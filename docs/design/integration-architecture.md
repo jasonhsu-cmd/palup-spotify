@@ -49,8 +49,11 @@ Engineering Monitor** which name the concrete vendors. ~15 integrations across 5
 ## 4. Ads, social, shipping, analytics (behind `commerce`/`comms`/dedicated adapters)
 
 - **Ads:** Meta, Google (incl. PMax), TikTok, LinkedIn — spend is **always** an Approval Center item
-  (ad budget = money boundary); connection is an authority change (two-person).
-- **Social publishing:** Ayrshare. **Shipping:** ShipStation. **Analytics:** GA4, Klaviyo.
+  (ad budget = money boundary); connection is an authority change (two-person). The buildable service
+  design (campaign object model, performance ingestion, real-time budget pacing, creative + media
+  eval gate, conversion tracking, SEO/AEO) is `docs/design/advertising-and-social.md`.
+- **Social publishing:** Ayrshare (multi-platform scheduling/publish + engagement pull-back —
+  `advertising-and-social.md` §5). **Shipping:** ShipStation. **Analytics:** GA4, Klaviyo.
 - **Prospect data (PalUp plane):** Clearbit / Apollo for ICP enrichment.
 - Each connector is **allowlisted in Policy** (connector allowlist, per-connector spend cap) and
   vetted per `docs/SECURITY.md` §2.8; a connector never acquires autonomy that bypasses HITL.

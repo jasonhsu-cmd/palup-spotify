@@ -106,6 +106,35 @@ durable, committed with the action** (transactional outbox tied to the action's 
 action can execute without its audit entry — "no silent action" (`CLAUDE.md` §3.5). Audit durability
 is distinct from droppable telemetry even though both sit on this port.
 
+## Marketing-plane ports (additive to the core nine, per ADR-0001's additive model)
+
+These are first-class ports with their own contract-test suites; provider SDKs (Meta/Google/TikTok/
+LinkedIn, Ayrshare, Pixel/CAPI) appear only in their adapters. Full semantics:
+`docs/design/advertising-and-social.md`.
+
+### `ads` — paid campaigns (Meta / Google incl. PMax / TikTok / LinkedIn)
+```
+launchCampaign(ctx, proposalRef, spec): campaignRef   // requires an approved proposal; sets platform-native hard caps
+setBudget(ctx, campaignRef, budget, proposalRef?): status // increase requires proposal; platform daily+lifetime+account caps enforce the ceiling
+pause(ctx, campaignRef): status                       // spend-reducing → auto-allowed
+getMetrics(ctx, cursor): adMetric[]                    // spend/impr/clicks/conv/ROAS, normalized
+```
+Contract tests: tenant-scoping, residency, **launch/increase rejected without a valid approvalRef**,
+platform hard-cap set on launch.
+
+### `social` — organic publishing (Ayrshare)
+```
+schedule(ctx, post, when): postRef ; getEngagement(ctx, cursor): socialMetric[]
+```
+Least-privilege, revocable, per-tenant publish tokens via `secrets`; ingested engagement is untrusted.
+
+### `tracking` — conversion signals (Meta Pixel/CAPI, Google Enhanced Conversions)
+```
+sendConversion(ctx, { event, consentRef, signals }): status
+```
+**Fail-closed contract test:** the adapter **rejects** any egress lacking `consentRef` or containing
+un-hashed PII, and honors residency — symmetric with the `model` egress-before-inference test.
+
 ## Model tiering (via `model`, stays portable)
 
 `routine` → fast tier (~95% of actions), `high_stakes` → strong tier (~4%), `canary` →

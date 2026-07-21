@@ -97,6 +97,10 @@ lives inside policy; anything above a rule goes to a human._
   Evolution decision. Candidates that clear evals but regress in canary are reverted and surfaced.
 - The eval suite is **safety-critical infrastructure** — itself versioned, reviewed, and maintained
   (ADR-0003 consequence).
+- **Media eval gate (creative arm):** generated/edited creative (ad, email, chat-video, social) must
+  pass visual-brand, safety, IP/copyright, claims-substantiation, CAN-SPAM, AI-labeled, and
+  accessibility checks before an approval can be granted — a failing check blocks the proposal. Same
+  gate, one service across every surface; specified in `docs/design/advertising-and-social.md` §4.
 
 ## 6. Audit log (immutable, tamper-evident, high-volume)
 

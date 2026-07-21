@@ -34,6 +34,7 @@ answering two questions from the finalized UI/UX:
 | 7 | `cost-margin-telemetry.md` | Per-tenant COGS, circuit-breaker, margin floor |
 | 8 | `integration-architecture.md` | Shopify + ~15 integrations behind ports |
 | 8b | `comms-and-messaging.md` | Email/SMS/chat delivery: gate, deliverability, inbound, consent/suppression, A2P, live chat |
+| 8c | `advertising-and-social.md` | Ads (Meta/Google/TikTok/LinkedIn) + pacing, creative + media eval gate, Ayrshare, conversion tracking, SEO/AEO |
 | 9 | `security-data-path.md` | Injection, tenant isolation, DLP, residency, controls |
 | 10 | `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
 | 11 | `ui-backend-coverage-matrix.md` | Every screen ↔ backend; **zero unmapped** |

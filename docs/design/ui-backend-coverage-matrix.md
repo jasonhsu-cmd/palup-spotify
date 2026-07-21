@@ -144,6 +144,35 @@ Legend adds: Cm = comms-and-messaging spec.
 **Zero unmapped messaging surfaces.** Every send passes a consent + suppression + frequency +
 quiet-hours + rate + DLP gate; opt-outs and STOP/HELP are deterministic, not LLM-dependent.
 
+## Advertising & social coverage sub-matrix
+
+Legend adds: Ad = advertising-and-social spec.
+
+| Ads/social UI surface | Backing flow | Specs | Covered |
+|---|---|---|---|
+| Campaigns table + live creative (Meta/Google/TikTok/ads) | ad_campaign object model + creative | Ad(§1,§4) | ✅ |
+| "Approve $400/day" / ad-budget approvals | spend = proposal (money boundary) | Ad(§1),G,HITL | ✅ |
+| Budget adjuster + ad-spend cap guardrail | pacing engine inside Policy ceiling | Ad(§3),C | ✅ |
+| "budget-capped by early afternoon" / auto-pause | real-time pacing + auto-pause | Ad(§3) | ✅ |
+| Daily+monthly ceiling + ROI floor rules | ad-spend automation rules | Ad(§3),G | ✅ |
+| ROAS / CAC / channel-comparison / heatmap | ad_metric ingestion + normalization | Ad(§2),D | ✅ |
+| PMax / Meta retargeting / TikTok UGC / LinkedIn | per-platform ad adapters | Ad(§1),I | ✅ |
+| Connect an ad platform | authority change (two-person) + allowlist | Ad(§1),S,G | ✅ |
+| Ad/email/social creative (AI visual, headline/CTA) | creative production service | Ad(§4) | ✅ |
+| Media eval gate (brand/safety/IP/claims/CAN-SPAM/AI-label/a11y) | media eval gate service | Ad(§4),G(§5) | ✅ |
+| Regenerate creative (metered) | media-gen orchestration + metering | Ad(§4),B | ✅ |
+| Organic social publishing (Ayrshare, IG/TikTok/founder POV) | social publishing service | Ad(§5),I | ✅ |
+| Organic engagement KPIs | social_metric rollups | Ad(§5) | ✅ |
+| Conversion tracking (implied by ROAS/attribution) | Pixel/CAPI, consent-gated, PII-hashed | Ad(§6),S | ✅ |
+| SEO/AEO pages + rewrites (Brand/Pricing sign-off) | content pipeline + sign-off | Ad(§7),G | ✅ |
+| AI-answer citation (ChatGPT/Gemini/Perplexity "38% cited") | citation monitoring → seo_metric | Ad(§7) | ✅ |
+| Site Experiments / CRO (canary → promote HITL) | reuses evolution gating | Ad(§8),G(§4) | ✅ |
+
+**Zero unmapped ads/social surfaces.** All spend is proposal-or-rule + audited + reversible; pacing
+never exceeds Policy; all creative passes the media eval gate; conversion tracking is
+consent-gated + PII-minimized. *Empirical risks to validate in build:* pacing under ad-API lag, and
+ad-conversion reconciliation vs. the incrementality model (`advertising-and-social.md` §2–3).
+
 ## Result
 
 **Zero unmapped screens or load-bearing behaviors.** Every detail in the finalized UI/UX has a named
