@@ -19,6 +19,9 @@ build time; this fixes the shape, conventions, and per-screen resource map._
   endpoints are proposal endpoints, not direct mutations.
 - **Live:** `GET /stream` (SSE) per session for tenant/role-scoped events; `/chat/:id/takeover`
   (WebSocket) for live-chat.
+- **Bulk PII export** endpoints (`POST /memory/export`, customer CSV/JSON export, `GET /audit`
+  export) are **step-up-required and audited** — they move personal data in bulk even though a human
+  initiates them. (No run-time *agent* tool performs bulk export at all — security spec §1/§3.)
 - Standard errors, idempotency keys on POST, ETag/If-Match on edits.
 
 ## 2. Merchant API (resource groups → screens)

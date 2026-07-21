@@ -22,6 +22,12 @@ against; exact DDL is produced at build time._
   (see §5). Three data classes are kept explicitly distinct (the mockups depend on this): (a)
   first-party merchant/shopper data, (b) PalUp prospect records, (c) k-anonymized cross-store
   benchmarks.
+- **Admin-plane cross-tenant reads (SOC, Audit, Support, Run Replay)** are the one legitimate way
+  past RLS and are the highest-risk path, so they are **explicitly constrained**, not an RLS bypass:
+  least-privilege **per operator role** (RBAC scope of `console-api-contracts.md` §3), **by-id only**
+  for run traces and tenant records (no fleet-wide scan), **break-glass is step-up + two-person +
+  audited**, and every such read is itself written to the audit log. There is no ambient "read any
+  tenant" capability; the privileged read path is a named, audited service, not a raw query.
 
 ## 2. Core entities (grouped; keys and the large/hot ones flagged)
 
@@ -115,6 +121,14 @@ fleet-wide analytics run off the de-identified analytics store, not the OLTP tab
   days.
 - **Export & erasure**: frictionless export (CSV/JSON) and right-to-be-forgotten are first-class
   (`docs/STICKINESS.md`, ADR-0001) — tenant-keyed layout makes per-tenant export/delete tractable.
+- **Erasure cascade (enumerated):** a right-to-be-forgotten request erases/redacts the subject across
+  **`customer`, `conversation`/`message`, `agent_memory` + vector namespace entries, object storage
+  (attachments/media), and read-model projections.** For the two **immutable/retention-bound** stores
+  — `audit_entry` (7-yr, hash-chained) and `run_trace` (90-day, may hold PII in step payloads) — the
+  rule is **PII redaction in place, not deletion** (the chain/record survives; the personal data does
+  not): run traces redact PII on erase and expire at 90 days regardless; audit entries keep the
+  action record but redact subject PII, preserving the hash chain. Bulk PII export endpoints are
+  step-up-gated and audited (see security spec).
 
 ## 5. De-identified cross-tenant pipeline (benchmarks + flywheel)
 

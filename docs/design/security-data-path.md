@@ -27,8 +27,14 @@ Backs the admin **Security/SOC**, **Event Center**, and **Policy** screens._
 ## 3. Data exfiltration & DLP
 
 - Egress controls + **DLP/PII redaction** on all outbound comms (`comms` boundary); allow-listed
-  recipients/domains; **no bulk-export tool without HITL.** PII minimized/redacted **before**
-  inference (`model` boundary) so the provider sees the minimum necessary.
+  recipients/domains; **no bulk-export tool without HITL.**
+- **Redaction before inference — enforced at the `model` port boundary.** PII minimization/redaction
+  is the responsibility of the `model` adapter (and a guardrail step before `Act`/`generate` in the
+  runtime), symmetric with the `comms` DLP boundary — feature/agent code cannot send raw PII to a
+  provider by omission. It is an **invariant** (§10.4) and a **required `model` contract test**
+  (`port-interfaces.md`), not a caller convention.
+- **Human bulk PII export** (console export endpoints) is **step-up-required and audited**; **no
+  run-time agent tool performs bulk export** at all (the agent invariant above).
 
 ## 4. Memory poisoning
 

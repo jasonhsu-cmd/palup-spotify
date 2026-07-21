@@ -21,6 +21,11 @@ Agent = {
 ```
 New agent types (new industry/business model) are new bundles — no new infrastructure.
 
+**The bundle is not self-mutable.** No run-time tool can change an agent's own `autonomy_level`,
+`tools`, `policy_ref`, or `version`. Autonomy escalation is a HITL boundary crossing (`docs/HITL-
+POLICY.md`) and version changes go only through the evolution pipeline — an agent can never widen
+its own scope or self-promote (governance spec §4).
+
 ## 2. The run loop (traced state machine)
 
 A **run** is one trigger-to-completion unit, enqueued via `queue.enqueueRun` (inbound event,

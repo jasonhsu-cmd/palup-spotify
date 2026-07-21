@@ -57,9 +57,23 @@ validating load-test/PoC was deliberately out of scope for this doc-only phase):
       economics at 10^9–10^10 vectors; distributed-Postgres rebalancing/restore (RTO/RPO).
 - [ ] **Storage engine selection** among the ADR-0004 candidates, passing the `storage` contract
       tests.
-- [ ] **Sign-offs recorded** before building governance-sensitive code:
-      `security-reviewer` (tenant isolation, prompt injection, secrets, residency) and
-      `agent-evolution-steward` (evolution pipeline, eval gate, no self-promotion path).
+- [x] **Build-time reviewer sign-offs — completed.** Both ran against the specs; each raised **one
+      blocking finding**, now **fixed**:
+      - `agent-evolution-steward` → BLOCK: "pure-quality → auto-promote" let a behavior change skip
+        human promotion. **Fixed** (governance §4): auto-promote is now permitted *only* for
+        non-output-affecting changes; any behavior/prompt/model change always takes human approve;
+        change class is governance-assigned (defaults up); frozen candidates need human clearance +
+        cooldown to re-enter. Plus should-fixes on threshold/holdout edit control.
+      - `security-reviewer` → BLOCK: PII-redaction-before-inference had no enforcement point.
+        **Fixed** (security §3, `port-interfaces` model): enforced at the `model` port boundary as an
+        invariant + contract test. Plus should-fixes applied: constrained/audited admin cross-tenant
+        read path, `storage` fail-closed on missing tenant ctx, durable (transactional-outbox) audit
+        write, enumerated erasure cascade, step-up+audit on bulk PII export, Shopify token revocation
+        on uninstall, non-self-mutable agent bundle, tenant-scoped queue handlers.
+- [ ] **Residual — human security sign-off** to formally close the two items on the reviewer's
+      mandated block list (cross-tenant isolation incl. the admin read path; PII-before-inference),
+      required before governance-sensitive code merges. The design now specifies both; a named human
+      must accept them.
 
 ## How to proceed
 

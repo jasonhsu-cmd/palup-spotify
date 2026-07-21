@@ -56,11 +56,25 @@ lives inside policy; anything above a rule goes to a human._
   runtime capability keyed off `agent_version`; blast-radius ceilings (§1) are enforced by the
   orchestrator.
 - **proposer ≠ evaluator:** the eval gate uses a **secret held-out set**; a candidate's author agent
-  cannot see or influence it. Fleet patterns (k ≥ 50) enter as proposals, not auto-changes.
-- **Change classes** (admin Evolution): pure-quality → auto-promote after gates; business / external
-  / cost / compliance / billing → HITL; **authority** (grant a money tool, raise a ceiling) →
-  two-person, human-initiated. Prohibited: removing/weakening a gate or granting self-promotion
-  (HITL §5) — requires an explicit policy change with security signoff, not the normal flow.
+  cannot see or influence it. Fleet patterns (k ≥ 50) enter as proposals, not auto-changes. The
+  **change class is assigned by the governance layer, never self-declared by the proposing agent**;
+  ambiguous or mixed changes **default up** to the stricter class (HITL §7 default-to-human), so a
+  candidate can never dodge human approval by mis-classifying itself.
+- **Human approval is never skipped for any change that alters agent behavior/prompt/model/outputs**
+  (`CLAUDE.md` rules #1–#2). This is the hard floor and it overrides the console's "pure-quality
+  (auto-promote)" label.
+- **Change classes** (admin Evolution):
+  - **Pure-quality → auto-promote after gates is permitted *only* for changes that do not alter
+    agent behavior or outputs** — non-output-affecting infra/latency/retrieval refactors verified
+    equivalent by the gate. Anything that changes what an agent says or does is **not** pure-quality
+    and takes the human-approve path, no exceptions.
+  - **Business / external / cost / compliance / billing → HITL** (human approve).
+  - **Authority** (grant a money tool, raise a ceiling) → **two-person, human-initiated.**
+  - **Prohibited:** removing/weakening a gate or granting self-promotion (HITL §5) — requires an
+    explicit policy change with security signoff, not the normal flow.
+- **Re-entry after auto-rollback + freeze:** a frozen candidate requires **human clearance** before
+  it may be re-proposed, and re-proposal is **cooldown- and rate-limited at the orchestrator** (not
+  merely the per-run agent-bound retry limits) so a candidate cannot loop-storm the gate.
 - Every stage writes an immutable audit entry (`who/what`, inputs, metrics, decision, approver,
   rollback pointer). Renders the Evolution Console + Audit Log.
 
@@ -80,8 +94,11 @@ lives inside policy; anything above a rule goes to a human._
 ## 6. Audit log (immutable, tamper-evident, high-volume)
 
 - Append-only `audit_entry`; **hash-chained** (event_hash + prev_hash) so tampering is detectable;
-  **7-year** retention with tiering; **~3.1M events/day** today → ~1.5B/day at target (ingested
-  async off the event bus, never on the request path).
+  **7-year** retention with tiering; **~3.1M events/day** today → ~1.5B/day at target.
+- **Durability, not best-effort:** the audit write is **at-least-once and committed with the action**
+  via a transactional outbox tied to the action's DB commit — an action cannot execute without its
+  audit entry ("no silent action", `CLAUDE.md` §3.5). Downstream fan-out/indexing runs async off the
+  event bus, but the durable write does **not** depend on the bus delivering.
 - Every autonomous action and every operator action is logged with actor+role, action, target
   tenant, category, result, sensitivity, and **before→after diff**; step-up-verified actions flagged.
 - **No silent transitions** anywhere in governance. Searchable + filterable (category/actor/time),

@@ -11,7 +11,8 @@ Engineering Monitor** which name the concrete vendors. ~15 integrations across 5
 - **Webhook ingestion at scale** (millions of stores): `orders/create`, `carts/update`,
   `customers/*`, `app/uninstalled`, etc. → `commerce.verifyWebhook` → **published to the event bus**
   (ADR-0006), never processed synchronously on the HTTP path. Idempotent (dedup on Shopify event id);
-  retries tolerated.
+  retries tolerated. **`app/uninstalled` triggers immediate `secrets` revocation/rotation of that
+  shop's token** (least-privilege / revocable) and halts the tenant's agent triggers.
 - **Rate limits & bulk:** respect Shopify's per-shop API limits with per-tenant backoff (Event
   Center shows "Shopify rate-limit backoff"); initial import uses the Bulk Operations API. Shopify
   stays **system of record**; PalUp mirrors read-optimized copies (data-model spec).

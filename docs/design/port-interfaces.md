@@ -21,6 +21,9 @@ embed(req: { texts, model? }): { vectors, usage }
 ```
 Tier → concrete model mapping lives in the adapter/config (not feature code). Emits usage for the
 cost meter. Supports provider fallback behind the port (routing shown in the Engineering Monitor).
+**The adapter enforces PII minimization/redaction before the request leaves for the provider** (the
+egress-before-inference control, `security-data-path.md` §3) — symmetric with `comms` DLP. This is a
+**required contract test**: an adapter that forwards un-redacted PII does not ship.
 
 ### `vector` — memory retrieval (per-tenant namespaced)
 ```
@@ -36,6 +39,8 @@ publish(topic, event: { key: tenantKey, id, type, payload }): void
 subscribe(topic, group, handler): Subscription   // at-least-once; per-key ordering; idempotent handlers
 enqueueRun(run): void ; scheduleRun(run, at): void   // agent triggers + cadence timers
 ```
+Events carry a tenant key; **handlers are constrained to their own tenant key** — a run processing an
+event can only touch that event's tenant, so cross-tenant leakage can't occur via the queue.
 
 ### `storage` — transactional/relational (ADR-0004, distributed Postgres)
 ```
@@ -45,6 +50,10 @@ query(sql, params, ctx): rows   // tenant-scoped via RLS/ctx
 ```
 Contract tests assert isolation level, RLS/tenant scoping, cursor pagination semantics, and
 transactional guarantees so the engine (Cockroach/Yugabyte/Citus/sharded-PG) stays swappable.
+**Fail-closed on missing tenant context:** the adapter **rejects** any query without a resolved
+tenant/RLS session rather than silently widening scope — isolation must not depend on caller
+discipline. This is a required contract test. (The constrained admin cross-tenant read path is
+defined in `data-model-and-tenancy.md` §1.)
 
 ### `secrets` — secret material (KMS/Secret Manager)
 ```
@@ -77,6 +86,10 @@ Enforces CAN-SPAM/TCPA/A2P-10DLC + DLP/PII redaction at the boundary (see securi
 ```
 metric(name, value, tags) ; trace(span) ; recordCost(ctx, category, amount) ; auditAppend(entry)  // hash-chained
 ```
+Metrics/traces are best-effort and droppable. **`auditAppend` is not:** it must be **at-least-once
+durable, committed with the action** (transactional outbox tied to the action's DB commit), so no
+action can execute without its audit entry — "no silent action" (`CLAUDE.md` §3.5). Audit durability
+is distinct from droppable telemetry even though both sit on this port.
 
 ## Model tiering (via `model`, stays portable)
 
