@@ -1,0 +1,16 @@
+{
+  "//": "Project-scoped MCP servers, checked in so every dev/agent shares the same tools. Replace placeholders with your real endpoints/commands. Never commit secrets — use env var expansion (${VAR}).",
+  "mcpServers": {
+    "github": {
+      "//": "Source of truth for PRs/issues used by the build-time agents. Configure per Claude Code's GitHub MCP docs.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+    },
+    "palup-control-plane": {
+      "//": "TEMPLATE — PalUp's own MCP server exposing read access to Approval Center, Audit Log, Evolution/Eval status, and Kill Switch state so agents can reason about governance. Point at your internal endpoint. Keep it least-privilege and read-mostly.",
+      "type": "url",
+      "url": "${PALUP_MCP_URL}"
+    }
+  }
+}
