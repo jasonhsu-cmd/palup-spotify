@@ -115,6 +115,35 @@ Legend adds: Pay = payments-and-billing spec, A8 = ADR-0008.
 **Zero unmapped payment surfaces.** No PalUp-holds-funds path anywhere; every money mutation is a
 rule-or-proposal, audited, reversible.
 
+## Comms coverage sub-matrix (email / SMS / live chat)
+
+Legend adds: Cm = comms-and-messaging spec.
+
+| Messaging UI surface | Backing flow | Specs | Covered |
+|---|---|---|---|
+| Merchant Inbox — replies land here ("Replies → Inbox 1,240") | inbound email parse → thread → Inbox | Cm(§5),D,E | ✅ |
+| Live Chat Widget (`w.js`, <120ms, take-over) | WebSocket transport + handoff | Cm(§10),E | ✅ |
+| Email send (campaigns/nurture/outreach) | send gate + SendGrid/SES | Cm(§1–2),I | ✅ |
+| SMS send (segment counter, consent-gated) | send gate + Twilio + segment count | Cm(§1,§8),I | ✅ |
+| Domain auth (SPF/DKIM/DMARC "authenticated") | deliverability onboarding | Cm(§2) | ✅ |
+| Deliverability / sender reputation | IP warmup, reputation, ESP failover | Cm(§2,§6) | ✅ |
+| Consent snapshot (email 21,840 / SMS 8,210 / excluded 412) | consent records (proof) → projection | Cm(§3) | ✅ |
+| One-click unsubscribe / opt-out | instant suppression propagation | Cm(§3–4) | ✅ |
+| SMS STOP / HELP / START | deterministic keyword auto-handling | Cm(§5) | ✅ |
+| Bounce / spam-complaint handling | feedback loop → auto-suppress + reputation | Cm(§6) | ✅ |
+| Suppression list (outreach) | global + per-tenant suppression | Cm(§4) | ✅ |
+| TCPA exclusions (412 missing SMS consent) | consent gate step 1 | Cm(§3) | ✅ |
+| Quiet hours + frequency caps | quiet-hours + cross-channel governor | Cm(§1,§7) | ✅ |
+| Send rate limits (email 2k/hr, SMS 200/hr) | rate limit gate | Cm(§1),G | ✅ |
+| A2P 10DLC registered number | brand/campaign registration workflow | Cm(§8) | ✅ |
+| CAN-SPAM sender identity / physical address | compliance envelope | Cm(§1),I | ✅ |
+| Personalized-per-recipient copy / preview | template & rendering service | Cm(§9) | ✅ |
+| Basic mode at cap (live chat continues) | chat transport + billing degradation | Cm(§10),Pay | ✅ |
+| DLP/PII redaction before send | comms-boundary redaction | Cm(§1),S(§3) | ✅ |
+
+**Zero unmapped messaging surfaces.** Every send passes a consent + suppression + frequency +
+quiet-hours + rate + DLP gate; opt-outs and STOP/HELP are deterministic, not LLM-dependent.
+
 ## Result
 
 **Zero unmapped screens or load-bearing behaviors.** Every detail in the finalized UI/UX has a named

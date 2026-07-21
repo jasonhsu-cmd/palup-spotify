@@ -213,6 +213,6 @@ unmapped screens) and `docs/design/capacity-model.md` (scale + residual empirica
 - **Specs:** `design/data-model-and-tenancy` · `design/port-interfaces` · `design/capacity-model` ·
   `design/agent-runtime` · `design/governance-subsystems` · `design/attribution-and-billing` ·
   `design/payments-and-billing` · `design/cost-margin-telemetry` · `design/integration-architecture` ·
-  `design/security-data-path` ·
+  `design/comms-and-messaging` · `design/security-data-path` ·
   `design/console-api-contracts` · `design/ui-backend-coverage-matrix`.
 - **Go/no-go for automated development:** `design/README.md`.

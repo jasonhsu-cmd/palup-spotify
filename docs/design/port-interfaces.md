@@ -83,10 +83,19 @@ semantics: `docs/design/payments-and-billing.md`.
 
 ### `comms` — outbound email/chat/SMS (SendGrid/SES, Twilio; consent-gated)
 ```
-send(ctx, { channel, to, body, consentRef }): result   // rejects if consent/quiet-hours/frequency fails
+send(ctx, { channel, to, body, consentRef, templateRef?, approvalRef?, frequencyKey }): result
+        // rejects unless consent + suppression + frequency + quiet-hours + rate + DLP pass;
+        // AND rejects a non-template or out-of-frequency send that lacks a valid in-policy approvalRef
 liveChat(ctx, session): duplex                          // take-over
+verifyWebhook(req): inboundEvent                        // provider-signature verified; tenant resolved
+        // from PalUp-provisioned resources (per-tenant number / signed reply token), NEVER from payload
 ```
-Enforces CAN-SPAM/TCPA/A2P-10DLC + DLP/PII redaction at the boundary (see security spec).
+Enforces CAN-SPAM/TCPA/A2P-10DLC + DLP/PII redaction at the boundary (see security spec). The full
+ordered **pre-send gate** (consent → suppression → frequency → quiet-hours → rate → DLP → compliance
+envelope), inbound pipeline (replies, delivery-status webhooks, deterministic SMS STOP/HELP/START),
+deliverability (IP warmup, reputation, SendGrid↔SES failover), and live-chat transport are specified
+in `docs/design/comms-and-messaging.md`. Contract tests assert the gate rejects (never silently
+sends) and that opt-out suppresses before the next send.
 
 ### `telemetry` — metrics/traces/logs/cost (OTel/Grafana/Sentry)
 ```

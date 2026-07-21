@@ -30,6 +30,10 @@ Engineering Monitor** which name the concrete vendors. ~15 integrations across 5
 - **Every send is consent-gated + DLP-redacted + policy-checked** at the port boundary; a send that
   fails consent/quiet-hours/frequency is rejected, not queued. Boundary-crossing sends (outside
   approved templates/frequency, new channels) route to HITL.
+- **Delivery-service design** (deliverability/IP warmup/reputation/ESP failover, inbound replies +
+  status webhooks + deterministic SMS STOP/HELP/START, consent-as-source-of-truth + suppression,
+  bounce/complaint loop, A2P 10DLC registration, templating, cross-channel frequency governor,
+  live-chat transport) is `docs/design/comms-and-messaging.md`.
 
 ## 3. Model & media (behind `model`)
 

@@ -26,8 +26,10 @@ Backs the admin **Security/SOC**, **Event Center**, and **Policy** screens._
 
 ## 3. Data exfiltration & DLP
 
-- Egress controls + **DLP/PII redaction** on all outbound comms (`comms` boundary); allow-listed
-  recipients/domains; **no bulk-export tool without HITL.**
+- Egress controls + **DLP/PII redaction** on all outbound comms (`comms` boundary; the full ordered
+  pre-send gate incl. deterministic SMS STOP/HELP and suppression is in
+  `docs/design/comms-and-messaging.md`); allow-listed recipients/domains; **no bulk-export tool
+  without HITL.**
 - **Redaction before inference — enforced at the `model` port boundary.** PII minimization/redaction
   is the responsibility of the `model` adapter (and a guardrail step before `Act`/`generate` in the
   runtime), symmetric with the `comms` DLP boundary — feature/agent code cannot send raw PII to a
