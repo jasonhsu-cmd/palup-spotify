@@ -1,10 +1,12 @@
 # Backend Design & Scale Review — Findings and Go/No-Go
 
 This folder is the **buildable backend design** for PalUp.ai, produced as a pre-development review
-answering two questions from the finalized UI/UX:
+answering, for the finalized UI/UX:
 
 1. **Does the backend design support every detail of the UI/UX?**
 2. **Can it scale to millions of merchants, each with tens of thousands of customers?**
+3. **Is each major service domain fully planned** (payments, email/SMS, ads/social, LLM/DB/infra,
+   cost)?
 
 ## What this review found
 
@@ -12,84 +14,124 @@ answering two questions from the finalized UI/UX:
   agent runtime, ports & adapters, governance-as-backbone, model tiering — ADR-0001/0002/0003) but
   **no buildable backend design and no code** (`packages/` did not exist). The only concrete infra
   choice named in the mockups — a single Cloud SQL Postgres — cannot hold the target scale.
-- **This phase produced** the missing design layer: 4 new ADRs + 11 design specs, each traceable to
-  the UI inventory and stress-tested against the scale target.
+- **This phase produced** the missing design layer: **7 new ADRs (0004–0010) + ~19 design specs**,
+  each traceable to the UI inventory, stress-tested against the scale target, and **independently
+  security-reviewed** (see the sign-off ledger below).
 
 ## The documents
 
-| # | Document | Answers |
-|---|---|---|
-| ADR-0004 | `../adr/0004-storage-tier-at-scale.md` | How storage scales while staying portable |
-| ADR-0005 | `../adr/0005-agent-runtime-execution-model.md` | How "24/7 agents" run for millions of tenants |
-| ADR-0006 | `../adr/0006-eventing-and-realtime.md` | How live UI + triggers + monitoring are fed |
-| ADR-0007 | `../adr/0007-attribution-and-metering.md` | How the outcome fee + credit metering work |
-| ADR-0008 | `../adr/0008-billing-settlement-shopify.md` | How charges settle on Shopify Billing primitives (no funds held) |
-| ADR-0009 | `../adr/0009-vector-store-at-scale.md` | Vector engine choice behind the port at 10⁹–10¹⁰ vectors |
-| ADR-0010 | `../adr/0010-capacity-commitment-strategy.md` | Committed-use/reserved/spot purchasing, governed |
-| 1 | `data-model-and-tenancy.md` | Entities behind every screen; isolation; large-table strategy |
-| 2 | `port-interfaces.md` | The 9 portable ports + contract tests |
-| 3 | `capacity-model.md` | The numbers; bottlenecks; residual empirical risks |
-| 4 | `agent-runtime.md` | The traced run loop, budgets, HITL-in-hot-path, kill switch |
-| 5 | `governance-subsystems.md` | Policy → Rules → Approvals; Evolution; Eval; Audit |
-| 6 | `attribution-and-billing.md` | Incrementality fee basis; metering; Shopify Billing |
-| 6b | `payments-and-billing.md` | Billing lifecycle, reconciliation, dunning, adjustments, money tools, tax |
-| 7 | `cost-margin-telemetry.md` | Per-tenant COGS, circuit-breaker, margin floor |
-| 8 | `integration-architecture.md` | Shopify + ~15 integrations behind ports |
-| 8b | `comms-and-messaging.md` | Email/SMS/chat delivery: gate, deliverability, inbound, consent/suppression, A2P, live chat |
-| 8c | `advertising-and-social.md` | Ads (Meta/Google/TikTok/LinkedIn) + pacing, creative + media eval gate, Ayrshare, conversion tracking, SEO/AEO |
-| 12 | `model-gateway.md` | LLM serving: routing, cache tiers, failover, self-trained serving, embeddings |
-| 13 | `data-platform.md` | DB ops, backup/restore/RTO-RPO, replicas, vector tier, cache, OLAP mirror |
-| 14 | `compute-and-delivery.md` | Service topology, autoscaling, scheduler, networking, CI/CD, IaC, environments |
-| 15 | `observability-and-sre.md` | SLO/alerting/tracing, monitoring ingestion, DR, eval/training GPU infra |
-| 16 | `cost-optimization.md` | Operating-cost levers (commitments/spot/egress/right-size/tiering/media) + continuous FinOps loop |
-| 9 | `security-data-path.md` | Injection, tenant isolation, DLP, residency, controls |
-| 10 | `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
-| 11 | `ui-backend-coverage-matrix.md` | Every screen ↔ backend; **zero unmapped** |
+**Load-bearing decisions (ADRs)**
 
-## Answer to the two questions
+| ADR | Decision |
+|---|---|
+| 0004 | Storage tier at scale — portable distributed Postgres, tenant-sharded |
+| 0005 | Agent-runtime execution model — event-driven, not process-per-merchant |
+| 0006 | Eventing & real-time delivery |
+| 0007 | Attribution & metering as the billing basis |
+| 0008 | Billing settlement via Shopify Billing primitives (no funds held) |
+| 0009 | Vector store at scale (engine choice behind the port) |
+| 0010 | Capacity-commitment strategy (committed-use/reserved/spot, governed) |
+
+**Core platform specs**
+
+| Document | Covers |
+|---|---|
+| `data-model-and-tenancy.md` | Entities behind every screen; isolation; large-table strategy; erasure cascade |
+| `port-interfaces.md` | The 9 core ports + marketing-plane ports (`ads`/`social`/`tracking`) + contract tests |
+| `capacity-model.md` | The numbers; bottlenecks; residual empirical risks |
+| `agent-runtime.md` | Traced run loop, budgets, HITL-in-hot-path, 3-scope kill switch |
+| `governance-subsystems.md` | Policy → Rules → Approvals; Evolution; Eval; Audit; media eval gate |
+| `security-data-path.md` | Injection, tenant isolation, DLP, residency, model supply-chain |
+| `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
+| `ui-backend-coverage-matrix.md` | Every screen + payments/comms/ads/platform/cost ↔ backend; **zero unmapped** |
+
+**Money path**
+
+| Document | Covers |
+|---|---|
+| `attribution-and-billing.md` | Incrementality fee basis; credit metering |
+| `payments-and-billing.md` | Billing lifecycle, reconciliation, dunning, adjustments, money tools, tax |
+| `cost-margin-telemetry.md` | Per-tenant COGS, circuit-breaker, margin floor |
+| `cost-optimization.md` | Operating-cost levers (commitments/spot/egress/right-size/tiering/media) + continuous FinOps loop |
+
+**Integrations & channels**
+
+| Document | Covers |
+|---|---|
+| `integration-architecture.md` | Shopify + ~15 integrations behind ports |
+| `comms-and-messaging.md` | Email/SMS/chat: send gate, deliverability, inbound, consent/suppression, A2P, live chat |
+| `advertising-and-social.md` | Ads (Meta/Google/TikTok/LinkedIn) + pacing, creative + media eval gate, Ayrshare, conversion tracking, SEO/AEO |
+
+**Infrastructure**
+
+| Document | Covers |
+|---|---|
+| `model-gateway.md` | LLM serving: routing, cache tiers, failover, self-trained serving, embeddings |
+| `data-platform.md` | DB ops, backup/restore/RTO-RPO, replicas, vector tier, cache, OLAP mirror |
+| `compute-and-delivery.md` | Service topology, autoscaling, scheduler, networking, CI/CD, IaC, environments |
+| `observability-and-sre.md` | SLO/alerting/tracing, monitoring ingestion, DR, eval/training GPU infra |
+
+## Answers
 
 1. **Supports every UI detail: YES, by design.** `ui-backend-coverage-matrix.md` maps every screen
-   and every load-bearing behavior (live counters, approve-to-rule, bounded adjusters, expiry
-   semantics, two-person/step-up, basic-mode-at-cap, k≥50 benchmarks, hash-chained audit, forensic
-   run lookup) to a named entity, endpoint, event source, and spec — with zero gaps.
-2. **Scales to millions × tens-of-thousands: YES on paper, WITH conditions.** ADR-0004/0005/0006
-   give a design that holds the storage and agency volumes (`capacity-model.md`), and the margin
-   holds **if** the model-tier mix (~95/4/1) and per-action cost (~$0.011) hold at fleet scale.
+   and every load-bearing behavior — plus the payments, comms, ads/social, platform, and cost
+   sub-matrices — to a named entity, endpoint, event source, and spec, with **zero unmapped
+   surfaces**.
+2. **Scales to millions × tens-of-thousands: YES on paper, WITH conditions.** ADR-0004/0005/0006/0009
+   hold the storage and agency volumes (`capacity-model.md`); the margin holds **if** the tier mix
+   (~95/4/1) and per-action cost (~$0.011) hold at fleet scale.
+3. **Each domain fully planned: YES at design depth, each security-reviewed.** Not "fully optimized"
+   for cost — that is an empirical operating result, not a design claim (see cost caveat below).
+
+## Reviewer sign-off ledger
+
+Every domain was reviewed by the relevant build-time subagent; each **blocking** finding was fixed.
+
+| Review | Verdict (initial) | Result |
+|---|---|---|
+| Core design — `agent-evolution-steward` | BLOCK (1) | **Fixed** — auto-promote fenced to non-behavioral only; class governance-assigned; frozen-candidate cooldown |
+| Core design — `security-reviewer` | BLOCK (1) | **Fixed** — PII-redaction-before-inference enforced at `model` port; + admin cross-tenant path, storage fail-closed, durable audit, erasure cascade, export step-up |
+| Payments money-path — `security-reviewer` | SIGN OFF w/ conditions | **Fixed** — aggregate money ceiling, separation-of-duties on money-out, non-auto-cleared reconciliation exceptions |
+| Messaging — `security-reviewer` | BLOCK (2) | **Fixed** — approval attestation at the comms floor; verified + signed-token inbound tenant attribution; consent tamper-resistance |
+| Ads/social — `security-reviewer` | BLOCK (1) | **Fixed** — platform-native hard-cap backstop for pacing; `tracking` port fail-closed; exact rule/HITL spend line; least-priv social tokens |
+| Platform — `security-reviewer` | SIGN OFF w/ conditions | **Fixed** — strong-consistency authz/revocation reads; training-scope binds serving-scope; cache poisoning/encryption |
+| Cost governance — `security-reviewer` | SIGN OFF w/ conditions (1 blocking) | **Fixed** — safety-infra fenced from cost cuts; quality eval gates infra levers; cost anomalies triaged vs SOC |
 
 ## Go / no-go for automated development
 
-**Recommendation: GO to automated development, conditionally** — the design is complete and
-consistent enough for the builder agents to implement against without improvising load-bearing
-decisions. The following are **conditions to validate early in the build**, not design gaps (a
-validating load-test/PoC was deliberately out of scope for this doc-only phase):
+**Recommendation: GO to automated development, conditionally.** The design is complete, internally
+consistent, and reviewed across all domains; builders can implement against it without improvising
+load-bearing decisions. Remaining items are **build-time conditions, not design gaps** (a validating
+load-test/PoC was deliberately out of scope for this doc-only phase):
 
-- [ ] **Empirical scale constants** (`capacity-model.md` §6): real req/s and its linearity;
-      per-action cost and the 95/4/1 tier mix on real traffic (cost eval gate live); vector-store
-      economics at 10^9–10^10 vectors; distributed-Postgres rebalancing/restore (RTO/RPO).
-- [ ] **Storage engine selection** among the ADR-0004 candidates, passing the `storage` contract
-      tests.
-- [x] **Build-time reviewer sign-offs — completed.** Both ran against the specs; each raised **one
-      blocking finding**, now **fixed**:
-      - `agent-evolution-steward` → BLOCK: "pure-quality → auto-promote" let a behavior change skip
-        human promotion. **Fixed** (governance §4): auto-promote is now permitted *only* for
-        non-output-affecting changes; any behavior/prompt/model change always takes human approve;
-        change class is governance-assigned (defaults up); frozen candidates need human clearance +
-        cooldown to re-enter. Plus should-fixes on threshold/holdout edit control.
-      - `security-reviewer` → BLOCK: PII-redaction-before-inference had no enforcement point.
-        **Fixed** (security §3, `port-interfaces` model): enforced at the `model` port boundary as an
-        invariant + contract test. Plus should-fixes applied: constrained/audited admin cross-tenant
-        read path, `storage` fail-closed on missing tenant ctx, durable (transactional-outbox) audit
-        write, enumerated erasure cascade, step-up+audit on bulk PII export, Shopify token revocation
-        on uninstall, non-self-mutable agent bundle, tenant-scoped queue handlers.
-- [ ] **Residual — human security sign-off** to formally close the two items on the reviewer's
-      mandated block list (cross-tenant isolation incl. the admin read path; PII-before-inference),
-      required before governance-sensitive code merges. The design now specifies both; a named human
-      must accept them.
+- [ ] **Empirical constants** (`capacity-model.md` §6) — validate on real traffic: req/s and its
+      linearity; per-action cost and the 95/4/1 tier mix (cost eval gate live); vector-store economics
+      at 10⁹–10¹⁰ vectors; distributed-Postgres restore times (RTO/RPO); cache hit rates (40/22/71);
+      commitment utilization. **These are what "optimized" and "scales" ultimately rest on.**
+- [ ] **Engine selections** — the `storage` engine (ADR-0004 candidates) and the dedicated `vector`
+      engine (ADR-0009), each passing its port contract test.
+- [x] **All build-time reviewer sign-offs completed** — see the ledger above; every blocking finding
+      fixed in the specs.
+- [ ] **Named human sign-offs before governance-sensitive code merges** (design specifies all of
+      these; a person must accept them):
+      - **Security team** — cross-tenant isolation (incl. admin read path) + PII-before-inference
+        (core review block list).
+      - **Security team (gate-weakening class, HITL §5)** — any future cost change that would reduce
+        eval / audit / SOC / redaction / guardrail / kill-switch coverage.
+      - **Named owners** — money/authority/pricing changes (two-person + step-up): fee-model,
+        margin-floor, commitments, money-tool grants, ad-platform connections.
+
+## Cost caveat (re: "fully optimized")
+
+Cost is a first-class, governed, metered concern with a continuous FinOps loop and the full lever set
+(`cost-optimization.md`, ADR-0010). But **"fully optimized" is not a design claim** — it is an
+empirical result earned on real traffic. The design provides the machinery; the numbers that prove
+minimal cost are the empirical constants above.
 
 ## How to proceed
 
 Build risk-first, behind flags, via the standard loop (`/ship`): start with the ports + data model +
 runtime skeleton (the governance invariants in `agent-runtime.md` §4/§6 and `governance-subsystems.md`
-§8 must be true from the first vertical slice), validate the empirical constants above on the
-cart-recovery wedge, then expand screen-group by screen-group against the coverage matrix. Every
-governance-touching PR runs `/governance-check` and names a human owner.
+§8 must be true from the first vertical slice), validate the empirical constants on the cart-recovery
+wedge, then expand screen-group by screen-group against the coverage matrix. Every governance-touching
+PR runs `/governance-check` and names a human owner.
