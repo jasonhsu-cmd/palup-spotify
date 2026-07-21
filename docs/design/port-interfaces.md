@@ -68,12 +68,18 @@ createBillingCharge(ctx, plan|usage): shopifyInvoiceRef   // PalUp never holds m
 ```
 Read-heavy operations are auto-allowed; anything moving money routes through HITL, not the port.
 
-### `payments` — outcome/fee settlement (via Shopify Billing; PSP abstraction for future)
+### `payments` — billing settlement (Shopify Billing adapter now; PSP-ready for future)
 ```
-recordAttributedFee(ctx, period, amount, basisRef): void
-settleViaShopifyBilling(ctx, invoice): status
+ensureSubscription(ctx, plan): subscriptionRef            // base plan → AppSubscription
+submitUsage(ctx, subscriptionRef, batchId, amount): status // fee+overage → AppUsageRecord (idempotent on batchId, under cappedAmount)
+getCapturedCharges(ctx, cycle): capture[]                 // for reconciliation vs ledgers
+recordAdjustment(ctx, adjustment): void                   // credit / write-off / clawback (adjustment_ledger)
 ```
-No PAN storage (PCI minimization, `docs/SECURITY.md`).
+Provider-neutral: the Shopify Billing adapter maps these to `AppSubscription` / `AppUsageRecord` /
+`AppPurchase` (ADR-0008); a future direct-PSP adapter can satisfy the same port. **No PAN storage**,
+no fund custody (PCI minimization, `docs/SECURITY.md` §5). Contract tests assert idempotent usage
+submission, cap enforcement, and reconciliation-shape parity so the adapter stays swappable. Full
+semantics: `docs/design/payments-and-billing.md`.
 
 ### `comms` — outbound email/chat/SMS (SendGrid/SES, Twilio; consent-gated)
 ```

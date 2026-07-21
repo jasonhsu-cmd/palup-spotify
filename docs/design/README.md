@@ -23,12 +23,14 @@ answering two questions from the finalized UI/UX:
 | ADR-0005 | `../adr/0005-agent-runtime-execution-model.md` | How "24/7 agents" run for millions of tenants |
 | ADR-0006 | `../adr/0006-eventing-and-realtime.md` | How live UI + triggers + monitoring are fed |
 | ADR-0007 | `../adr/0007-attribution-and-metering.md` | How the outcome fee + credit metering work |
+| ADR-0008 | `../adr/0008-billing-settlement-shopify.md` | How charges settle on Shopify Billing primitives (no funds held) |
 | 1 | `data-model-and-tenancy.md` | Entities behind every screen; isolation; large-table strategy |
 | 2 | `port-interfaces.md` | The 9 portable ports + contract tests |
 | 3 | `capacity-model.md` | The numbers; bottlenecks; residual empirical risks |
 | 4 | `agent-runtime.md` | The traced run loop, budgets, HITL-in-hot-path, kill switch |
 | 5 | `governance-subsystems.md` | Policy → Rules → Approvals; Evolution; Eval; Audit |
 | 6 | `attribution-and-billing.md` | Incrementality fee basis; metering; Shopify Billing |
+| 6b | `payments-and-billing.md` | Billing lifecycle, reconciliation, dunning, adjustments, money tools, tax |
 | 7 | `cost-margin-telemetry.md` | Per-tenant COGS, circuit-breaker, margin floor |
 | 8 | `integration-architecture.md` | Shopify + ~15 integrations behind ports |
 | 9 | `security-data-path.md` | Injection, tenant isolation, DLP, residency, controls |

@@ -84,6 +84,37 @@ Cap = capacity model.
 | Hash-chained audit, before→after diff | audit_entry (G §6) |
 | Forensic by-id run lookup (no fleet scroll) | run_trace design (R §9, Cap) |
 
+## Payments coverage sub-matrix (money path in detail)
+
+Legend adds: Pay = payments-and-billing spec, A8 = ADR-0008.
+
+| Payment UI surface | Backing entity/flow | Specs | Covered |
+|---|---|---|---|
+| Merchant Payments & Payouts (net-you-keep, "PalUp never touches money") | invoice, outcome_ledger; payout = Shopify (read-only) | Pay(inv),A8,B | ✅ |
+| Merchant Billing & Usage — Within plan | invoice = base+fee+overage | B(§3),Pay(§2) | ✅ |
+| Billing & Usage — Overage | usage_ledger beyond included credits | B(§2),Pay(§2) | ✅ |
+| Billing & Usage — At cap $3k / $0 | cappedAmount + basic-mode degradation | A8,B(§5),Pay(§2) | ✅ |
+| Overage spend cap (warn %, hard cap, approved in Shopify) | Shopify `cappedAmount` | A8,Pay(§2) | ✅ |
+| Failed charge → pause proactive, Shopify retries | dunning state machine | Pay(§3) | ✅ |
+| Invoices table / PDF (billed via Shopify) | invoice, AppSubscription/UsageRecord | A8,Pay | ✅ |
+| Plans (base + fee tiers; change in Shopify) | plan config, AppSubscription line items | A8,B(§3) | ✅ |
+| Admin FinOps — collection this cycle / performance fees | outcome_ledger, reconciliation report | Pay(§2),C | ✅ |
+| Admin FinOps — plan margin (incl. Shopify 0/15% share) | margin model + revenue-share cost line | A8,C(§3) | ✅ |
+| Admin Deal Close — new MRR / failed & retrying $3,210 | PalUp own AppSubscription + dunning | A8,Pay(§3) | ✅ |
+| Merchant refund (draft; ≤$30 auto; duplicate check; execute in Shopify) | refund money tool | Pay(§6),S | ✅ |
+| Refund past policy / above ceiling → HITL | proposal + ceiling | Pay(§6),G | ✅ |
+| Chargeback / dispute (evidence assembled, submission HITL) | dispute tool | Pay(§6) | ✅ |
+| SLA credit (≤$500 rule / above HITL) | adjustment_ledger credit | Pay(§5),G | ✅ |
+| Bad-debt write-off (≤$1,000 rule / above HITL) | adjustment_ledger write-off | Pay(§5),G | ✅ |
+| Custom / below-floor fee (two-person) | fee delta, margin boundary | Pay(§5),C,G | ✅ |
+| Returns reduce attributed revenue → clawback | attribution restatement → adjustment_ledger | Pay(§4) | ✅ |
+| Routine billing corrections auto / disputed escalate | adjustment rule vs proposal | Pay(§4),G | ✅ |
+| Money-tool allowlist (Shopify refund, Shopify Billing app charge) — two-person | money-tool allowlist | Pay(§6),S,G | ✅ |
+| Every money action audited + reversible | hash-chained audit + reversal | Pay(§8),G(§6) | ✅ |
+
+**Zero unmapped payment surfaces.** No PalUp-holds-funds path anywhere; every money mutation is a
+rule-or-proposal, audited, reversible.
+
 ## Result
 
 **Zero unmapped screens or load-bearing behaviors.** Every detail in the finalized UI/UX has a named

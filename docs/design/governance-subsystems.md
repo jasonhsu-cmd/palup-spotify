@@ -32,6 +32,13 @@ lives inside policy; anything above a rule goes to a human._
   campaigns, upsell, outreach, orders; admin: pricing, cost, authority, security, creative,
   evolution, compliance, send, ad-spend). Role-scoped; searchable; grouped by urgency
   (Urgent / This week / Standing-no-deadline).
+- **Money adjustments are proposal types too:** merchant refunds/disputes above ceiling, and
+  PalUp-side SLA credits, bad-debt write-offs, custom/below-floor fees, and attribution
+  restatements/clawbacks — each is a rule (within limit) or a proposal (above), lands in the
+  `adjustment_ledger`, and is audited + reversible. Full flow: `docs/design/payments-and-billing.md`
+  §4–5; disputed/contested amounts always escalate to a human. **Money-out adjustments require
+  approver ≠ initiator, and two-person above an upper threshold** (separation of duties — no single
+  admin can grant unbounded credits/write-offs).
 - **Proposal state machine:** `open → {approved | approved+rule | edited+approved | rejected |
   taken_over | sent_back | expired}`; each transition is audited with approver identity.
 - **Expiry semantics** (load-bearing in the UI): timed proposals **fail closed** on expiry; safety

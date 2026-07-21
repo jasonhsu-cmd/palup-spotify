@@ -72,3 +72,9 @@ build time; this fixes the shape, conventions, and per-screen resource map._
 - Every list endpoint on a large table is cursor-paginated + searchable; every live counter is a
   projection read. Every boundary-crossing POST is a proposal, audited. Every response is RBAC- and
   residency-scoped. This contract is what the UI→backend coverage matrix checks against.
+- **Payment/adjustment endpoints are proposals, not direct money mutations.** Refunds/disputes
+  (merchant), SLA credits, write-offs, custom/below-floor fees, and budget/cap changes (admin) create
+  or advance a `proposal` (or auto-apply only within an Automation Rule); above-rule and
+  disputed/contested amounts always route to a human, and money-tool grants are two-person. Read
+  endpoints (`/payments/*`, `/billing/*`, `/finops/*`) are reporting views over the ledgers and the
+  per-cycle reconciliation report. See `docs/design/payments-and-billing.md`.

@@ -38,11 +38,17 @@ base and fee tiers from the Plans screen).
 
 ## 4. Money movement (PalUp never holds funds)
 
-- Charges settle through **Shopify Billing** (`commerce.createBillingCharge` /
-  `payments.settleViaShopifyBilling`). PalUp stores **no card/PAN**, cannot view/change/deduct from
-  merchant payouts (merchant Payments screen; PCI minimization in `docs/SECURITY.md` §5).
+- Charges settle through **Shopify Billing**, mapped onto concrete primitives in **`ADR-0008`**
+  (base → `AppSubscription`; fee + overage → `AppUsageRecord`s under the merchant-approved
+  `cappedAmount`). PalUp stores **no card/PAN**, cannot view/change/deduct from merchant payouts
+  (merchant Payments screen; PCI minimization in `docs/SECURITY.md` §5).
 - Plan/cap changes are approved in Shopify; a failed charge pauses proactive work and Shopify
   retries (dunning). PalUp's own subscriptions (admin **Deal Close**) collect the same way.
+- **The full lifecycle** — usage submission/idempotency, per-cycle reconciliation, the
+  dunning/delinquency state machine, fee adjustments/clawbacks, PalUp-side credits/write-offs, the
+  merchant-side money tools (refund/dispute/cancel), tax/currency, and money-domain audit — is
+  specified in **`docs/design/payments-and-billing.md`**. This doc stays focused on attribution +
+  metering.
 
 ## 5. Spend cap → graceful degradation (never over-bill)
 
