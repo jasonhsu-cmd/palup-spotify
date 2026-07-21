@@ -48,6 +48,10 @@ Backs the admin **Security/SOC**, **Event Center**, and **Policy** screens._
 - Provenance for models/variants; **all** changes gated by the evolution pipeline; **security evals
   are part of the blocking eval gate**; no self-hosted/canary variant ships without passing
   (governance spec §5).
+- **Training-scope binds serving-scope:** a self-trained variant served beyond its training tenant
+  must be trained only on **de-identified, k≥50** data; single-tenant-trained variants are
+  **namespace-scoped** to that tenant. Prevents model-memorization exfiltration across tenants
+  (`observability-and-sre.md` §6).
 
 ## 6. Standard controls in the data path
 

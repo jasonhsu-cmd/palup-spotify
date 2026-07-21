@@ -24,6 +24,7 @@ answering two questions from the finalized UI/UX:
 | ADR-0006 | `../adr/0006-eventing-and-realtime.md` | How live UI + triggers + monitoring are fed |
 | ADR-0007 | `../adr/0007-attribution-and-metering.md` | How the outcome fee + credit metering work |
 | ADR-0008 | `../adr/0008-billing-settlement-shopify.md` | How charges settle on Shopify Billing primitives (no funds held) |
+| ADR-0009 | `../adr/0009-vector-store-at-scale.md` | Vector engine choice behind the port at 10⁹–10¹⁰ vectors |
 | 1 | `data-model-and-tenancy.md` | Entities behind every screen; isolation; large-table strategy |
 | 2 | `port-interfaces.md` | The 9 portable ports + contract tests |
 | 3 | `capacity-model.md` | The numbers; bottlenecks; residual empirical risks |
@@ -35,6 +36,10 @@ answering two questions from the finalized UI/UX:
 | 8 | `integration-architecture.md` | Shopify + ~15 integrations behind ports |
 | 8b | `comms-and-messaging.md` | Email/SMS/chat delivery: gate, deliverability, inbound, consent/suppression, A2P, live chat |
 | 8c | `advertising-and-social.md` | Ads (Meta/Google/TikTok/LinkedIn) + pacing, creative + media eval gate, Ayrshare, conversion tracking, SEO/AEO |
+| 12 | `model-gateway.md` | LLM serving: routing, cache tiers, failover, self-trained serving, embeddings |
+| 13 | `data-platform.md` | DB ops, backup/restore/RTO-RPO, replicas, vector tier, cache, OLAP mirror |
+| 14 | `compute-and-delivery.md` | Service topology, autoscaling, scheduler, networking, CI/CD, IaC, environments |
+| 15 | `observability-and-sre.md` | SLO/alerting/tracing, monitoring ingestion, DR, eval/training GPU infra |
 | 9 | `security-data-path.md` | Injection, tenant isolation, DLP, residency, controls |
 | 10 | `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
 | 11 | `ui-backend-coverage-matrix.md` | Every screen ↔ backend; **zero unmapped** |

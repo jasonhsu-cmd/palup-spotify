@@ -173,6 +173,33 @@ never exceeds Policy; all creative passes the media eval gate; conversion tracki
 consent-gated + PII-minimized. *Empirical risks to validate in build:* pacing under ad-API lag, and
 ad-conversion reconciliation vs. the incrementality model (`advertising-and-social.md` §2–3).
 
+## Platform (LLM / DB / infra) coverage sub-matrix
+
+Legend adds: MG = model-gateway, DP = data-platform, CD = compute-and-delivery,
+OS = observability-and-sre, A9 = ADR-0009.
+
+| Platform UI surface | Backing service | Specs | Covered |
+|---|---|---|---|
+| Model Gateway (routing 95/4/1, fallback, 1.9M tok/min) | model gateway routing + failover | MG(§1,§3),ADR-0005 | ✅ |
+| Deflection 40% / semantic cache 22% / prompt cache 71% | three cache tiers | MG(§1),DP(§4) | ✅ |
+| Self-trained canary serving / provider fallback | GPU serving + failover | MG(§2–3),OS(§6) | ✅ |
+| Agent memory retrieval at 10⁹–10¹⁰ vectors | vector tier (pgvector + dedicated) | A9,DP(§3) | ✅ |
+| Service health & SLO (p95 280ms, 99.98%) | SLO/alerting | OS(§2),Cap | ✅ |
+| Auto-heal & scale ("scaled 12→28 cells") | autoscaling + self-heal | CD(§2,§6),OS(§3) | ✅ |
+| Event Center (auto-remediation, MTTR) | telemetry pipeline + monitors | OS(§1–3),E | ✅ |
+| Security/SOC counters | security observability + SIEM | OS(§4),S | ✅ |
+| Audit 3.1M/day + Run traces 87M/day ingestion | async ingestion off bus | OS(§1),DP(§1) | ✅ |
+| Environments (Production/Staging) | CI/CD + environments | CD(§5) | ✅ |
+| Cost stack: infra (GKE/CloudRun/PG/GCS/observability) | compute topology + cost meter | CD(§1),C | ✅ |
+| Cost stack: eval & training (H100/A100) | GPU eval/training infra | OS(§6) | ✅ |
+| DR / backup / RTO-RPO | backup/restore/DR | DP(§2),OS(§5) | ✅ |
+| Data residency (US / EU-per-tenant) | per-region adapters + networking | DP,CD(§3),ADR-0001 | ✅ |
+
+**Zero unmapped platform surfaces.** Tenant isolation holds across OLTP/vector/cache/OLAP; no CI/CD
+path lets an agent self-deploy; caches/replicas/OLAP are never money/audit truth. *Empirical risks
+(unchanged, `capacity-model.md` §6):* req/s linearity, per-action cost + tier mix, vector economics,
+distributed-Postgres restore times.
+
 ## Result
 
 **Zero unmapped screens or load-bearing behaviors.** Every detail in the finalized UI/UX has a named

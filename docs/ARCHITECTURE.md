@@ -209,10 +209,11 @@ unmapped screens) and `docs/design/capacity-model.md` (scale + residual empirica
 
 - **ADRs:** `adr/0004` storage tier at scale · `adr/0005` agent-runtime execution model ·
   `adr/0006` eventing & real-time · `adr/0007` attribution & metering · `adr/0008` billing
-  settlement via Shopify.
+  settlement via Shopify · `adr/0009` vector store at scale.
 - **Specs:** `design/data-model-and-tenancy` · `design/port-interfaces` · `design/capacity-model` ·
   `design/agent-runtime` · `design/governance-subsystems` · `design/attribution-and-billing` ·
   `design/payments-and-billing` · `design/cost-margin-telemetry` · `design/integration-architecture` ·
-  `design/comms-and-messaging` · `design/advertising-and-social` · `design/security-data-path` ·
-  `design/console-api-contracts` · `design/ui-backend-coverage-matrix`.
+  `design/comms-and-messaging` · `design/advertising-and-social` · `design/model-gateway` ·
+  `design/data-platform` · `design/compute-and-delivery` · `design/observability-and-sre` ·
+  `design/security-data-path` · `design/console-api-contracts` · `design/ui-backend-coverage-matrix`.
 - **Go/no-go for automated development:** `design/README.md`.
