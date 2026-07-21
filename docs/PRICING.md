@@ -72,9 +72,11 @@ Because COGS is variable, pricing is incomplete without margin control:
 - **Per-merchant cost telemetry + circuit-breaker.** Track contribution margin per account;
   no customer should be structurally unprofitable. Fair-use thresholds + usage overage on
   the base tiers catch outliers.
-- **Margin floor is a hard guardrail.** Any pricing/discount/plan change that would move
-  margin is a PalUp-plane boundary crossing → **administrator approval via the Approval
-  Center** (`docs/HITL-POLICY.md`). Pricing is governed, not ad hoc.
+- **Margin floor is a hard guardrail.** Any pricing/discount/plan/commitment change that would
+  move margin is a PalUp-plane boundary crossing → **two-person administrator approval + step-up
+  via the Approval Center** (`docs/HITL-POLICY.md`; consistent with
+  `docs/design/governance-subsystems.md` §3 and `docs/design/cost-margin-telemetry.md` §4). Pricing
+  is governed, not ad hoc and never single-approver.
 
 ## 6. Anchoring, fences, and psychology
 

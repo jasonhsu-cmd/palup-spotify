@@ -36,7 +36,10 @@ not an afterthought._
 
 - **Cost circuit-breaker:** per-tenant/per-agent spend beyond budget **freezes the agent** and
   raises an alert (this is also a kill-switch trigger, `docs/ARCHITECTURE.md` §6). Ties to the
-  unbounded-consumption ceiling (5×) in Policy.
+  unbounded-consumption ceiling (5×) in Policy. **On a live/latency-critical path** (live chat, an
+  in-flight high-stakes/money step) the freeze does a **graceful human handoff/takeover**, never a
+  mid-interaction drop or a mid-money-action abort. A spike is also triaged against SOC signals
+  (denial-of-wallet) — `cost-optimization.md` §4.
 - **Margin floor is a hard, governed boundary:** any pricing/discount/plan change that would move
   margin is a PalUp-plane boundary crossing → **two-person administrator approval + step-up** via the
   Approval Center (`docs/HITL-POLICY.md`, `docs/PRICING.md` §5; consistent with
@@ -44,6 +47,13 @@ not an afterthought._
 - **Tier-mix protection:** the model-tier mix (≈95/4/1) is the gross-margin engine; a routing
   regression toward expensive tiers is a **margin event** flagged by the cost/efficiency eval (≥85)
   and cost telemetry. Quality floor still forbids downgrading high-stakes steps to save cost.
+
+## 4b. Cost-optimization program
+
+The full set of operating-cost levers (committed-use/reserved/spot purchasing per ADR-0010, egress,
+right-sizing/bin-packing, storage cold-tiering, media caps, batch/off-peak placement) and the
+**continuous FinOps optimization loop** are specified in `docs/design/cost-optimization.md`. This doc
+owns the metering + guardrails; that doc owns the levers + the loop.
 
 ## 5. Cost-reduction levers (observed, governed)
 

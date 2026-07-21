@@ -25,6 +25,7 @@ answering two questions from the finalized UI/UX:
 | ADR-0007 | `../adr/0007-attribution-and-metering.md` | How the outcome fee + credit metering work |
 | ADR-0008 | `../adr/0008-billing-settlement-shopify.md` | How charges settle on Shopify Billing primitives (no funds held) |
 | ADR-0009 | `../adr/0009-vector-store-at-scale.md` | Vector engine choice behind the port at 10⁹–10¹⁰ vectors |
+| ADR-0010 | `../adr/0010-capacity-commitment-strategy.md` | Committed-use/reserved/spot purchasing, governed |
 | 1 | `data-model-and-tenancy.md` | Entities behind every screen; isolation; large-table strategy |
 | 2 | `port-interfaces.md` | The 9 portable ports + contract tests |
 | 3 | `capacity-model.md` | The numbers; bottlenecks; residual empirical risks |
@@ -40,6 +41,7 @@ answering two questions from the finalized UI/UX:
 | 13 | `data-platform.md` | DB ops, backup/restore/RTO-RPO, replicas, vector tier, cache, OLAP mirror |
 | 14 | `compute-and-delivery.md` | Service topology, autoscaling, scheduler, networking, CI/CD, IaC, environments |
 | 15 | `observability-and-sre.md` | SLO/alerting/tracing, monitoring ingestion, DR, eval/training GPU infra |
+| 16 | `cost-optimization.md` | Operating-cost levers (commitments/spot/egress/right-size/tiering/media) + continuous FinOps loop |
 | 9 | `security-data-path.md` | Injection, tenant isolation, DLP, residency, controls |
 | 10 | `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
 | 11 | `ui-backend-coverage-matrix.md` | Every screen ↔ backend; **zero unmapped** |

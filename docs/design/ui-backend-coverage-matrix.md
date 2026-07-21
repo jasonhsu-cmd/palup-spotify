@@ -200,6 +200,31 @@ path lets an agent self-deploy; caches/replicas/OLAP are never money/audit truth
 (unchanged, `capacity-model.md` §6):* req/s linearity, per-action cost + tier mix, vector economics,
 distributed-Postgres restore times.
 
+## Cost-optimization coverage sub-matrix
+
+Legend adds: CO = cost-optimization, A10 = ADR-0010.
+
+| Cost UI surface / lever | Backing design | Specs | Covered |
+|---|---|---|---|
+| FinOps cost stack (8 categories, MTD vs budget) | per-category metering | C,CO(§1) | ✅ |
+| Model-gateway cost levers (deflection/cache/routing) | tier + cache tiers | MG,CO(§1) | ✅ |
+| "Vertex committed-use commitment" approval | capacity-commitment strategy | A10,CO(§2) | ✅ |
+| Spot/preemptible for eval & training | workload placement | A10,CO(§1–3),OS | ✅ |
+| Scale-to-zero / autoscale (auto-heal "12→28 cells") | elastic compute | CD,CO(§3) | ✅ |
+| Storage cost tiering / retention | partition tiering + cold storage | DP,CO(§1) | ✅ |
+| Egress as a cost line | egress cost lever | CO(§1) | ✅ |
+| Right-sizing / bin-packing | infra levers | CO(§1,§3) | ✅ |
+| Media (Veo/Imagen) cost | draft-cheap-first + caps | CO(§1),Ad | ✅ |
+| Cost circuit-breaker / unbounded-consumption ceiling | guardrail | C,CO(§5) | ✅ |
+| Contribution margin per account / outlier flag | unit-economics guardrails | C,CO(§5),PRICING | ✅ |
+| "raise platform budget" approval | governed cost boundary | C,CO(§4),HITL | ✅ |
+| Cost/efficiency eval (≥85) gates cost regressions | eval gate | G,CO(§4) | ✅ |
+
+**Cost is a first-class, governed, metered concern with a continuous optimization loop.** *Not
+claimed as "optimized":* the constants that prove minimal cost (per-action cost, tier mix, cache hit
+rates, vector $/query, commitment utilization) are **empirical go/no-go items** validated in the build
+(`capacity-model.md` §6), not in design.
+
 ## Result
 
 **Zero unmapped screens or load-bearing behaviors.** Every detail in the finalized UI/UX has a named
