@@ -126,12 +126,19 @@ have ADRs.
   `palup-design-system` skill for the tokens.
 
 ### 4.4 Data — Postgres + vendor-neutral vector store
-- **Chosen:** Cloud SQL Postgres for transactional/relational data (merchants, orders,
-  approvals, audit log); a vector store behind the `vector` port for agent memory and
-  retrieval. Audit log is append-only.
+- **Chosen:** Postgres for transactional/relational data (merchants, orders, approvals,
+  audit log); a vector store behind the `vector` port for agent memory and retrieval. Audit
+  log is append-only.
 - **Why:** Postgres is portable, boring, and well understood — the right default for the
   money-and-audit data where correctness matters most. Keeping vectors behind a port lets
   us start managed and move if economics change.
+- **At scale (ADR-0004):** a *single* Cloud SQL instance is fine early but cannot hold the
+  target volume (~10^10 customer rows + billions of messages/events/audit records — see
+  `design/capacity-model.md`). The scale tier is a **portable, distributed, Postgres-
+  compatible engine, sharded by tenant (`merchant_id`)**, behind the same `storage` port so
+  ADR-0001 stays intact. Google-native Spanner was rejected for the money/audit path
+  (lock-in). Details: `docs/adr/0004-storage-tier-at-scale.md`,
+  `docs/design/data-model-and-tenancy.md`.
 
 ### 4.5 Open-source agent tooling
 - **Approach:** The named ecosystems (`wshobson/agents`, `obra/superpowers`,
@@ -189,3 +196,21 @@ Expansion is also **moat defense**, not only growth: staying on one commerce pla
 PalUp's defensibility at "whatever that platform allows." Cross-platform reach and an owned
 merchant/data layer are what turn a platform feature into a durable business. See
 `docs/MOAT.md`.
+
+## 8. Buildable design specs (the pre-development design layer)
+
+The sections above set principles and topology. The **buildable backend design** — data model,
+tenancy, ports, runtime, governance-as-services, the money path, integrations, security-in-the-
+data-path, and the numbers that validate scale — lives in `docs/design/`, and the load-bearing
+decisions are captured as ADRs. This layer was produced as an explicit review of whether the
+backend can support **every detail** of the finalized UI/UX and scale to **millions of merchants ×
+tens of thousands of customers each**; see `docs/design/ui-backend-coverage-matrix.md` (zero
+unmapped screens) and `docs/design/capacity-model.md` (scale + residual empirical risks).
+
+- **ADRs:** `adr/0004` storage tier at scale · `adr/0005` agent-runtime execution model ·
+  `adr/0006` eventing & real-time · `adr/0007` attribution & metering.
+- **Specs:** `design/data-model-and-tenancy` · `design/port-interfaces` · `design/capacity-model` ·
+  `design/agent-runtime` · `design/governance-subsystems` · `design/attribution-and-billing` ·
+  `design/cost-margin-telemetry` · `design/integration-architecture` · `design/security-data-path` ·
+  `design/console-api-contracts` · `design/ui-backend-coverage-matrix`.
+- **Go/no-go for automated development:** `design/README.md`.

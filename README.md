@@ -26,7 +26,13 @@ application packages (`packages/…`) are scaffolded by these artifacts, not shi
 - **`docs/SECURITY.md`** — security architecture & enterprise readiness (agentic threats +
   standard controls + compliance roadmap); backs the console's security section.
 - **`docs/DESIGN-SYSTEM.md`** — the shared token system (identical across both consoles).
-- **`docs/adr/`** — the three load-bearing decisions, recorded as ADRs.
+- **`docs/design/`** — the **buildable backend design** (data model, ports, runtime, governance
+  subsystems, attribution/billing, cost/margin, integrations, security, API contracts) plus the
+  **UI→backend coverage matrix**, **capacity model**, and the **go/no-go** review
+  (`docs/design/README.md`). Produced as the pre-development review of whether the backend supports
+  every UI detail and scales to millions of merchants.
+- **`docs/adr/`** — the load-bearing decisions, recorded as ADRs (0001–0003 strategic; 0004–0007
+  the scale/runtime/eventing/attribution decisions).
 
 ## What's in `.claude/`
 | Path | Purpose |
