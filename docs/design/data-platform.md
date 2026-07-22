@@ -42,12 +42,15 @@ money/audit truth lives only in the transactional store; every layer is residenc
 
 ## 4. Cache tier (hot reads + projections)
 
-- **In-memory cache (Redis/Memcached-class) behind a port**, tenant-keyed, for: live counters/
+- **In-memory cache behind a port**, tenant-keyed, for: live counters/
   projections (ADR-0006), hot session/config reads, rate-limit counters, and the model gateway's
   semantic-cache index (`model-gateway.md`). **Cache is never the source of truth** for money/audit;
   it is invalidated off the event bus. The cache tier **inherits KMS/CMEK at-rest encryption and
   residency pinning** (`docs/SECURITY.md` §3) — it holds projections and answer text that can contain
-  PII, so it is not exempt from the standard at-rest controls. Kill-switch/halt state uses a fast always-available read here
+  PII, so it is not exempt from the standard at-rest controls.
+- **Engine pick is license-constrained** (`oss-and-licensing.md`): prefer **Valkey (Apache-2.0)** or
+  **Memcached (BSD)** — **Redis ≥7.4 is RSALv2/SSPL** (*Flag*-tier, SaaS-restricted) and needs legal
+  sign-off before adoption. Portable behind the cache port either way. Kill-switch/halt state uses a fast always-available read here
   (runtime spec §6) but fails safe if unavailable.
 
 ## 5. Analytics / OLAP mirror

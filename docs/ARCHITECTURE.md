@@ -151,6 +151,9 @@ have ADRs.
   own ports/policies. Do not let an external skill acquire autonomy that bypasses the HITL
   policy. (Treat the specific repos above as candidates to evaluate at integration time,
   not as guaranteed-suitable — confirm current contents/licenses when you get there.)
+- **The license policy is now concrete:** the allowlist, the flagged candidate register (CockroachDB
+  / Redis / Grafana / Sentry / Citus have commercial/copyleft constraints), and the enforcing SBOM +
+  license-scan CI gate live in `docs/design/oss-and-licensing.md`.
 
 ## 5. Self-improvement, governed (the OpenClaw answer)
 
@@ -217,5 +220,5 @@ unmapped screens) and `docs/design/capacity-model.md` (scale + residual empirica
   `design/comms-and-messaging` · `design/advertising-and-social` · `design/model-gateway` ·
   `design/data-platform` · `design/compute-and-delivery` · `design/observability-and-sre` ·
   `design/cost-optimization` · `design/security-data-path` · `design/identity-and-access` ·
-  `design/console-api-contracts` · `design/ui-backend-coverage-matrix`.
+  `design/oss-and-licensing` · `design/console-api-contracts` · `design/ui-backend-coverage-matrix`.
 - **Go/no-go for automated development:** `design/README.md`.

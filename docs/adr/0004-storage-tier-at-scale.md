@@ -44,6 +44,13 @@ port and is selected at integration time against the contract tests below.
   become application-owned complexity that a distributed engine solves natively — but it remains a
   valid `storage` adapter if the distributed engine's economics or ops disappoint.
 
+**License constraint on the engine pick (`docs/design/oss-and-licensing.md`):** prefer the
+**Allow-tier** candidate — **YugabyteDB (Apache-2.0 core)**. **CockroachDB now requires a paid
+Enterprise license for commercial production**, and **Citus is AGPL-3.0** — both are *Flag*-tier and
+may not be adopted without legal + `security-reviewer` sign-off. This does not change the
+architecture (portable distributed Postgres behind the `storage` port); it constrains which engine
+clears.
+
 ## Consequences
 
 - (+) Scales horizontally on the largest tables while keeping ADR-0001 intact; a second cloud or

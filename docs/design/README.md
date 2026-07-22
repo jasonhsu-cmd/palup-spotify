@@ -16,7 +16,8 @@ answering, for the finalized UI/UX:
   choice named in the mockups — a single Cloud SQL Postgres — cannot hold the target scale.
 - **This phase produced** the missing design layer: **8 new ADRs (0004–0011) + ~20 design specs**,
   each traceable to the UI inventory, stress-tested against the scale target, and **independently
-  security-reviewed** (see the sign-off ledger below).
+  security-reviewed** (see the sign-off ledger below), plus an **OSS licensing policy** with an
+  enforcing CI gate (`oss-and-licensing.md`).
 
 ## The documents
 
@@ -44,6 +45,7 @@ answering, for the finalized UI/UX:
 | `governance-subsystems.md` | Policy → Rules → Approvals; Evolution; Eval; Audit; media eval gate |
 | `security-data-path.md` | Injection, tenant isolation, DLP, residency, model supply-chain |
 | `identity-and-access.md` | AuthN service, authZ PDP (RBAC+ABAC), SSO/SCIM, passkey/step-up, API keys, break-glass, lifecycle |
+| `oss-and-licensing.md` | License allowlist policy, candidate register (flags Cockroach/Redis/Grafana/Sentry/Citus), SBOM + license-scan CI gate |
 | `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
 | `ui-backend-coverage-matrix.md` | Every screen + payments/comms/ads/platform/cost ↔ backend; **zero unmapped** |
 
@@ -112,7 +114,12 @@ load-test/PoC was deliberately out of scope for this doc-only phase):
       at 10⁹–10¹⁰ vectors; distributed-Postgres restore times (RTO/RPO); cache hit rates (40/22/71);
       commitment utilization. **These are what "optimized" and "scales" ultimately rest on.**
 - [ ] **Engine selections** — the `storage` engine (ADR-0004 candidates) and the dedicated `vector`
-      engine (ADR-0009), each passing its port contract test.
+      engine (ADR-0009), each passing its port contract test **and its license check** (prefer the
+      Allow-tier picks: YugabyteDB, Valkey/Memcached — `oss-and-licensing.md`).
+- [ ] **OSS license clearance** — no per-dependency verification is possible until the dependency
+      tree exists; the SBOM + license-scan CI gate (`oss-and-licensing.md`) must be live from the
+      first build, and any Flag-tier component (CockroachDB / Redis / Grafana / Sentry / Citus) needs
+      legal + `security-reviewer` sign-off before it ships.
 - [x] **All build-time reviewer sign-offs completed** — see the ledger above; every blocking finding
       fixed in the specs.
 - [ ] **Named human sign-offs before governance-sensitive code merges** (design specifies all of

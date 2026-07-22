@@ -46,7 +46,8 @@ All are **independently deployable behind flags**; agents/feature code depend on
 
 - **IaC** (Terraform-class) for all infra; policy checks in the pipeline (SECURITY.md); no click-ops
   in prod.
-- **Pipeline:** build → SAST/DAST + dependency/license scan + SBOM → sign artifact → deploy to
+- **Pipeline:** build → SAST/DAST + **dependency/license scan (fails on any non-Allow-tier license
+  without recorded legal sign-off — `oss-and-licensing.md`)** + SBOM → sign artifact → deploy to
   **staging** → **progressive prod rollout behind a flag (canary → full)** with automatic rollback on
   regression (`release-manager`). Every deploy is reversible and audited.
 - **Build-time vs run-time separation is absolute (ADR-0002):** the CI/CD pipeline ships code humans

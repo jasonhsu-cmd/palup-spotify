@@ -75,7 +75,9 @@ Secret Manager; automatic rotation; short-lived credentials for agents.
 **Infrastructure.** Private networking / VPC-SC, egress controls, WAF; container/image
 scanning (GKE); hardened baselines; IaC with policy checks.
 
-**AppSec & supply chain.** SAST/DAST, dependency & license scanning, **SBOM**, pinned deps,
+**AppSec & supply chain.** SAST/DAST, dependency & **license scanning against the allowlist policy in
+`docs/design/oss-and-licensing.md`** (build fails on any copyleft/source-available/proprietary/unknown
+license without recorded legal sign-off), **SBOM**, pinned deps,
 signed artifacts; secure SDLC via the gated build pipeline (`security-reviewer` required on
 sensitive changes); annual + on-major-change **pen testing** and a **bug bounty**.
 
