@@ -225,6 +225,32 @@ claimed as "optimized":* the constants that prove minimal cost (per-action cost,
 rates, vector $/query, commitment utilization) are **empirical go/no-go items** validated in the build
 (`capacity-model.md` §6), not in design.
 
+## Identity & access (authN/authZ) coverage sub-matrix
+
+Legend adds: IAM = identity-and-access, A11 = ADR-0011.
+
+| Auth UI surface | Backing design | Specs | Covered |
+|---|---|---|---|
+| Merchant login (owner signed in) | Shopify-embedded session-token exchange | A11,IAM(§1) | ✅ |
+| Merchant 2FA required / SSO-SAML (Enterprise) | passkey/TOTP + SSO adapter | IAM(§1,§3) | ✅ |
+| Admin "Continue with SSO" + phishing-resistant MFA | SSO + passkey/hardware key | IAM(§1,§3) | ✅ |
+| Step-up for sensitive actions | policy-driven step-up (short-TTL authLevel) | IAM(§1–2) | ✅ |
+| Merchant roles matrix (5) + can-approve | RBAC in the PDP | IAM(§2),D | ✅ |
+| Admin roles matrix (8) + approve domains | RBAC in the PDP | IAM(§2),D | ✅ |
+| Role-gated nav / ask-bar inherits matrix | single PDP, default-deny | IAM(§2),S | ✅ |
+| New operators read-only until passkey enrolled | enrollment gate | IAM(§4) | ✅ |
+| Revoke session / sign-out-all / sessions list | session store + revocation | IAM(§1,§8) | ✅ |
+| Session timeout | idle + absolute timeout | IAM(§1) | ✅ |
+| Two-person + maker-checker | two distinct stepped-up principals | IAM(§2),G | ✅ |
+| API keys (shown once) | scoped/hashed/rotatable/revocable keys | IAM(§5) | ✅ |
+| Users & Roles: invite / role change (audited) | account lifecycle | IAM(§7) | ✅ |
+| SSO/SCIM (org settings) | SAML/OIDC + SCIM provision/deprovision + group→role | IAM(§3) | ✅ |
+| Break-glass / JIT privileged access | time-boxed, two-person, audited | IAM(§4) | ✅ |
+| Agent scoped/revocable tool credentials | issueScopedCredential + autonomy ceiling | IAM(§6),R | ✅ |
+
+**Zero unmapped auth surfaces.** Authorization is server-side default-deny at one PDP; revocation
+fails closed and is strong-consistency; no principal (user, API key, agent) can escalate its scope.
+
 ## Result
 
 **Zero unmapped screens or load-bearing behaviors.** Every detail in the finalized UI/UX has a named

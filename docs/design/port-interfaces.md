@@ -61,6 +61,18 @@ get(ref): secret ; issueScopedCredential(scope, ttl): shortLivedCred ; rotate(re
 ```
 Never returns secrets to logs/prompts; issues short-lived, revocable creds for agents.
 
+### `identity` — authentication + the authorization decision point (PDP)
+```
+authenticate(request): Principal{ merchantId|org, userId, role, authLevel, sessionId }
+authorize(principal, operation, resourceCtx): allow|deny   // default-deny PDP; server-side only
+stepUp(principal, actionClass): elevatedPrincipal          // fresh passkey, short-TTL, action-scoped
+revokeSession(sessionId | userId='all') ; issueApiKey/rotateApiKey/revokeApiKey(...)
+```
+Adapters: Shopify-embedded (ADR-0011), SSO (SAML/OIDC) + SCIM, standalone. Feature code depends on a
+`Principal`, never on an IdP. Contract tests: default-deny, tenant-scoping, revocation-fails-closed,
+step-up-where-declared, two-person distinctness, no privilege escalation. Full semantics:
+`docs/design/identity-and-access.md`.
+
 ### `commerce` — Shopify first (orders/products/customers/fulfillment/OAuth/webhooks/billing)
 ```
 oauthInstall(shop): tokens ; verifyWebhook(req): event ; getOrders/getCustomers/getInventory(ctx, cursor): page

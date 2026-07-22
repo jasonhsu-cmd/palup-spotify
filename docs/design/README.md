@@ -14,7 +14,7 @@ answering, for the finalized UI/UX:
   agent runtime, ports & adapters, governance-as-backbone, model tiering — ADR-0001/0002/0003) but
   **no buildable backend design and no code** (`packages/` did not exist). The only concrete infra
   choice named in the mockups — a single Cloud SQL Postgres — cannot hold the target scale.
-- **This phase produced** the missing design layer: **7 new ADRs (0004–0010) + ~19 design specs**,
+- **This phase produced** the missing design layer: **8 new ADRs (0004–0011) + ~20 design specs**,
   each traceable to the UI inventory, stress-tested against the scale target, and **independently
   security-reviewed** (see the sign-off ledger below).
 
@@ -31,6 +31,7 @@ answering, for the finalized UI/UX:
 | 0008 | Billing settlement via Shopify Billing primitives (no funds held) |
 | 0009 | Vector store at scale (engine choice behind the port) |
 | 0010 | Capacity-commitment strategy (committed-use/reserved/spot, governed) |
+| 0011 | Merchant-auth model — Shopify-embedded, portable behind an `identity` port |
 
 **Core platform specs**
 
@@ -42,6 +43,7 @@ answering, for the finalized UI/UX:
 | `agent-runtime.md` | Traced run loop, budgets, HITL-in-hot-path, 3-scope kill switch |
 | `governance-subsystems.md` | Policy → Rules → Approvals; Evolution; Eval; Audit; media eval gate |
 | `security-data-path.md` | Injection, tenant isolation, DLP, residency, model supply-chain |
+| `identity-and-access.md` | AuthN service, authZ PDP (RBAC+ABAC), SSO/SCIM, passkey/step-up, API keys, break-glass, lifecycle |
 | `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
 | `ui-backend-coverage-matrix.md` | Every screen + payments/comms/ads/platform/cost ↔ backend; **zero unmapped** |
 
@@ -96,6 +98,7 @@ Every domain was reviewed by the relevant build-time subagent; each **blocking**
 | Ads/social — `security-reviewer` | BLOCK (1) | **Fixed** — platform-native hard-cap backstop for pacing; `tracking` port fail-closed; exact rule/HITL spend line; least-priv social tokens |
 | Platform — `security-reviewer` | SIGN OFF w/ conditions | **Fixed** — strong-consistency authz/revocation reads; training-scope binds serving-scope; cache poisoning/encryption |
 | Cost governance — `security-reviewer` | SIGN OFF w/ conditions (1 blocking) | **Fixed** — safety-infra fenced from cost cuts; quality eval gates infra levers; cost anomalies triaged vs SOC |
+| Identity & access — `security-reviewer` | SIGN OFF w/ conditions (2 blocking) | **Fixed** — Shopify token validation + tenant-bind-from-verified-claims; API-key scope = min(key, current grantor); IdP-group ceiling; embedded CSP/replay; operator recovery; session-store fail-closed |
 
 ## Go / no-go for automated development
 
@@ -115,7 +118,8 @@ load-test/PoC was deliberately out of scope for this doc-only phase):
 - [ ] **Named human sign-offs before governance-sensitive code merges** (design specifies all of
       these; a person must accept them):
       - **Security team** — cross-tenant isolation (incl. admin read path) + PII-before-inference
-        (core review block list).
+        (core review block list); plus Shopify session-token validation/tenant-binding and API-key
+        scope-on-role-downgrade (IAM review block list).
       - **Security team (gate-weakening class, HITL §5)** — any future cost change that would reduce
         eval / audit / SOC / redaction / guardrail / kill-switch coverage.
       - **Named owners** — money/authority/pricing changes (two-person + step-up): fee-model,

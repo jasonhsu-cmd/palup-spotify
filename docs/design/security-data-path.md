@@ -60,7 +60,9 @@ Backs the admin **Security/SOC**, **Event Center**, and **Policy** screens._
 - **Identity/access:** SSO (SAML/OIDC), SCIM, passkey/hardware-key MFA, **step-up for sensitive
   actions**, RBAC (5 merchant / 8 admin roles), least privilege, break-glass audited. The console
   ask-bar inherits the RBAC matrix (reads never become actions; can't surface what the role can't
-  open).
+  open). The full authN service + authZ decision point (PDP), sessions/sign-out-all, SSO/SCIM,
+  passkey/step-up, API keys, and account lifecycle are specified in
+  `docs/design/identity-and-access.md` (merchant-auth model: `ADR-0011`).
 - **Secrets:** via `secrets` only — never in code/prompts/logs/fixtures; short-lived, rotated,
   revocable agent credentials.
 - **Unbounded-consumption ceiling** (5× trip) + rate limits per tenant (email 2k/hr, SMS 200/hr) in
