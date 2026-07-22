@@ -41,6 +41,7 @@ application packages (`packages/…`) are scaffolded by these artifacts, not shi
 | `skills/palup-design-system/` | Tokens + Tailwind mapping + component vocabulary for UI work. |
 | `skills/hitl-approval-gate/` | Checklist + code pattern for routing boundary-crossing actions to the Approval Center. |
 | `skills/portability-guard/` | Enforces the ports-and-adapters portability rule (ADR-0001). |
+| `skills/triage/` | Loop heartbeat: discovers build-time work (CI/coverage/evals/alerts) and writes it to a durable state file so the autonomous loop is resumable. |
 | `commands/` | `/ship`, `/eval`, `/governance-check`, `/new-runtime-agent`. |
 | `settings.json` + `hooks/` | Permissions (least-privilege, no ungated prod deploy) + an advisory governance pre-check hook. |
 | `../.mcp.json` | Project-scoped MCP servers (GitHub + a template for PalUp's control-plane server). |

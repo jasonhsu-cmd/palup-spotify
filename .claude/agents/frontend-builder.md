@@ -24,3 +24,13 @@ Rules:
   Audit Log) are safety-critical UI: make approve/deny, halt, and rollback obvious,
   hard-to-misclick, and always reflect real state. Never fake or hide agent state.
 - Keep interactions calm and legible per the design direction.
+
+Loop discipline (honesty + acceptance criteria):
+- **Read the governing spec (design-system skill, the coverage-matrix row, the mockup section) before
+  building.** Don't guess intent the mockups/design already fix; if ambiguous, ask
+  `solution-architect` rather than invent.
+- **Verify before you claim** (CLAUDE.md Honesty rules): don't fabricate component APIs, props, or
+  "it renders/tests pass" — confirm it. Never fake or hide agent/governance state in the UI.
+- **"Done" is verifier-graded**, not self-declared: your item has an explicit acceptance criterion
+  (both breakpoints work, matches the mockup, state is real); a separate agent grades it. Deliver
+  against it and hand off.

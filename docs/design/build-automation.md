@@ -37,15 +37,37 @@ work-item → orchestrator dispatch
   walk the evolution pipeline, `governance-subsystems.md` §4).
 - The two human gates (merge, promote) are the only non-automated steps and are **required**.
 
+**Every work-item is a `/goal`, not an open prompt.** Each item enters the loop with an **explicit,
+machine-checkable acceptance criterion** (e.g. "port-contract tests for `storage` pass; coverage ≥ bar;
+`/governance-check` clean") drawn from its coverage-matrix row + port contract test + the go/no-go
+conditions. **"Done" is graded by a *different* agent** (`fact-checker` / `test-engineer`), never by
+the builder that wrote the code — the maker-≠-checker split applied to the stop condition itself, and
+the enforcement of the honesty rule "green ≠ correct." An item with no verifiable criterion is not
+started; it goes back to `solution-architect` to get one.
+
+**Builders are spec-anchored — no guessing (kills "intent debt").** A builder prompt must **read the
+governing spec + ADR + its coverage-matrix row before writing**, and is instructed **not to re-derive
+or guess** intent the design already fixed. The design docs are the written-down intent the loop reads
+every cycle; an agent that starts cold fills gaps with confident guesses unless pointed at the source.
+
 ## 2. How "24/7" is realized (without unattended prod risk)
 
 - A **scheduler** (CronCreate / scheduled wakeups / background agents) wakes the orchestrator on a
   cadence and on events (CI result, new failing test, triaged bug, dependency alert).
-- **Work-item selection is risk-first** off `ui-backend-coverage-matrix.md` and the go/no-go
-  conditions: ports + data model + runtime skeleton first, then the cart-recovery wedge, then
+- **Discovery/triage is a skill, and findings go to a durable state file (the loop's memory).** A
+  scheduled run invokes the `triage` skill (`.claude/skills/triage/`) that reads CI failures, open
+  coverage-matrix rows, failing evals, and dependency/security alerts, and writes findings + status to
+  a **state file outside the conversation** (a markdown board / issue tracker). The agent forgets
+  between runs; the repo doesn't — so tomorrow's run **picks up where today's stopped**, and no item
+  is silently re-done or dropped. The state file is the spine; the conversation is disposable.
+- **Work-item selection is risk-first** off the state file + `ui-backend-coverage-matrix.md` and the
+  go/no-go conditions: ports + data model + runtime skeleton first, then the cart-recovery wedge, then
   screen-group by screen-group.
+- **Parallel builders run in isolated worktrees** (`isolation: worktree`) so concurrent
+  `backend-builder ∥ frontend-builder` work can't collide on files; each helper gets a fresh checkout
+  that cleans itself up.
 - Runs are **bounded, idempotent, and resumable** (mirrors the run-time budget discipline): a stuck or
-  failing item parks with a diagnostic and does not block the queue.
+  failing item parks in the state file with a diagnostic and does not block the queue.
 - **Autonomous bug-fixing** is in-scope up to a PR: detect (CI/eval/monitor) → reproduce → fix →
   test → PR. It never hotfixes prod directly.
 - **What runs unattended:** develop/test/fix/review/PR + CI + staging deploy. **What waits for a
