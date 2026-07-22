@@ -102,6 +102,36 @@ deploy, dependency/permission change). Miss one → keep it a manual, human-driv
   human:** PR merge and prod promotion. Overnight, work accumulates as green, staged PRs ready for
   morning review — not as prod changes.
 
+## 2a. Memory model — three durable layers (don't conflate them)
+
+The loop forgets between runs; persistence lives on disk in three distinct layers:
+
+| Layer | Writer | Holds | Scope / sync |
+|---|---|---|---|
+| `CLAUDE.md` (+ `CLAUDE.local.md`) | you / team | **instructions** — how to work, the §3 non-negotiables | git-shared (`.local` = local) |
+| `MEMORY.md` + topical files (`~/.claude/projects/<project>/memory/`) | Claude | **knowledge & lessons** — decisions, dead-ends, gotchas, and *why* | **local-only, per machine — NOT synced** |
+| state file + `VISION.md` (in the repo) | the loop | **task state** (done/next/parked) + **standing spec** | git-shared |
+
+Rules:
+- **Team/CI durable memory is the committed state file / `VISION.md`, not `MEMORY.md`.** Auto-memory
+  is per-developer-machine and does **not** travel to teammates or CI runners — so anything the loop or
+  a teammate must rely on goes in the repo, not auto-memory.
+- **Two-layer `MEMORY.md`:** keep it a short **index**; push detail to on-demand **topical files**
+  (`debugging.md`, `design-conventions.md`) that load only when opened. Durable knowledge stays on
+  disk, **off the live context window**, so session compaction doesn't lose it — it's *reloaded on
+  demand*, not "compressed less."
+- **Don't duplicate the repo.** Store only long-term knowledge **not derivable from `docs/`** — the
+  ADRs/specs/go-no-go already hold this project's decisions. Good `MEMORY.md` content: recurring
+  dead-ends, environment gotchas, and *why* a path was rejected.
+- **Explain why, not just what** (reasoning outlives implementation) and **record dead-ends** so the
+  loop doesn't re-walk them — the same `fail→investigate→verify→distill→consult` discipline as the
+  `triage` skill's state file.
+- **Curate:** small-high-signal beats large-noisy; review periodically; delete resolved/obsolete/
+  duplicate entries.
+- **Build-time ≠ run-time memory.** This layer is the *build* agents' memory. The *product's* run-time
+  agent memory (per-tenant `agent_memory` + vector store) is a separate system — **ADR-0009** — never
+  conflate them.
+
 ## 3. Reliability, accuracy, consistency controls
 
 - **Every change passes all gates** (tests + coverage bar + security-reviewer + governance-check +
