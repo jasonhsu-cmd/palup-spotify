@@ -47,7 +47,11 @@ gate** (test / build / type-check / lint → pass|fail), **not a second agent's 
 that only has an opinion is two optimists agreeing, the "Ralph Wiggum" quiet-failure (the maker emits
 "done" on a half-done job and the loop exits). The checker *interprets the gate*; it does not
 substitute judgment for it. An item with no objective criterion is not started; it goes back to
-`solution-architect` to get one.
+`solution-architect` to get one. For richer items the criterion is a **rubric** — a small file of N
+explicit checkable criteria (e.g. "contract tests pass **and** coverage ≥ bar **and**
+`/governance-check` clean **and** no cross-tenant path **and** audit entry present") — and the
+independent grader must confirm **every** criterion before the item may stop; the grader runs in a
+**fresh context window**, not the maker's.
 
 **Builders are spec-anchored — no guessing (kills "intent debt").** A builder prompt must **read the
 governing spec + ADR + its coverage-matrix row before writing**, and is instructed **not to re-derive

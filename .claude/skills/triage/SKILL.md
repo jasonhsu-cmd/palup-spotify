@@ -40,6 +40,23 @@ loop by surfacing work and persisting it **outside the conversation**.
   job (up to a PR); merge/promote stay human (`build-automation.md`).
 - Anything the loop can't handle lands in the state file's triage inbox for a human.
 
+## Memory discipline — make the state file *compound*, not accumulate
+
+The state file's "lessons learned" must be **verified rules, not a pile of guesses.** For anything the
+loop gets wrong, climb this progression before moving on:
+
+1. **Fail** — document the failure (what, where, the exact error/CI line).
+2. **Investigate** — figure out *why* before proceeding; don't just note "maybe X?".
+3. **Verify** — turn the diagnosis into a **checked fact** (a command/test confirms it).
+4. **Distill** — rewrite it as a **general rule** ("PowerShell hits a TLS 1.2 issue on this runner —
+   use bash"), not a one-off note.
+5. **Consult** — on future runs, **read the rule instead of re-deriving it.**
+
+Write distilled rules (not open guesses) to the state file so each cycle gets smarter, not just
+longer. This is explicit, task-specific memory instruction — don't assume the model does it unprompted;
+weaker models stall at step 1 (a list of guesses they never consult). Rules follow the same honesty
+bar as everything else: a rule is only "distilled" once it's **verified**, and it carries its evidence.
+
 ## Never do (hard constraints)
 
 - **Never autonomously touch or loop** authentication, payments/billing, pricing/margin, agent-
