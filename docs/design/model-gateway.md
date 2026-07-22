@@ -40,6 +40,17 @@ Caches are **tenant-scoped** (no cross-tenant answer reuse) and honor residency.
 
 - **Managed:** Vertex Gemini Flash/Pro; **Claude via Vertex Model Garden** as fallback. Embeddings
   (`text-embedding-005`) + Cohere Rerank.
+- **Claude Fable 5 (`claude-fable-5`) — gated premium candidate for the `high_stakes`/`canary` tier.**
+  Anthropic's most capable long-horizon model (1M context; $10/$50 per M tok). Adopt **only** via the
+  evolution pipeline: must clear the **cost/efficiency eval (≥85)** (it is far pricier than Gemini, so
+  it never serves the routine tier and never breaches the margin floor) and the quality floor. **Two
+  integration requirements before it serves live traffic:** (a) handle **`stop_reason: "refusal"`**
+  (HTTP 200, not an error) with automatic **fallback** to another tier/model — see §3; (b) it is a
+  **"Covered Model" with 30-day data retention (no zero-data-retention option)**, so PII-redaction-
+  before-inference (§1) and the DPA/sub-processor terms must account for it (`security-data-path.md`
+  §2.7, `../legal/provisions-brief.md` §4). Availability risk (it was export-control-suspended for ~3
+  weeks in 2026) reinforces keeping Gemini/alternatives viable (ADR-0001) — Fable is never a hard
+  dependency.
 - **Self-trained variants (Gemma/Llama canary):** served on **GKE GPU nodes** (see
   `observability-and-sre.md` for the GPU pool); provenance-tracked, promoted only through the
   evolution pipeline. Tier→model mapping lives in adapter config, never feature code.
@@ -50,6 +61,12 @@ Caches are **tenant-scoped** (no cross-tenant answer reuse) and honor residency.
   alternate (routing shown in the monitor; Claude fallback <1%) while preserving tier semantics and
   the quality floor. Failover is auto-allowed (reliability, non-cost-changing); a routing/default-
   model *policy* change is governed (HITL).
+- **Refusal handling (required for any Fable-class model with safety classifiers).** A
+  `stop_reason: "refusal"` is a **successful response, not an error** — the gateway must detect it and
+  **fall back** to another tier/model (server-side `fallbacks` param or gateway-managed retry),
+  preserving tier semantics. Billing note: a pre-output refusal is not charged, and fallback credit
+  refunds the prompt-cache switch cost — the cost meter (§5) must reflect this so refusals don't
+  distort per-tenant COGS. A refused → unservable request escalates, never silently drops.
 
 ## 4. Embeddings pipeline
 

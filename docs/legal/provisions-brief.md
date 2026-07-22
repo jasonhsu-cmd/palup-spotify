@@ -98,6 +98,12 @@ and templates so the merchant can meet these:
 - **International transfer** — SCCs / adequacy mechanism; **residency** (US launch, EU-per-tenant).
 - **Model-provider commitment** — **no training on PalUp/merchant data**; documented in the
   sub-processor terms. (`SECURITY.md` §2.7)
+- **Model-specific retention** — some models carry provider-set retention that overrides ZDR
+  preferences. Notably **Claude Fable 5 is a "Covered Model" with 30-day data retention (no zero-data-
+  retention option)**; if adopted at run-time it must appear in the sub-processor exhibit with that
+  retention term, and PII-minimization-before-inference becomes a hard dependency, not a nicety.
+  Counsel should confirm this is compatible with the merchant DPA and EU-residency commitments before
+  Fable serves any PII path. (`model-gateway.md` §2, `security-data-path.md` §2.7)
 - **Audit rights** (report-based / on-cause).
 
 ## 5. D–G — the rest

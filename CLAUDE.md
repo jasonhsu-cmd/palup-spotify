@@ -115,6 +115,12 @@ to *how* we build.
   inference COGS. It **never relaxes the non-negotiables (§3):** more agents fan out reviewers and
   builders, **not** autonomy; HITL, no-auto-prod-deploy, and fact-checking still apply, and humans
   still merge and promote.
+- **Model for the ultracode tier: Claude Fable 5** (`claude-fable-5`) — built for long-horizon
+  agentic work (large migrations, multi-day autonomous sessions, sub-agent delegation, self-checking).
+  Use it for the high-complexity design/review/migration work above; keep **default-effort models
+  (Sonnet/Haiku-class) for routine implementation** — Fable is premium ($10/$50 per M tok), so treat
+  it as the high-stakes dev tier, not the daily driver. (This is a build-time tooling choice; Fable's
+  *run-time* use behind the product `model` port is separately gated — `docs/design/model-gateway.md`.)
 
 ## 5. Conventions
 
