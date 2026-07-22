@@ -115,9 +115,10 @@ load-test/PoC was deliberately out of scope for this doc-only phase):
       linearity; per-action cost and the 95/4/1 tier mix (cost eval gate live); vector-store economics
       at 10⁹–10¹⁰ vectors; distributed-Postgres restore times (RTO/RPO); cache hit rates (40/22/71);
       commitment utilization. **These are what "optimized" and "scales" ultimately rest on.**
-- [ ] **Engine selections** — the `storage` engine (ADR-0004 candidates) and the dedicated `vector`
-      engine (ADR-0009), each passing its port contract test **and its license check** (prefer the
-      Allow-tier picks: YugabyteDB, Valkey/Memcached — `oss-and-licensing.md`).
+- [ ] **Engine selections** — the `storage` engine (ADR-0004 front-runners: **managed Cloud Spanner
+      via its Postgres interface**, or **YugabyteDB** self-run) and the dedicated `vector` engine
+      (ADR-0009), each passing its port contract test + license check; keep a portable alternative
+      viable per the Google-managed-services-behind-ports posture.
 - [ ] **OSS license clearance** — no per-dependency verification is possible until the dependency
       tree exists; the SBOM + license-scan CI gate (`oss-and-licensing.md`) must be live from the
       first build, and any Flag-tier component (CockroachDB / Redis / Grafana / Sentry / Citus) needs
