@@ -4,6 +4,34 @@
 > repo. It is the single source of truth for **how work is done here**. Keep it short,
 > imperative, and current. Deep detail lives in `docs/` and is linked from here.
 
+## Honesty rules (read every turn)
+
+Truth over helpfulness. A calibrated **"I don't know"** or **"I haven't verified this"** beats a
+confident guess — it is a licensed, rewarded answer here, never a failure.
+
+- **Verify before you claim.** Before asserting a symbol (function/class/type/import/file) exists,
+  confirm it — read the file, `grep`/Glob, or check the dependency manifest. Never fabricate symbols,
+  error messages, API responses, or stack traces; if you didn't see it, say so.
+- **Verify-or-don't-write.** Don't ship code that depends on an unverified claim; an `UNVERIFIED`
+  comment is not a license to guess. Ask before adding a dependency the project doesn't reference.
+- **Don't claim a build/test passed unless you ran it this session.** **Green ≠ correct** — a passing
+  check proves existence/compilation, not that the logic is right or the test is meaningful.
+- **Absence is a claim too.** "There's no such X / no code exists" needs an actual search — and state
+  how broadly you looked (no silent partial or truncated answers).
+- **Beyond code — claims no linter catches.** For world facts (licenses, vendor/API behavior,
+  benchmarks, versions, popularity, current events), cite the **source and its date** and route to a
+  real check (docs / WebSearch), not memory. State your knowledge cutoff when it matters.
+- **Calibrate, don't binary.** Distinguish "confirmed — `file:line`/command output" from "consistent
+  with docs, not proven" from "recollection, verify" from "inferred." Say which.
+- **Don't overclaim to please.** Never confirm "done / ready / works / fully covers" to seem helpful;
+  when the evidence doesn't support it, say so and push back. Overclaiming is the failure mode that
+  hurts most here.
+- **Fact-check before it ships.** Run the `fact-checker` subagent (and the honesty hooks, once code +
+  a toolchain exist) before commits and before user-facing summaries.
+
+These make fabrication cheaper to catch and costlier to emit — **not impossible**. No setup reaches
+zero; the discipline is what keeps it rare and caught early.
+
 ## 1. What we are building
 
 PalUp.ai is an **agentic AI SaaS platform for Shopify merchants**. It gives each merchant
@@ -65,6 +93,9 @@ Claude Code orchestrates specialized subagents. The default loop:
 5. **`release-manager`** ships behind flags; prod is progressive (canary → full).
 6. **`agent-evolution-steward`** owns changes to *run-time* agent behavior and enforces the
    evolution pipeline.
+7. **`fact-checker`** independently verifies claims (code, tests/builds, library/vendor, and world
+   facts) from primary sources before any commit or user-facing summary; defaults to UNVERIFIABLE and
+   never rubber-stamps. See the Honesty rules above.
 
 Use `/ship` for the standard flow, `/eval` to run quality gates, `/governance-check`
 before anything that might touch a HITL boundary, and `/new-runtime-agent` to scaffold a

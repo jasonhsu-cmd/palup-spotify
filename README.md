@@ -37,7 +37,7 @@ application packages (`packages/…`) are scaffolded by these artifacts, not shi
 ## What's in `.claude/`
 | Path | Purpose |
 |---|---|
-| `agents/` | Build-time subagents: orchestrator, solution-architect, backend/frontend builders, test-engineer, security-reviewer, release-manager, agent-evolution-steward. |
+| `agents/` | Build-time subagents: orchestrator, solution-architect, backend/frontend builders, test-engineer, security-reviewer, release-manager, agent-evolution-steward, fact-checker (verifies claims before commits/summaries). |
 | `skills/palup-design-system/` | Tokens + Tailwind mapping + component vocabulary for UI work. |
 | `skills/hitl-approval-gate/` | Checklist + code pattern for routing boundary-crossing actions to the Approval Center. |
 | `skills/portability-guard/` | Enforces the ports-and-adapters portability rule (ADR-0001). |

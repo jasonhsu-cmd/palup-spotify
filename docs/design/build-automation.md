@@ -24,6 +24,7 @@ work-item → orchestrator dispatch
   → test-engineer (unit/integration/port-contract/governance tests; coverage bar)
   → security-reviewer (blocks on auth/creds/payments/customer-data/autonomy/isolation)
   → /governance-check (HITL boundary + no-self-deploy + portability)
+  → fact-checker (re-derive every claim from primary sources; UNVERIFIABLE by default)
   → OPEN PR (states plane touched + HITL crossing + named human owner)
   ─────────────── human merges ───────────────
   → CI: build + SAST/DAST + license-scan(oss-and-licensing) + SBOM + eval gate
@@ -62,6 +63,27 @@ work-item → orchestrator dispatch
 - **Determinism where possible:** pinned deps, pinned tool/agent versions, reproducible builds, SBOM.
 - **Cost/rate discipline:** the orchestration itself is metered; a runaway loop trips a budget/step
   ceiling and parks (mirrors the run-time unbounded-consumption ceiling).
+
+### 3a. Honesty layer (anti-hallucination), per `CLAUDE.md` "Honesty rules"
+
+Deterministic external checks beat model self-discipline, so the loop pins claims to machine-checked
+reality wherever it can:
+
+- **Honesty hooks (deterministic).** `PostToolUse` runs a type-check/lint on the **changed package
+  only** (not whole-project on every write — that's slow, noisy, and trains around it); the hard gate
+  is a **`Stop`/pre-commit hook that runs the affected test + build suite** and returns real output to
+  the session. This extends the existing `.claude/hooks/governance-precheck.js` pattern. **Activates
+  once code + a toolchain exist (task #36)** — dead hooks that can't run are not wired in before then.
+- **`fact-checker` in the loop.** Runs **before a PR opens and before any user-facing summary**;
+  re-derives every claim (code, tests/builds, library/vendor, world facts) from primary sources,
+  defaults to UNVERIFIABLE, and never rubber-stamps (independent of the writer's context).
+- **Green ≠ correct.** A passing hook/test proves a symbol exists or code compiled — not that logic is
+  right or a test is meaningful. A green check is evidence, not a license to claim "done"; vacuous/
+  mocked tests are flagged, not counted.
+- **Calibrated reporting.** Agents state verification status ("confirmed `file:line`" vs "unverified")
+  and coverage limits (what was actually checked); no silent partial/ truncated results.
+- Honest scope note: this makes fabrication cheaper to catch, **not zero** — the value is early,
+  automatic catching, not a guarantee.
 
 ## 4. OSS framework adoption workflow (vet-then-adopt)
 
@@ -103,6 +125,9 @@ The harness is designed; it **cannot operate yet** until these exist (mostly hum
    HITL-bypassing.
 5. The orchestration is metered; a runaway loop parks on a budget/step ceiling.
 6. Every autonomous action (commit, PR, staging deploy) is audited with an actor + reversal path.
+7. No PR opens or summary ships without a `fact-checker` pass; claims of "tests/build passed" require
+   the command to have actually run this session (green ≠ correct); no completeness claim without
+   stated coverage.
 
 ## 7. Honest bottom line
 
