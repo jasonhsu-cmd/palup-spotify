@@ -47,6 +47,7 @@ answering, for the finalized UI/UX:
 | `identity-and-access.md` | AuthN service, authZ PDP (RBAC+ABAC), SSO/SCIM, passkey/step-up, API keys, break-glass, lifecycle |
 | `oss-and-licensing.md` | License allowlist policy, candidate register (flags Cockroach/Redis/Grafana/Sentry/Citus), SBOM + license-scan CI gate |
 | `../legal/provisions-brief.md` | Terms/DPA/privacy/AUP/SLA provisions brief for counsel (not legal advice) — grounded in the design |
+| `build-automation.md` | Continuous build-time agent orchestration (develop→test→fix→PR→CI→staging; human merge/promote gates); OSS vet-then-adopt workflow |
 | `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
 | `ui-backend-coverage-matrix.md` | Every screen + payments/comms/ads/platform/cost ↔ backend; **zero unmapped** |
 
