@@ -39,3 +39,15 @@ loop by surfacing work and persisting it **outside the conversation**.
 - **This skill does not fix or deploy** — it surfaces and records work. Fixing is the builders'
   job (up to a PR); merge/promote stay human (`build-automation.md`).
 - Anything the loop can't handle lands in the state file's triage inbox for a human.
+
+## Never do (hard constraints)
+
+- **Never autonomously touch or loop** authentication, payments/billing, pricing/margin, agent-
+  autonomy/governance code, architecture, or production — **escalate to a human** (this is the HITL
+  boundary, `docs/HITL-POLICY.md` / `CLAUDE.md` §3, and the "never looped" list in
+  `docs/design/build-automation.md` §1a).
+- **Never disable or delete a failing test** to make a gate pass — file it as an escalation instead.
+- **Never modify CI/CD config, permissions, or secrets** without human approval.
+- **Never dispatch an item without an objective acceptance criterion**, and never mark an item `done`
+  on a maker's say-so — only on the objective gate (build-automation §1).
+- **Never fabricate a finding** — every item cites the CI line / file / eval that produced it.

@@ -42,13 +42,37 @@ machine-checkable acceptance criterion** (e.g. "port-contract tests for `storage
 `/governance-check` clean") drawn from its coverage-matrix row + port contract test + the go/no-go
 conditions. **"Done" is graded by a *different* agent** (`fact-checker` / `test-engineer`), never by
 the builder that wrote the code — the maker-≠-checker split applied to the stop condition itself, and
-the enforcement of the honesty rule "green ≠ correct." An item with no verifiable criterion is not
-started; it goes back to `solution-architect` to get one.
+the enforcement of the honesty rule "green ≠ correct." The criterion must be an **objective machine
+gate** (test / build / type-check / lint → pass|fail), **not a second agent's opinion** — a verifier
+that only has an opinion is two optimists agreeing, the "Ralph Wiggum" quiet-failure (the maker emits
+"done" on a half-done job and the loop exits). The checker *interprets the gate*; it does not
+substitute judgment for it. An item with no objective criterion is not started; it goes back to
+`solution-architect` to get one.
 
 **Builders are spec-anchored — no guessing (kills "intent debt").** A builder prompt must **read the
 governing spec + ADR + its coverage-matrix row before writing**, and is instructed **not to re-derive
 or guess** intent the design already fixed. The design docs are the written-down intent the loop reads
 every cycle; an agent that starts cold fills gaps with confident guesses unless pointed at the source.
+The loop **rereads the governing spec + the `CLAUDE.md` §3 non-negotiables at the start of every
+cycle** — long sessions silently drop "don't do X" constraints (goal drift; they vanish around turn
+47), so session memory is never trusted to carry them.
+
+## 1a. Loop-eligibility test — what may and may not be looped
+
+Not every task earns a loop; the wrong ones cost more than they return. A task is loop-eligible **only
+if all hold**: (1) it **recurs** (roughly weekly+), (2) an **objective automated gate** can reject bad
+output, (3) the agent can **run the code it changes** (repro env), (4) there is a **hard stop**
+(token/iteration/time budget), and (5) a **human reviews before any irreversible action** (merge,
+deploy, dependency/permission change). Miss one → keep it a manual, human-driven task.
+
+- **Loop-eligible (good first loops):** CI-failure triage, dependency-bump PRs, lint/type-fix passes,
+  flaky-test reproduction, and coverage-matrix implementation on **well-tested slices with a real
+  gate**.
+- **Never looped (human-driven or full governed pipeline only):** **authentication, payments/billing,
+  architecture, pricing/margin, production deploys, agent-autonomy/governance changes, and any task
+  where "done" is a judgment call.** This list *is* the HITL boundary (`docs/HITL-POLICY.md`,
+  `CLAUDE.md` §3) — the loop is confined to repetitive, machine-checkable work, never to money, model,
+  autonomy, or design judgment.
 
 ## 2. How "24/7" is realized (without unattended prod risk)
 
@@ -88,6 +112,11 @@ every cycle; an agent that starts cold fills gaps with confident guesses unless 
 - **Determinism where possible:** pinned deps, pinned tool/agent versions, reproducible builds, SBOM.
 - **Cost/rate discipline:** the orchestration itself is metered; a runaway loop trips a budget/step
   ceiling and parks (mirrors the run-time unbounded-consumption ceiling).
+- **Loop health metric: cost per *accepted* change** (not tokens spent or PRs opened). If the
+  accepted-change rate falls below ~50%, the loop is generating review work it was meant to remove —
+  pause and fix the gate/skill, don't scale it. Ties to `cost-optimization.md`.
+- **Build small, in order:** get one manual run reliable → capture it as a skill → wrap it in a loop →
+  then schedule it. Don't schedule an unproven loop.
 
 ### 3a. Honesty layer (anti-hallucination), per `CLAUDE.md` "Honesty rules"
 
@@ -109,6 +138,22 @@ reality wherever it can:
   and coverage limits (what was actually checked); no silent partial/ truncated results.
 - Honest scope note: this makes fabrication cheaper to catch, **not zero** — the value is early,
   automatic catching, not a guarantee.
+
+### 3b. Security tax (an unattended loop is an unattended attack surface)
+
+A loop opens PRs faster than a human can read them, so the loop's own gate — not just merge CI — must
+carry security checks:
+
+- **Security in the loop gate:** SAST + dependency audit + **secret scanning** + license scan
+  (`oss-and-licensing.md`) run before a PR opens, not only at merge. Insecure/secret-leaking code must
+  fail the gate automatically.
+- **Skills/plugins are injection vectors** — **audit the source of any skill/plugin before it's
+  installed or auto-loaded** (a malicious description is prompt injection the loop would inherit). This
+  is the OSS vet-then-adopt rule (§4) applied to skills, not just code deps.
+- **No verbose logging in loops** — long unattended runs scatter secrets across logs no one watches;
+  keep loop logging sanitized (secrets via the port only, never to logs — `security-data-path.md`).
+- **Re-audit loop permissions every 30 days** — a read-only loop that got "just one" write scope for
+  convenience, never re-checked, is scope creep; least-privilege is re-verified on a cadence.
 
 ## 4. OSS framework adoption workflow (vet-then-adopt)
 
