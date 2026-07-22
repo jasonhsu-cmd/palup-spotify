@@ -101,6 +101,21 @@ Use `/ship` for the standard flow, `/eval` to run quality gates, `/governance-ch
 before anything that might touch a HITL boundary, and `/new-runtime-agent` to scaffold a
 product agent with governance wired in.
 
+**Effort tiering — `ultracode` vs default.** `ultracode` makes multi-agent Workflow orchestration the
+default posture (fan-out + adversarial verification, token cost de-prioritized for thoroughness).
+Reserve it for **high-stakes, high-complexity** work; use the model's **default effort** for routine
+work — the model-tiering / cost-margin discipline (§5, `docs/design/cost-margin-telemetry.md`) applied
+to *how* we build.
+- **ultracode / workflows:** system design & architecture; comprehensive review / security &
+  governance audits; large migrations and cross-cutting refactors; coverage-matrix-driven build
+  fan-out; loop-until-dry gap-finding.
+- **default effort:** routine implementation; single-file edits; iterating a known change;
+  clear-cause bug fixes; conversational/advisory turns.
+- **Opt-in, not always-on.** Enable per high-stakes task — its spend is real, so govern it like
+  inference COGS. It **never relaxes the non-negotiables (§3):** more agents fan out reviewers and
+  builders, **not** autonomy; HITL, no-auto-prod-deploy, and fact-checking still apply, and humans
+  still merge and promote.
+
 ## 5. Conventions
 
 - **Stack (Phase 1):** TypeScript everywhere. Backend: Node + Fastify services on Cloud

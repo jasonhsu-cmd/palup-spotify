@@ -57,7 +57,10 @@ work-item → orchestrator dispatch
 - **Every change passes all gates** (tests + coverage bar + security-reviewer + governance-check +
   eval) before a PR is even opened; red gates block, they don't warn.
 - **Adversarial verification** on non-trivial changes (independent reviewer/tester agents that try to
-  refute the change), and **contract tests per port** so adapters stay behavior-equivalent.
+  refute the change), and **contract tests per port** so adapters stay behavior-equivalent. This is
+  the natural home for **`ultracode` / Workflow orchestration** (fan-out → adversarially-verify →
+  synthesize) — reserved for high-stakes design/review/migration per the effort-tiering rule in
+  `CLAUDE.md` §4; routine implementation stays on default effort.
 - **Small, reversible diffs** (minimal-change discipline); every change flag-gated and auditable.
 - **No-prod-self-deploy invariant** is asserted in CI and by `security-reviewer`/`release-manager`.
 - **Determinism where possible:** pinned deps, pinned tool/agent versions, reproducible builds, SBOM.
