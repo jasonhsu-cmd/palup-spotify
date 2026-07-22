@@ -46,6 +46,7 @@ answering, for the finalized UI/UX:
 | `security-data-path.md` | Injection, tenant isolation, DLP, residency, model supply-chain |
 | `identity-and-access.md` | AuthN service, authZ PDP (RBAC+ABAC), SSO/SCIM, passkey/step-up, API keys, break-glass, lifecycle |
 | `oss-and-licensing.md` | License allowlist policy, candidate register (flags Cockroach/Redis/Grafana/Sentry/Citus), SBOM + license-scan CI gate |
+| `../legal/provisions-brief.md` | Terms/DPA/privacy/AUP/SLA provisions brief for counsel (not legal advice) — grounded in the design |
 | `console-api-contracts.md` | Merchant + admin API, RBAC, pagination, proposals |
 | `ui-backend-coverage-matrix.md` | Every screen + payments/comms/ads/platform/cost ↔ backend; **zero unmapped** |
 
@@ -120,6 +121,10 @@ load-test/PoC was deliberately out of scope for this doc-only phase):
       tree exists; the SBOM + license-scan CI gate (`oss-and-licensing.md`) must be live from the
       first build, and any Flag-tier component (CockroachDB / Redis / Grafana / Sentry / Citus) needs
       legal + `security-reviewer` sign-off before it ships.
+- [ ] **Legal instruments (not started)** — no Terms/DPA/privacy/AUP/SLA exist; `../legal/provisions-
+      brief.md` is a **counsel brief, not drafted agreements**. Qualified counsel must draft/review
+      them, reconciled against the design ↔ contract consistency watch-list, before commercial launch
+      and Shopify App Store submission. Owner: the Compliance/Legal operator role.
 - [x] **All build-time reviewer sign-offs completed** — see the ledger above; every blocking finding
       fixed in the specs.
 - [ ] **Named human sign-offs before governance-sensitive code merges** (design specifies all of
