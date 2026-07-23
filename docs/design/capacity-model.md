@@ -87,6 +87,11 @@ conditions** on the go/no-go and should be the first thing the build phase valid
   story rests on these; confirm on real traffic with the cost eval gate live.
 - Vector-store economics at 10^9–10^10 vectors (engine choice + $/query + recall).
 - Distributed-Postgres rebalancing/restore times at target row counts (RTO/RPO below).
+- **Cache hit rates holding at fleet scale** — deterministic deflection ~40% / semantic ~22% /
+  prompt ~71% (`model-gateway.md`); these keep token load and cost sub-linear to traffic, so a
+  regression is a margin event.
+- **Commitment utilization** — committed-use/reserved coverage vs. actual usage (`ADR-0010`); an
+  under-utilized commitment is a margin leak, over-100% on-demand spillover a signal to commit more.
 
 ## 7. SLOs, reliability, DR (targets from the mockups)
 

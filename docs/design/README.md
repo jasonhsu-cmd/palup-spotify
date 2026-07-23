@@ -89,6 +89,25 @@ answering, for the finalized UI/UX:
 3. **Each domain fully planned: YES at design depth, each security-reviewed.** Not "fully optimized"
    for cost — that is an empirical operating result, not a design claim (see cost caveat below).
 
+## Scope — surfaces this design does NOT cover
+
+"Supports every UI detail / zero unmapped surfaces" above is scoped to the **two authenticated console
+mockups** (`palup-merchant-app.html`, `palup-admin-console.html`) — it is *not* a claim of
+product-wide completeness. PalUp has additional **user-facing surfaces that are referenced in the
+strategy docs but not mockup-ed and not covered by this backend design**, and they carry real business
+decisions (GTM, public pricing presentation, shopper experience, enterprise trust):
+
+- **Public `palup.ai` site + signup / onboarding funnel** (the growth agent's front door; public
+  pricing page) — `GTM.md`.
+- **Shopify App Store listing + OAuth install/consent** — `GTM.md` §3, `ADR-0011`.
+- **The shopper-facing live-chat widget** (what the merchant's customer sees) — `comms-and-messaging.md` §10.
+- **Delivered outbound content** (email/SMS/social/ads as the customer receives it) — `comms-and-messaging.md`, `advertising-and-social.md`.
+- **Shopper-facing notices** (AI disclosure, unsubscribe/STOP, CCPA/GDPR data-rights) — `../legal/provisions-brief.md` §3.
+- **Trust Center** (public/enterprise compliance surface) — `SECURITY.md` §6; and likely a **status page**.
+
+These are real product surfaces still to be designed; treat this document's completeness claims as
+**console-scoped**, not product-scoped.
+
 ## Reviewer sign-off ledger
 
 Every domain was reviewed by the relevant build-time subagent; each **blocking** finding was fixed.

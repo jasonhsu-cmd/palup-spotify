@@ -126,9 +126,9 @@ to *how* we build.
 
 - **Stack (Phase 1):** TypeScript everywhere. Backend: Node + Fastify services on Cloud
   Run, orchestrated agents on GKE. Frontend: React + Vite + Tailwind + shadcn/ui. Data:
-  Postgres (Cloud SQL) + a vendor-neutral vector store behind a port. LLM access via
-  Vertex AI (Gemini) **through the model port** — never call a provider SDK directly from
-  feature code.
+  Postgres (Cloud SQL early; a distributed, Postgres-compatible engine at scale — ADR-0004) +
+  a vendor-neutral vector store behind a port. LLM access via Vertex AI (Gemini) **through the
+  model port** — never call a provider SDK directly from feature code.
 - **Design system:** Use the tokens and components from the `palup-design-system` skill.
   Both consoles already share one token set (verified). Do not invent new colors/spacing;
   extend the tokens file and document it.

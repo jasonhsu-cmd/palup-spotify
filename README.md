@@ -31,8 +31,8 @@ application packages (`packages/…`) are scaffolded by these artifacts, not shi
   **UI→backend coverage matrix**, **capacity model**, and the **go/no-go** review
   (`docs/design/README.md`). Produced as the pre-development review of whether the backend supports
   every UI detail and scales to millions of merchants.
-- **`docs/adr/`** — the load-bearing decisions, recorded as ADRs (0001–0003 strategic; 0004–0007
-  the scale/runtime/eventing/attribution decisions).
+- **`docs/adr/`** — the load-bearing decisions, recorded as ADRs (0001–0003 strategic; 0004–0011
+  the scale/runtime/eventing/attribution/billing/vector/capacity/auth decisions).
 
 ## What's in `.claude/`
 | Path | Purpose |

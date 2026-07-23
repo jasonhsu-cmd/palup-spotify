@@ -136,8 +136,10 @@ have ADRs.
   target volume (~10^10 customer rows + billions of messages/events/audit records — see
   `design/capacity-model.md`). The scale tier is a **portable, distributed, Postgres-
   compatible engine, sharded by tenant (`merchant_id`)**, behind the same `storage` port so
-  ADR-0001 stays intact. Google-native Spanner was rejected for the money/audit path
-  (lock-in). Details: `docs/adr/0004-storage-tier-at-scale.md`,
+  ADR-0001 stays intact. **Cloud Spanner — via its PostgreSQL interface, behind the `storage`
+  port — is an accepted managed candidate** (lowest-ops), with a self-run alternative
+  (YugabyteDB) kept viable; the portability discipline is Postgres-dialect-only +
+  keep-an-alternative-viable. Details: `docs/adr/0004-storage-tier-at-scale.md`,
   `docs/design/data-model-and-tenancy.md`.
 
 ### 4.5 Open-source agent tooling
