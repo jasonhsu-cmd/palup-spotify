@@ -1,8 +1,7 @@
 packages:
   - "packages/*"
 allowBuilds:
-  # Not run offline: the SDK is lazily imported and only executes when GCP creds are present.
-  # Approve these when wiring the live Vertex path (vet-then-adopt, build-automation.md §4).
-  '@google/genai': false
+  # Approved for the live Vertex path (Google's official SDK, Apache-2.0; vet-then-adopt §4).
+  '@google/genai': true
   esbuild: true
-  protobufjs: false
+  protobufjs: true

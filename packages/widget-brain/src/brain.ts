@@ -1,10 +1,38 @@
-import type { ModelPort } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, ModelPort } from "@palup/platform-ports";
 import type {
   Decision,
   PitchKind,
   SafetyClass,
   Signals,
 } from "./types.js";
+
+// The system prompt reinforces the guardrails on the MODEL side (defense-in-depth behind the code
+// guardrails) and grounds replies in the merchant's own catalog so it recommends THEIR products.
+function systemPrompt(ctx?: GroundingContext): string {
+  const rules = [
+    "Be concise: 2-4 sentences, warm, plain language.",
+    "Recommend ONLY products from the CATALOG below - never invent products, prices, or discounts.",
+    "If the store doesn't carry what the shopper needs, say so honestly and suggest the closest fit.",
+    "Never make medical or disease claims and never diagnose; defer health/safety concerns to a human.",
+    "You are an AI assistant - never claim to be human; disclose it if asked.",
+  ];
+  if (!ctx) return ["You are an online store's shopping assistant.", ...rules].join(" ");
+  const catalog = ctx.products
+    .map(
+      (p) =>
+        `- ${p.title} (${p.price}): ${p.description}${p.tags?.length ? ` [${p.tags.join(", ")}]` : ""}`,
+    )
+    .join("\n");
+  return [
+    `You are ${ctx.brandName}'s shopping assistant.`,
+    rules.join(" "),
+    "",
+    "CATALOG:",
+    catalog,
+    "",
+    `POLICY: Returns - ${ctx.policy.returns} Shipping - ${ctx.policy.shipping}`,
+  ].join("\n");
+}
 
 // NOTE (honest scope): detection here is a first-cut heuristic classifier. The production
 // brain uses the model + learned signals for classification — but the GUARDRAILS
@@ -32,7 +60,7 @@ const INJECTION = [
 
 const SAFETY: { class: Exclude<SafetyClass, "none" | "injection">; terms: string[] }[] = [
   { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm"] },
-  { class: "product_safety", terms: ["burning", "burns", "rash", "reaction", "allergic", "allergy", "broke out", "breaking out", "irritat", "swelling", "swollen", "stings", "hives"] },
+  { class: "product_safety", terms: ["burning", "burns", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "breaking out", "irritat", "swelling", "swollen", "stings", "hives", "peeling", "flaking", "blister"] },
   { class: "medical", terms: ["cure", "treat ", "diagnos", "pregnan", "medication", "prescription", "tretinoin", "rosacea", "eczema", "mole", "infection"] },
   { class: "legal", terms: ["lawyer", "i'll sue", "lawsuit", "legal action"] },
   { class: "abuse", terms: ["you're useless", "you are useless", "i hate you", "stupid bot"] },
@@ -72,7 +100,15 @@ export interface Brain {
   decide(signals: Signals, message: string): Promise<Decision>;
 }
 
-export function createBrain(model: ModelPort): Brain {
+export function createBrain(model: ModelPort, grounding?: GroundingPort): Brain {
+  const tenantId = "demo";
+  const groundedMessages = async (message: string) => {
+    const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
+    return [
+      { role: "system" as const, content: systemPrompt(ctx) },
+      { role: "user" as const, content: message },
+    ];
+  };
   return {
     async decide(signals: Signals, message: string): Promise<Decision> {
       const text = message.toLowerCase();
@@ -128,9 +164,9 @@ export function createBrain(model: ModelPort): Brain {
         const stuck = text.includes("just fix it") || text.includes("need help") || text.includes("none of this");
         if (stuck) flags.push("escalate");
         const gen = await model.complete({
-          messages: [{ role: "user", content: message }],
+          messages: await groundedMessages(message),
           temperature: 0,
-          tenantId: "demo",
+          tenantId,
         });
         const reply = stuck
           ? "I'm sorry this has been frustrating — I'm connecting you with a person who can resolve it."
@@ -163,9 +199,9 @@ export function createBrain(model: ModelPort): Brain {
 
       // 4. Sales / smalltalk — reactive answer always; proactive pitch is gated.
       const gen = await model.complete({
-        messages: [{ role: "user", content: message }],
+        messages: await groundedMessages(message),
         temperature: 0,
-        tenantId: "demo",
+        tenantId,
       });
       const negativeMood =
         signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";

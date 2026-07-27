@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { createBrain, type Signals } from "@palup/widget-brain";
-import { createModelPort } from "./model.js";
+import { createModelPort, createGroundingPort } from "./model.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const widgetHtml = readFileSync(
@@ -12,7 +12,7 @@ const widgetHtml = readFileSync(
 );
 
 const { port: modelPort, name: modelName } = createModelPort();
-const brain = createBrain(modelPort);
+const brain = createBrain(modelPort, createGroundingPort());
 
 export function buildServer() {
   const app = Fastify({ logger: false });
@@ -23,17 +23,31 @@ export function buildServer() {
     reply.type("text/html").send(widgetHtml);
   });
 
-  app.post("/chat", async (req) => {
+  app.post("/chat", async (req, reply) => {
     const body = (req.body ?? {}) as { message?: string; signals?: Signals };
-    const d = await brain.decide(body.signals ?? {}, String(body.message ?? ""));
-    // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
-    return {
-      reply: d.reply,
-      mode: d.mode,
-      pitch: d.pitch,
-      escalate: d.escalateToHuman,
-      flags: d.flags,
-    };
+    try {
+      const d = await brain.decide(body.signals ?? {}, String(body.message ?? ""));
+      // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
+      return {
+        reply: d.reply,
+        mode: d.mode,
+        pitch: d.pitch,
+        escalate: d.escalateToHuman,
+        flags: d.flags,
+      };
+    } catch (e) {
+      // A model/config failure must degrade gracefully — never hang or leak internals to the shopper.
+      console.error(`[/chat] model error (${modelName}):`, (e as Error).message);
+      reply.code(200);
+      return {
+        reply:
+          "Sorry — I'm having trouble right now. Let me get a team member to help; please try again in a moment.",
+        mode: "support",
+        pitch: "none",
+        escalate: true,
+        flags: ["model_error"],
+      };
+    }
   });
 
   return app;
