@@ -67,6 +67,7 @@ answering, for the finalized UI/UX:
 | `integration-architecture.md` | Shopify + ~15 integrations behind ports |
 | `comms-and-messaging.md` | Email/SMS/chat: send gate, deliverability, inbound, consent/suppression, A2P, live chat |
 | `advertising-and-social.md` | Ads (Meta/Google/TikTok/LinkedIn) + pacing, creative + media eval gate, Ayrshare, conversion tracking, SEO/AEO |
+| `shopper-widget.md` | Shopper-facing live-chat widget — **DRAFT**: intelligence layer (principles, signals, 8 pitches, 3-tier grounding, eval); UI/surface layer still open |
 
 **Infrastructure**
 
@@ -100,7 +101,8 @@ decisions (GTM, public pricing presentation, shopper experience, enterprise trus
 - **Public `palup.ai` site + signup / onboarding funnel** (the growth agent's front door; public
   pricing page) — `GTM.md`.
 - **Shopify App Store listing + OAuth install/consent** — `GTM.md` §3, `ADR-0011`.
-- **The shopper-facing live-chat widget** (what the merchant's customer sees) — `comms-and-messaging.md` §10.
+- **The shopper-facing live-chat widget** (what the merchant's customer sees) — `comms-and-messaging.md` §10;
+  **now being designed** in `shopper-widget.md` (DRAFT — intelligence layer done, UI/surface layer open).
 - **Delivered outbound content** (email/SMS/social/ads as the customer receives it) — `comms-and-messaging.md`, `advertising-and-social.md`.
 - **Shopper-facing notices** (AI disclosure, unsubscribe/STOP, CCPA/GDPR data-rights) — `../legal/provisions-brief.md` §3.
 - **Trust Center** (public/enterprise compliance surface) — `SECURITY.md` §6; and likely a **status page**.
