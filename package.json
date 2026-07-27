@@ -12,6 +12,7 @@
     "backend": "tsx packages/widget-backend/src/server.ts",
     "widget:dev": "pnpm --filter @palup/widget dev",
     "e2e": "playwright test --config e2e/playwright.config.ts",
+    "e2e:live": "playwright test --config e2e/playwright.live.config.ts",
     "typecheck": "tsc -b --pretty"
   },
   "devDependencies": {

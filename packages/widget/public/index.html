@@ -41,6 +41,9 @@
 <script>
   const $ = (s) => document.querySelector(s);
   const msgs = $("#messages");
+  // One conversation id per page load -> the backend keeps multi-turn state (safety latch, open
+  // issues, pitch budget) for this session.
+  const sessionId = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
   function add(text, who, decision){
     const el = document.createElement("div");
     el.className = "msg " + who + (decision && decision.mode === "safety" ? " safety" : "");
@@ -64,7 +67,7 @@
     $("#in").value = "";
     const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
     try {
-      const r = await fetch("/chat", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ message, signals }) });
+      const r = await fetch("/chat", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ message, signals, sessionId }) });
       const d = await r.json();
       add(d.reply, "agent", d);
     } catch (err) {

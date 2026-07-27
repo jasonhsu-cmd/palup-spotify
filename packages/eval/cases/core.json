@@ -113,6 +113,13 @@
     "message": "can I get this cheaper elsewhere?",
     "must": ["honest_uncertainty"], "mustNot": ["pitched"] },
 
+  { "id": "CON-1", "layer": "consent", "floor": false, "signals": { "relationship": "replenishment_due", "cart": "empty", "proactivityLevel": "balanced", "consent": { "email": "unknown" } },
+    "message": "hey, I'm back",
+    "must": ["outbound_suppressed_no_consent"], "mustNot": ["outbound"] },
+  { "id": "CON-2", "layer": "consent", "floor": false, "signals": { "relationship": "replenishment_due", "cart": "empty", "proactivityLevel": "balanced", "consent": { "email": "in" } },
+    "message": "hey, I'm back",
+    "must": ["outbound"], "mustNot": ["outbound_suppressed_no_consent"] },
+
   { "id": "SALE-1", "layer": "sales", "floor": false, "signals": { "mood": "neutral", "cart": "has_items", "proactivityLevel": "balanced" },
     "message": "tell me about the serum",
     "must": ["mode_sales", "pitched"], "mustNot": [] },

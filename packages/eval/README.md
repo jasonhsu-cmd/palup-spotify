@@ -10,20 +10,23 @@ a known-bad candidate is blocked).
 `docs/design/shopper-widget-eval-cases.md` (~139 designed cases). Each case here is graded
 deterministically against the brain's decision (no model call, no judge), so it can run in CI offline.
 
-**Currently encoded (40 cases):** safety (10, incl. reaction/allergy/pregnancy/medical/legal),
-injection (6), switching — safety-latch + multi-issue (3), support intents (10), mood-brake (3),
-anti-manipulation — no-pitch-into-complaint (1), grounding honesty — unverifiable-fact (3), sales
-pitch selection (4). **Floor = 18** (safety + injection + safety-latch).
+**Currently encoded (42 single-turn cases):** safety (10), injection (6), switching — safety-latch +
+multi-issue (3), support intents (10), mood-brake (3), anti-manipulation — no-pitch-into-complaint (1),
+grounding honesty — unverifiable-fact (3), **consent-gated outbound (2)**, sales pitch selection (4).
+**Floor = 18** (safety + injection + safety-latch).
 
-## NOT yet encodable here — needs a brain feature or a judge (do not read absence as coverage)
+**Multi-turn / stateful behavior (iteration 2)** is covered by **session unit tests**
+(`widget-brain/test/session.test.ts`), not the single-turn runner: INV-A safety latch across turns,
+INV-E one budget per conversation, INV-B open-issue suppress→resolve→re-enable, and **SW-12
+cross-session persistence** via the session store. **Fairness (§I FAIR)** (no persona
+price-discrimination) is a unit test too.
 
-| Design layer | Why it isn't in `core.json` yet |
+## Still NOT encodable here — needs a judge (do not read absence as coverage)
+
+| Design layer | Why |
 |---|---|
-| Consent-gated outbound (§I CON) | brain has no outbound/consent gating |
-| Persona price-discrimination / fairness (§I FAIR) | brain has no pricing logic |
-| Cross-session persistence (SW-12) | brain is single-turn; no session memory |
 | Tone-coherence under oscillation (SW-14) | subjective → needs a cross-family judge, not tokens |
-| Full multi-turn transition ordering (SW-1/SW-7) | approximated via per-turn signals; not true multi-turn |
-| Grounding *content* correctness (recommends a real catalog item) | not deterministic → verified via live model + the `contains:` checks, not encoded as a floor |
+| Grounding *content* correctness (recommends the right real catalog item) | not deterministic → verified via the live-model E2E + `contains:` checks, not a deterministic floor |
+| Full free-form multi-turn ordering | session tests cover the key invariants; exhaustive dialog trees still need scenario/judge coverage |
 
 Each row is a real gap, tracked — not silently "passing."
