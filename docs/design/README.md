@@ -69,6 +69,9 @@ answering, for the finalized UI/UX:
 | `advertising-and-social.md` | Ads (Meta/Google/TikTok/LinkedIn) + pacing, creative + media eval gate, Ayrshare, conversion tracking, SEO/AEO |
 | `shopper-widget.md` | Shopper-facing live-chat widget — **DRAFT**: intelligence layer (principles, signals, 8 pitches, 3-tier grounding, eval); UI/surface layer still open |
 | `shopper-widget-eval.md` | Widget eval data (case schema + sample cases) + runnable eval process/grader |
+| `shopper-simulator.md` | Synthetic eval-data engine (Gemini/Claude shopper-simulator; cross-family judge; generate→curate→freeze) |
+| `shopper-widget-eval-cases.md` | The static test corpus (authored upfront) — coverage map + ~79 cases covering every invariant/signal/pitch/mode/level; value-alignment anchor |
+| `shopper-widget-eval-pairwise.md` | Pairwise (all-pairs) layer — parameter model + constraints for PICT/ACTS + ~48 generator-shaped rows |
 
 **Infrastructure**
 

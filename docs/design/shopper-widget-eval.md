@@ -5,18 +5,68 @@
 > buildable spec; example data is illustrative seed, not the full suite. Store: Auria (skincare) is
 > used for realistic examples. Date: 2026-07-22.
 
-## 1. What "the data" is
-Three sources feed the suites:
-- **Authored adversarial cases** — hand-written to break each invariant (§8a). Highest priority.
-- **Pairwise-generated cases** — from the axis/class model (§8b) via a constraint solver (prunes
-  incoherent combos).
-- **Golden journeys** — curated real multi-turn conversations (de-identified) that capture whole
-  flows.
-- **Living additions** — production conversations (sampled, **de-identified; k-anon where
-  cross-tenant**) become new golden cases; any canary/prod failure becomes a new adversarial case
-  (loop-until-dry). **No real shopper PII in the static suite** — synthetic or de-identified only.
-- A **secret holdout** subset is stored separately and is **never visible to a candidate agent**
-  (anti-gaming; proposer ≠ evaluator).
+## 0. Eval tiers & phasing (decided — target: risk-weighted middle)
+Coverage is phased. **The catastrophic floor — exhaustive safety / injection / tenant-isolation /
+money — is identical in every tier**; tiers differ only on *interaction coverage* and *volume*, not on
+the non-negotiables.
+
+| Tier | Adds over the previous | Static count |
+|---|---|---|
+| Launch-lean v1 | per-aspect ≥1 (every invariant/signal/pitch/mode/level) + exhaustive floor + ~6 goldens | ~110–140 |
+| **Risk-weighted middle — ✅ TARGET** | **+ full pairwise (`shopper-widget-eval-pairwise.md`, ~56–72) + targeted 3-way on risk trios** | **~180–230** |
+| Full | + large simulator-journey volume + broader 3-way + the living prod/shadow/canary loop | ~300–500+, then living |
+
+**Decision:** build to the **risk-weighted middle**. It keeps the safety floor exhaustive *and* adds
+interaction-bug coverage (pairwise) for ~one generator run + light curation. **Launch-lean** is an
+acceptable earlier checkpoint (same floor, defers only interaction coverage); the **full** tier's
+simulator volume + living loop are **post-prototype / post-launch growth** (they need a prototype/
+traffic). The middle is **cold-runnable now**: authored anchor + one PICT run on the pairwise model +
+light curation — no agent required.
+
+## 1. Data sources & acquisition plan
+**Honest reality: two phases.** At **cold-start** there is no product and no shoppers, so the richest
+source (real traffic) doesn't exist. The initial suite is **authored + synthetic + fixtures**; real
+data enriches it only once shadow/canary/prod exist. Don't plan the suite as if prod data is available
+day one.
+
+| Method | How obtained | Available | Producer / review |
+|---|---|---|---|
+| **Authored adversarial** | humans (security-reviewer, test-engineer, domain experts) write break-it cases per invariant (§8a), optionally expanded by an adversarial LLM; **human-reviewed** | **cold-start** | the backbone; red-team mindset |
+| **Pairwise-generated** | a combinatorial (all-pairs/PICT-style) generator over the §8b axes + a **constraint solver** prunes incoherent combos; shopper utterances synthesized per combo; assertions derived from the §4–§6 rules (deterministic) | **cold-start** | spot-checked by humans |
+| **Shopper-simulator (synthetic journeys)** | an LLM role-plays a shopper parameterized by the signal axes (mood/persona/relationship/safety…) and drives multi-turn conversations against the agent; the good ones curated into golden — full spec in `shopper-simulator.md` | **cold-start** | **human-curated — never trust synthetic labels blindly** |
+| **Fixtures (merchant/catalog/policy)** | synthetic Auria-like catalog, prices, inventory, policies, consent records — from the mockups' data + generation; no real merchant/PII | **cold-start** | — |
+| **Live user test sessions** | recruited/consented testers converse with a working **prototype**; real human ambiguity/emotion/edge-cases → golden seeds + unknown-unknown discovery + experience validation | **bridge (pre-prod, needs a prototype)** | consent + de-identify; not the real distribution / no real purchase intent |
+| **Real-traffic mining** | sample prod conversations, **strip PII / de-identify**, **k-anon where cross-tenant**, DPA-permitting; mine into golden + holdout | **steady-state only** | governed by the DPA |
+| **Failure-driven** | every canary/prod miss, incident, or complaint → a new adversarial regression case (loop-until-dry) | **steady-state** | — |
+| **Red-team / bug-bounty** | humans + adversarial agents actively attack injection/safety/isolation/manipulation → cases | **ongoing** | — |
+
+- **Secret holdout:** carved from authored+synthetic at cold-start; refreshed from unseen de-identified
+  prod later. **Never visible to a candidate agent**, **rotated** to prevent overfitting, maintained by
+  someone who is *not* the candidate author (proposer ≠ evaluator).
+- **Shadow/canary are themselves "data," not just static cases:** at steady-state most coverage of the
+  ~7M-cell distribution comes from **replaying the real traffic distribution** (shadow) + live canary,
+  not from enumerating synthetic cells.
+
+**Project resources (available now):**
+- **Gemini + Claude access powers the cold-start synthetic engine** — the shopper-simulator,
+  adversarial-case generation, pairwise-utterance synthesis, and the LLM-judge. **Two families is an
+  asset: generate with one, grade with the other** (stronger proposer ≠ evaluator; avoids grading the
+  runtime model with its own family). **Caveat:** chat *subscriptions* bootstrap/prototype this; a
+  scaled automated pipeline needs **API access** (Vertex/Anthropic) for rate limits/automation/ToS.
+- **Live user test sessions** bridge to real human data before production (row above) — the pre-prod
+  source for golden journeys + discovery, once a widget prototype exists.
+
+**Governance & quality of obtaining data:**
+- **PII / consent / DPA** — real shopper conversations are the merchant's customer data; **de-identify
+  before any eval use**, cross-tenant only k≥50, and only where the DPA permits eval use. Cold-start
+  avoids this entirely (synthetic/fixtures).
+- **No blind synthetic labels** — every generated case *and its expected assertions* is human-reviewed;
+  a wrong "expected" poisons the eval ("green ≠ correct").
+- **Coverage / blind spots** — authored cases reflect the authors' blind spots, so augment with
+  generated + red-team + prod-mined (completeness-critic mindset); **risk-weight** (exhaustive on
+  safety/injection/isolation, sampled elsewhere).
+- **Holdout hygiene** — the holdout must never leak into a candidate's training or context, or the gate
+  is gamed.
 
 ## 2. Test-case data schema
 ```yaml
