@@ -13,7 +13,7 @@ the non-negotiables.
 | Tier | Adds over the previous | Static count |
 |---|---|---|
 | Launch-lean v1 | per-aspect ≥1 (every invariant/signal/pitch/mode/level) + exhaustive floor + ~6 goldens | ~110–140 |
-| **Risk-weighted middle — ✅ TARGET** | **+ full pairwise (`shopper-widget-eval-pairwise.md`, ~56–72) + targeted 3-way on risk trios** | **~180–230** |
+| **Risk-weighted middle — ✅ TARGET** | **+ full pairwise (`shopper-widget-eval-pairwise.md`, ~56–72) + targeted 3-way on risk trios** | **~180–195** (de-duplicated: 102 corpus + 56–72 pairwise + ~20 three-way; earlier "~180–230" was a loose sum that double-counted the anchor's safety/injection + goldens) |
 | Full | + large simulator-journey volume + broader 3-way + the living prod/shadow/canary loop | ~300–500+, then living |
 
 **Decision:** build to the **risk-weighted middle**. It keeps the safety floor exhaustive *and* adds

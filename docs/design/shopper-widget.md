@@ -132,6 +132,48 @@ untrusted-content-as-data · no disparagement · volatile facts live/sourced · 
   (not removed) by the honesty invariant + injection sandbox + DLP + merchant claims policy; merchants
   may down-shift to General/Off.
 
+## 6A. Mode arbitration & context switching (long conversations)
+A conversation is never purely one mode — a shopper flips between browsing, a return question, a
+complaint, a safety issue, and back. Intent is **re-classified every turn (not sticky-by-session)**,
+and switches obey a **strict precedence ladder**, so a switch is always safe *by construction*.
+
+**Precedence ladder (higher always wins):**
+1. **Safety / distress** — preempts everything; **latches on** (a later topic-change alone can't clear it).
+2. **Open support issue** (complaint / defective / return-in-progress / frustration) — **suppresses sales**.
+3. **Support info** (order status / policy / how-to) — answer, return to neutral; sales stays quiet.
+4. **Active sales** (shopper-initiated, or proactive within budget) — **lowest**; yields to all above.
+
+**Switching invariants (INV-A…E — the value-alignment core):**
+- **INV-A — Safety latches.** Once a reaction/distress signal appears, the agent stays in
+  safety/escalation even if the shopper changes the subject back to buying. It does **not** resume
+  selling — and the latch is **cleared only by a human/escalation resolution**, never by the agent, a
+  topic change, or an unrelated support resolution.
+- **INV-B — Any open problem suppresses sales** (generalizes the §8a-13 / `AM-031` restraint rule to
+  *every* support mode): while **any** issue in `open_issues` is unresolved → **no pitch, no upsell**.
+  Never exploit a support moment to sell.
+- **INV-C — Brake fast, resume slow** (the serve-and-brake asymmetry, §4 mood). Switching *into*
+  support/safety is instant; resuming *to* sales requires **all of**: issue closed + mood
+  neutral-or-positive + a **shopper-initiated** buying signal (or a single offered "want to pick up
+  where you left off?" that they accept).
+- **INV-D — Context continuity, offered not pushed.** The browsing/cart context is preserved across the
+  detour, so resuming is *help* — offered **once**, non-pushy — not a re-pitch.
+- **INV-E — One proactivity budget across the whole conversation.** Mode-switching **never refills** the
+  pitch budget (§5), so the agent can't evade the Balanced cap by ping-ponging support↔sales.
+
+**Conversation state carried:** `active_intent` · **`open_issues[]`** (a **set** — several can be open
+at once; **persists across sessions** until each is closed) · `mood` · `escalation_pending` ·
+`pitch_budget_remaining` (per-conversation) · `consent` · `browsing_context`. **Any unresolved item in
+`open_issues` gates** INV-B. **Transition triggers:** explicit request · sentiment shift · safety
+keyword · **resolution confirmation** (closes one issue) · buying signal · exit-intent.
+**Escalation to a human hands off the mode** — the agent does not keep selling in the background.
+
+**Eval:** multi-turn switch scenarios **`SW-1…14`** in `shopper-widget-eval-cases.md` (§P), graded on
+INV-A…E — both directions (`SW-1`/`SW-7`), safety-latch persistence (`SW-3`/`SW-8`), multi-issue
+stacking (`SW-9`), support→safety preemption (`SW-10`), classification precision (`SW-11`),
+cross-session persistence (`SW-12`), escalation-pending bridge (`SW-13`), and tone-continuity under
+rapid oscillation (`SW-14`, subjective/judge-graded). **Pairwise is single-state and deliberately does
+*not* cover transitions** — switching is inherently multi-turn, so it lives in golden/scenario cases.
+
 ## 7. Cross-cutting guardrails (invariants — hold everywhere)
 AI disclosed (locked) · no medical/regulated claims (locked) · **tenant isolation** · PII minimized
 before inference · consent + frequency caps (TCPA/CAN-SPAM) · **price/discount = HITL** · honest

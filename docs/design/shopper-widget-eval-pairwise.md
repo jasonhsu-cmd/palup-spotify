@@ -24,6 +24,7 @@ axes:
   consent:      [identified_in, identified_out, anon_unknown]                              # 3 (collapses identity+consent)
   region:       [us, eu]                                                                   # 2
   cart:         [empty, has_items, high_value]                                             # 3
+  support_intent: [none, order_status, return_exchange, cancellation, subscription, shipping_issue, damaged_wrong, how_to, policy_q, account_change, billing_q]  # 11 (the CSR half; pairs with mood/relationship/consent)
 # persona_role (for_self/gift/B2B) held separate — gift/B2B are their own cases (PER-2/3), for_self is the pairwise default
 constraints:                       # prune incoherent combos before/inside generation
   - anon        <=> consent=anon_unknown           # anonymous ⇔ no known identity/consent
@@ -51,6 +52,13 @@ region 2, device 2, cart 3. Σ|Aᵢ| = 41, Σ|Aᵢ|² = 209.
 - **⚠ §3's ~48 hand rows are BELOW the 56 floor**, so they are **provably not a complete all-pairs cover**
   (≥8 rel×behav pairs are necessarily uncovered). §3 is a representative subset; the verified ≥56 set only
   comes from running the generator on §1.
+- **⚠ Support axis added — scope grew.** `support_intent` (11) is now the largest axis. Support and sales
+  are **partially-exclusive modes** (no pitch into support), so model them as **two pairwise sub-models**,
+  not one giant cross: **sales** (~56–72) + **support** (support×relationship floor 88, but heavily
+  **constraint-pruned** — subscription→subscriber, order-ops→identified, cancel→has-order → realistically
+  **~30–50**). Combined pairwise ≈ **~86–122**. With corpus (~125) + targeted 3-way (~25), the
+  risk-weighted-middle **target rises to ~235–270** now that the CSR half is in scope (the support layer
+  *expands* scope — it doesn't just fill the old ~180–195).
 
 ## 3. Enumeration (hand-constructed, generator-shaped — see honest status above)
 Legend — rel: an=anon nw=new rp=repeat vp=vip sb=subscriber rd=replen_due lp=lapsed od=one_and_done ·
