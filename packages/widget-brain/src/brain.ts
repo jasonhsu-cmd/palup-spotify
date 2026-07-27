@@ -124,6 +124,7 @@ export function createBrain(model: ModelPort, grounding?: GroundingPort): Brain 
             "I can't do that — but I'm happy to help with product questions, your order, or a recommendation.",
           pitch: "none",
           escalateToHuman: false,
+          outbound: false,
           safetyClass: "injection",
           flags,
           model: "guardrail",
@@ -150,6 +151,7 @@ export function createBrain(model: ModelPort, grounding?: GroundingPort): Brain 
           reply,
           pitch: "none",
           escalateToHuman: escalate,
+          outbound: false,
           safetyClass: cls,
           flags,
           model: "guardrail",
@@ -176,6 +178,7 @@ export function createBrain(model: ModelPort, grounding?: GroundingPort): Brain 
           reply,
           pitch: "none",
           escalateToHuman: stuck,
+          outbound: false,
           safetyClass: "none",
           flags,
           model: gen.model,
@@ -191,6 +194,7 @@ export function createBrain(model: ModelPort, grounding?: GroundingPort): Brain 
             "I can't verify another store's current price, but I can tell you exactly how ours performs for what you need — what matters most to you?",
           pitch: "none",
           escalateToHuman: false,
+          outbound: false,
           safetyClass: "none",
           flags,
           model: "guardrail",
@@ -206,17 +210,30 @@ export function createBrain(model: ModelPort, grounding?: GroundingPort): Brain 
       const negativeMood =
         signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
       let pitch: PitchKind = "none";
+      let outbound = false;
       if (negativeMood) {
         flags.push("mood_brake", "no_pitch");
       } else {
         pitch = selectPitch(signals);
         if (pitch !== "none") flags.push(`pitch:${pitch}`);
+        // Consent-gated outbound: replenishment/cart-recovery imply an email/SMS follow-up, which is
+        // only permitted with valid consent (unknown = no-consent). Never do outbound otherwise.
+        const wantsOutbound = pitch === "replenishment" || pitch === "cart_recovery";
+        if (wantsOutbound) {
+          if (signals.consent?.email === "in") {
+            outbound = true;
+            flags.push("outbound");
+          } else {
+            flags.push("outbound_suppressed_no_consent");
+          }
+        }
       }
       return {
         mode: "sales",
         reply: gen.text,
         pitch,
         escalateToHuman: false,
+        outbound,
         safetyClass: "none",
         flags,
         model: gen.model,

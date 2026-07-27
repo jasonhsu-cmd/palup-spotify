@@ -44,6 +44,9 @@ export type PitchKind =
 
 export type ProactivityLevel = "cautious" | "balanced" | "confident";
 
+/** Consent state per channel (legally load-bearing; unknown is treated as no-consent). */
+export type Consent = "in" | "out" | "unknown";
+
 export interface Signals {
   mood?: Mood;
   relationship?: Relationship;
@@ -53,6 +56,8 @@ export interface Signals {
   cart?: "empty" | "has_items" | "high_value";
   /** True once a safety event has latched this conversation (INV-A). */
   safetyLatched?: boolean;
+  /** Marketing consent per channel; drives outbound gating (TCPA/CAN-SPAM). */
+  consent?: { email?: Consent; sms?: Consent };
 }
 
 export interface Decision {
@@ -60,6 +65,8 @@ export interface Decision {
   reply: string;
   pitch: PitchKind;
   escalateToHuman: boolean;
+  /** Whether the agent initiated an outbound channel action (email/SMS follow-up). Gated on consent. */
+  outbound: boolean;
   safetyClass: SafetyClass;
   /** Machine-checkable audit tags the eval harness grades against. */
   flags: string[];

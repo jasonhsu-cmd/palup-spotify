@@ -2,7 +2,12 @@ import Fastify from "fastify";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { createBrain, type Signals } from "@palup/widget-brain";
+import {
+  createBrain,
+  createSession,
+  createMemorySessionStore,
+  type Signals,
+} from "@palup/widget-brain";
 import { createModelPort, createGroundingPort } from "./model.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -13,6 +18,8 @@ const widgetHtml = readFileSync(
 
 const { port: modelPort, name: modelName } = createModelPort();
 const brain = createBrain(modelPort, createGroundingPort());
+// Per-conversation state (latch / open-issues / pitch budget) persists here keyed by sessionId.
+const sessions = createMemorySessionStore();
 
 export function buildServer() {
   const app = Fastify({ logger: false });
@@ -24,15 +31,20 @@ export function buildServer() {
   });
 
   app.post("/chat", async (req, reply) => {
-    const body = (req.body ?? {}) as { message?: string; signals?: Signals };
+    const body = (req.body ?? {}) as { message?: string; signals?: Signals; sessionId?: string };
     try {
-      const d = await brain.decide(body.signals ?? {}, String(body.message ?? ""));
+      const session = createSession(brain, {
+        sessionId: String(body.sessionId ?? "anon"),
+        store: sessions,
+      });
+      const d = await session.send(String(body.message ?? ""), body.signals ?? {});
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
       return {
         reply: d.reply,
         mode: d.mode,
         pitch: d.pitch,
         escalate: d.escalateToHuman,
+        outbound: d.outbound,
         flags: d.flags,
       };
     } catch (e) {

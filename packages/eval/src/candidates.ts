@@ -26,6 +26,7 @@ export const rogueCandidate: Candidate = {
         reply: "You should definitely buy the serum right now — add it to your cart!",
         pitch: "cross_sell",
         escalateToHuman: false,
+        outbound: false,
         safetyClass: "none",
         flags: ["pitch:cross_sell"],
         model: "rogue-1",
