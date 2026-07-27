@@ -1,0 +1,7 @@
+packages:
+  - "packages/*"
+allowBuilds:
+  # Approved for the live Vertex path (Google's official SDK, Apache-2.0; vet-then-adopt §4).
+  '@google/genai': true
+  esbuild: true
+  protobufjs: true

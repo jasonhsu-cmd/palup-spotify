@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PalUp Shopper Widget — demo</title>
+<style>
+  :root { --bg:#fff; --fg:#111; --muted:#666; --line:#e5e7eb; --brand:#4f46e5; --agent:#f3f4f6; --safe:#fff4f4; --safeln:#f0b4bd; }
+  @media (prefers-color-scheme: dark){ :root{ --bg:#0f1115; --fg:#e8e8ea; --muted:#9aa0a6; --line:#2a2f3a; --agent:#1a1e27; --safe:#241416; --safeln:#5a2b32; } }
+  body{ font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); margin:0; }
+  .wrap{ max-width:440px; margin:24px auto; border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+  header{ background:var(--brand); color:#fff; padding:12px 16px; }
+  header b{ display:block; } header small{ opacity:.85; }
+  #messages{ height:360px; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
+  .msg{ max-width:80%; padding:8px 12px; border-radius:12px; }
+  .user{ align-self:flex-end; background:var(--brand); color:#fff; border-bottom-right-radius:3px; }
+  .agent{ align-self:flex-start; background:var(--agent); border-bottom-left-radius:3px; }
+  .agent.safety{ background:var(--safe); border:1px solid var(--safeln); }
+  .badge{ font-size:11px; color:var(--muted); margin-top:3px; }
+  .controls{ display:flex; gap:6px; padding:8px 14px; border-top:1px solid var(--line); flex-wrap:wrap; }
+  .controls select{ font-size:12px; }
+  form{ display:flex; gap:8px; padding:12px 14px; border-top:1px solid var(--line); }
+  input[type=text]{ flex:1; padding:9px 12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--fg); }
+  button{ padding:9px 16px; border:0; border-radius:10px; background:var(--brand); color:#fff; cursor:pointer; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header><b>Auria</b><small>AI assistant · replies are AI-generated</small></header>
+    <div id="messages" data-testid="messages"></div>
+    <div class="controls">
+      <select id="mood" title="mood signal"><option value="neutral">neutral</option><option>frustrated</option><option>upset</option><option>satisfied</option></select>
+      <select id="cart" title="cart signal"><option value="has_items">cart: has items</option><option value="empty">cart: empty</option><option value="high_value">cart: high value</option></select>
+      <select id="proactivityLevel" title="proactivity"><option value="balanced">balanced</option><option value="cautious">cautious</option><option value="confident">confident</option></select>
+    </div>
+    <form id="f">
+      <input id="in" data-testid="chat-input" type="text" placeholder="Ask about a product, an order…" autocomplete="off" />
+      <button data-testid="send" type="submit">Send</button>
+    </form>
+  </div>
+<script>
+  const $ = (s) => document.querySelector(s);
+  const msgs = $("#messages");
+  function add(text, who, decision){
+    const el = document.createElement("div");
+    el.className = "msg " + who + (decision && decision.mode === "safety" ? " safety" : "");
+    if (who === "agent") el.setAttribute("data-testid", "agent-msg");
+    el.textContent = text;
+    if (decision){
+      const b = document.createElement("div");
+      b.className = "badge";
+      b.setAttribute("data-testid","badge");
+      b.textContent = `mode=${decision.mode} · pitch=${decision.pitch} · escalate=${decision.escalate}`;
+      el.appendChild(b);
+    }
+    msgs.appendChild(el);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+  $("#f").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const message = $("#in").value.trim();
+    if (!message) return;
+    add(message, "user");
+    $("#in").value = "";
+    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
+    try {
+      const r = await fetch("/chat", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ message, signals }) });
+      const d = await r.json();
+      add(d.reply, "agent", d);
+    } catch (err) {
+      add("Sorry — I hit a problem reaching the server.", "agent");
+    }
+  });
+  add("Hi! I'm Auria's assistant. Ask me about a product or your order.", "agent");
+</script>
+</body>
+</html>

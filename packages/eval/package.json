@@ -1,0 +1,9 @@
+{
+  "name": "@palup/eval",
+  "version": "0.0.0",
+  "type": "module",
+  "dependencies": {
+    "@palup/platform-ports": "workspace:*",
+    "@palup/widget-brain": "workspace:*"
+  }
+}
