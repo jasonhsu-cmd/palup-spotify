@@ -68,6 +68,7 @@ answering, for the finalized UI/UX:
 | `comms-and-messaging.md` | Email/SMS/chat: send gate, deliverability, inbound, consent/suppression, A2P, live chat |
 | `advertising-and-social.md` | Ads (Meta/Google/TikTok/LinkedIn) + pacing, creative + media eval gate, Ayrshare, conversion tracking, SEO/AEO |
 | `shopper-widget.md` | Shopper-facing live-chat widget — **DRAFT**: intelligence layer (principles, signals, 8 pitches, 3-tier grounding, eval); UI/surface layer still open |
+| `shopper-widget-eval.md` | Widget eval data (case schema + sample cases) + runnable eval process/grader |
 
 **Infrastructure**
 

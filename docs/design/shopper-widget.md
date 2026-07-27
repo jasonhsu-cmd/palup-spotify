@@ -139,6 +139,9 @@ incrementality attribution · **opt-out/complaint rate = manipulation smoke-alar
 eval as the release gate · 3-scope kill switch honored · every autonomous action audited.
 
 ## 8. Eval matrix (the self-improvement gate)
+_Concrete data (case schema + sample cases) and the runnable eval process live in
+`shopper-widget-eval.md`._
+
 Not a cross-product of signal values (~7M cells = untestable). **Risk-weighted**, in five parts:
 invariant suites (must-hold) → pairwise coverage → golden journeys → the candidate-promotion gate →
 live shadow/canary. Maps to the 7 production suites: **safety ≥99 · accuracy ≥92 · brand-voice ≥90 ·
