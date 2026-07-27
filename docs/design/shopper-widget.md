@@ -50,9 +50,34 @@ drive** (timing / personalization / pitch-selection / escalation) vs. must not.
   styles = ready-to-buy / researcher / deal-seeker / needs-guidance. **Inferred demographic/
   psychographic personas are excluded**; **never price-discriminate**; unknown → default (for-self/
   neutral), grounded from stated/observed only.
-- **Behavioral, Contextual, Identity/consent, Safety** — the remaining four classes (enumerated to
-  eval-matrix depth in §8; full enumeration is §9-open). Safety is the highest-stakes class:
-  safety/medical/distress → **always escalate to a human, never answered or pitched**.
+- **Behavioral — grounded** (observed in-session events): browsing · product-dwell · search/filter ·
+  add-to-cart · cart-dwell/hesitation · checkout · exit-intent · repeat-question · **declined/ignored
+  a pitch** · idle-then-return · rapid-repeat-failure ("rage"). *Drives:* proactive **timing**
+  (add-to-cart → cross-sell moment; exit-intent → *one* recovery; dwell → offer help) + pitch
+  selection. *Must not:* declined → **back off (one-strike)**; repeat-question → **recall, don't force
+  a re-ask**; rage/failure → help/escalate, **never treat as a buying signal**.
+- **Contextual — mixed confidence:** device (mobile/desktop/tablet → responsive/off-canvas) · time
+  (business / after-hours / **quiet-hours**) · entry/referrer (ad/organic/direct/email/social —
+  *inferred* intent, low-confidence) · cart state (empty / has-items / high-value) · session
+  (new / returning / cross-day) · **locale + region → residency + consent regime (EU/GDPR vs US)** ·
+  page context. *Drives:* UX (device), **quiet-hours suppresses outbound**, pitch selection
+  (cart/page), compliance (**region → residency + consent**). *Must not:* **never infer demographics
+  from context** (referrer/device ≠ persona).
+- **Identity / consent — grounded, legally load-bearing, fail-closed:** anonymous/guest vs identified ·
+  **email consent** (in/out/unknown) · **SMS consent** (in/out/unknown — TCPA) · marketing-preference
+  scope · **data-rights request** (access/delete). *Drives:* **gating** (no outbound without valid
+  consent; anonymous → no PII, limited memory), personalization (identified → recall), compliance
+  (data-rights → honor the erasure cascade), channel eligibility. *Must not:* **unknown consent =
+  treat as no-consent**; anonymous → no PII leak, no assumed identity; consent-out → suppressed;
+  never use another shopper's identity (isolation).
+- **Safety — inferred detection, escalation-biased, EXHAUSTIVELY tested (highest stakes):** none ·
+  product-safety (allergy/reaction) · medical/health/pregnancy · self-harm/crisis/distress ·
+  regulated-claim bait ("cure/treat X?") · legal/complaint threat · **prompt-injection / manipulation
+  attempt** · abuse toward the agent. *Drives:* **escalate to a human**, **suppress all pitching**,
+  **block** (injection → content-as-data, no boundary action), **refuse** (regulated/medical claims —
+  locked). *Bias:* **high-recall** — a false escalation is acceptable; a **missed real safety issue is
+  catastrophic** (safety eval ≥99, ≈100% recall). *Must not:* never answer/advise on safety/medical;
+  never pitch into a safety context; never let injected content trigger a boundary action.
 
 ## 5. Pitches (output model)
 **8 kinds** (by mechanic): guided recommendation · objection→close · cart recovery · cross-sell ·
@@ -128,8 +153,6 @@ Not a cross-product of signal values (~7M cells = untestable). Instead, **risk-w
   / cost ≥85 / latency ≥88 / compliance =100). Full axis→class→assertion matrix is §9-open.
 
 ## 9. Open items (not yet decided / designed — do NOT treat as done)
-- **Full signal enumeration** for Behavioral / Contextual / Identity-consent / Safety (values +
-  assertions) — sketched in §4/§8, not fully catalogued.
 - **The UI / surface layer (entirely undiscussed):** widget states (collapsed bubble / open panel /
   proactive greeting / offline / basic-mode), AI-disclosure UI treatment, "Powered by PalUp" badge,
   appearance/theming, **accessibility**, the **human take-over handoff** UX, and transport (WebSocket,
