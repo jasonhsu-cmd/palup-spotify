@@ -1,0 +1,10 @@
+{
+  "name": "@palup/widget-brain",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@palup/platform-ports": "workspace:*"
+  }
+}

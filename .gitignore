@@ -5,3 +5,7 @@ dist/
 **/secrets/**
 *.log
 .DS_Store
+# generated artifacts
+reports/
+test-results/
+playwright-report/
