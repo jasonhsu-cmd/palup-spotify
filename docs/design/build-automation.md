@@ -21,14 +21,16 @@ human merge/promotion gate** — not around it.
 work-item → orchestrator dispatch
   → solution-architect (design note + task list; flags HITL/portability/plane)
   → backend-builder ∥ frontend-builder (parallel where independent)
-  → test-engineer (unit/integration/port-contract/governance tests; coverage bar)
+  → test-engineer (unit/integration/port-contract/governance + E2E tests; coverage bar)
   → security-reviewer (blocks on auth/creds/payments/customer-data/autonomy/isolation)
   → /governance-check (HITL boundary + no-self-deploy + portability)
   → fact-checker (re-derive every claim from primary sources; UNVERIFIABLE by default)
   → OPEN PR (states plane touched + HITL crossing + named human owner)
   ─────────────── human merges ───────────────
   → CI: build + SAST/DAST + license-scan(oss-and-licensing) + SBOM + eval gate
-  → AUTO-DEPLOY to STAGING (behind flags)
+       + application-E2E (Playwright, ephemeral env) + agent-behavioral eval suites
+  → AUTO-DEPLOY to STAGING (behind flags) → critical-journey smoke on staging
+  ── E2E ACCEPTANCE GATE (blocking: app-E2E green on critical journeys; agent-eval green for run-time-agent changes) ──
   ─────────────── human promotes ───────────────
   → progressive canary → full (release-manager) → monitor → auto-rollback on regression
 ```
@@ -189,6 +191,48 @@ carry security checks:
 - **Re-audit loop permissions every 30 days** — a read-only loop that got "just one" write scope for
   convenience, never re-checked, is scope creep; least-privilege is re-verified on a cadence.
 
+### 3c. Test scope & the end-to-end (E2E) gate
+
+"Automated testing" in the goal is **not** unit+integration alone — a multi-surface SaaS cannot be
+safely promoted on those. The required scope is a full pyramid with **two distinct E2E layers**, and
+E2E is a **blocking pre-promotion gate** (never an auto-promote — §2/§3 still require a human to promote).
+
+| Layer | Proves | Where it gates |
+|---|---|---|
+| Unit (per package) | units work in isolation | loop gate, pre-PR |
+| Integration | services + DB + queues interoperate | loop gate, pre-PR |
+| Port-contract | each adapter is behavior-equivalent to its port (ADR-0001) | loop gate, pre-PR |
+| Governance / HITL | boundary→proposal, kill switch, no-self-promote (`HITL-POLICY.md`) | loop gate, pre-PR (red = hard block) |
+| **Application E2E** | *the software works* — real journeys across merchant console, admin console, shopper-widget install, **Shopify embedded auth**, **billing**, public API (Playwright/Cypress on an ephemeral/staging env) | **CI + blocking acceptance gate before human promotion**; critical-journey smoke re-runs post-staging-deploy and post-canary |
+| **Agent-behavioral E2E / evals** | *the agent behaves* — golden journeys + invariant/pairwise/switch/support suites (the `shopper-widget-eval*` corpus) | the **eval gate** + the **candidate-promotion gate** for any run-time-agent change (`shopper-widget.md` §8d) — never skipped |
+| Synthetic monitoring / prod smoke | journeys still work live | post-promotion; feeds auto-rollback |
+
+**Don't conflate the two E2E layers.** *Application E2E* = the consoles/widget/billing/auth stack
+functions; *agent-behavioral E2E* = the run-time agent makes value-aligned, safe, honest decisions. A
+change can pass one and fail the other; **both are required** before prod.
+
+**The E2E gate (blocking):**
+- **Full application E2E** on the critical journeys must be **green before a human is asked to promote**
+  staging→prod. Money/auth journeys (Shopify billing, embedded auth, refunds) run **only in sandbox /
+  test mode — never against real money** (`payments-and-billing.md`). Critical-path **smoke** re-runs
+  against staging on deploy and against prod after canary.
+- For any **run-time agent-behavior** change, the **agent-behavioral eval/E2E suites are blocking in the
+  candidate-promotion gate** (shadow→canary→eval→human), enforced by `agent-evolution-steward`.
+- **E2E green ≠ auto-promote.** It is a *gate the human clears*, not a trigger — promotion stays
+  human-initiated (§2/§3).
+
+**Determinism (E2E is the flakiest layer — treat it so):** isolated/seeded test data per run, resilient
+(role/test-id) selectors, trace-on-failure, and a **flake-quarantine** lane — **but critical
+money/auth/safety journeys may NOT be quarantined** (a flaky checkout test is a broken gate, not a
+nuisance), and a quarantined test **never counts as green** (green ≠ correct, §3a).
+
+**Loop-eligibility:** authoring/repairing E2E and reproducing flakes is loop-eligible (§1a); E2E that
+covers **money/auth/agent-autonomy** journeys is human-reviewed like the code it guards — it sits on the
+HITL boundary.
+
+Cross-refs: `compute-and-delivery.md` §5 (CI/CD wiring) · `shopper-widget-eval*.md` (agent-behavioral
+E2E) · `ui-backend-coverage-matrix.md` (journeys to cover) · `payments-and-billing.md` (sandbox).
+
 ## 4. OSS framework adoption workflow (vet-then-adopt)
 
 For each candidate (`wshobson/agents`, `obra/superpowers`, `msitarzewski/agency-agents`,
@@ -217,6 +261,9 @@ The harness is designed; it **cannot operate yet** until these exist (mostly hum
 - [ ] **Engine picks** — `storage` (ADR-0004 → prefer YugabyteDB) and `vector` (ADR-0009), license-cleared.
 - [ ] **Human sign-offs already flagged** (`design/README.md`) — security (isolation/PII, Shopify
       token, API-key scope), legal (instruments + flagged OSS licenses).
+- [ ] **E2E harness** — Playwright/Cypress + seeded/isolated test data + a **Shopify test store &
+      billing test mode** (money/auth journeys never hit real money), wired as a blocking CI +
+      pre-promotion gate (§3c).
 - [ ] **Scheduler/runtime** for the 24/7 cadence (CronCreate/background agents) — armed only after the
       above, and only for the develop→staging portion.
 
@@ -232,6 +279,9 @@ The harness is designed; it **cannot operate yet** until these exist (mostly hum
 7. No PR opens or summary ships without a `fact-checker` pass; claims of "tests/build passed" require
    the command to have actually run this session (green ≠ correct); no completeness claim without
    stated coverage.
+8. No promotion to prod without **green application-E2E on the critical journeys** (money/auth in
+   sandbox only) and, for any run-time-agent change, **green agent-behavioral eval/E2E suites**;
+   critical money/auth/safety journeys may **not** be flake-quarantined.
 
 ## 7. Honest bottom line
 
