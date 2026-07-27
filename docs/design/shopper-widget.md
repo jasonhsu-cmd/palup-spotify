@@ -61,8 +61,22 @@ upsell/trade-up · subscription conversion · replenishment & win-back · promot
   value-aligned moment, **capped** (per-session + cross-session + cross-channel dedup + one-strike
   back-off); never mid-complaint/safety or "just browsing"; **basic-mode-at-cap** (no proactive,
   live-chat continues, customer never sees billing state).
-- **Default proactivity level:** **OPEN** — maps to Agent Controls autonomy (Cautious / Balanced /
-  Confident). *(Decision pending — §9.)*
+- **Proactivity level — DEFAULT: Balanced.** Governs which pitches fire *proactively* (agent-initiated)
+  and how often; maps to Agent Controls (Cautious / Balanced / Confident). **Reactive pitches
+  (shopper-initiated) are full at every level;** the level tunes only proactive scope + cadence,
+  **always inside the hard caps** (frequency, margin floor, price=HITL, safety/complaint suppression,
+  anti-manipulation eval) — a level is a dial *within* the guardrails, never a way to loosen them.
+
+  | Level | Proactive pitches allowed | Cadence |
+  |---|---|---|
+  | **Cautious** | cart recovery (strong abandonment/exit-intent) + promo surfacing (when qualified) only | tightest (≤1 proactive/session) |
+  | **Balanced (default)** | + cross-sell (at add-to-cart/checkout), upsell (better-fit), replenishment & win-back (returning/due), subscription (post-purchase, replenishables) — at value-aligned moments | moderate (≤~2/session; cross-session + cross-channel dedup; one-strike back-off) |
+  | **Confident** | + proactive guided-recommendation (browse/dwell), earlier cart intervention | wider window, looser caps — **still inside the hard policy ceilings** |
+
+  Merchants can tune per-pitch on top of the level. **Rationale for Balanced default:** delivers the
+  wedge + core expansion at natural moments (revenue) while tight caps + restraint protect trust;
+  Cautious under-delivers the product's value, Confident risks over-pitching a consumer surface by
+  default — Balanced is the value×trust sweet spot, and the dial is one setting away.
 - **Price/discount = merchant-approved (HITL); agent never invents a discount.**
 
 ## 6. Grounding & Knowledge
@@ -114,7 +128,6 @@ Not a cross-product of signal values (~7M cells = untestable). Instead, **risk-w
   / cost ≥85 / latency ≥88 / compliance =100). Full axis→class→assertion matrix is §9-open.
 
 ## 9. Open items (not yet decided / designed — do NOT treat as done)
-- **Default proactivity level** (Cautious / Balanced / Confident).
 - **Full signal enumeration** for Behavioral / Contextual / Identity-consent / Safety (values +
   assertions) — sketched in §4/§8, not fully catalogued.
 - **The UI / surface layer (entirely undiscussed):** widget states (collapsed bubble / open panel /
