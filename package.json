@@ -11,7 +11,7 @@
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
     "widget:dev": "pnpm --filter @palup/widget dev",
-    "e2e": "playwright test",
+    "e2e": "playwright test --config e2e/playwright.config.ts",
     "typecheck": "tsc -b --pretty"
   },
   "devDependencies": {

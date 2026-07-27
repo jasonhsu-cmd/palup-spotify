@@ -2,5 +2,5 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "outDir": "dist", "rootDir": "src", "noEmit": true },
   "include": ["src"],
-  "references": [{ "path": "../platform-ports" }, { "path": "../widget-brain" }]
+  "references": [{ "path": "../platform-ports/tsconfig.json" }, { "path": "../widget-brain/tsconfig.json" }]
 }
