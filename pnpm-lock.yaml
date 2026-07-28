@@ -21,6 +21,27 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@26.1.1)
 
+  packages/control-plane:
+    dependencies:
+      '@palup/evolution':
+        specifier: workspace:*
+        version: link:../evolution
+      '@palup/judge':
+        specifier: workspace:*
+        version: link:../judge
+      '@palup/model-vertex':
+        specifier: workspace:*
+        version: link:../model-vertex
+      '@palup/platform-ports':
+        specifier: workspace:*
+        version: link:../platform-ports
+      '@palup/widget-brain':
+        specifier: workspace:*
+        version: link:../widget-brain
+      fastify:
+        specifier: ^5.0.0
+        version: 5.10.0
+
   packages/eval:
     dependencies:
       '@palup/judge':

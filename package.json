@@ -11,11 +11,13 @@
     "eval:judge": "tsx packages/eval/src/judge-run.ts",
     "eval:full": "tsx packages/eval/src/eval-full.ts",
     "evo:demo": "tsx packages/evolution/src/demo.ts",
+    "monitor": "tsx packages/control-plane/src/server.ts",
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
     "widget:dev": "pnpm --filter @palup/widget dev",
     "e2e": "playwright test --config e2e/playwright.config.ts",
     "e2e:live": "playwright test --config e2e/playwright.live.config.ts",
+    "e2e:monitor": "playwright test --config e2e/playwright.monitor.config.ts",
     "typecheck": "tsc -b --pretty"
   },
   "devDependencies": {

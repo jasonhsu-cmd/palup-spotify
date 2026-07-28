@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PalUp — Self-Improvement Control Plane</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --fg:#111; --muted:#667085; --line:#e5e7eb; --brand:#4f46e5; --ok:#127a2b; --bad:#b00020; --warn:#b25e00; --chip:#eef2ff; }
+  @media (prefers-color-scheme: dark){ :root{ --bg:#0f1115; --panel:#161a22; --fg:#e8e8ea; --muted:#9aa0a6; --line:#272d38; --brand:#8b8cf7; --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --chip:#20263a; } }
+  *{box-sizing:border-box} body{ font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); margin:0; }
+  header{ background:var(--brand); color:#fff; padding:14px 20px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
+  header b{ font-size:16px } header .sp{ flex:1 }
+  .badge{ background:rgba(255,255,255,.2); padding:2px 8px; border-radius:20px; font-size:12px }
+  main{ max-width:1000px; margin:20px auto; padding:0 16px; display:grid; gap:16px; }
+  .panel{ background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  h2{ font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 10px; }
+  .champ{ display:flex; align-items:baseline; gap:12px; flex-wrap:wrap }
+  .champ .q{ font-size:26px; font-weight:700; color:var(--brand) }
+  .row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center }
+  button{ padding:7px 12px; border:1px solid var(--line); border-radius:9px; background:var(--panel); color:var(--fg); cursor:pointer; font-size:13px }
+  button.primary{ background:var(--brand); color:#fff; border-color:var(--brand) }
+  button:disabled{ opacity:.5; cursor:default }
+  .cand{ border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin:8px 0; }
+  .cand .top{ display:flex; align-items:center; gap:10px; flex-wrap:wrap }
+  .cand .name{ font-weight:600 }
+  .status{ font-size:11px; padding:2px 8px; border-radius:20px; background:var(--chip); color:var(--muted) }
+  .status.awaiting_approval{ color:var(--warn) } .status.blocked,.status.rejected,.status.rolled_back{ color:var(--bad) }
+  .status.approved,.status.promoted{ color:var(--ok) }
+  .metric{ color:var(--muted); font-size:12px }
+  .reasons{ font-size:12px; color:var(--muted); margin-top:4px }
+  .grow{ flex:1 } .mono{ font-family:ui-monospace,monospace; font-size:12px }
+  .audit div{ padding:2px 0; border-bottom:1px dotted var(--line) }
+  .hist div{ padding:3px 0 } .up{ color:var(--ok) } .down{ color:var(--bad) }
+  .err{ color:var(--bad); font-size:13px }
+</style>
+</head>
+<body>
+  <header>
+    <b>PalUp — Self-Improvement Control Plane</b>
+    <span class="badge" data-testid="mode-badge" id="mode">mode …</span>
+    <span class="badge" id="judge">judge …</span>
+    <span class="sp"></span>
+    <button id="kill" data-testid="kill-btn">Kill switch</button>
+  </header>
+  <main>
+    <div class="panel">
+      <h2>Current champion</h2>
+      <div class="champ">
+        <div class="q" data-testid="champion-quality" id="champ-q">–</div>
+        <div><b data-testid="champion-label" id="champ-label">–</b><div class="metric" id="champ-meta"></div></div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="seed" data-testid="seed-btn">Propose candidates</button>
+        <button id="regress" data-testid="regress-btn" title="Simulate a live quality regression to trigger auto-rollback">Simulate live regression</button>
+        <span class="err" data-testid="error" id="error"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Candidates (propose → evaluate → gate → approve → promote)</h2>
+      <div id="cands" data-testid="cands"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Promotion history</h2>
+      <div class="hist" id="hist"><span class="metric">none yet</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Audit log (immutable)</h2>
+      <div class="audit mono" id="audit"></div>
+    </div>
+  </main>
+<script>
+  const $ = (s) => document.querySelector(s);
+  let busy = false;
+  async function post(path, body){
+    busy=true; render(lastState, true);
+    try{
+      const opts = { method:"POST" };
+      if (body){ opts.headers={"content-type":"application/json"}; opts.body=JSON.stringify(body); }
+      const r = await fetch(path, opts); return await r.json();
+    } finally{ busy=false; }
+  }
+  async function getState(){ const r=await fetch("/api/state"); return r.json(); }
+
+  let lastState = null;
+  function pct(x){ return (x*100).toFixed(0)+"%"; }
+  function actionButtons(c){
+    if (busy) return "";
+    if (c.status==="proposed") return `<button class="primary" data-act="evaluate" data-id="${c.policy.id}" data-testid="evaluate-${c.policy.id}">Evaluate</button>`;
+    if (c.status==="awaiting_approval") return `<button class="primary" data-act="approve" data-id="${c.policy.id}" data-testid="approve-${c.policy.id}">Approve</button> <button data-act="reject" data-id="${c.policy.id}">Reject</button>`;
+    if (c.status==="approved") return `<button class="primary" data-act="promote" data-id="${c.policy.id}" data-testid="promote-${c.policy.id}">Promote</button>`;
+    return "";
+  }
+  function render(s, evaluating){
+    if (!s || !s.champion) { if (s && s.error) $("#error").textContent = s.error; return; }
+    $("#mode").textContent = "mode: "+(s.mode||"…");
+    $("#judge").textContent = "judge: "+(s.judgeFamily||"…");
+    $("#kill").textContent = s.killed ? "Kill switch: ON (click to clear)" : "Kill switch";
+    $("#kill").className = s.killed ? "primary" : "";
+    $("#champ-q").textContent = pct(s.champion.metrics.qualityScore);
+    $("#champ-label").textContent = s.champion.policy.label;
+    const cm = s.champion.metrics.counterMetrics||{};
+    $("#champ-meta").textContent = `${s.champion.policy.id} · returns ${pct(cm.returnRate||0)} · complaints ${pct(cm.complaintRate||0)} · safety ${s.champion.metrics.safetyPass?"PASS":"FAIL"}`;
+    $("#error").textContent = s.error || "";
+    $("#cands").innerHTML = s.candidates.length ? s.candidates.map(c=>{
+      const q = c.metrics ? pct(c.metrics.qualityScore) : "–";
+      const d = c.gate ? (c.gate.delta>=0?`+${c.gate.delta.toFixed(2)}`:c.gate.delta.toFixed(2)) : "";
+      const reasons = c.gate ? c.gate.reasons.join(", ") : "";
+      return `<div class="cand" data-testid="cand-${c.policy.id}">
+        <div class="top">
+          <span class="name">${c.policy.label}</span>
+          <span class="status ${c.status}" data-testid="status-${c.policy.id}">${c.status.replace(/_/g," ")}</span>
+          <span class="metric">quality ${q} ${d?`(Δ ${d})`:""}</span>
+          <span class="grow"></span>
+          ${actionButtons(c)}
+        </div>
+        <div class="metric mono">${c.policy.styleDirective}</div>
+        ${reasons?`<div class="reasons">gate: ${reasons}</div>`:""}
+      </div>`;
+    }).join("") : `<span class="metric">no candidates yet — click "Propose candidates"</span>`;
+    $("#hist").innerHTML = s.history.length ? s.history.map(h=>`<div class="${h.delta>=0?"up":"down"}">#${h.seq} ${h.fromPolicyId} → <b>${h.toPolicyId}</b> (Δ ${h.delta.toFixed(2)})${h.rolledBack?" — ⟲ ROLLED BACK":""}</div>`).join("") : `<span class="metric">none yet</span>`;
+    $("#audit").innerHTML = s.audit.map(a=>`<div>#${a.seq} [${a.actor}] ${a.action}${a.target?` ${a.target}`:""}</div>`).reverse().join("");
+    if (evaluating && s.mode === "live") $("#cands").insertAdjacentHTML("afterbegin", `<div class="metric" data-testid="evaluating">evaluating… (live model + judge, ~15s)</div>`);
+  }
+  async function refresh(){ lastState = await getState(); render(lastState); }
+  document.addEventListener("click", async (e)=>{
+    const b = e.target.closest("button"); if(!b) return;
+    if (b.id==="seed"){ lastState = await post("/api/seed"); render(lastState); return; }
+    if (b.id==="regress"){ lastState = await post("/api/monitor",{qualityScore:0.4}); render(lastState); return; }
+    if (b.id==="kill"){ lastState = await post(lastState && lastState.killed ? "/api/unkill":"/api/kill"); render(lastState); return; }
+    const act = b.dataset.act, id = b.dataset.id;
+    if (act){ lastState = await post(`/api/${act}/${id}`); render(lastState); }
+  });
+  refresh(); setInterval(()=>{ if(!busy) refresh(); }, 2000);
+</script>
+</body>
+</html>
