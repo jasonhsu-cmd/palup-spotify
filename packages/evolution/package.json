@@ -5,6 +5,7 @@
   "main": "src/index.ts",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
+    "@palup/platform-ports": "workspace:*",
     "@palup/widget-brain": "workspace:*"
   }
 }

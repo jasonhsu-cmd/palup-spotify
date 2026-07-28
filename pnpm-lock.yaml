@@ -59,6 +59,9 @@ importers:
 
   packages/evolution:
     dependencies:
+      '@palup/platform-ports':
+        specifier: workspace:*
+        version: link:../platform-ports
       '@palup/widget-brain':
         specifier: workspace:*
         version: link:../widget-brain
