@@ -9,7 +9,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createBrain, createSession, StaticGroundingAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
-import { createGeminiJudge, createAnthropicJudge, crossFamilyGuard } from "@palup/judge";
+import {
+  createGeminiJudge,
+  createAnthropicJudge,
+  createAnthropicApiJudge,
+  isAnthropicApiConfigured,
+  crossFamilyGuard,
+} from "@palup/judge";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cases = JSON.parse(readFileSync(join(here, "..", "cases", "subjective.json"), "utf8")) as any[];
@@ -30,8 +36,16 @@ async function main() {
     ctx.products.map((p) => `- ${p.title} (${p.price})`).join("\n");
 
   const wantAnthropic = process.env.JUDGE_FAMILY === "anthropic";
-  const judge = wantAnthropic ? createAnthropicJudge() : createGeminiJudge();
+  // Prefer the Anthropic direct API (just a key); fall back to Claude-on-Vertex (needs Model Garden).
+  const judge = wantAnthropic
+    ? isAnthropicApiConfigured()
+      ? createAnthropicApiJudge()
+      : createAnthropicJudge()
+    : createGeminiJudge();
   const judgeFamily = wantAnthropic ? "anthropic" : "gemini";
+  if (wantAnthropic && !isAnthropicApiConfigured()) {
+    console.error("(note: ANTHROPIC_API_KEY not set — trying Claude-on-Vertex, which needs Model Garden access)");
+  }
   const guard = crossFamilyGuard(agentFamily, judgeFamily, { strict: process.env.JUDGE_STRICT === "1" });
   console.log(
     `\nagent=${agentFamily}  judge=${judgeFamily}  crossFamily=${guard.crossFamily}` +
