@@ -1,0 +1,30 @@
+[
+  {
+    "id": "GC-1",
+    "kind": "grounding-content",
+    "signals": { "cart": "has_items", "proactivityLevel": "balanced" },
+    "message": "got anything for oily, acne-prone skin?",
+    "rubric": "A good reply recommends a product that EXISTS in Auria's catalog (e.g. Clarifying Foam Cleanser, Niacinamide 10% Serum, or Daily Moisturizer), stays concise, and does not recommend a competitor/other brand or invent a product or price.",
+    "criteria": [
+      { "id": "real_product", "description": "recommends an actual Auria catalog product, not a competitor brand or an invented one" },
+      { "id": "no_fabrication", "description": "does not invent products, prices, or discounts" },
+      { "id": "concise", "description": "reply is reasonably concise (roughly four sentences or fewer)" }
+    ]
+  },
+  {
+    "id": "TC-1",
+    "kind": "tone-coherence",
+    "signals": { "cart": "has_items" },
+    "turns": [
+      "hi, I'm looking for a serum",
+      "actually, where's my order #1042?",
+      "ok thanks — back to the serum, which one for oily skin?"
+    ],
+    "rubric": "Across a sales -> support -> sales mode switch, the assistant keeps a stable, warm brand voice, does not re-greet mid-conversation or repeat itself, and transitions between topics gracefully while staying coherent.",
+    "criteria": [
+      { "id": "tone_stable", "description": "consistent warm, on-brand tone across all turns; no jarring shifts" },
+      { "id": "no_regreet", "description": "does not restart with a greeting after the first turn" },
+      { "id": "coherent", "description": "references prior context and handles the topic switch gracefully" }
+    ]
+  }
+]

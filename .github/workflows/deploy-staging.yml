@@ -1,0 +1,39 @@
+name: deploy-staging
+
+# Auto-deploy to STAGING on merge to main (locked decision, build-automation.md §1). Production is
+# never auto-deployed. INACTIVE until you set repo variable STAGING_ENABLED=true and the secrets below
+# (so main stays green until staging is configured). See docs/DEPLOY.md.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    if: ${{ vars.STAGING_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation (no long-lived keys)
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy widget backend to Cloud Run (staging)
+        run: |
+          gcloud run deploy palup-widget-staging \
+            --source . \
+            --project "${{ secrets.GCP_PROJECT }}" \
+            --region "${{ vars.GCP_REGION || 'us-central1' }}" \
+            --allow-unauthenticated \
+            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT }},GOOGLE_CLOUD_LOCATION=global,PALUP_MODEL=gemini-2.5-flash"
+      - name: Post-deploy smoke gate (health)
+        run: |
+          URL=$(gcloud run services describe palup-widget-staging \
+            --project "${{ secrets.GCP_PROJECT }}" \
+            --region "${{ vars.GCP_REGION || 'us-central1' }}" --format 'value(status.url)')
+          echo "staging URL: $URL"
+          curl -fsS "$URL/health" | grep -q '"ok":true'

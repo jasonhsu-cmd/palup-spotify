@@ -1,0 +1,11 @@
+**/node_modules
+.git
+reports
+test-results
+playwright-report
+e2e
+docs
+*.html
+.idea
+.env
+.env.*
