@@ -40,8 +40,9 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_DEPLOY_SA }}
       - name: Run live 190-case judge (Gemini agent, cross-family Claude judge)
+        id: evalfull
         env:
-          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT }}
           GOOGLE_CLOUD_LOCATION: ${{ vars.GCP_LOCATION || 'global' }}
           PALUP_MODEL: ${{ vars.PALUP_MODEL || 'gemini-2.5-flash' }}
           JUDGE_FAMILY: anthropic
@@ -51,6 +52,7 @@ jobs:
         # eval:full itself exits non-zero on any safety/injection FLOOR case failure.
         run: pnpm eval:full
       - name: Regression check vs baseline (tolerant of variance)
+        id: regression
         run: pnpm eval:regression
       - name: Upload gap-map report
         if: always()
@@ -58,8 +60,10 @@ jobs:
         with:
           name: live-gap-map
           path: reports/
+      # Only file an issue for a REAL quality regression (floor fail in eval:full, or a drop in the
+      # regression check) — not for an auth/infra failure (those just show as a red run).
       - name: Open an issue on regression
-        if: failure()
+        if: ${{ !cancelled() && (steps.evalfull.outcome == 'failure' || steps.regression.outcome == 'failure') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

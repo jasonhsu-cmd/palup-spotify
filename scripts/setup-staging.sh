@@ -48,7 +48,7 @@ gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" --project "$PROJE
   --member "principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL}/attribute.repository/${REPO}"
 
 echo ">> [5/5] GitHub secrets + variables"
-gh secret set GCP_PROJECT --repo "$REPO" --body "$PROJECT"
+gh variable set GCP_PROJECT --repo "$REPO" --body "$PROJECT"
 gh secret set GCP_WIF_PROVIDER --repo "$REPO" --body "$WIF_PROVIDER"
 gh secret set GCP_DEPLOY_SA --repo "$REPO" --body "$SA_EMAIL"
 gh variable set STAGING_ENABLED --repo "$REPO" --body "true"
