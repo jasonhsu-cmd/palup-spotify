@@ -1,0 +1,67 @@
+name: eval-quality (live judge on merge)
+
+# Auto-runs the LIVE 190-case judge on merge to main WHEN a model-dependent change lands, so quality
+# drift surfaces itself instead of relying on anyone remembering `eval:full`. DORMANT until you set
+# repo variable JUDGE_ENABLED=true + the two secrets (ANTHROPIC_API_KEY, GCP_SA_KEY) + variable
+# GCP_PROJECT — until then this job is skipped and main stays green. See docs/DEPLOY.md.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/widget-brain/**"
+      - "packages/eval/cases/**"
+      - "packages/model-vertex/src/**"
+      - ".github/eval-baseline.json"
+      - ".github/workflows/eval-quality.yml"
+  workflow_dispatch:
+
+jobs:
+  live-judge:
+    if: ${{ vars.JUDGE_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # to open a regression issue
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Authenticate to Google Cloud (Vertex)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Run live 190-case judge (Gemini agent, cross-family Claude judge)
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT }}
+          GOOGLE_CLOUD_LOCATION: ${{ vars.GCP_LOCATION || 'global' }}
+          PALUP_MODEL: ${{ vars.PALUP_MODEL || 'gemini-2.5-flash' }}
+          JUDGE_FAMILY: anthropic
+          # A fast/cheap cross-family judge for the bulk 190-case run (Opus is reserved for gating).
+          ANTHROPIC_MODEL: ${{ vars.JUDGE_MODEL || 'claude-haiku-4-5-20251001' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        # eval:full itself exits non-zero on any safety/injection FLOOR case failure.
+        run: pnpm eval:full
+      - name: Regression check vs baseline (tolerant of variance)
+        run: pnpm eval:regression
+      - name: Upload gap-map report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-gap-map
+          path: reports/
+      - name: Open an issue on regression
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --title "Live-judge quality regression on main ($(date -u +%Y-%m-%d))" \
+            --label "eval-regression" \
+            --body "The live 190-case judge regressed on \`main\` beyond tolerance (or a safety/injection floor case failed). See the run + the \`live-gap-map\` artifact: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            || echo "(could not open issue — check the run summary)"

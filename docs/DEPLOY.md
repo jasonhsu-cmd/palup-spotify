@@ -47,6 +47,26 @@ pnpm backend        # http://127.0.0.1:8787 (mock model; set the Vertex env for 
 docker build -t palup-widget:staging .   # requires a running Docker daemon
 ```
 
+## Live-judge-on-merge (eval-quality.yml)
+
+Auto-runs the live 190-case judge when a model-dependent change lands on `main`, and **opens an issue
+if quality regresses** — so drift surfaces itself. **Dormant until you add:**
+
+- **Variable** `JUDGE_ENABLED = true` (turns the job on).
+- **Variable** `GCP_PROJECT` (e.g. `palup-jason`). Optional: `GCP_LOCATION` (default `global`), `PALUP_MODEL`, `JUDGE_MODEL` (default `claude-haiku-4-5-20251001` — fast/cheap for the bulk run).
+- **Secret** `ANTHROPIC_API_KEY` — the cross-family judge.
+- **Secret** `GCP_SA_KEY` — a Google service-account key JSON with `roles/aiplatform.user` (Vertex).
+
+```bash
+# one-time, as a repo admin with gh authenticated:
+gh variable set JUDGE_ENABLED --repo <owner>/<repo> --body true
+gh variable set GCP_PROJECT   --repo <owner>/<repo> --body palup-jason
+gh secret   set ANTHROPIC_API_KEY --repo <owner>/<repo>            # paste the key when prompted
+gh secret   set GCP_SA_KEY        --repo <owner>/<repo> < sa-key.json
+```
+The baseline lives in `.github/eval-baseline.json`; regenerate it after a real improvement
+(`pnpm eval:full` → copy the byLayer rates). Regression tolerances absorb the judge's run-to-run variance.
+
 ## Cross-family judge (optional, related)
 
 `pnpm eval:judge` defaults to an **advisory** same-family Gemini judge. For the **gating** cross-family

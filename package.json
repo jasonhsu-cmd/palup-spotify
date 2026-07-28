@@ -10,6 +10,7 @@
     "eval": "tsx packages/eval/src/run.ts",
     "eval:judge": "tsx packages/eval/src/judge-run.ts",
     "eval:full": "tsx packages/eval/src/eval-full.ts",
+    "eval:regression": "tsx packages/eval/src/regression-check.ts",
     "evo:demo": "tsx packages/evolution/src/demo.ts",
     "monitor": "tsx packages/control-plane/src/server.ts",
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
