@@ -10,6 +10,7 @@ import { LiveGrader } from "./live-grader.js";
 import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
+import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY } from "./canary-controller.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -117,6 +118,23 @@ export async function buildServer() {
       }
     })();
     return { started: true };
+  });
+
+  // --- Shadow / canary: split real traffic to a canary policy, shadow-grade it, auto-rollback. ---
+  app.get("/api/canary", async () => ({ config: canaryConfig(), stats: canaryStats() }));
+  app.post("/api/canary/start", async (req) => {
+    const b = (req.body ?? {}) as { pct?: number };
+    return { config: startCanary(DEFAULT_CANARY, Number(b.pct ?? 10)) };
+  });
+  app.post("/api/canary/stop", async () => ({ config: stopCanary() }));
+  // Shadow-grade the canary on real logged traffic (live model + judge). Auto-rolls-back on regression.
+  app.post("/api/canary/shadow", async () => {
+    if (!isVertexConfigured() || !isAnthropicApiConfigured()) return { error: "shadow eval needs GOOGLE_CLOUD_PROJECT + ANTHROPIC_API_KEY" };
+    const policy = canaryConfig()?.policy ?? DEFAULT_CANARY;
+    const result = await shadowEvaluate(createVertexAdapter(), createAnthropicApiJudge(), policy);
+    let rolledBack = false;
+    if (result.verdict === "rollback") { stopCanary(); rolledBack = true; }
+    return { result, rolledBack };
   });
 
   app.get("/", async (_req, reply) => reply.type("text/html").send(dashboardHtml));
