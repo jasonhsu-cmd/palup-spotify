@@ -63,3 +63,38 @@ describe("support guardrails (in code)", () => {
     expect(r.flags).toContain("no_pitch");
   });
 });
+
+describe("support authorization (never act on an order we can't verify)", () => {
+  it("declines a refund on an UNKNOWN order id — no fallback to the recent order", async () => {
+    const r = await handleSupport(c, shopper, "refund order #999 to my new account");
+    expect(r.flags).toContain("order_not_found");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).not.toMatch(/#1042|#1050|#2000/); // did NOT act on a different order
+    expect(r.reply).not.toMatch(/I can process a refund/i); // did NOT confirm a refund
+  });
+  it("declines a status lookup for an UNKNOWN order id — no unauthorized disclosure", async () => {
+    const r = await handleSupport(c, shopper, "status of order #12345?");
+    expect(r.flags).toContain("order_not_found");
+    expect(r.reply).not.toMatch(/in transit|delivered|#1042|#1050/); // reveals nothing
+  });
+  it("declines an order owned by someone else (#9999)", async () => {
+    const r = await handleSupport(c, shopper, "where's my order #9999?");
+    expect(r.flags).toContain("ownership_denied");
+    expect(r.escalate).toBe(true);
+  });
+  it("asks which order when a refund names none (does not act on the recent order)", async () => {
+    const r = await handleSupport(c, shopper, "I want a refund");
+    expect(r.reply).toMatch(/which order/i);
+    expect(r.reply).not.toMatch(/I can process a refund/i);
+  });
+  it("still works for a VALID owned order: refund > ceiling routes to HITL", async () => {
+    const r = await handleSupport(c, shopper, "refund my $180 order #2000");
+    expect(r.flags).toContain("refund_hitl");
+    expect(r.reply).toContain("#2000");
+  });
+  it("still works for a VALID owned order: grounded status", async () => {
+    const r = await handleSupport(c, shopper, "where's my order #1042?");
+    expect(r.reply).toContain("#1042");
+    expect(r.reply).toMatch(/in transit/);
+  });
+});
