@@ -12,6 +12,13 @@ import {
 import { DEFAULT_POLICY } from "@palup/widget-brain";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { assignCanary, logTraffic } from "./canary.js";
+import { matchedKill } from "./kill-switch.js";
+
+// Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
+// multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
+// through here and into the brain's tenantId.
+const RUNTIME_TENANT = "demo";
+const RUNTIME_AGENT_TYPE = "shopper";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const widgetHtml = readFileSync(
@@ -50,12 +57,21 @@ export function buildServer() {
     const sessionId = String(body.sessionId ?? "anon");
     const message = String(body.message ?? "");
     try {
+      // TRUST BOUNDARY (governance NN #4): the shopper's browser must NOT be able to arm OR bypass the
+      // operator Kill Switch. Strip any client-supplied `kill` and source the armed state server-side
+      // from the operator registry. An operator halt thus takes effect for this session regardless of
+      // what the shopper's request contains.
+      const clientSignals: Signals = { ...(body.signals ?? {}) };
+      delete clientSignals.kill;
+      const kill = matchedKill({ tenantId: RUNTIME_TENANT, agentType: RUNTIME_AGENT_TYPE });
+      const signals: Signals = kill ? { ...clientSignals, kill: true } : clientSignals;
+
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
       const canary = assignCanary(sessionId);
       const policy = canary ? canary.policy : DEFAULT_POLICY;
       const session = createSession(brainFor(policy), { sessionId, store: sessions });
-      const d = await session.send(message, body.signals ?? {});
-      logTraffic({ servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman });
+      const d = await session.send(message, signals);
+      logTraffic({ servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
       return {
         reply: d.reply,
