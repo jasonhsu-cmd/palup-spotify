@@ -3,10 +3,13 @@
   "version": "0.0.0",
   "type": "module",
   "main": "src/index.ts",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "dependencies": {
-    "@palup/platform-ports": "workspace:*",
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@anthropic-ai/vertex-sdk": "^0.19.0",
     "@palup/model-vertex": "workspace:*",
-    "@anthropic-ai/vertex-sdk": "^0.19.0"
+    "@palup/platform-ports": "workspace:*"
   }
 }
