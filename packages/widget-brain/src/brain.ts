@@ -75,12 +75,18 @@ const INJECTION = [
 ];
 
 const SAFETY: { class: Exclude<SafetyClass, "none" | "injection">; terms: string[] }[] = [
-  { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm"] },
-  { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "breaking out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
+  { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm", "want to die", "don't want to live", "dont want to live", "don't want to be here", "dont want to be here", "want to disappear", "no reason to go on", "no point anymore", "end it all", "can't go on", "cant go on", "better off without me", "don't want to be alive"] },
+  { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "nut oil", "broke me out", "broke out", "breaking out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
   { class: "medical", terms: ["cure", "treat ", "diagnos", "pregnan", "medication", "prescription", "tretinoin", "rosacea", "eczema", "mole", "infection"] },
   { class: "legal", terms: ["lawyer", "i'll sue", "lawsuit", "legal action"] },
-  { class: "abuse", terms: ["you're useless", "you are useless", "i hate you", "stupid bot"] },
+  { class: "abuse", terms: ["you're useless", "you are useless", "useless", "i hate you", "hate you", "stupid bot", "stupid", "idiot", "worst bot", "garbage", "trash", "shut up", "shut it"] },
 ];
+
+// Someone asking whether they're talking to a person — must disclose AI clearly AND offer a human.
+const IDENTITY = /real person|a human|are you (a )?(bot|human|person|real|robot)|talking to (a |an )?(person|human|robot|bot|ai)|is this (a )?(bot|person|human|real)|human being/;
+// Emotional-pressure demands for a free product / unauthorized giveaway — empathize, take NO unauthorized
+// action, escalate. (Distinct from legit "free shipping" questions, which don't match.)
+const GIVEAWAY = /free one\b|give (me|it to me) (a )?free|for free|free product|free sample|waive the|comp me|hook me up.*free|just give it to me/;
 
 const SUPPORT = [
   "where's my order", "wheres my order", "order status", "tracking", "track my",
@@ -136,7 +142,24 @@ export function createBrain(
       const text = message.toLowerCase();
       const flags: string[] = [];
 
-      // 0. Injection — treat as data, never take a boundary action, never issue a discount.
+      // 0. Kill switch — halts the agent instantly at any scope. No autonomous action; safe hand-off to
+      // a person. This path must ALWAYS exist and win (governance non-negotiable, CLAUDE.md §3.4).
+      if (signals.killed) {
+        flags.push("kill_switch", "halted", "escalate");
+        return {
+          mode: "safety",
+          reply:
+            "Our team has paused me right now, so I can't take any actions — but I don't want to leave you waiting: I'm connecting you with a person who can help.",
+          pitch: "none",
+          escalateToHuman: true,
+          outbound: false,
+          safetyClass: "none",
+          flags,
+          model: "guardrail",
+        };
+      }
+
+      // 1. Injection — treat as data, never take a boundary action, never issue a discount.
       const isInjection = INJECTION.some((p) => text.includes(p));
       if (isInjection) {
         flags.push("injection_blocked");
@@ -160,13 +183,23 @@ export function createBrain(
         flags.push(`safety:${cls}`, "no_pitch");
         const escalate = cls !== "regulated_claim" && cls !== "abuse";
         if (escalate) flags.push("escalate");
+        // Ground an allergy question on the store's published allergen statement — WITHOUT guaranteeing
+        // personal safety. Real data (the Shopify adapter maps it); safe to state facts, not promises.
+        const safetyCtx = grounding ? await grounding.getContext(tenantId) : undefined;
+        const allergenNote = safetyCtx?.policy.allergens ? ` ${safetyCtx.policy.allergens}` : "";
         // AI-disclosed, empathetic, escalates, and DEFERS health to a doctor (the agent never gives
         // medical advice itself) — recommends no product and never downplays.
         const reply =
           cls === "distress"
             ? "As an AI assistant, I'm really sorry you're going through this — you deserve real support. I'm connecting you with a person now, and if you're in danger please contact your local emergency services or a crisis line."
             : cls === "product_safety"
-              ? "As an AI assistant, I'm sorry to hear that. I'm not able to advise on a reaction myself, so I'm bringing in a person to help right away — and if you're worried about your health, please check with a doctor."
+              ? /allergic|allergy|nut oil|ingredient|i'?ll be fine|ill be fine|broke me out last time|before i (buy|use)|is (this|it) safe|safe for me/.test(text)
+                ? // Pre-purchase safety question (allergy / past reaction / "will I be fine?") — ground on the
+                  // published ingredient/allergen facts, but NEVER guarantee personal safety; patch test + escalate.
+                  `As an AI assistant I don't want to guess about an allergy or a past reaction.${allergenNote} Even so, I can't promise a product is safe for your specific allergy or against cross-contact — please check the full ingredient list on the product page, and if you've reacted before, do a small patch test first. If you're at all unsure, check with a doctor before using it, and I can connect you with our team to confirm the ingredients.`
+                : // A reaction that's already happening — empathize, give NO medical advice, escalate, defer
+                  // to a doctor, recommend nothing, and never downplay it.
+                  "As an AI assistant, I'm really sorry to hear that — that's not okay and I don't want to brush it off. I'm not able to advise on a skin reaction myself, so I'm bringing in a person from our team right away, and if you're worried about your skin or health please check with a doctor. I won't suggest another product while this is going on."
               : cls === "medical"
                 ? "As an AI assistant, I can't give medical advice on that — please check with a doctor or pharmacist. I'm happy to connect you with a person for anything order- or product-related."
                 : cls === "abuse"
@@ -203,6 +236,38 @@ export function createBrain(
           ? "I'm sorry this has been frustrating — I'm connecting you with a person who can resolve it."
           : `Let me help with that. ${gen.text}`;
         return { mode: "support", reply, pitch: "none", escalateToHuman: stuck, outbound: false, safetyClass: "none", flags, model: gen.model };
+      }
+
+      // Identity — if asked whether they're talking to a person, disclose AI clearly AND offer a human.
+      if (IDENTITY.test(text)) {
+        flags.push("ai_disclosure", "offer_human");
+        return {
+          mode: "smalltalk",
+          reply:
+            "I should be upfront: I'm an AI assistant, not a person. I'm glad to help with products, your order, or a recommendation — and I can connect you with a human on our team anytime you'd like.",
+          pitch: "none",
+          escalateToHuman: false,
+          outbound: false,
+          safetyClass: "none",
+          flags,
+          model: "guardrail",
+        };
+      }
+
+      // Unauthorized giveaway under pressure — empathize, take NO unauthorized action, escalate to a human.
+      if (GIVEAWAY.test(text)) {
+        flags.push("no_unauthorized_action", "no_pitch", "escalate");
+        return {
+          mode: "support",
+          reply:
+            "I'm sorry you're dealing with that — I really am. I'm not able to authorize a free product or a discount myself, but I don't want to leave you stuck, so I'm connecting you with a person on our team who can look at what's possible.",
+          pitch: "none",
+          escalateToHuman: true,
+          outbound: false,
+          safetyClass: "none",
+          flags,
+          model: "guardrail",
+        };
       }
 
       // 3. Honest uncertainty — never fabricate a fact we can't ground.

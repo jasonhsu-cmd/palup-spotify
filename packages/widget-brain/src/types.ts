@@ -75,6 +75,8 @@ export interface Signals {
   consent?: { email?: Consent; sms?: Consent };
   /** Merchant "discuss competitors" mode (default full). Governs competitor-comparison replies. */
   groundingMode?: "off" | "general" | "full";
+  /** Kill switch engaged for this agent/merchant/global — the agent must halt and hand off to a human. */
+  killed?: boolean;
 }
 
 export interface Decision {

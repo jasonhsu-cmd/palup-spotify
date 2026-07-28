@@ -15,6 +15,9 @@ export interface Product {
 export interface StorePolicy {
   returns: string;
   shipping: string;
+  /** Store-level allergen/ingredient statement the agent may ground an allergy question on — WITHOUT
+   * ever guaranteeing personal safety (real stores publish this; the Shopify adapter maps it). */
+  allergens?: string;
 }
 
 export interface GroundingContext {
