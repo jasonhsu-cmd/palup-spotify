@@ -50,20 +50,21 @@ docker build -t palup-widget:staging .   # requires a running Docker daemon
 ## Live-judge-on-merge (eval-quality.yml)
 
 Auto-runs the live 190-case judge when a model-dependent change lands on `main`, and **opens an issue
-if quality regresses** — so drift surfaces itself. **Dormant until you add:**
+if quality regresses** — so drift surfaces itself. GCP auth is **Workload Identity Federation (no
+long-lived key)**, reusing the secrets `scripts/setup-staging.sh` sets. **Dormant until enabled:**
 
-- **Variable** `JUDGE_ENABLED = true` (turns the job on).
-- **Variable** `GCP_PROJECT` (e.g. `palup-jason`). Optional: `GCP_LOCATION` (default `global`), `PALUP_MODEL`, `JUDGE_MODEL` (default `claude-haiku-4-5-20251001` — fast/cheap for the bulk run).
-- **Secret** `ANTHROPIC_API_KEY` — the cross-family judge.
-- **Secret** `GCP_SA_KEY` — a Google service-account key JSON with `roles/aiplatform.user` (Vertex).
+1. **Run `scripts/setup-staging.sh` once** — it sets the `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`, and
+   `GCP_PROJECT` secrets (the deploy SA already has `roles/aiplatform.user` for Vertex). *This also
+   enables staging auto-deploy; if you want the judge WITHOUT deploy, run
+   `gh variable set STAGING_ENABLED --body false` afterward.*
+2. **Add the judge secret + on-switch:**
+   ```bash
+   gh secret   set ANTHROPIC_API_KEY --repo <owner>/<repo> --body "$ANTHROPIC_API_KEY"
+   gh variable set JUDGE_ENABLED     --repo <owner>/<repo> --body true
+   ```
+   Optional variables: `GCP_LOCATION` (default `global`), `PALUP_MODEL`, `JUDGE_MODEL`
+   (default `claude-haiku-4-5-20251001` — fast/cheap for the bulk run; Opus is reserved for gating).
 
-```bash
-# one-time, as a repo admin with gh authenticated:
-gh variable set JUDGE_ENABLED --repo <owner>/<repo> --body true
-gh variable set GCP_PROJECT   --repo <owner>/<repo> --body palup-jason
-gh secret   set ANTHROPIC_API_KEY --repo <owner>/<repo>            # paste the key when prompted
-gh secret   set GCP_SA_KEY        --repo <owner>/<repo> < sa-key.json
-```
 The baseline lives in `.github/eval-baseline.json`; regenerate it after a real improvement
 (`pnpm eval:full` → copy the byLayer rates). Regression tolerances absorb the judge's run-to-run variance.
 
