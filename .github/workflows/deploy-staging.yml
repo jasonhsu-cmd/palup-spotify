@@ -26,14 +26,14 @@ jobs:
         run: |
           gcloud run deploy palup-widget-staging \
             --source . \
-            --project "${{ secrets.GCP_PROJECT }}" \
+            --project "${{ vars.GCP_PROJECT }}" \
             --region "${{ vars.GCP_REGION || 'us-central1' }}" \
             --allow-unauthenticated \
-            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT }},GOOGLE_CLOUD_LOCATION=global,PALUP_MODEL=gemini-2.5-flash"
+            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT }},GOOGLE_CLOUD_LOCATION=global,PALUP_MODEL=gemini-2.5-flash"
       - name: Post-deploy smoke gate (health)
         run: |
           URL=$(gcloud run services describe palup-widget-staging \
-            --project "${{ secrets.GCP_PROJECT }}" \
+            --project "${{ vars.GCP_PROJECT }}" \
             --region "${{ vars.GCP_REGION || 'us-central1' }}" --format 'value(status.url)')
           echo "staging URL: $URL"
           curl -fsS "$URL/health" | grep -q '"ok":true'

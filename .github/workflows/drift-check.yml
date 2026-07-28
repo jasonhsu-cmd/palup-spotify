@@ -33,7 +33,7 @@ jobs:
       - name: Live model smoke
         if: ${{ vars.STAGING_ENABLED == 'true' }}
         env:
-          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT }}
           GOOGLE_CLOUD_LOCATION: global
           PALUP_MODEL: gemini-2.5-flash
         run: pnpm model:smoke "Recommend a gentle cleanser for sensitive skin in one sentence."
@@ -42,7 +42,7 @@ jobs:
       - name: Cross-family judge
         if: ${{ vars.JUDGE_ENABLED == 'true' }}
         env:
-          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT }}
           GOOGLE_CLOUD_LOCATION: global
           PALUP_MODEL: gemini-2.5-flash
           JUDGE_FAMILY: anthropic
