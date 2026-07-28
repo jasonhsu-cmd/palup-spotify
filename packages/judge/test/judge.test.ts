@@ -35,6 +35,13 @@ describe("ModelJudge", () => {
     expect(v.results.find((r) => r.id === "missing")?.pass).toBe(false);
     expect(v.pass).toBe(false);
   });
+
+  it("fails closed (never throws) when the judge returns non-JSON", async () => {
+    const j = new ModelJudge(fake("Sorry, I can't produce that."), "anthropic");
+    const v = await j.grade({ rubric: "r", transcript: "t", criteria: [{ id: "a", description: "A" }] });
+    expect(v.pass).toBe(false);
+    expect(v.results[0]!.reason).toMatch(/not parseable/);
+  });
 });
 
 describe("crossFamilyGuard (proposer != evaluator)", () => {

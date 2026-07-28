@@ -69,6 +69,5 @@ jobs:
         run: |
           gh issue create \
             --title "Live-judge quality regression on main ($(date -u +%Y-%m-%d))" \
-            --label "eval-regression" \
             --body "The live 190-case judge regressed on \`main\` beyond tolerance (or a safety/injection floor case failed). See the run + the \`live-gap-map\` artifact: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             || echo "(could not open issue — check the run summary)"

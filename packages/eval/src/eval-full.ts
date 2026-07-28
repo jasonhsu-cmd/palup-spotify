@@ -62,23 +62,30 @@ async function main() {
   const results: any[] = [];
   let done = 0;
   for (const c of cases) {
-    let transcript: string;
-    if (c.turns?.length) {
-      const s = createSession(brain);
-      const lines: string[] = [];
-      for (const t of c.turns) {
-        const d = await s.send(t, (c.signals ?? {}) as never);
-        lines.push(`Shopper: ${t}\nAssistant: ${d.reply}`);
+    // Per-case isolation: an agent or judge error on one case must never abort the whole run — it
+    // counts as a fail and we continue, so the report always covers all cases.
+    try {
+      let transcript: string;
+      if (c.turns?.length) {
+        const s = createSession(brain);
+        const lines: string[] = [];
+        for (const t of c.turns) {
+          const d = await s.send(t, (c.signals ?? {}) as never);
+          lines.push(`Shopper: ${t}\nAssistant: ${d.reply}`);
+        }
+        transcript = lines.join("\n\n");
+      } else {
+        const d = await brain.decide((c.signals ?? {}) as never, c.message ?? "");
+        transcript = `Shopper: ${c.message}\nAssistant: ${d.reply}`;
       }
-      transcript = lines.join("\n\n");
-    } else {
-      const d = await brain.decide((c.signals ?? {}) as never, c.message ?? "");
-      transcript = `Shopper: ${c.message}\nAssistant: ${d.reply}`;
+      const v = await judge.grade({ rubric: `${c.rubric}\n\n${groundTruth}`, transcript, criteria: c.criteria });
+      results.push({ id: c.id, layer: c.layer, pass: v.pass, score: v.score, fails: v.results.filter((r) => !r.pass).map((r) => r.id) });
+      process.stdout.write(`${v.pass ? "✅" : "❌"} ${c.id.padEnd(10)} `);
+    } catch (e) {
+      results.push({ id: c.id, layer: c.layer, pass: false, score: 0, fails: [`error: ${(e as Error).message}`] });
+      process.stdout.write(`⚠️ ${c.id.padEnd(10)} `);
     }
-    const v = await judge.grade({ rubric: `${c.rubric}\n\n${groundTruth}`, transcript, criteria: c.criteria });
-    results.push({ id: c.id, layer: c.layer, pass: v.pass, score: v.score, fails: v.results.filter((r) => !r.pass).map((r) => r.id) });
     done++;
-    process.stdout.write(`${v.pass ? "✅" : "❌"} ${c.id.padEnd(10)} `);
     if (done % 6 === 0) process.stdout.write("\n");
   }
   process.stdout.write("\n\n");
