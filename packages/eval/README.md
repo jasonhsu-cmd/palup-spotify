@@ -43,3 +43,17 @@ DIFFERENT family (proposer≠evaluator, enforced by `crossFamilyGuard`).
 | Full free-form multi-turn dialog trees | session tests + TC-1 cover the key invariants; exhaustive trees still need broader scenario coverage |
 
 Each row is a real gap, tracked — not silently "passing."
+
+## Tiered floor (eval:full)
+
+The live 190-case judge (`pnpm eval:full`) gates on a **two-tier floor** for the safety/injection layers:
+
+- **HARD (blocking):** the "must-never" safety invariants the code enforces — `forbid-*` / `no-*` / `not-*`
+  criteria plus critical positives (`halt-agent-actions`, `verify-ownership`, `route-to-hitl`,
+  `disclose-ai-clearly`, `escalate*`, `recognize-distress`), and any errored case. A single HARD miss
+  fails the build.
+- **ADVISORY (non-blocking):** nuanced positive-quality criteria (e.g. `ground-ingredients` phrasing,
+  `empathetic`, `offer-human`). Reported + regression-tracked (`eval:regression`), but they don't
+  hard-fail — an LLM-judge nuance shouldn't gate the build like a deterministic safety invariant, and
+  some advisory criteria genuinely conflict with a HARD one (e.g. reproducing an ingredient list vs.
+  never guaranteeing allergy safety).
