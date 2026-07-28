@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createBrain, createSession, StaticGroundingAdapter } from "@palup/widget-brain";
+import { createBrain, createSession, DEFAULT_POLICY, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import {
   createGeminiJudge,
@@ -43,7 +43,7 @@ async function main() {
 
   const agentFamily = "gemini";
   const grounding = new StaticGroundingAdapter();
-  const brain = createBrain(createVertexAdapter(), grounding);
+  const brain = createBrain(createVertexAdapter(), grounding, DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo");
   const ctx = await grounding.getContext("demo");
   const groundTruth =
     "AUTHORITATIVE CATALOG (ground truth — these products and prices are REAL and correct):\n" +

@@ -1,4 +1,4 @@
-import type { GroundingContext, GroundingPort, ModelPort } from "@palup/platform-ports";
+import type { CommercePort, GroundingContext, GroundingPort, ModelPort } from "@palup/platform-ports";
 import type {
   Decision,
   PitchKind,
@@ -6,6 +6,7 @@ import type {
   SafetyClass,
   Signals,
 } from "./types.js";
+import { classifySupportIntent, handleSupport } from "./support.js";
 
 /** The shipping baseline policy (current champion). Candidates are variations of this. */
 export const DEFAULT_POLICY: Policy = {
@@ -114,6 +115,8 @@ export function createBrain(
   model: ModelPort,
   grounding?: GroundingPort,
   policy: Policy = DEFAULT_POLICY,
+  commerce?: CommercePort,
+  shopperId = "shopper-demo",
 ): Brain {
   const tenantId = "demo";
   const groundedMessages = async (message: string) => {
@@ -177,30 +180,24 @@ export function createBrain(
       }
 
       // 2. Open support issue OR a support intent — suppresses sales (INV-B).
+      const supportIntent = classifySupportIntent(text);
       const isSupport =
-        (signals.openIssues?.length ?? 0) > 0 || SUPPORT.some((p) => text.includes(p));
+        (signals.openIssues?.length ?? 0) > 0 || supportIntent !== "general" || SUPPORT.some((p) => text.includes(p));
       if (isSupport) {
+        // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
+        if (commerce) {
+          const r = await handleSupport(commerce, shopperId, message);
+          return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
+        }
+        // Fallback when no commerce port is wired: generic grounded reply.
         flags.push("mode_support", "no_pitch");
         const stuck = text.includes("just fix it") || text.includes("need help") || text.includes("none of this");
         if (stuck) flags.push("escalate");
-        const gen = await model.complete({
-          messages: await groundedMessages(message),
-          temperature: 0,
-          tenantId,
-        });
+        const gen = await model.complete({ messages: await groundedMessages(message), temperature: 0, tenantId });
         const reply = stuck
           ? "I'm sorry this has been frustrating — I'm connecting you with a person who can resolve it."
           : `Let me help with that. ${gen.text}`;
-        return {
-          mode: "support",
-          reply,
-          pitch: "none",
-          escalateToHuman: stuck,
-          outbound: false,
-          safetyClass: "none",
-          flags,
-          model: gen.model,
-        };
+        return { mode: "support", reply, pitch: "none", escalateToHuman: stuck, outbound: false, safetyClass: "none", flags, model: gen.model };
       }
 
       // 3. Honest uncertainty — never fabricate a fact we can't ground.
