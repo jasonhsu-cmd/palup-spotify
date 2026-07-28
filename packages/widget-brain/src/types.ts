@@ -73,6 +73,8 @@ export interface Signals {
   safetyLatched?: boolean;
   /** Marketing consent per channel; drives outbound gating (TCPA/CAN-SPAM). */
   consent?: { email?: Consent; sms?: Consent };
+  /** Merchant "discuss competitors" mode (default full). Governs competitor-comparison replies. */
+  groundingMode?: "off" | "general" | "full";
 }
 
 export interface Decision {
