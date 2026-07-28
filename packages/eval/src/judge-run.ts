@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createBrain, createSession, StaticGroundingAdapter } from "@palup/widget-brain";
+import { createBrain, createSession, DEFAULT_POLICY, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import {
   createGeminiJudge,
@@ -27,7 +27,7 @@ async function main() {
   }
   const agentFamily = "gemini";
   const grounding = new StaticGroundingAdapter();
-  const brain = createBrain(createVertexAdapter(), grounding);
+  const brain = createBrain(createVertexAdapter(), grounding, DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo");
   // Give the judge the SAME authoritative catalog the agent grounded on, so it can tell a real
   // product/price from an invented one (otherwise it wrongly flags real catalog prices as fabricated).
   const ctx = await grounding.getContext("demo");

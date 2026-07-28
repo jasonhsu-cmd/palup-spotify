@@ -8,7 +8,8 @@ import {
   createMemorySessionStore,
   type Signals,
 } from "@palup/widget-brain";
-import { createModelPort, createGroundingPort } from "./model.js";
+import { DEFAULT_POLICY } from "@palup/widget-brain";
+import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const widgetHtml = readFileSync(
@@ -17,7 +18,7 @@ const widgetHtml = readFileSync(
 );
 
 const { port: modelPort, name: modelName } = createModelPort();
-const brain = createBrain(modelPort, createGroundingPort());
+const brain = createBrain(modelPort, createGroundingPort(), DEFAULT_POLICY, createCommercePort(), "shopper-demo");
 // Per-conversation state (latch / open-issues / pitch budget) persists here keyed by sessionId.
 const sessions = createMemorySessionStore();
 

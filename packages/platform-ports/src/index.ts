@@ -17,3 +17,10 @@ export type {
   JudgeCriterion,
   JudgeCriterionResult,
 } from "./judge-port.js";
+export type {
+  CommercePort,
+  Order,
+  OrderItem,
+  Subscription,
+  CommercePolicy,
+} from "./commerce-port.js";

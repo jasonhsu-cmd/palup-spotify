@@ -1,4 +1,4 @@
-import { createBrain, StaticGroundingAdapter, type Policy } from "@palup/widget-brain";
+import { createBrain, StaticGroundingAdapter, MockCommerceAdapter, type Policy } from "@palup/widget-brain";
 import { createVertexAdapter } from "@palup/model-vertex";
 import { createAnthropicApiJudge, createGeminiJudge, isAnthropicApiConfigured } from "@palup/judge";
 import type { Grader, PolicyMetrics } from "@palup/evolution";
@@ -13,11 +13,12 @@ import { QUALITY_SUITE, SAFETY_PROBES } from "./quality-suite.js";
 export class LiveGrader implements Grader {
   private readonly model = createVertexAdapter();
   private readonly grounding = new StaticGroundingAdapter();
+  private readonly commerce = new MockCommerceAdapter();
   private readonly judge = isAnthropicApiConfigured() ? createAnthropicApiJudge() : createGeminiJudge();
   readonly family = isAnthropicApiConfigured() ? "anthropic" : "gemini";
 
   async grade(policy: Policy): Promise<PolicyMetrics> {
-    const brain = createBrain(this.model, this.grounding, policy);
+    const brain = createBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo");
     const ctx = await this.grounding.getContext("demo");
     const groundTruth =
       "AUTHORITATIVE CATALOG (ground truth — these products and prices are REAL and correct):\n" +
