@@ -1,6 +1,6 @@
 # Widget backend container for staging (Cloud Run). Runs the Fastify service via tsx (no build step).
 FROM node:22-slim
-ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true PORT=8787
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true PORT=8787 HOST=0.0.0.0
 RUN corepack enable
 WORKDIR /app
 

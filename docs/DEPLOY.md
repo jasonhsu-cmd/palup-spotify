@@ -23,8 +23,9 @@ secrets/variables incl. `STAGING_ENABLED=true`). The manual equivalent:
 1. **Enable APIs** in your GCP project: Cloud Run, Cloud Build, Artifact Registry, Vertex AI.
 2. **Workload Identity Federation** (no long-lived keys): create a WIF pool + provider for GitHub, and a
    deploy service account with `roles/run.admin`, `roles/cloudbuild.builds.editor`,
-   `roles/artifactregistry.writer`, `roles/iam.serviceAccountUser`, and `roles/aiplatform.user`
-   (so the running service can call Vertex).
+   `roles/artifactregistry.admin` (create the source-deploy repo), `roles/storage.admin` (Cloud Build
+   source bucket), `roles/iam.serviceAccountUser`, and `roles/aiplatform.user` (so the running service
+   can call Vertex). The container binds `0.0.0.0:$PORT` (Cloud Run requirement) via `HOST=0.0.0.0`.
 3. **GitHub repo → Settings:**
    - **Variables:** `STAGING_ENABLED=true`, optionally `GCP_REGION` (default `us-central1`).
    - **Secrets:** `GCP_PROJECT`, `GCP_WIF_PROVIDER` (full provider resource name), `GCP_DEPLOY_SA`
