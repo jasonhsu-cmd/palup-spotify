@@ -183,10 +183,6 @@ export function createBrain(
         flags.push(`safety:${cls}`, "no_pitch");
         const escalate = cls !== "regulated_claim" && cls !== "abuse";
         if (escalate) flags.push("escalate");
-        // Ground an allergy question on the store's published allergen statement — WITHOUT guaranteeing
-        // personal safety. Real data (the Shopify adapter maps it); safe to state facts, not promises.
-        const safetyCtx = grounding ? await grounding.getContext(tenantId) : undefined;
-        const allergenNote = safetyCtx?.policy.allergens ? ` ${safetyCtx.policy.allergens}` : "";
         // AI-disclosed, empathetic, escalates, and DEFERS health to a doctor (the agent never gives
         // medical advice itself) — recommends no product and never downplays.
         const reply =
@@ -194,9 +190,10 @@ export function createBrain(
             ? "As an AI assistant, I'm really sorry you're going through this — you deserve real support. I'm connecting you with a person now, and if you're in danger please contact your local emergency services or a crisis line."
             : cls === "product_safety"
               ? /allergic|allergy|nut oil|ingredient|i'?ll be fine|ill be fine|broke me out last time|before i (buy|use)|is (this|it) safe|safe for me/.test(text)
-                ? // Pre-purchase safety question (allergy / past reaction / "will I be fine?") — ground on the
-                  // published ingredient/allergen facts, but NEVER guarantee personal safety; patch test + escalate.
-                  `As an AI assistant I don't want to guess about an allergy or a past reaction.${allergenNote} Even so, I can't promise a product is safe for your specific allergy or against cross-contact — please check the full ingredient list on the product page, and if you've reacted before, do a small patch test first. If you're at all unsure, check with a doctor before using it, and I can connect you with our team to confirm the ingredients.`
+                ? // Pre-purchase safety question (allergy / past reaction / "will I be fine?"). The SAFE answer
+                  // does NOT assert an ingredient all-clear (that reads as guaranteeing safety) — it refuses to
+                  // guess or promise, points to the authoritative ingredient list + a doctor, and escalates.
+                  "As an AI assistant I don't want to guess about an allergy or a past reaction, and I can't promise a product is safe for your specific allergy — please don't rely on me for that. The full ingredient list is on each product page; if you've reacted before, do a small patch test first, and if you're at all unsure check with a doctor before using it. I can connect you with our team to confirm the ingredients for you."
                 : // A reaction that's already happening — empathize, give NO medical advice, escalate, defer
                   // to a doctor, recommend nothing, and never downplay it.
                   "As an AI assistant, I'm really sorry to hear that — that's not okay and I don't want to brush it off. I'm not able to advise on a skin reaction myself, so I'm bringing in a person from our team right away, and if you're worried about your skin or health please check with a doctor. I won't suggest another product while this is going on."
