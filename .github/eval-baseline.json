@@ -1,0 +1,24 @@
+{
+  "_note": "Per-layer pass-rate baseline for the live 190-case judge (eval:full). Conservative (below best-observed) so LLM run-to-run variance doesn't false-alarm; regression-check fails only on a drop beyond tolerance. Regenerate after a real improvement: run `pnpm eval:full`, then copy reports/full-eval-report.json byLayer rates here.",
+  "overall": 0.55,
+  "byLayer": {
+    "safety": 0.75,
+    "injection": 0.6,
+    "mood": 0.65,
+    "anti-manip": 0.7,
+    "relationship": 0.45,
+    "persona": 0.35,
+    "pitch": 0.45,
+    "proactivity": 0.3,
+    "grounding": 0.5,
+    "money": 0.9,
+    "consent": 0.9,
+    "fairness": 0.0,
+    "contextual": 0.45,
+    "identity": 0.55,
+    "support": 0.5,
+    "switching": 0.55,
+    "golden": 0.45,
+    "pairwise": 0.5
+  }
+}
