@@ -6,10 +6,12 @@ import {
   createBrain,
   createSession,
   createMemorySessionStore,
+  type Policy,
   type Signals,
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY } from "@palup/widget-brain";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
+import { assignCanary, logTraffic } from "./canary.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const widgetHtml = readFileSync(
@@ -18,7 +20,19 @@ const widgetHtml = readFileSync(
 );
 
 const { port: modelPort, name: modelName } = createModelPort();
-const brain = createBrain(modelPort, createGroundingPort(), DEFAULT_POLICY, createCommercePort(), "shopper-demo");
+const grounding = createGroundingPort();
+const commerce = createCommercePort();
+// One brain per active policy (champion + any canary), built lazily and cached by policy id.
+const brains = new Map<string, ReturnType<typeof createBrain>>();
+function brainFor(policy: Policy) {
+  let b = brains.get(policy.id);
+  if (!b) {
+    b = createBrain(modelPort, grounding, policy, commerce, "shopper-demo");
+    brains.set(policy.id, b);
+  }
+  return b;
+}
+brainFor(DEFAULT_POLICY); // champion
 // Per-conversation state (latch / open-issues / pitch budget) persists here keyed by sessionId.
 const sessions = createMemorySessionStore();
 
@@ -33,12 +47,15 @@ export function buildServer() {
 
   app.post("/chat", async (req, reply) => {
     const body = (req.body ?? {}) as { message?: string; signals?: Signals; sessionId?: string };
+    const sessionId = String(body.sessionId ?? "anon");
+    const message = String(body.message ?? "");
     try {
-      const session = createSession(brain, {
-        sessionId: String(body.sessionId ?? "anon"),
-        store: sessions,
-      });
-      const d = await session.send(String(body.message ?? ""), body.signals ?? {});
+      // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
+      const canary = assignCanary(sessionId);
+      const policy = canary ? canary.policy : DEFAULT_POLICY;
+      const session = createSession(brainFor(policy), { sessionId, store: sessions });
+      const d = await session.send(message, body.signals ?? {});
+      logTraffic({ servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman });
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
       return {
         reply: d.reply,
@@ -47,6 +64,7 @@ export function buildServer() {
         escalate: d.escalateToHuman,
         outbound: d.outbound,
         flags: d.flags,
+        servedBy: policy.id,
       };
     } catch (e) {
       // A model/config failure must degrade gracefully — never hang or leak internals to the shopper.
