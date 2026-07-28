@@ -3,47 +3,120 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>PalUp Shopper Widget — demo</title>
+<title>Auria — Shopper Assistant</title>
 <style>
-  :root { --bg:#fff; --fg:#111; --muted:#666; --line:#e5e7eb; --brand:#4f46e5; --agent:#f3f4f6; --safe:#fff4f4; --safeln:#f0b4bd; }
-  @media (prefers-color-scheme: dark){ :root{ --bg:#0f1115; --fg:#e8e8ea; --muted:#9aa0a6; --line:#2a2f3a; --agent:#1a1e27; --safe:#241416; --safeln:#5a2b32; } }
-  body{ font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg); margin:0; }
-  .wrap{ max-width:440px; margin:24px auto; border:1px solid var(--line); border-radius:14px; overflow:hidden; }
-  header{ background:var(--brand); color:#fff; padding:12px 16px; }
-  header b{ display:block; } header small{ opacity:.85; }
-  #messages{ height:360px; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
-  .msg{ max-width:80%; padding:8px 12px; border-radius:12px; }
-  .user{ align-self:flex-end; background:var(--brand); color:#fff; border-bottom-right-radius:3px; }
-  .agent{ align-self:flex-start; background:var(--agent); border-bottom-left-radius:3px; }
-  .agent.safety{ background:var(--safe); border:1px solid var(--safeln); }
-  .badge{ font-size:11px; color:var(--muted); margin-top:3px; }
-  .controls{ display:flex; gap:6px; padding:8px 14px; border-top:1px solid var(--line); flex-wrap:wrap; }
-  .controls select{ font-size:12px; }
-  form{ display:flex; gap:8px; padding:12px 14px; border-top:1px solid var(--line); }
-  input[type=text]{ flex:1; padding:9px 12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--fg); }
-  button{ padding:9px 16px; border:0; border-radius:10px; background:var(--brand); color:#fff; cursor:pointer; }
+  :root{
+    --bg:#eef1f6; --panel:#fff; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0;
+    --brand:#4f46e5; --brand-ink:#fff; --agent:#f1f5f9; --user:#4f46e5; --safe:#fff5f5; --safeln:#fecdd3;
+    --shadow:0 18px 50px rgba(15,23,42,.18);
+  }
+  @media (prefers-color-scheme: dark){ :root{
+    --bg:#0b0e14; --panel:#141924; --fg:#e6e9ef; --muted:#94a3b8; --line:#232a37;
+    --brand:#818cf8; --agent:#1b212e; --user:#4f46e5; --safe:#241318; --safeln:#5b2b34; --shadow:0 18px 50px rgba(0,0,0,.5);
+  }}
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{ margin:0; font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--fg);
+    background:
+      radial-gradient(1100px 500px at 80% -10%, color-mix(in srgb, var(--brand) 12%, transparent), transparent),
+      var(--bg); }
+  /* faux storefront so the widget reads as "embedded" */
+  .store{ max-width:960px; margin:0 auto; padding:40px 20px 120px; }
+  .store h1{ font-size:26px; margin:.2em 0 } .store p{ color:var(--muted); max-width:60ch }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px; margin-top:22px }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; }
+  .card .ph{ height:96px; border-radius:10px; background:linear-gradient(135deg, color-mix(in srgb,var(--brand) 22%,var(--panel)), var(--panel)); }
+  .card b{ display:block; margin-top:10px } .card span{ color:var(--muted); font-size:13px }
+
+  /* launcher */
+  #launcher{ position:fixed; right:22px; bottom:22px; width:58px; height:58px; border-radius:50%;
+    background:var(--brand); color:#fff; border:0; cursor:pointer; box-shadow:var(--shadow); font-size:24px; display:grid; place-items:center; z-index:40 }
+  #launcher:active{ transform:scale(.96) }
+
+  /* widget panel */
+  #widget{ position:fixed; right:22px; bottom:22px; width:390px; max-width:calc(100vw - 24px); height:min(620px, calc(100vh - 40px));
+    background:var(--panel); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow);
+    display:flex; flex-direction:column; overflow:hidden; z-index:50 }
+  #widget[hidden]{ display:none }
+  .wh{ background:var(--brand); color:var(--brand-ink); padding:13px 15px; display:flex; align-items:center; gap:11px }
+  .avatar{ width:34px; height:34px; border-radius:50%; background:rgba(255,255,255,.22); display:grid; place-items:center; font-weight:700 }
+  .wh .t{ line-height:1.15 } .wh .t b{ font-size:15px } .wh .t small{ opacity:.85; font-size:12px }
+  .wh .sp{ flex:1 } .wh button{ background:transparent; border:0; color:#fff; cursor:pointer; font-size:16px; opacity:.9; padding:4px }
+
+  #messages{ flex:1; overflow-y:auto; padding:16px 14px; display:flex; flex-direction:column; gap:10px; background:
+    linear-gradient(var(--panel),var(--panel)); }
+  .msg{ max-width:82%; padding:9px 13px; border-radius:15px; white-space:pre-wrap; word-wrap:break-word; animation:pop .18s ease }
+  @keyframes pop{ from{opacity:0; transform:translateY(4px)} to{opacity:1} }
+  .user{ align-self:flex-end; background:var(--user); color:#fff; border-bottom-right-radius:5px }
+  .agent{ align-self:flex-start; background:var(--agent); border-bottom-left-radius:5px }
+  .agent.safety{ background:var(--safe); border:1px solid var(--safeln) }
+  .badge{ font-size:11px; color:var(--muted); margin-top:5px; font-family:ui-monospace,monospace }
+  .badge[hidden]{ display:none }
+  .typing{ align-self:flex-start; background:var(--agent); padding:12px 14px; border-radius:15px; border-bottom-left-radius:5px }
+  .typing i{ display:inline-block; width:7px; height:7px; margin:0 2px; border-radius:50%; background:var(--muted); animation:blink 1.2s infinite both }
+  .typing i:nth-child(2){ animation-delay:.2s } .typing i:nth-child(3){ animation-delay:.4s }
+  @keyframes blink{ 0%,80%,100%{opacity:.25} 40%{opacity:1} }
+
+  /* demo controls drawer */
+  #drawer{ border-top:1px solid var(--line); padding:10px 14px; display:none; gap:8px; flex-wrap:wrap; align-items:center; background:var(--panel) }
+  #drawer.open{ display:flex }
+  #drawer select{ font-size:12px; padding:3px 6px; border-radius:7px; border:1px solid var(--line); background:var(--panel); color:var(--fg) }
+  #drawer label{ font-size:12px; color:var(--muted); display:flex; align-items:center; gap:5px }
+
+  form{ display:flex; gap:8px; padding:12px 14px; border-top:1px solid var(--line) }
+  #in{ flex:1; padding:11px 14px; border:1px solid var(--line); border-radius:12px; background:var(--panel); color:var(--fg); font:inherit }
+  #in:focus{ outline:2px solid color-mix(in srgb,var(--brand) 45%,transparent); outline-offset:0 }
+  form button{ padding:0 16px; border:0; border-radius:12px; background:var(--brand); color:#fff; cursor:pointer; font-weight:600 }
+  form button:disabled{ opacity:.5 }
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <header><b>Auria</b><small>AI assistant · replies are AI-generated</small></header>
-    <div id="messages" data-testid="messages"></div>
-    <div class="controls">
-      <select id="mood" title="mood signal"><option value="neutral">neutral</option><option>frustrated</option><option>upset</option><option>satisfied</option></select>
+  <div class="store" aria-hidden="true">
+    <h1>Auria</h1>
+    <p>Clean, effective skincare. (This page is a stand-in storefront — the assistant in the corner is the PalUp widget running on the live model, grounded in Auria's catalog.)</p>
+    <div class="grid">
+      <div class="card"><div class="ph"></div><b>Vitamin-C Serum</b><span>$34</span></div>
+      <div class="card"><div class="ph"></div><b>Gentle Cleanser</b><span>$18</span></div>
+      <div class="card"><div class="ph"></div><b>Daily Moisturizer</b><span>$24</span></div>
+      <div class="card"><div class="ph"></div><b>Caffeine Eye Cream</b><span>$26</span></div>
+    </div>
+  </div>
+
+  <button id="launcher" hidden aria-label="Open chat">💬</button>
+
+  <section id="widget" aria-label="Shopper assistant">
+    <div class="wh">
+      <div class="avatar">A</div>
+      <div class="t"><b>Auria Assistant</b><br><small>AI assistant · replies are AI-generated</small></div>
+      <span class="sp"></span>
+      <button id="gear" title="Demo controls" aria-label="Demo controls">⚙︎</button>
+      <button id="min" title="Minimize" aria-label="Minimize">—</button>
+    </div>
+    <div id="messages" data-testid="messages" role="log" aria-live="polite"></div>
+    <div id="drawer">
+      <select id="mood" title="mood signal"><option value="neutral">neutral</option><option>frustrated</option><option>upset</option><option>anxious</option><option>satisfied</option></select>
       <select id="cart" title="cart signal"><option value="has_items">cart: has items</option><option value="empty">cart: empty</option><option value="high_value">cart: high value</option></select>
       <select id="proactivityLevel" title="proactivity"><option value="balanced">balanced</option><option value="cautious">cautious</option><option value="confident">confident</option></select>
+      <label><input type="checkbox" id="showSignals" checked /> show signals</label>
     </div>
     <form id="f">
-      <input id="in" data-testid="chat-input" type="text" placeholder="Ask about a product, an order…" autocomplete="off" />
-      <button data-testid="send" type="submit">Send</button>
+      <input id="in" data-testid="chat-input" type="text" placeholder="Ask about a product or your order…" autocomplete="off" />
+      <button data-testid="send" type="submit" aria-label="Send">➤</button>
     </form>
-  </div>
+  </section>
+
 <script>
   const $ = (s) => document.querySelector(s);
   const msgs = $("#messages");
-  // One conversation id per page load -> the backend keeps multi-turn state (safety latch, open
-  // issues, pitch budget) for this session.
+  const widget = $("#widget"), launcher = $("#launcher");
   const sessionId = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
+
+  function setOpen(open){ widget.hidden = !open; launcher.hidden = open; }
+  $("#min").onclick = () => setOpen(false);
+  launcher.onclick = () => setOpen(true);
+  $("#gear").onclick = () => $("#drawer").classList.toggle("open");
+  $("#showSignals").onchange = (e) => document.querySelectorAll(".badge").forEach(b => b.hidden = !e.target.checked);
+
   function add(text, who, decision){
     const el = document.createElement("div");
     el.className = "msg " + who + (decision && decision.mode === "safety" ? " safety" : "");
@@ -51,30 +124,34 @@
     el.textContent = text;
     if (decision){
       const b = document.createElement("div");
-      b.className = "badge";
-      b.setAttribute("data-testid","badge");
-      b.textContent = `mode=${decision.mode} · pitch=${decision.pitch} · escalate=${decision.escalate}`;
+      b.className = "badge"; b.setAttribute("data-testid","badge");
+      b.hidden = !$("#showSignals").checked;
+      b.textContent = `mode=${decision.mode} · pitch=${decision.pitch} · escalate=${decision.escalate}` + (decision.outbound ? " · outbound" : "");
       el.appendChild(b);
     }
-    msgs.appendChild(el);
-    msgs.scrollTop = msgs.scrollHeight;
+    msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
+    return el;
   }
+  function typing(on){
+    let t = $("#typing");
+    if (on && !t){ t = document.createElement("div"); t.id="typing"; t.className="typing"; t.innerHTML="<i></i><i></i><i></i>"; msgs.appendChild(t); msgs.scrollTop=msgs.scrollHeight; }
+    else if (!on && t){ t.remove(); }
+  }
+
   $("#f").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const message = $("#in").value.trim();
-    if (!message) return;
-    add(message, "user");
-    $("#in").value = "";
+    const message = $("#in").value.trim(); if (!message) return;
+    add(message, "user"); $("#in").value = ""; $("#in").focus();
+    const btn = $("#f button"); btn.disabled = true; typing(true);
     const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
-    try {
+    try{
       const r = await fetch("/chat", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ message, signals, sessionId }) });
-      const d = await r.json();
-      add(d.reply, "agent", d);
-    } catch (err) {
-      add("Sorry — I hit a problem reaching the server.", "agent");
-    }
+      const d = await r.json(); typing(false); add(d.reply, "agent", d);
+    }catch(err){ typing(false); add("Sorry — I hit a problem reaching the server. Please try again.", "agent"); }
+    finally{ btn.disabled = false; }
   });
-  add("Hi! I'm Auria's assistant. Ask me about a product or your order.", "agent");
+
+  add("Hi! I'm Auria's assistant — ask me about a product or your order.", "agent");
 </script>
 </body>
 </html>
