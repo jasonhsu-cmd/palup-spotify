@@ -35,8 +35,10 @@ secrets/variables incl. `STAGING_ENABLED=true`). The manual equivalent:
 - **`.github/workflows/deploy-staging.yml`** — on push to `main`: `gcloud run deploy` from source, then a
   **post-deploy health smoke gate** (`/health` returns `{"ok":true}`). The service gets
   `GOOGLE_CLOUD_PROJECT`/`LOCATION`/`PALUP_MODEL`, so it serves the **real Gemini** model.
-- **`.github/workflows/scheduled-eval.yml`** — every 6h: the deterministic **eval gate** (always), plus a
-  **live-model smoke** when `STAGING_ENABLED`. Reports upload as an artifact.
+- **`.github/workflows/drift-check.yml`** — **manual** ("Run workflow"), no schedule: a live-model smoke
+  + the cross-family judge (guarded by `STAGING_ENABLED` / `JUDGE_ENABLED`). The offline eval is
+  deterministic and already runs in CI on every PR, so it isn't re-run on a timer; trigger this only to
+  check the live model (e.g. after Google updates the `gemini-2.5-flash` alias).
 
 ## Local
 
