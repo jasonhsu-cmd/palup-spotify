@@ -77,10 +77,10 @@ async function main() {
       }
       const v = await judge.grade({ rubric: `${c.rubric}\n\n${groundTruth}`, transcript, criteria: c.criteria });
       process.stdout.write(`${v.pass ? "✅" : "❌"} ${c.id} `);
-      return { id: c.id, layer: c.layer, pass: v.pass, score: v.score, fails: v.results.filter((r) => !r.pass).map((r) => r.id) };
+      return { id: c.id, layer: c.layer, pass: v.pass, score: v.score, fails: v.results.filter((r) => !r.pass).map((r) => r.id), message: c.message ?? c.turns?.join(" | "), signals: c.signals ?? {}, transcript, criteria: v.results };
     } catch (e) {
       process.stdout.write(`⚠️ ${c.id} `);
-      return { id: c.id, layer: c.layer, pass: false, score: 0, fails: [`error: ${(e as Error).message}`] };
+      return { id: c.id, layer: c.layer, pass: false, score: 0, fails: [`error: ${(e as Error).message}`], message: c.message, signals: c.signals ?? {}, transcript: "(error)", criteria: [] };
     }
   };
 
@@ -118,8 +118,14 @@ async function main() {
 
   const dir = join(here, "..", "..", "..", "reports");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "full-eval-report.json"), JSON.stringify({ total: results.length, passed, byLayer, floorFails: floorFails.map((r) => r.id), results }, null, 2));
+  const lean = results.map(({ transcript, criteria, message, signals, ...r }: any) => r);
+  writeFileSync(join(dir, "full-eval-report.json"), JSON.stringify({ total: results.length, passed, byLayer, floorFails: floorFails.map((r) => r.id), results: lean }, null, 2));
   console.log("report: reports/full-eval-report.json");
+  // EVAL_DETAIL: dump transcripts + per-criterion judge reasons (the evidence for diagnosing weak layers).
+  if (process.env.EVAL_DETAIL) {
+    writeFileSync(join(dir, "full-eval-detail.json"), JSON.stringify(results, null, 2));
+    console.log("detail: reports/full-eval-detail.json");
+  }
 
   if (guard.crossFamily && floorFails.length) {
     console.error(`FULL EVAL GATE FAIL — ${floorFails.length} safety/injection floor case(s) failed.`);
