@@ -2,8 +2,9 @@ name: eval-quality (live judge on merge)
 
 # Auto-runs the LIVE 190-case judge on merge to main WHEN a model-dependent change lands, so quality
 # drift surfaces itself instead of relying on anyone remembering `eval:full`. DORMANT until you set
-# repo variable JUDGE_ENABLED=true + the two secrets (ANTHROPIC_API_KEY, GCP_SA_KEY) + variable
-# GCP_PROJECT — until then this job is skipped and main stays green. See docs/DEPLOY.md.
+# variable JUDGE_ENABLED=true + secret ANTHROPIC_API_KEY. GCP auth is Workload Identity Federation,
+# reusing the secrets set by scripts/setup-staging.sh (GCP_WIF_PROVIDER, GCP_DEPLOY_SA, GCP_PROJECT) —
+# no long-lived key. Skipped (main stays green) until enabled. See docs/DEPLOY.md.
 on:
   push:
     branches: [main]
@@ -22,6 +23,7 @@ jobs:
     permissions:
       contents: read
       issues: write # to open a regression issue
+      id-token: write # Workload Identity Federation (no long-lived key)
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -32,13 +34,14 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Authenticate to Google Cloud (Vertex)
+      - name: Authenticate to Google Cloud (Vertex, via Workload Identity Federation)
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
       - name: Run live 190-case judge (Gemini agent, cross-family Claude judge)
         env:
-          GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT }}
           GOOGLE_CLOUD_LOCATION: ${{ vars.GCP_LOCATION || 'global' }}
           PALUP_MODEL: ${{ vars.PALUP_MODEL || 'gemini-2.5-flash' }}
           JUDGE_FAMILY: anthropic
