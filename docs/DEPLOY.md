@@ -1,13 +1,15 @@
 # Deploy & scheduler (staging)
 
 Staging **auto-deploys on merge to `main`**; **production is never auto-deployed** (locked decision,
-`docs/design/build-automation.md` §1). Everything here is **inactive until you configure GCP↔GitHub
-auth** — the workflows are guarded by the `STAGING_ENABLED` repo variable so `main` stays green until
-then.
+`docs/design/build-automation.md` §1). Staging is now **configured and active** (WIF auth +
+`STAGING_ENABLED=true`); before setup the workflows were guarded by `STAGING_ENABLED` so `main` stayed
+green.
 
-> Status: the container + workflows are authored and the app runs locally, but the **Docker image build
-> and the actual Cloud Run deploy are unverified from this environment** (no Docker daemon; cloud deploys
-> require the setup below, which only a project owner can do).
+> Status: **staging is LIVE and verified.** The widget backend is deployed to Cloud Run and serves the
+> real Gemini model — `/health` → `{"ok":true,"model":"vertex/gemini"}` and `/chat` returns a grounded
+> live reply; the widget UI is served at `/`. Every merge to `main` auto-redeploys.
+> **Open follow-up:** the service is currently public + unauthenticated (`--allow-unauthenticated`), so
+> add rate-limiting / an access token before sharing the URL widely.
 
 ## One-time setup
 
