@@ -10,3 +10,10 @@ export type {
   Product,
   StorePolicy,
 } from "./grounding-port.js";
+export type {
+  JudgePort,
+  JudgeInput,
+  JudgeVerdict,
+  JudgeCriterion,
+  JudgeCriterionResult,
+} from "./judge-port.js";

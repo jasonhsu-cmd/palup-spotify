@@ -8,6 +8,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "eval": "tsx packages/eval/src/run.ts",
+    "eval:judge": "tsx packages/eval/src/judge-run.ts",
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
     "widget:dev": "pnpm --filter @palup/widget dev",

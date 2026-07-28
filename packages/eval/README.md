@@ -21,12 +21,25 @@ INV-E one budget per conversation, INV-B open-issue suppress→resolve→re-enab
 cross-session persistence** via the session store. **Fairness (§I FAIR)** (no persona
 price-discrimination) is a unit test too.
 
-## Still NOT encodable here — needs a judge (do not read absence as coverage)
+## Judge-graded layers — `pnpm eval:judge` (iteration 3)
 
-| Design layer | Why |
+The two non-deterministic layers are now graded by a **cross-family judge** (`cases/subjective.json`,
+`src/judge-run.ts`): **tone-coherence** (TC-1) and **grounding-content correctness** (GC-1, judged
+against the authoritative catalog as ground truth). The agent runs on real Gemini; the judge must be a
+DIFFERENT family (proposer≠evaluator, enforced by `crossFamilyGuard`).
+
+- **Default (`pnpm eval:judge`):** a same-family **Gemini** judge — **ADVISORY only** (the guard refuses
+  to gate it). Verified live: GC-1 ✅ TC-1 ✅.
+- **True cross-family (`JUDGE_FAMILY=anthropic pnpm eval:judge`):** Claude on Vertex — **gates**. The
+  adapter + auth are verified, but requires **enabling a Claude model in your project's Model Garden**
+  (not enabled in the demo project). Set `JUDGE_MODEL` / `ANTHROPIC_VERTEX_REGION` to an enabled id.
+- Requires GCP creds (the agent uses the real model); not part of the offline CI gate.
+
+## Still needs work (tracked)
+
+| Layer | Status |
 |---|---|
-| Tone-coherence under oscillation (SW-14) | subjective → needs a cross-family judge, not tokens |
-| Grounding *content* correctness (recommends the right real catalog item) | not deterministic → verified via the live-model E2E + `contains:` checks, not a deterministic floor |
-| Full free-form multi-turn ordering | session tests cover the key invariants; exhaustive dialog trees still need scenario/judge coverage |
+| Cross-family gating live | mechanism built + advisory verified; **gating** unverified until Claude is enabled in Model Garden |
+| Full free-form multi-turn dialog trees | session tests + TC-1 cover the key invariants; exhaustive trees still need broader scenario coverage |
 
 Each row is a real gap, tracked — not silently "passing."

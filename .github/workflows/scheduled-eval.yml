@@ -1,0 +1,51 @@
+name: scheduled-eval
+
+# The "24/7" heartbeat: runs the deterministic eval gate on a cadence (catches regressions from
+# dependency drift etc.) and, when staging is configured, a live-model smoke against the real model
+# (catches model-side drift). Reports upload as an artifact each run.
+on:
+  schedule:
+    - cron: "0 */6 * * *" # every 6 hours
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Eval gate (offline, deterministic)
+        run: pnpm eval
+
+      # Live model + judge drift check — only when staging/creds are configured.
+      - name: Auth to GCP
+        if: ${{ vars.STAGING_ENABLED == 'true' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA }}
+      - name: Live model smoke (drift)
+        if: ${{ vars.STAGING_ENABLED == 'true' }}
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GOOGLE_CLOUD_LOCATION: global
+          PALUP_MODEL: gemini-2.5-flash
+        run: pnpm model:smoke "Recommend a gentle cleanser for sensitive skin in one sentence."
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: reports/
