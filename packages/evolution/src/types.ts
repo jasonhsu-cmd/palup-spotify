@@ -11,12 +11,40 @@ export interface PolicyMetrics {
   qualityScore: number;
   /** Counter-metrics that must NOT worsen (returns/complaints/opt-outs) — lower is better. */
   counterMetrics?: { returnRate?: number; complaintRate?: number };
+  /** Pass rate (0..1) per criterion id, across the scenario set — the per-criteria improvement proof. */
+  perCriteria?: Record<string, number>;
   detail?: Record<string, unknown>;
 }
 
 /** Grades a policy. Injected so the engine is testable offline and pluggable to the live eval+judge. */
 export interface Grader {
   grade(policy: Policy): Promise<PolicyMetrics>;
+}
+
+/** A measured weakness of the current champion — a criterion and how often it passes (0..1). */
+export interface Weakness {
+  criterion: string;
+  passRate: number;
+}
+
+/** Proposes candidate policies aimed at fixing measured weaknesses. Real adapter is LLM-backed. */
+export interface Proposer {
+  propose(champion: Policy, weaknesses: Weakness[]): Promise<Policy[]>;
+}
+
+/** One entry in the durable improvement timeline — the proof the system got better over time. */
+export interface ImprovementEntry {
+  round: number;
+  at: string; // ISO timestamp (stamped by the caller — engine code can't call Date.now())
+  event: "baseline" | "promoted" | "no_improvement";
+  fromPolicyId?: string;
+  toPolicyId: string;
+  qualityBefore?: number;
+  qualityAfter: number;
+  perCriteriaBefore?: Record<string, number>;
+  perCriteriaAfter: Record<string, number>;
+  /** Human-readable note, e.g. which criteria the winning candidate targeted + improved. */
+  note?: string;
 }
 
 export type CandidateStatus =

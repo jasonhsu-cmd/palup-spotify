@@ -11,3 +11,6 @@ dist/
 reports/
 test-results/
 playwright-report/
+
+# self-improvement loop runtime state
+.palup-state/

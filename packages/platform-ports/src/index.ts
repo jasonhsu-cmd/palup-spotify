@@ -24,3 +24,4 @@ export type {
   Subscription,
   CommercePolicy,
 } from "./commerce-port.js";
+export type { StorePort } from "./store-port.js";

@@ -3,10 +3,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { DEFAULT_POLICY } from "@palup/widget-brain";
-import { EvolutionEngine, MockGrader, seedCandidates, type Grader, type PolicyMetrics } from "@palup/evolution";
-import { isVertexConfigured } from "@palup/model-vertex";
-import { isAnthropicApiConfigured } from "@palup/judge";
+import { AutoLoop, EvolutionEngine, FileStore, MockGrader, seedCandidates, type Grader, type PolicyMetrics } from "@palup/evolution";
+import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
+import { createAnthropicApiAdapter, createAnthropicApiJudge, isAnthropicApiConfigured } from "@palup/judge";
 import { LiveGrader } from "./live-grader.js";
+import { ScenarioGrader } from "./scenario-grader.js";
+import { ModelProposer } from "./model-proposer.js";
+import { SCENARIOS } from "./scenarios.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -77,6 +80,43 @@ export async function buildServer() {
   app.post("/api/monitor", async (req) => {
     const b = (req.body ?? {}) as { qualityScore?: number; safetyPass?: boolean };
     return act(() => engine.monitor({ qualityScore: Number(b.qualityScore ?? 0.4), safetyPass: b.safetyPass !== false }));
+  });
+
+  // --- Real self-improvement loop: the durable improvement timeline + an interactive live round. ---
+  const store = new FileStore(".palup-state");
+  let evolving = false;
+
+  app.get("/api/timeline", async () => ({
+    timeline: await store.readLog("improvement-timeline"),
+    champion: await store.read("champion"),
+    scenarios: SCENARIOS.length,
+    evolving,
+  }));
+
+  // Run the full loop fresh (baseline → propose → evaluate → gate → promote) on the LIVE model, writing
+  // the improvement timeline to disk. Background + a flag so the dashboard can poll while it runs.
+  app.post("/api/evolve", async () => {
+    if (mode !== "live") return { error: "evolve requires CP_MODE=live (real Gemini + judge)" };
+    if (!isAnthropicApiConfigured()) return { error: "set ANTHROPIC_API_KEY (judge + proposer)" };
+    if (evolving) return { error: "already evolving" };
+    evolving = true;
+    void (async () => {
+      try {
+        await store.write("improvement-timeline", []); // fresh run
+        const agent = createVertexAdapter();
+        const sgrader = new ScenarioGrader(agent, createAnthropicApiJudge(), SCENARIOS);
+        const proposer = new ModelProposer(createAnthropicApiAdapter(), 2);
+        const championMetrics = await sgrader.grade(DEFAULT_POLICY);
+        const eng = new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader: sgrader });
+        const loop = new AutoLoop({ engine: eng, grader: sgrader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: true });
+        await loop.run(Number(process.env.EVOLVE_ROUNDS ?? 2));
+      } catch (e) {
+        console.error("[evolve]", (e as Error).message);
+      } finally {
+        evolving = false;
+      }
+    })();
+    return { started: true };
   });
 
   app.get("/", async (_req, reply) => reply.type("text/html").send(dashboardHtml));

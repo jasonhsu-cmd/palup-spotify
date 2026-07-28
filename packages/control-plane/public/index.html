@@ -59,6 +59,15 @@
     </div>
 
     <div class="panel">
+      <h2>Self-improvement timeline (real — persisted to .palup-state/)</h2>
+      <div class="row" style="margin-bottom:10px">
+        <button class="primary" id="evolve" data-testid="evolve-btn" title="Run the loop live across the conversation scenarios: propose → evaluate → gate → promote">Run a live improvement round</button>
+        <span class="metric" id="evolve-status"></span>
+      </div>
+      <div id="timeline" data-testid="timeline"><span class="metric">no runs yet — run <span class="mono">pnpm evolve</span>, or click above in live mode</span></div>
+    </div>
+
+    <div class="panel">
       <h2>Candidates (propose → evaluate → gate → approve → promote)</h2>
       <div id="cands" data-testid="cands"></div>
     </div>
@@ -126,9 +135,31 @@
     $("#audit").innerHTML = s.audit.map(a=>`<div>#${a.seq} [${a.actor}] ${a.action}${a.target?` ${a.target}`:""}</div>`).reverse().join("");
     if (evaluating && s.mode === "live") $("#cands").insertAdjacentHTML("afterbegin", `<div class="metric" data-testid="evaluating">evaluating… (live model + judge, ~15s)</div>`);
   }
-  async function refresh(){ lastState = await getState(); render(lastState); }
+  function bar(q, cls){ return `<div style="background:var(--line);border-radius:6px;height:10px;flex:1;min-width:80px"><div style="width:${(q*100).toFixed(0)}%;height:100%;border-radius:6px;background:var(--${cls||'brand'})"></div></div>`; }
+  function renderTimeline(t){
+    const btn = $("#evolve"); if (btn) btn.disabled = !!t.evolving;
+    $("#evolve-status").textContent = t.evolving ? "evolving live… propose → evaluate → gate → promote (a few min)" : (t.champion ? `current champion: ${t.champion.policy.label}` : "");
+    const tl = t.timeline || [];
+    if (!tl.length){ return; }
+    const net = ((tl[tl.length-1].qualityAfter - tl[0].qualityAfter)*100).toFixed(0);
+    const rows = tl.map(e=>{
+      const label = e.event==="promoted" ? `promoted → ${e.toPolicyId}` : e.event==="baseline" ? "baseline" : "settled (no improvement)";
+      const impr = e.event==="promoted" ? Object.keys(e.perCriteriaAfter||{}).filter(k=>(e.perCriteriaAfter[k]||0)>((e.perCriteriaBefore||{})[k]||0)) : [];
+      const cls = e.event==="promoted" ? "ok" : e.event==="no_improvement" ? "warn" : "brand";
+      return `<div style="display:flex;gap:10px;align-items:center;padding:5px 0">
+        <span class="metric" style="width:58px">round ${e.round}</span>
+        ${bar(e.qualityAfter, cls)}
+        <b style="width:44px;text-align:right">${(e.qualityAfter*100).toFixed(0)}%</b>
+        <span class="metric grow">${label}${impr.length?` · ↑ ${impr.join(", ")}`:""}</span>
+      </div>`;
+    }).join("");
+    $("#timeline").innerHTML = `<div class="metric" style="margin-bottom:6px">net quality change: <b class="${net>=0?'up':'down'}">${net>=0?"+":""}${net} pts</b> across ${tl.filter(e=>e.event==='promoted').length} promotion(s)</div>${rows}`;
+  }
+  async function refreshTimeline(){ try{ renderTimeline(await (await fetch("/api/timeline")).json()); }catch{} }
+  async function refresh(){ lastState = await getState(); render(lastState); refreshTimeline(); }
   document.addEventListener("click", async (e)=>{
     const b = e.target.closest("button"); if(!b) return;
+    if (b.id==="evolve"){ await post("/api/evolve"); refreshTimeline(); return; }
     if (b.id==="seed"){ lastState = await post("/api/seed"); render(lastState); return; }
     if (b.id==="regress"){ lastState = await post("/api/monitor",{qualityScore:0.4}); render(lastState); return; }
     if (b.id==="kill"){ lastState = await post(lastState && lastState.killed ? "/api/unkill":"/api/kill"); render(lastState); return; }
