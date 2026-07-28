@@ -23,8 +23,10 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 
 echo ">> [2/5] deploy service account + roles"
 gcloud iam service-accounts create "$SA" --project "$PROJECT" --display-name "PalUp deploy" 2>/dev/null || true
-for ROLE in roles/run.admin roles/cloudbuild.builds.editor roles/artifactregistry.writer \
-            roles/iam.serviceAccountUser roles/aiplatform.user; do
+# artifactregistry.admin: `gcloud run deploy --source` auto-creates the cloud-run-source-deploy repo.
+# storage.admin: Cloud Build uploads the source tarball to a GCS staging bucket.
+for ROLE in roles/run.admin roles/cloudbuild.builds.editor roles/artifactregistry.admin \
+            roles/storage.admin roles/iam.serviceAccountUser roles/aiplatform.user; do
   gcloud projects add-iam-policy-binding "$PROJECT" \
     --member "serviceAccount:$SA_EMAIL" --role "$ROLE" --condition=None >/dev/null
 done

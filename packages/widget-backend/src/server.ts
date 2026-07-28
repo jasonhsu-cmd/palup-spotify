@@ -70,9 +70,12 @@ export function buildServer() {
 const invoked = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (invoked === import.meta.url) {
   const port = Number(process.env.PORT ?? 8787);
+  // Cloud Run requires binding 0.0.0.0:$PORT (its health check hits the container over the network);
+  // locally we keep 127.0.0.1. The container sets HOST=0.0.0.0 (see Dockerfile).
+  const host = process.env.HOST ?? "127.0.0.1";
   buildServer()
-    .listen({ port, host: "127.0.0.1" })
-    .then(() => console.log(`widget backend listening on http://127.0.0.1:${port}`))
+    .listen({ port, host })
+    .then(() => console.log(`widget backend listening on http://${host}:${port}`))
     .catch((e) => {
       console.error(e);
       process.exit(1);
