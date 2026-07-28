@@ -26,22 +26,65 @@ export class ModelJudge implements JudgePort {
   async grade(input: JudgeInput): Promise<JudgeVerdict> {
     const system =
       "You are an impartial, strict evaluator. Judge each CRITERION as pass/fail against the RUBRIC " +
-      "and TRANSCRIPT. Respond ONLY with JSON: " +
-      '{"results":[{"id":"<criterion id>","pass":true|false,"reason":"<one line>"}]}. No prose.';
+      "and TRANSCRIPT. Output ONLY the JSON object and nothing else — no preamble, no markdown fences: " +
+      '{"results":[{"id":"<criterion id>","pass":true|false,"reason":"<one line>"}]}';
     const user =
       `RUBRIC:\n${input.rubric}\n\nCRITERIA:\n` +
       input.criteria.map((c) => `- ${c.id}: ${c.description}`).join("\n") +
       `\n\nTRANSCRIPT:\n${input.transcript}`;
+    const messages = [
+      { role: "system" as const, content: system },
+      { role: "user" as const, content: user },
+    ];
+    // Structured-outputs schema: adapters that support it (Anthropic `output_config.format`) force
+    // schema-valid JSON at the provider so a verdict can't come back as prose. Adapters that don't
+    // just ignore it. `additionalProperties: false` + `required` per the structured-outputs contract.
+    const responseSchema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        results: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: { type: "string" },
+              pass: { type: "boolean" },
+              reason: { type: "string" },
+            },
+            required: ["id", "pass", "reason"],
+          },
+        },
+      },
+      required: ["results"],
+    } as const;
 
-    const res = await this.model.complete({
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      temperature: 0,
-    });
-
-    const parsed = extractJson(res.text);
+    // Resilient: attempt 0 asks for structured output; attempt 1 drops the schema (fallback if a
+    // provider rejects it or an edge case — refusal / max_tokens — slips through). Then FAIL CLOSED
+    // rather than throwing — a single unparseable verdict must never crash a whole corpus run.
+    let res: Awaited<ReturnType<ModelPort["complete"]>> | undefined;
+    let parsed: { results?: Array<{ id?: unknown; pass?: unknown; reason?: unknown }> } | undefined;
+    for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+      try {
+        res = await this.model.complete({
+          messages,
+          temperature: 0,
+          responseSchema: attempt === 0 ? (responseSchema as unknown as Record<string, unknown>) : undefined,
+        });
+        parsed = extractJson(res.text);
+      } catch {
+        parsed = undefined;
+      }
+    }
+    if (!parsed) {
+      const results = input.criteria.map((c) => ({
+        id: c.id,
+        pass: false,
+        reason: "judge response not parseable as JSON",
+      }));
+      return { pass: false, score: 0, results, judgeModel: res?.model ?? "judge", judgeFamily: this.family };
+    }
     const byId = new Map((parsed.results ?? []).map((r) => [String(r.id), r]));
     const results: JudgeCriterionResult[] = input.criteria.map((c) => {
       const r = byId.get(c.id);
@@ -56,7 +99,7 @@ export class ModelJudge implements JudgePort {
       pass: passed === results.length,
       score: results.length ? passed / results.length : 0,
       results,
-      judgeModel: res.model,
+      judgeModel: res?.model ?? "judge",
       judgeFamily: this.family,
     };
   }

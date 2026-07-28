@@ -37,6 +37,11 @@ export function createAnthropicApiAdapter(opts: AnthropicApiOptions = {}): Model
         // temperature intentionally omitted: newer Claude models (e.g. Opus 4.8) deprecate it.
         system,
         messages,
+        // Structured outputs: force schema-valid JSON at the provider (Opus 4.8 / Haiku 4.5 support it).
+        ...(req.
+            responseSchema
+          ? { output_config: { format: { type: "json_schema", schema: req.responseSchema } } }
+          : {}),
       });
       const text: string = (resp?.content ?? [])
         .map((b: any) => (typeof b?.text === "string" ? b.text : ""))

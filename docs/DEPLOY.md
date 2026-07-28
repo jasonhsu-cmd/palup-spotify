@@ -63,7 +63,7 @@ long-lived key)**, reusing the secrets `scripts/setup-staging.sh` sets. **Dorman
    gh variable set JUDGE_ENABLED     --repo <owner>/<repo> --body true
    ```
    Optional variables: `GCP_LOCATION` (default `global`), `PALUP_MODEL`, `JUDGE_MODEL`
-   (default `claude-haiku-4-5-20251001` — fast/cheap for the bulk run; Opus is reserved for gating).
+   (default `claude-sonnet-5` — balanced for the bulk run; Opus is reserved for gating).
 
 The baseline lives in `.github/eval-baseline.json`; regenerate it after a real improvement
 (`pnpm eval:full` → copy the byLayer rates). Regression tolerances absorb the judge's run-to-run variance.
@@ -77,7 +77,7 @@ judge there are two paths:
 ```bash
 export ANTHROPIC_API_KEY=...            # your key (never commit it)
 JUDGE_FAMILY=anthropic pnpm eval:judge  # gates; uses Claude via the direct API
-# optional: ANTHROPIC_MODEL=claude-haiku-4-5-20251001 (default) or another current id
+# optional: ANTHROPIC_MODEL=claude-sonnet-5 (or another current id; adapter default is claude-opus-4-8)
 ```
 
 **B) Claude on Vertex** (if you'd rather stay in GCP) — enable a Claude model in Model Garden, then:

@@ -46,8 +46,8 @@ jobs:
           GOOGLE_CLOUD_LOCATION: ${{ vars.GCP_LOCATION || 'global' }}
           PALUP_MODEL: ${{ vars.PALUP_MODEL || 'gemini-2.5-flash' }}
           JUDGE_FAMILY: anthropic
-          # A fast/cheap cross-family judge for the bulk 190-case run (Opus is reserved for gating).
-          ANTHROPIC_MODEL: ${{ vars.JUDGE_MODEL || 'claude-haiku-4-5-20251001' }}
+          # Cross-family judge for the bulk 190-case run (Sonnet — balanced; Opus reserved for gating).
+          ANTHROPIC_MODEL: ${{ vars.JUDGE_MODEL || 'claude-sonnet-5' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         # eval:full itself exits non-zero on any safety/injection FLOOR case failure.
         run: pnpm eval:full
@@ -69,6 +69,5 @@ jobs:
         run: |
           gh issue create \
             --title "Live-judge quality regression on main ($(date -u +%Y-%m-%d))" \
-            --label "eval-regression" \
             --body "The live 190-case judge regressed on \`main\` beyond tolerance (or a safety/injection floor case failed). See the run + the \`live-gap-map\` artifact: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             || echo "(could not open issue — check the run summary)"
