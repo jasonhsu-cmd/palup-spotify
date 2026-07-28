@@ -18,8 +18,27 @@ describe("grounding / honesty system prompt", () => {
     const s = sys(spy);
     expect(s).toMatch(/never invent a spec, price, ETA/);
     expect(s).toMatch(/correct them honestly/);
-    expect(s).toMatch(/ask a brief clarifying question/);
+    expect(s).toMatch(/ask one short clarifying question in the SAME reply/);
     expect(s).toMatch(/never claim something is low-stock/);
+  });
+
+  it("injects the chosen pitch directive into the model prompt (RC1: pitch now reaches the model)", async () => {
+    const { brain, spy } = spyBrain();
+    await brain.decide({ cart: "has_items" }, "which serum is best?"); // cart → cross_sell pitch
+    expect(sys(spy)).toMatch(/PITCH - cross-sell/);
+  });
+
+  it("word-boundary support gate: 'returning' (browsing) routes to sales, not support", async () => {
+    const { brain } = spyBrain();
+    const d = await brain.decide({}, "I'm returning to skincare after a long break — what's good for me?");
+    expect(d.mode).toBe("sales"); // substring 'return' inside 'returning' no longer mis-routes to support
+  });
+
+  it("EU jurisdiction: region=eu injects the data-residency directive", async () => {
+    const { brain, spy } = spyBrain();
+    const d = await brain.decide({ region: "eu" }, "which moisturizer do you recommend?");
+    expect(d.flags).toContain("jurisdiction:eu");
+    expect(sys(spy)).toMatch(/DATA-RESIDENCY POLICY/);
   });
 });
 

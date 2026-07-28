@@ -36,7 +36,7 @@ export function classifySupportIntent(text: string): SupportIntent {
   if (/says delivered|marked delivered|didn.?t (get|receive)|never (arrived|came|got)|lost package|package.*(lost|missing)/.test(t)) return "lost_package";
   if (/where.?s my order|order status|status of order|where is (my )?order|\btrack\b|hasn.?t (arrived|come)|days? late|\blate\b|\bstuck\b/.test(t)) return "order_status";
   if (/how (often|do i|to|much|long).*(use|apply|retinol|serum|it)/.test(t)) return "how_to";
-  if (/fragrance|paraben|sulfate|nut oil|ingredient|allergen/.test(t)) return "ingredients";
+  if (/fragrance|paraben|sulfate|nut oil|allergen|allergic to|free of/.test(t)) return "ingredients";
   return "general";
 }
 
