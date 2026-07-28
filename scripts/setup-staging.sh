@@ -2,7 +2,7 @@
 # One-time setup for staging auto-deploy: Workload Identity Federation (no keys) + deploy service
 # account + GitHub secrets/variables. Run as a project OWNER with gcloud + gh authenticated.
 #
-#   GCP_PROJECT=palup-all GITHUB_REPO=jasonhsu-cmd/palup-spotify bash scripts/setup-staging.sh
+#   GCP_PROJECT=palup-jason GITHUB_REPO=jasonhsu-cmd/palup-spotify bash scripts/setup-staging.sh
 #
 # Idempotent-ish: "already exists" errors are tolerated. See docs/DEPLOY.md.
 set -euo pipefail

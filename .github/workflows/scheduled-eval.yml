@@ -43,6 +43,18 @@ jobs:
           PALUP_MODEL: gemini-2.5-flash
         run: pnpm model:smoke "Recommend a gentle cleanser for sensitive skin in one sentence."
 
+      # Cross-family judge drift (Gemini agent graded by Claude). Enable by adding repo variable
+      # JUDGE_ENABLED=true + secret ANTHROPIC_API_KEY.
+      - name: Cross-family judge (drift)
+        if: ${{ vars.JUDGE_ENABLED == 'true' }}
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT }}
+          GOOGLE_CLOUD_LOCATION: global
+          PALUP_MODEL: gemini-2.5-flash
+          JUDGE_FAMILY: anthropic
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pnpm eval:judge
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4

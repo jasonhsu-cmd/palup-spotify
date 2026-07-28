@@ -14,7 +14,7 @@ export function isAnthropicApiConfigured(): boolean {
 
 export function createAnthropicApiAdapter(opts: AnthropicApiOptions = {}): ModelPort {
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
-  const model = opts.model ?? process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5-20251001";
+  const model = opts.model ?? process.env.ANTHROPIC_MODEL ?? "claude-opus-4-8";
   if (!apiKey) throw new Error("anthropic-api: set ANTHROPIC_API_KEY (or pass opts.apiKey)");
 
   let clientPromise: Promise<any> | null = null;
@@ -34,7 +34,7 @@ export function createAnthropicApiAdapter(opts: AnthropicApiOptions = {}): Model
       const resp: any = await client.messages.create({
         model,
         max_tokens: req.maxTokens ?? 1024,
-        temperature: req.temperature ?? 0,
+        // temperature intentionally omitted: newer Claude models (e.g. Opus 4.8) deprecate it.
         system,
         messages,
       });

@@ -14,7 +14,7 @@ then.
 **Fastest — run the script** (as a project owner with `gcloud` + `gh` authenticated):
 
 ```bash
-GCP_PROJECT=palup-all GITHUB_REPO=jasonhsu-cmd/palup-spotify bash scripts/setup-staging.sh
+GCP_PROJECT=palup-jason GITHUB_REPO=jasonhsu-cmd/palup-spotify bash scripts/setup-staging.sh
 ```
 
 It does everything below (WIF pool/provider restricted to your repo, deploy SA + roles, and the GitHub
