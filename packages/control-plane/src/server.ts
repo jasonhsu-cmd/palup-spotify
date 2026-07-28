@@ -60,7 +60,15 @@ export async function buildServer() {
       for (const c of seedCandidates()) if (!existing.has(c.id)) engine.propose(c);
     }),
   );
-  app.post("/api/evaluate/:id", async (req) => act(() => engine.evaluate((req.params as { id: string }).id)));
+  app.post("/api/evaluate/:id", async (req) => {
+    const id = (req.params as { id: string }).id;
+    // Status flips to "evaluating" synchronously. In live mode grading (~15–30s: live Gemini + Opus
+    // judge) runs in the background and the dashboard picks up the result by polling; in mock mode it's
+    // instant, so we await it (keeps the CI E2E deterministic).
+    const p = engine.evaluate(id).catch((e) => console.error(`[eval ${id}]`, (e as Error).message));
+    if (mode !== "live") await p;
+    return state();
+  });
   app.post("/api/approve/:id", async (req) => act(() => engine.approve((req.params as { id: string }).id, "operator")));
   app.post("/api/reject/:id", async (req) => act(() => engine.reject((req.params as { id: string }).id, "operator")));
   app.post("/api/promote/:id", async (req) => act(() => engine.promote((req.params as { id: string }).id)));
