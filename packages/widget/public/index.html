@@ -6,20 +6,25 @@
 <title>Auria — Shopper Assistant</title>
 <style>
   :root{
-    --bg:#eef1f6; --panel:#fff; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0;
-    --brand:#4f46e5; --brand-ink:#fff; --agent:#f1f5f9; --user:#4f46e5; --safe:#fff5f5; --safeln:#fecdd3;
+    --brand:#4f46e5; --brand-ink:#ffffff; --bg:#eef1f6; --panel:#ffffff; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --radius:18px;
+    --palup:#0c4a3c;
+    --brand-glow:var(--brand); --agent:#f1f5f9; --user:var(--brand); --safe:#fff5f5; --safeln:#fecdd3;
     --shadow:0 18px 50px rgba(15,23,42,.18);
   }
   @media (prefers-color-scheme: dark){ :root{
     --bg:#0b0e14; --panel:#141924; --fg:#e6e9ef; --muted:#94a3b8; --line:#232a37;
-    --brand:#818cf8; --agent:#1b212e; --user:#4f46e5; --safe:#241318; --safeln:#5b2b34; --shadow:0 18px 50px rgba(0,0,0,.5);
+    --brand:#4f46e5; --brand-glow:#818cf8; --palup:#5eb99b;
+    --agent:#1b212e; --user:var(--brand);
+    --safe:#241318; --safeln:#5b2b34; --shadow:0 18px 50px rgba(0,0,0,.5);
   }}
   *{box-sizing:border-box}
   html,body{height:100%}
   body{ margin:0; font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--fg);
     background:
-      radial-gradient(1100px 500px at 80% -10%, color-mix(in srgb, var(--brand) 12%, transparent), transparent),
+      radial-gradient(1100px 500px at 80% -10%, color-mix(in srgb, var(--brand-glow) 12%, transparent), transparent),
       var(--bg); }
+  .sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0 }
+  @media (prefers-reduced-motion: reduce){ .msg{ animation:none } .typing i{ animation:none; opacity:.6 } #launcher:active{ transform:none } }
   /* faux storefront so the widget reads as "embedded" */
   .store{ max-width:960px; margin:0 auto; padding:40px 20px 120px; }
   .store h1{ font-size:26px; margin:.2em 0 } .store p{ color:var(--muted); max-width:60ch }
@@ -30,28 +35,37 @@
 
   /* launcher */
   #launcher{ position:fixed; right:22px; bottom:22px; width:58px; height:58px; border-radius:50%;
-    background:var(--brand); color:#fff; border:0; cursor:pointer; box-shadow:var(--shadow); font-size:24px; display:grid; place-items:center; z-index:40 }
+    background:var(--brand); color:var(--brand-ink); border:0; cursor:pointer; box-shadow:var(--shadow); font-size:24px; display:grid; place-items:center; z-index:40 }
   #launcher:active{ transform:scale(.96) }
+  #launcher:focus-visible{ outline:2px solid color-mix(in srgb,var(--brand) 55%,transparent); outline-offset:2px }
 
   /* widget panel */
   #widget{ position:fixed; right:22px; bottom:22px; width:390px; max-width:calc(100vw - 24px); height:min(620px, calc(100vh - 40px));
-    background:var(--panel); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow);
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow);
     display:flex; flex-direction:column; overflow:hidden; z-index:50 }
   #widget[hidden]{ display:none }
   .wh{ background:var(--brand); color:var(--brand-ink); padding:13px 15px; display:flex; align-items:center; gap:11px }
-  .avatar{ width:34px; height:34px; border-radius:50%; background:rgba(255,255,255,.22); display:grid; place-items:center; font-weight:700 }
+  .wh.handoff-mode{ background:#0f766e }
+  .avatar{ width:34px; height:34px; border-radius:50%; background:color-mix(in srgb, var(--brand-ink) 22%, transparent); display:grid; place-items:center; font-weight:700 }
   .wh .t{ line-height:1.15 } .wh .t b{ font-size:15px } .wh .t small{ opacity:.85; font-size:12px }
-  .wh .sp{ flex:1 } .wh button{ background:transparent; border:0; color:#fff; cursor:pointer; font-size:16px; opacity:.9; padding:4px }
+  .wh .sp{ flex:1 } .wh button{ background:transparent; border:0; color:var(--brand-ink); cursor:pointer; font-size:16px; opacity:.9; padding:4px }
+  .wh button:focus-visible{ outline:2px solid var(--brand-ink); outline-offset:2px }
 
   #messages{ flex:1; overflow-y:auto; padding:16px 14px; display:flex; flex-direction:column; gap:10px; background:
     linear-gradient(var(--panel),var(--panel)); }
   .msg{ max-width:82%; padding:9px 13px; border-radius:15px; white-space:pre-wrap; word-wrap:break-word; animation:pop .18s ease }
   @keyframes pop{ from{opacity:0; transform:translateY(4px)} to{opacity:1} }
-  .user{ align-self:flex-end; background:var(--user); color:#fff; border-bottom-right-radius:5px }
+  .user{ align-self:flex-end; background:var(--user); color:var(--brand-ink); border-bottom-right-radius:5px }
   .agent{ align-self:flex-start; background:var(--agent); border-bottom-left-radius:5px }
   .agent.safety{ background:var(--safe); border:1px solid var(--safeln) }
-  .badge{ font-size:11px; color:var(--muted); margin-top:5px; font-family:ui-monospace,monospace }
+  .badge{ font-size:11px; color:#475569; margin-top:5px; font-family:ui-monospace,monospace }
+  @media (prefers-color-scheme: dark){ .badge{ color:#94a3b8 } }
   .badge[hidden]{ display:none }
+  /* human take-over handoff + offline system lines */
+  .handoff{ align-self:stretch; max-width:100%; text-align:center; color:var(--muted); font-size:12.5px; padding:9px 12px; margin:4px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:color-mix(in srgb,var(--brand) 9%,transparent) }
+  .handoff b{ color:var(--fg) }
+  .system{ align-self:stretch; max-width:100%; text-align:center; color:var(--muted); font-size:12.5px; padding:7px 12px }
+  .system .retry{ margin-left:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand); border-radius:8px; padding:2px 10px; cursor:pointer; font:inherit; font-size:12px }
   .typing{ align-self:flex-start; background:var(--agent); padding:12px 14px; border-radius:15px; border-bottom-left-radius:5px }
   .typing i{ display:inline-block; width:7px; height:7px; margin:0 2px; border-radius:50%; background:var(--muted); animation:blink 1.2s infinite both }
   .typing i:nth-child(2){ animation-delay:.2s } .typing i:nth-child(3){ animation-delay:.4s }
@@ -64,10 +78,14 @@
   #drawer label{ font-size:12px; color:var(--muted); display:flex; align-items:center; gap:5px }
 
   form{ display:flex; gap:8px; padding:12px 14px; border-top:1px solid var(--line) }
-  #in{ flex:1; padding:11px 14px; border:1px solid var(--line); border-radius:12px; background:var(--panel); color:var(--fg); font:inherit }
-  #in:focus{ outline:2px solid color-mix(in srgb,var(--brand) 45%,transparent); outline-offset:0 }
-  form button{ padding:0 16px; border:0; border-radius:12px; background:var(--brand); color:#fff; cursor:pointer; font-weight:600 }
+  #in{ flex:1; padding:11px 14px; border:1px solid #94a3b8; border-radius:12px; background:var(--panel); color:var(--fg); font:inherit }
+  #in:focus{ outline:2px solid var(--brand); outline-offset:1px }
+  form button{ padding:0 16px; border:0; border-radius:12px; background:var(--brand); color:var(--brand-ink); cursor:pointer; font-weight:600 }
   form button:disabled{ opacity:.5 }
+  /* Powered-by PalUp attribution (third-party mark; merchant identity stays in the header) */
+  .powered{ display:flex; align-items:center; justify-content:center; gap:6px; padding:7px 12px; border-top:1px solid var(--line); background:var(--panel); font-size:11px; letter-spacing:.02em; color:var(--muted); user-select:none }
+  .powered b{ color:var(--fg); font-weight:600 }
+  .powered-dot{ width:8px; height:8px; border-radius:50%; background:var(--palup); flex:0 0 auto }
 </style>
 </head>
 <body>
@@ -82,27 +100,28 @@
     </div>
   </div>
 
-  <button id="launcher" hidden aria-label="Open chat">💬</button>
+  <button id="launcher" hidden aria-expanded="false" aria-controls="widget" aria-label="Open chat">💬</button>
 
   <section id="widget" aria-label="Shopper assistant">
     <div class="wh">
-      <div class="avatar">A</div>
-      <div class="t"><b>Auria Assistant</b><br><small>AI assistant · replies are AI-generated</small></div>
+      <div class="avatar" aria-hidden="true">A</div>
+      <div class="t"><b>Auria Assistant</b><br><small id="whStatus">AI assistant · replies are AI-generated</small></div>
       <span class="sp"></span>
-      <button id="gear" title="Demo controls" aria-label="Demo controls">⚙︎</button>
+      <button id="gear" title="Demo controls" aria-label="Demo controls" aria-expanded="false" aria-controls="drawer">⚙︎</button>
       <button id="min" title="Minimize" aria-label="Minimize">—</button>
     </div>
-    <div id="messages" data-testid="messages" role="log" aria-live="polite"></div>
-    <div id="drawer">
-      <select id="mood" title="mood signal"><option value="neutral">neutral</option><option>frustrated</option><option>upset</option><option>anxious</option><option>satisfied</option></select>
-      <select id="cart" title="cart signal"><option value="has_items">cart: has items</option><option value="empty">cart: empty</option><option value="high_value">cart: high value</option></select>
-      <select id="proactivityLevel" title="proactivity"><option value="balanced">balanced</option><option value="cautious">cautious</option><option value="confident">confident</option></select>
+    <div id="messages" data-testid="messages" role="log" aria-live="polite" aria-describedby="whStatus"></div>
+    <div id="drawer" role="group" aria-label="Demo controls">
+      <select id="mood" aria-label="Mood signal" title="mood signal"><option value="neutral">neutral</option><option>frustrated</option><option>upset</option><option>anxious</option><option>satisfied</option></select>
+      <select id="cart" aria-label="Cart signal" title="cart signal"><option value="has_items">cart: has items</option><option value="empty">cart: empty</option><option value="high_value">cart: high value</option></select>
+      <select id="proactivityLevel" aria-label="Proactivity level" title="proactivity"><option value="balanced">balanced</option><option value="cautious">cautious</option><option value="confident">confident</option></select>
       <label><input type="checkbox" id="showSignals" checked /> show signals</label>
     </div>
     <form id="f">
-      <input id="in" data-testid="chat-input" type="text" placeholder="Ask about a product or your order…" autocomplete="off" />
+      <input id="in" data-testid="chat-input" type="text" aria-label="Type a message to the assistant" placeholder="Ask about a product or your order…" autocomplete="off" />
       <button data-testid="send" type="submit" aria-label="Send">➤</button>
     </form>
+    <div class="powered"><span class="powered-dot" aria-hidden="true"></span><span>Powered by <b>PalUp</b></span></div>
   </section>
 
 <script>
@@ -110,11 +129,13 @@
   const msgs = $("#messages");
   const widget = $("#widget"), launcher = $("#launcher");
   const sessionId = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
+  let handedOff = false, lastSend = null;
 
-  function setOpen(open){ widget.hidden = !open; launcher.hidden = open; }
+  function setOpen(open){ widget.hidden = !open; launcher.hidden = open; launcher.setAttribute('aria-expanded', String(open)); if(open){ $('#in').focus(); } else { launcher.focus(); } }
   $("#min").onclick = () => setOpen(false);
   launcher.onclick = () => setOpen(true);
-  $("#gear").onclick = () => $("#drawer").classList.toggle("open");
+  widget.addEventListener('keydown', (e) => { if (e.key === 'Escape') setOpen(false); });
+  $("#gear").onclick = () => { const open = $('#drawer').classList.toggle('open'); $('#gear').setAttribute('aria-expanded', String(open)); };
   $("#showSignals").onchange = (e) => document.querySelectorAll(".badge").forEach(b => b.hidden = !e.target.checked);
 
   function add(text, who, decision){
@@ -124,7 +145,7 @@
     el.textContent = text;
     if (decision){
       const b = document.createElement("div");
-      b.className = "badge"; b.setAttribute("data-testid","badge");
+      b.className = "badge"; b.setAttribute("data-testid","badge"); b.setAttribute("aria-hidden","true");
       b.hidden = !$("#showSignals").checked;
       b.textContent = `mode=${decision.mode} · pitch=${decision.pitch} · escalate=${decision.escalate}` + (decision.outbound ? " · outbound" : "");
       el.appendChild(b);
@@ -134,22 +155,47 @@
   }
   function typing(on){
     let t = $("#typing");
-    if (on && !t){ t = document.createElement("div"); t.id="typing"; t.className="typing"; t.innerHTML="<i></i><i></i><i></i>"; msgs.appendChild(t); msgs.scrollTop=msgs.scrollHeight; }
+    if (on && !t){ t = document.createElement("div"); t.id="typing"; t.className="typing"; t.innerHTML='<span class="sr-only">Assistant is typing…</span><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i>'; msgs.appendChild(t); msgs.scrollTop=msgs.scrollHeight; }
     else if (!on && t){ t.remove(); }
   }
+  // Latched human take-over: once a reply escalates, the widget stops presenting as AI and shows a
+  // "connecting you with a person" state for the rest of the session (persists even if a later reply
+  // doesn't escalate). The real two-way agent channel (WebSocket) is a separate, larger piece.
+  function enterHandoff(){
+    if (handedOff) return; handedOff = true;
+    const el = document.createElement("div"); el.className = "handoff"; el.setAttribute("role","status"); el.setAttribute("data-testid","handoff");
+    el.innerHTML = "<b>Connecting you with a person…</b><br>A team member is joining this chat. You can keep typing — your messages are saved and they'll see the whole conversation.";
+    msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
+    document.querySelector(".wh").classList.add("handoff-mode");
+    $("#whStatus").textContent = "Connecting you with a person";
+  }
+  function offline(){
+    const el = document.createElement("div"); el.className = "system"; el.setAttribute("role","status"); el.setAttribute("data-testid","offline");
+    el.textContent = "⚠︎ I couldn't reach the assistant just now. ";
+    const b = document.createElement("button"); b.type = "button"; b.className = "retry"; b.textContent = "Retry";
+    b.onclick = () => { el.remove(); if (lastSend) send(lastSend.message, true); };
+    el.appendChild(b); msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
+  }
 
-  $("#f").addEventListener("submit", async (e) => {
+  $("#f").addEventListener("submit", (e) => {
     e.preventDefault();
     const message = $("#in").value.trim(); if (!message) return;
-    add(message, "user"); $("#in").value = ""; $("#in").focus();
-    const btn = $("#f button"); btn.disabled = true; typing(true);
-    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
-    try{
-      const r = await fetch("/chat", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ message, signals, sessionId }) });
-      const d = await r.json(); typing(false); add(d.reply, "agent", d);
-    }catch(err){ typing(false); add("Sorry — I hit a problem reaching the server. Please try again.", "agent"); }
-    finally{ btn.disabled = false; }
+    $("#in").value = ""; $("#in").focus();
+    send(message, false);
   });
+  async function send(message, isRetry){
+    if (!isRetry) add(message, "user");
+    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
+    lastSend = { message, signals };
+    const btn = $("#f button"); btn.disabled = true; typing(true);
+    const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 15000);
+    try{
+      const r = await fetch("/chat", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ message, signals, sessionId }), signal: ctrl.signal });
+      if (!r.ok) throw new Error("http " + r.status);
+      const d = await r.json(); add(d.reply, "agent", d); if (d.escalate) enterHandoff();
+    }catch(err){ offline(); }
+    finally{ clearTimeout(timer); typing(false); btn.disabled = false; }
+  }
 
   add("Hi! I'm Auria's assistant — ask me about a product or your order.", "agent");
 </script>
