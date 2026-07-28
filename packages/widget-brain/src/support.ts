@@ -48,21 +48,31 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
 
   let order: Order | null = null;
   let ownershipDenied = false;
+  let orderNotFound = false;
   if (orderId) {
     const found = await commerce.getOrder(orderId);
-    if (found && found.shopperId !== shopperId) ownershipDenied = true;
+    if (!found) orderNotFound = true;
+    else if (found.shopperId !== shopperId) ownershipDenied = true;
     else order = found;
   }
-  const recent = async () => order ?? (await commerce.getRecentOrder(shopperId));
-  const deny = (): SupportResult => {
-    flags.push("ownership_denied", "escalate");
-    return { reply: `For your security I can only look up orders on your own account, so I can't share details for order #${orderId}. If it's yours, I can connect you with a person to verify your identity.`, escalate: true, flags };
+  // A NAMED order we can't verify as this shopper's — unknown id OR someone else's — must never be acted
+  // on, and we must NOT fall back to their recent order (that fallback was an unauthorized-action hole:
+  // "refund order #999" would refund a different order). Auth-sensitive intents deny + route to a human.
+  const namedButUnavailable = Boolean(orderId) && (ownershipDenied || orderNotFound);
+  // Resolve the order to act on: the named+owned order, or — only when NO id was named AND a recent
+  // fallback is allowed — the shopper's recent order. Money actions pass allowRecent=false so they only
+  // ever act on an explicitly named, verified order (never a guessed one).
+  const resolveOwned = async (allowRecent = true): Promise<Order | null> =>
+    order ?? (orderId || !allowRecent ? null : await commerce.getRecentOrder(shopperId));
+  const denyOrder = (verb = "act on"): SupportResult => {
+    flags.push(ownershipDenied ? "ownership_denied" : "order_not_found", "escalate");
+    return { reply: `For your security I can only ${verb} an order I can verify on your account, so I can't ${verb} order #${orderId}. If it's yours, I can connect you with a person to verify your identity.`, escalate: true, flags };
   };
 
   switch (intent) {
     case "order_status": {
-      if (ownershipDenied) return deny();
-      const o = await recent();
+      if (namedButUnavailable) return denyOrder("look up");
+      const o = await resolveOwned();
       if (!o) return { reply: `I couldn't find an order to check — could you share your order number? Our orders usually arrive in 3–5 business days.`, escalate: false, flags };
       const late = o.placedDaysAgo >= 7 || o.status.includes("stuck");
       const eta = o.eta ? ` — ${o.eta}` : ` — I don't have a firm delivery estimate right now`;
@@ -72,21 +82,23 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
     case "policy_q":
       return { reply: `Our return policy: ${policy.returns} Shipping: ${policy.shipping}`, escalate: false, flags };
     case "return": {
-      if (ownershipDenied) return deny();
-      const o = await recent();
+      if (namedButUnavailable) return denyOrder("start a return on");
+      const o = await resolveOwned();
       const past = o ? o.placedDaysAgo > policy.returnWindowDays : false;
       if (past) { flags.push("escalate"); return { reply: `I'm sorry — that order was placed ${o!.placedDaysAgo} days ago, which is past our ${policy.returnWindowDays}-day return window, so I can't start a standard return. I can connect you with a person to see what options we might have.`, escalate: true, flags }; }
       return { reply: `Happy to help — ${o ? `order #${o.id} was placed ${o.placedDaysAgo} days ago, within our ${policy.returnWindowDays}-day window` : `that's within our ${policy.returnWindowDays}-day window`}, so for an unopened item I can start the return and email you a prepaid label. Want me to go ahead?`, escalate: false, flags };
     }
     case "refund": {
-      if (ownershipDenied) return deny();
-      const o = await recent();
-      const above = o ? o.total > policy.refundCeiling : false;
-      if (above) { flags.push("refund_hitl", "escalate"); return { reply: `I'm sorry about that. A refund of $${o!.total} is above the amount I can approve directly, so I've routed it to a team member to process — you'll hear back shortly, and I've checked there's no duplicate refund on this order.`, escalate: true, flags }; }
-      flags.push("refund_within_ceiling"); return { reply: `I'm sorry about that${o ? ` with order #${o.id}` : ""} — I can process a refund within our policy, and I've confirmed there's no duplicate refund already on it. You'll see it back on your original payment method in a few business days.`, escalate: false, flags };
+      if (namedButUnavailable) return denyOrder("refund");
+      const o = await resolveOwned(false); // money action — require an explicit, verified order
+      if (!o) { flags.push("escalate"); return { reply: `Happy to help with a refund — which order is it? I can only refund an order I can verify on your account.`, escalate: true, flags }; }
+      const above = o.total > policy.refundCeiling;
+      if (above) { flags.push("refund_hitl", "escalate"); return { reply: `I'm sorry about that. A refund of $${o.total} on order #${o.id} is above the amount I can approve directly, so I've routed it to a team member to process — you'll hear back shortly, and I've checked there's no duplicate refund on this order.`, escalate: true, flags }; }
+      flags.push("refund_within_ceiling"); return { reply: `I'm sorry about that with order #${o.id} — I can process a refund within our policy, and I've confirmed there's no duplicate refund already on it. You'll see it back on your original payment method in a few business days.`, escalate: false, flags };
     }
     case "damaged": {
-      const o = await recent();
+      if (namedButUnavailable) return denyOrder("act on");
+      const o = await resolveOwned();
       const above = o ? o.total > policy.refundCeiling : false;
       if (above) flags.push("refund_hitl", "escalate");
       return { reply: `I'm really sorry your item arrived damaged — that's not the experience we want, and you don't need to send any proof. I can arrange a replacement or a refund per our policy${above ? `; since this order is $${o!.total}, I'm routing the refund to a person to approve` : ""}. Which would you prefer?`, escalate: above, flags };
@@ -96,10 +108,11 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
     case "exchange":
       return { reply: `Of course — I can set up an exchange for a different shade. Let me check we have it in stock, and I'll email you a prepaid label for the original. Which shade would you like?`, escalate: false, flags };
     case "cancel_order": {
-      if (ownershipDenied) return deny();
-      const o = await recent();
-      if (o && o.fulfilled) { flags.push("escalate"); return { reply: `I checked and order #${o.id} has already shipped, so I can't cancel it from here — but I can connect you with a person to arrange a return or intercept it with the carrier.`, escalate: true, flags }; }
-      return { reply: `I checked and ${o ? `order #${o.id}` : "your order"} hasn't shipped yet, so I've cancelled it and you'll see the refund on your original payment method.`, escalate: false, flags };
+      if (namedButUnavailable) return denyOrder("cancel");
+      const o = await resolveOwned();
+      if (!o) { flags.push("escalate"); return { reply: `I can help cancel an order — which one? I can only cancel an order I can verify on your account.`, escalate: true, flags }; }
+      if (o.fulfilled) { flags.push("escalate"); return { reply: `I checked and order #${o.id} has already shipped, so I can't cancel it from here — but I can connect you with a person to arrange a return or intercept it with the carrier.`, escalate: true, flags }; }
+      return { reply: `I checked and order #${o.id} hasn't shipped yet, so I've cancelled it and you'll see the refund on your original payment method.`, escalate: false, flags };
     }
     case "cancel_subscription": {
       const sub = await commerce.getSubscription(shopperId);
@@ -109,15 +122,17 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
     case "skip_subscription":
       return { reply: `Done — I've skipped your next subscription delivery. Your following order will ship as usual.`, escalate: false, flags };
     case "lost_package": {
-      const o = await recent();
+      if (namedButUnavailable) return denyOrder("act on");
+      const o = await resolveOwned();
       flags.push("escalate");
       return { reply: `I'm sorry it hasn't reached you${o ? ` (order #${o.id})` : ""} — that's frustrating and I won't assume anything went wrong on your end. Per our policy I can start a carrier check and then reship or refund it; I'll get that going and loop in a person to make sure it's sorted.`, escalate: true, flags };
     }
     case "address_change": {
-      if (ownershipDenied) return deny();
-      const o = await recent();
-      if (o && o.fulfilled) { flags.push("escalate"); return { reply: `Order #${o.id} has already shipped, so the address can't be changed now — I can connect you with a person to try to redirect it with the carrier.`, escalate: true, flags }; }
-      return { reply: `Happy to help — I've confirmed this order is on your account, and since ${o ? `order #${o.id}` : "it"} hasn't shipped yet I've updated the shipping address. You'll get a confirmation email.`, escalate: false, flags };
+      if (namedButUnavailable) return denyOrder("change the address on");
+      const o = await resolveOwned();
+      if (!o) { flags.push("escalate"); return { reply: `Happy to update a shipping address — which order? I can only change an order I can verify on your account.`, escalate: true, flags }; }
+      if (o.fulfilled) { flags.push("escalate"); return { reply: `Order #${o.id} has already shipped, so the address can't be changed now — I can connect you with a person to try to redirect it with the carrier.`, escalate: true, flags }; }
+      return { reply: `Happy to help — I've confirmed order #${o.id} is on your account, and since it hasn't shipped yet I've updated the shipping address. You'll get a confirmation email.`, escalate: false, flags };
     }
     case "billing":
       flags.push("escalate");
