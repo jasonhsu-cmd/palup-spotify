@@ -75,6 +75,8 @@ export interface Signals {
   consent?: { email?: Consent; sms?: Consent };
   /** Merchant "discuss competitors" mode (default full). Governs competitor-comparison replies. */
   groundingMode?: "off" | "general" | "full";
+  /** Shopper jurisdiction; drives data-residency / consent regime (unknown = treat conservatively). */
+  region?: "us" | "eu" | "uk" | "other";
 }
 
 export interface Decision {

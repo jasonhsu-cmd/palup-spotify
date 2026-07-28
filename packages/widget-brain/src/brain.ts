@@ -24,10 +24,12 @@ function systemPrompt(policy: Policy, ctx?: GroundingContext): string {
     policy.styleDirective, // ← the only policy-tunable line
     "Recommend ONLY products from the CATALOG below - never invent products, prices, or discounts.",
     "Only state facts (attributes, prices, shipping, availability, stock) found in the CATALOG/POLICY below. If a fact isn't there, say you're not certain and will check - never invent a spec, price, ETA, stock level, or shipping detail.",
-    "If a shopper assumes a product has an attribute it does NOT have in the catalog (e.g. SPF), correct them honestly rather than confirming it.",
-    "If the question is ambiguous or you can't tell which product they mean, ask a brief clarifying question instead of guessing.",
+    "If a shopper assumes a product has an attribute it does NOT have in the catalog (e.g. SPF), correct them honestly rather than confirming it - and even when they don't name the product, state from the CATALOG which item(s) do and don't have that attribute rather than only asking which one they mean, and never confirm the attribute for an unnamed product.",
+    "If you can't tell which product the shopper means: for a catalog-answerable fact (price, ingredients, SPF or other attribute, size, availability) first surface the relevant facts from the CATALOG - the matching items with their real prices/attributes, or the price range - and engage the shopper's stated concern or goal, then ask one short clarifying question in the SAME reply (never a bare clarifying question that ignores what they said). For a subjective, efficacy, or results-timeline question where you can't tell which product is meant, say you're not sure which they mean (or that results vary) and ask what they're referring to, rather than assuming a specific product and giving a confident guess. Never invent a fact.",
     "All catalog items are in stock; never claim something is low-stock or 'almost sold out' to create urgency.",
     "Be an honest advisor: if a product isn't a good fit for the shopper, say so and suggest a better fit - even if it is cheaper.",
+    "If the shopper signals they've decided or want to check out, confirm the item and price and move them straight to checkout - do not add an upsell, cross-sell, bundle, or free-shipping nudge they didn't ask for. This applies only to an explicit buy/checkout signal, not to merely adding an item to the cart or a just-completed purchase.",
+    "When a shopper asks for an ingredient breakdown or why an active is at a given strength, answer with substance: name the actives and their concentrations AS STATED IN THE CATALOG and explain plainly why that level is used, with honest limits - do not deflect with only a generic safety caveat, and never state a concentration or ingredient not present in the CATALOG.",
     "If the store doesn't carry what the shopper needs, say so honestly and suggest the closest fit.",
     "Never make medical or disease claims and never diagnose; defer health/safety concerns to a human.",
     "You are an AI assistant - never claim to be human; disclose it if asked.",
@@ -106,11 +108,25 @@ function selectPitch(signals: Signals, policy: Policy): PitchKind {
   if (cart === "has_items" || cart === "high_value") {
     return level === "cautious" ? "cart_recovery" : "cross_sell";
   }
-  if (rel === "replenishment_due" || rel === "lapsed") return "replenishment";
+  if ((rel === "replenishment_due" || rel === "lapsed") && level !== "cautious") return "replenishment";
   if (level === "cautious") return "none";
   if (level === "confident") return "guided_rec";
   return "guided_rec";
 }
+
+// The chosen pitch has to reach the MODEL to shape the reply (RC1: it was computed but never used).
+// Each directive is a bounded, honest steer — always "from CATALOG/POLICY", one offer, never pushy.
+const PITCH_PLAYBOOK: Record<PitchKind, string> = {
+  guided_rec: "\nPITCH - guided recommendation: If the shopper names a product or category, recommend ONE specific best-fit item from the CATALOG by name with a one-line why; if a cheaper item is the better fit, say so and recommend it instead. If nothing specific is named yet, ask one short discovery question. Never push a higher-priced/higher-margin item against fit.",
+  cross_sell: "\nPITCH - cross-sell: Suggest exactly ONE relevant complement from the CATALOG that pairs with what they added, framed as optional. If nothing is genuinely relevant, add nothing. Never be pushy.",
+  cart_recovery: "\nPITCH - cart recovery: Make at most ONE helpful offer addressing a likely reason for hesitation (e.g. shipping/returns from POLICY). One offer only - no repeated nudges, no false urgency or scarcity.",
+  replenishment: "\nPITCH - replenishment: Give ONE capped, value-aligned repurchase nudge tied to what they use (they may be running low). No urgency/scarcity, no desperation, do not repeat the nudge.",
+  objection_close: "\nPITCH - objection: Acknowledge and address the shopper's actual concern (e.g. price/value) with grounded reasons from the CATALOG/POLICY, not only a clarifying question.",
+  subscription: "\nPITCH - subscription: Offer subscribe-and-save ONCE and state plainly they can pause or cancel anytime (per POLICY). Never hide the cancel option.",
+  upsell: "\nPITCH - trade-up: Suggest a larger size/higher tier ONLY if genuinely a better fit or value; otherwise do not.",
+  promo: "\nPITCH - promo: Surface an active merchant-approved promo ONLY if it appears in the grounded context, exactly as written. Never invent a promo, code, or terms.",
+  none: "",
+};
 
 export interface Brain {
   decide(signals: Signals, message: string): Promise<Decision>;
@@ -186,8 +202,11 @@ export function createBrain(
 
       // 2. Open support issue OR a support intent — suppresses sales (INV-B).
       const supportIntent = classifySupportIntent(text);
+      // Word-boundary match: substring scanning mis-routed "returning"/"cancellation" (and browsing
+      // "returning shopper" cases) into support. \b keeps genuine "return"/"cancel" routing intact.
+      const supportKeywordHit = SUPPORT.some((p) => new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text));
       const isSupport =
-        (signals.openIssues?.length ?? 0) > 0 || supportIntent !== "general" || SUPPORT.some((p) => text.includes(p));
+        (signals.openIssues?.length ?? 0) > 0 || supportIntent !== "general" || supportKeywordHit;
       if (isSupport) {
         // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
         if (commerce) {
@@ -234,11 +253,15 @@ export function createBrain(
               ? "\nCOMPETITOR POLICY: Give an honest, GENERAL comparison — what to look for in this category — from general knowledge only. No live web; never assert a specific volatile competitor fact (price/stock) as certain. Never disparage."
               : "\nCOMPETITOR POLICY: You may reference a current competitor fact ONLY if you can cite a source; if you can't source it, redirect to the shopper's need. Ground our side from the catalog. Never fabricate a competitor fact and never disparage.";
       }
-      const gen = await model.complete({
-        messages: await groundedMessages(message, systemExtra),
-        temperature: 0,
-        tenantId,
-      });
+      // Data residency / consent regime by jurisdiction — compliance enforced in CODE, never a POLICY.
+      const euShopper = signals.region === "eu" || /\beu\b|european union|\beea\b|gdpr/.test(text);
+      if (euShopper) {
+        flags.push("jurisdiction:eu");
+        systemExtra +=
+          "\nDATA-RESIDENCY POLICY: This shopper is in the EU. Handle their personal data under EU (GDPR) rules - EU data residency and opt-in consent by default - and do NOT apply US-default data handling. Briefly reassure them on this basis; do not assert specific infrastructure the merchant may not have.";
+      }
+      // Choose the pitch BEFORE generating so the reply can actually reflect it (RC1). The pitch
+      // directive lands on the sales path only — after every guardrail short-circuit above.
       const negativeMood =
         signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
       let pitch: PitchKind = "none";
@@ -260,6 +283,11 @@ export function createBrain(
           }
         }
       }
+      const gen = await model.complete({
+        messages: await groundedMessages(message, systemExtra + PITCH_PLAYBOOK[pitch]),
+        temperature: 0,
+        tenantId,
+      });
       return {
         mode: "sales",
         reply: gen.text,
