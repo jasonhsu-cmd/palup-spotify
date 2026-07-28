@@ -77,6 +77,8 @@ export interface Signals {
   groundingMode?: "off" | "general" | "full";
   /** Shopper jurisdiction; drives data-residency / consent regime (unknown = treat conservatively). */
   region?: "us" | "eu" | "uk" | "other";
+  /** Operator kill switch for this session/scope — when true the agent halts and hands to a human. */
+  kill?: boolean;
 }
 
 export interface Decision {

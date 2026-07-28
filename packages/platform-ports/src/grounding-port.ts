@@ -15,6 +15,8 @@ export interface Product {
 export interface StorePolicy {
   returns: string;
   shipping: string;
+  /** Merchant's published allergen statement, if any — grounds honest allergy answers (never a guarantee). */
+  allergens?: string;
 }
 
 export interface GroundingContext {
