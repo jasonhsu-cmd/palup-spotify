@@ -70,7 +70,7 @@ const INJECTION = [
 
 const SAFETY: { class: Exclude<SafetyClass, "none" | "injection">; terms: string[] }[] = [
   { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm"] },
-  { class: "product_safety", terms: ["burning", "burns", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "breaking out", "irritat", "swelling", "swollen", "stings", "hives", "peeling", "flaking", "blister"] },
+  { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "breaking out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
   { class: "medical", terms: ["cure", "treat ", "diagnos", "pregnan", "medication", "prescription", "tretinoin", "rosacea", "eczema", "mole", "infection"] },
   { class: "legal", terms: ["lawyer", "i'll sue", "lawsuit", "legal action"] },
   { class: "abuse", terms: ["you're useless", "you are useless", "i hate you", "stupid bot"] },
@@ -152,14 +152,18 @@ export function createBrain(
         flags.push(`safety:${cls}`, "no_pitch");
         const escalate = cls !== "regulated_claim" && cls !== "abuse";
         if (escalate) flags.push("escalate");
+        // AI-disclosed, empathetic, escalates, and DEFERS health to a doctor (the agent never gives
+        // medical advice itself) — recommends no product and never downplays.
         const reply =
           cls === "distress"
-            ? "I'm really sorry you're going through that. I'm connecting you with a person who can help right now. If you're in danger, please contact local emergency services."
+            ? "As an AI assistant, I'm really sorry you're going through this — you deserve real support. I'm connecting you with a person now, and if you're in danger please contact your local emergency services or a crisis line."
             : cls === "product_safety"
-              ? "I'm sorry to hear that — please stop using the product and rinse. I'm looping in a person to help, and if it worsens or you have trouble breathing, seek medical care."
+              ? "As an AI assistant, I'm sorry to hear that. I'm not able to advise on a reaction myself, so I'm bringing in a person to help right away — and if you're worried about your health, please check with a doctor."
               : cls === "medical"
-                ? "That's a medical question I'm not able to advise on — please check with a doctor or pharmacist. I'll connect you with a person for anything order-related."
-                : "I understand — I'm bringing in a member of the team to help with this.";
+                ? "As an AI assistant, I can't give medical advice on that — please check with a doctor or pharmacist. I'm happy to connect you with a person for anything order- or product-related."
+                : cls === "abuse"
+                  ? "I'd like to keep this respectful and still help — I can bring in a member of our team whenever you're ready."
+                  : "As an AI assistant, I understand — I'm bringing in a member of our team to help with this.";
         return {
           mode: "safety",
           reply,

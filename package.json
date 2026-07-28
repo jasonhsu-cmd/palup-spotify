@@ -9,6 +9,7 @@
     "test:watch": "vitest",
     "eval": "tsx packages/eval/src/run.ts",
     "eval:judge": "tsx packages/eval/src/judge-run.ts",
+    "eval:full": "tsx packages/eval/src/eval-full.ts",
     "evo:demo": "tsx packages/evolution/src/demo.ts",
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
