@@ -23,6 +23,11 @@ function systemPrompt(policy: Policy, ctx?: GroundingContext): string {
   const rules = [
     policy.styleDirective, // ← the only policy-tunable line
     "Recommend ONLY products from the CATALOG below - never invent products, prices, or discounts.",
+    "Only state facts (attributes, prices, shipping, availability, stock) found in the CATALOG/POLICY below. If a fact isn't there, say you're not certain and will check - never invent a spec, price, ETA, stock level, or shipping detail.",
+    "If a shopper assumes a product has an attribute it does NOT have in the catalog (e.g. SPF), correct them honestly rather than confirming it.",
+    "If the question is ambiguous or you can't tell which product they mean, ask a brief clarifying question instead of guessing.",
+    "All catalog items are in stock; never claim something is low-stock or 'almost sold out' to create urgency.",
+    "Be an honest advisor: if a product isn't a good fit for the shopper, say so and suggest a better fit - even if it is cheaper.",
     "If the store doesn't carry what the shopper needs, say so honestly and suggest the closest fit.",
     "Never make medical or disease claims and never diagnose; defer health/safety concerns to a human.",
     "You are an AI assistant - never claim to be human; disclose it if asked.",
@@ -119,10 +124,10 @@ export function createBrain(
   shopperId = "shopper-demo",
 ): Brain {
   const tenantId = "demo";
-  const groundedMessages = async (message: string) => {
+  const groundedMessages = async (message: string, systemExtra = "") => {
     const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
     return [
-      { role: "system" as const, content: systemPrompt(policy, ctx) },
+      { role: "system" as const, content: systemPrompt(policy, ctx) + systemExtra },
       { role: "user" as const, content: message },
     ];
   };
@@ -217,8 +222,20 @@ export function createBrain(
       }
 
       // 4. Sales / smalltalk — reactive answer always; proactive pitch is gated.
+      // Competitor-comparison handling per the merchant "discuss competitors" mode (default full).
+      let systemExtra = "";
+      if (/compare[ds]? (to|with)|compared to| versus | vs\b|better than|brand [a-z]\b|competitor/.test(text)) {
+        const mode = signals.groundingMode ?? "full";
+        flags.push(`competitor:${mode}`);
+        systemExtra =
+          mode === "off"
+            ? "\nCOMPETITOR POLICY: Do NOT discuss competitor specifics. Redirect to the shopper's need and highlight OUR strengths, grounded from the catalog. Never disparage a competitor."
+            : mode === "general"
+              ? "\nCOMPETITOR POLICY: Give an honest, GENERAL comparison — what to look for in this category — from general knowledge only. No live web; never assert a specific volatile competitor fact (price/stock) as certain. Never disparage."
+              : "\nCOMPETITOR POLICY: You may reference a current competitor fact ONLY if you can cite a source; if you can't source it, redirect to the shopper's need. Ground our side from the catalog. Never fabricate a competitor fact and never disparage.";
+      }
       const gen = await model.complete({
-        messages: await groundedMessages(message),
+        messages: await groundedMessages(message, systemExtra),
         temperature: 0,
         tenantId,
       });
