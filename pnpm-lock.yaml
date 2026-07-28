@@ -36,6 +36,12 @@ importers:
         specifier: workspace:*
         version: link:../widget-brain
 
+  packages/evolution:
+    dependencies:
+      '@palup/widget-brain':
+        specifier: workspace:*
+        version: link:../widget-brain
+
   packages/judge:
     dependencies:
       '@anthropic-ai/sdk':

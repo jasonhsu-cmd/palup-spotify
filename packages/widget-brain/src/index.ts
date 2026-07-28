@@ -1,4 +1,4 @@
-export { createBrain } from "./brain.js";
+export { createBrain, DEFAULT_POLICY } from "./brain.js";
 export type { Brain } from "./brain.js";
 export {
   createSession,
