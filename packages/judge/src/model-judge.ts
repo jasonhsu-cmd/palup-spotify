@@ -36,14 +36,42 @@ export class ModelJudge implements JudgePort {
       { role: "system" as const, content: system },
       { role: "user" as const, content: user },
     ];
+    // Structured-outputs schema: adapters that support it (Anthropic `output_config.format`) force
+    // schema-valid JSON at the provider so a verdict can't come back as prose. Adapters that don't
+    // just ignore it. `additionalProperties: false` + `required` per the structured-outputs contract.
+    const responseSchema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        results: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              id: { type: "string" },
+              pass: { type: "boolean" },
+              reason: { type: "string" },
+            },
+            required: ["id", "pass", "reason"],
+          },
+        },
+      },
+      required: ["results"],
+    } as const;
 
-    // Resilient parse: retry once, then FAIL CLOSED (all criteria fail) rather than throwing — a single
-    // unparseable judge response must never crash a whole corpus run.
+    // Resilient: attempt 0 asks for structured output; attempt 1 drops the schema (fallback if a
+    // provider rejects it or an edge case — refusal / max_tokens — slips through). Then FAIL CLOSED
+    // rather than throwing — a single unparseable verdict must never crash a whole corpus run.
     let res: Awaited<ReturnType<ModelPort["complete"]>> | undefined;
     let parsed: { results?: Array<{ id?: unknown; pass?: unknown; reason?: unknown }> } | undefined;
     for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
-      res = await this.model.complete({ messages, temperature: 0 });
       try {
+        res = await this.model.complete({
+          messages,
+          temperature: 0,
+          responseSchema: attempt === 0 ? (responseSchema as unknown as Record<string, unknown>) : undefined,
+        });
         parsed = extractJson(res.text);
       } catch {
         parsed = undefined;

@@ -14,6 +14,12 @@ export interface ModelRequest {
   maxTokens?: number;
   /** Opaque per-tenant tag for isolation/attribution — never used to leak across tenants. */
   tenantId?: string;
+  /**
+   * Optional JSON Schema constraining the response to valid JSON of that shape (structured outputs).
+   * Adapters that support it (e.g. Anthropic `output_config.format`) enforce it at the provider;
+   * adapters that don't simply ignore it. Used by the judge so a verdict can't come back as non-JSON.
+   */
+  responseSchema?: Record<string, unknown>;
 }
 
 export interface ModelResponse {
