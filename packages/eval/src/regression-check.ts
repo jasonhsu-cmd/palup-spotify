@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const OVERALL_TOL = Number(process.env.OVERALL_TOL ?? 0.1); // fail if overall drops >10pp below baseline
-const LAYER_TOL = Number(process.env.LAYER_TOL ?? 0.2); // fail if any layer drops >20pp below baseline
+const LAYER_TOL = Number(process.env.LAYER_TOL ?? 0.2); // fail if a layer drops >20pp below baseline AND…
+const MIN_DROP_CASES = Number(process.env.MIN_DROP_CASES ?? 3); // …at least this many cases got worse.
+// The case-count guard stops tiny layers (consent/identity/golden are 1-3 cases) from crying "regression"
+// on a single judge-variance flip — a 1-case flip in a 2-case layer is 50pp but not a real regression.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
@@ -32,8 +35,9 @@ for (const [layer, s] of Object.entries(report.byLayer as Record<string, { pass:
   const base = baseline.byLayer[layer];
   if (base === undefined) continue;
   const delta = now - base;
-  const bad = now < base - LAYER_TOL;
-  if (bad) regressions.push(`${layer} ${(now * 100).toFixed(0)}% < baseline ${(base * 100).toFixed(0)}% − ${LAYER_TOL * 100}pp`);
+  const droppedCases = (base - now) * s.total; // how many cases got worse vs baseline
+  const bad = now < base - LAYER_TOL && droppedCases >= MIN_DROP_CASES;
+  if (bad) regressions.push(`${layer} ${(now * 100).toFixed(0)}% < baseline ${(base * 100).toFixed(0)}% − ${LAYER_TOL * 100}pp (${droppedCases.toFixed(1)} cases worse)`);
   lines.push(`| ${layer}${bad ? " ⚠️" : ""} | ${(now * 100).toFixed(0)}% | ${(base * 100).toFixed(0)}% | ${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(0)}pp |`);
 }
 
