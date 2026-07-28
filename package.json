@@ -13,6 +13,7 @@
     "eval:regression": "tsx packages/eval/src/regression-check.ts",
     "evo:demo": "tsx packages/evolution/src/demo.ts",
     "evolve": "tsx packages/control-plane/src/evolve.ts",
+    "try": "tsx packages/control-plane/src/try.ts",
     "monitor": "tsx packages/control-plane/src/server.ts",
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
