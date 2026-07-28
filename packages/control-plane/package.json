@@ -1,0 +1,14 @@
+{
+  "name": "@palup/control-plane",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/server.ts",
+  "dependencies": {
+    "@palup/platform-ports": "workspace:*",
+    "@palup/widget-brain": "workspace:*",
+    "@palup/model-vertex": "workspace:*",
+    "@palup/judge": "workspace:*",
+    "@palup/evolution": "workspace:*",
+    "fastify": "^5.0.0"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@palup/evolution",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@palup/widget-brain": "workspace:*"
+  }
+}

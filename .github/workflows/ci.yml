@@ -28,3 +28,5 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
       - name: Application E2E (blocking pre-promotion gate)
         run: pnpm e2e
+      - name: Control-plane self-improvement E2E (mock)
+        run: pnpm e2e:monitor
