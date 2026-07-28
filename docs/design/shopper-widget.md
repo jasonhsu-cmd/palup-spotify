@@ -248,11 +248,14 @@ CSAT, resolution rate, cost/run. The design rule: a conversion lift that **raise
 complaints is a failed eval, not a win** — this is what makes "self-improving" safe on a consumer
 surface.
 
-## 9. Open items (not yet decided / designed — do NOT treat as done)
-- **The UI / surface layer (entirely undiscussed):** widget states (collapsed bubble / open panel /
-  proactive greeting / offline / basic-mode), AI-disclosure UI treatment, "Powered by PalUp" badge,
-  appearance/theming, **accessibility**, the **human take-over handoff** UX, and transport (WebSocket,
-  `<120ms` load) — see `comms-and-messaging.md` §10 for the transport starting point.
+## 9. Open items (partially built — see status)
+- **Built (PR #5, the shipped widget — `packages/widget/public/index.html`):** widget states
+  (collapsed launcher / open panel / proactive greeting), AI-disclosure UI treatment ("AI assistant ·
+  replies are AI-generated"), and a usable embedded panel on a stand-in storefront (now live on
+  staging).
+- **Still open:** "Powered by PalUp" badge, appearance/theming, **accessibility**, the **human
+  take-over handoff** UX, offline/basic-mode, and low-latency **transport (WebSocket, `<120ms` load)** —
+  see `comms-and-messaging.md` §10 for the transport starting point.
 - **Output format** for the broader deliverable (this doc vs. an interactive prototype).
 
 ## 10. References

@@ -144,7 +144,8 @@ to *how* we build.
 .claude/            Build-time agents, skills, commands, settings  (see .claude/README below)
 docs/               Architecture, governance, HITL policy, design system, ADRs
 docs/adr/           Architecture Decision Records — the "why"
-packages/           (to be built) platform-ports, agent-runtime, design-system, consoles
+packages/           built: platform-ports, widget-brain, widget-backend, widget, eval, judge,
+                    model-vertex, evolution, control-plane. Not yet built: agent-runtime, design-system, consoles
 palup-*.html        UI visual source of truth
 ```
 
