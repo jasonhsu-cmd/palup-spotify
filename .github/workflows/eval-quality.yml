@@ -11,6 +11,7 @@ on:
     paths:
       - "packages/widget-brain/**"
       - "packages/eval/cases/**"
+      - "packages/judge/**"
       - "packages/model-vertex/src/**"
       - ".github/eval-baseline.json"
       - ".github/workflows/eval-quality.yml"

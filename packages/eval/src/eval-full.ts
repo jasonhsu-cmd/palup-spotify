@@ -59,11 +59,8 @@ async function main() {
   const guard = crossFamilyGuard(agentFamily, judgeFamily);
   console.log(`\nFULL CORPUS: ${cases.length} cases | agent=${agentFamily} judge=${judgeFamily} crossFamily=${guard.crossFamily}${guard.crossFamily ? " (GATING)" : " (ADVISORY)"}\n`);
 
-  const results: any[] = [];
-  let done = 0;
-  for (const c of cases) {
-    // Per-case isolation: an agent or judge error on one case must never abort the whole run — it
-    // counts as a fail and we continue, so the report always covers all cases.
+  // Grade one case (per-case isolation: an agent/judge error counts as a fail, never aborts the run).
+  const gradeCase = async (c: any) => {
     try {
       let transcript: string;
       if (c.turns?.length) {
@@ -79,15 +76,28 @@ async function main() {
         transcript = `Shopper: ${c.message}\nAssistant: ${d.reply}`;
       }
       const v = await judge.grade({ rubric: `${c.rubric}\n\n${groundTruth}`, transcript, criteria: c.criteria });
-      results.push({ id: c.id, layer: c.layer, pass: v.pass, score: v.score, fails: v.results.filter((r) => !r.pass).map((r) => r.id) });
-      process.stdout.write(`${v.pass ? "✅" : "❌"} ${c.id.padEnd(10)} `);
+      process.stdout.write(`${v.pass ? "✅" : "❌"} ${c.id} `);
+      return { id: c.id, layer: c.layer, pass: v.pass, score: v.score, fails: v.results.filter((r) => !r.pass).map((r) => r.id) };
     } catch (e) {
-      results.push({ id: c.id, layer: c.layer, pass: false, score: 0, fails: [`error: ${(e as Error).message}`] });
-      process.stdout.write(`⚠️ ${c.id.padEnd(10)} `);
+      process.stdout.write(`⚠️ ${c.id} `);
+      return { id: c.id, layer: c.layer, pass: false, score: 0, fails: [`error: ${(e as Error).message}`] };
     }
-    done++;
-    if (done % 6 === 0) process.stdout.write("\n");
+  };
+
+  // Bounded-concurrency pool: run up to EVAL_CONCURRENCY (default 8) cases at once. Results are written
+  // by index so the report stays in corpus order regardless of completion order. ~8x faster than serial.
+  const concurrency = Math.max(1, Number(process.env.EVAL_CONCURRENCY ?? 8));
+  const results: any[] = new Array(cases.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= cases.length) return;
+      results[i] = await gradeCase(cases[i]);
+    }
   }
+  console.log(`(running ${concurrency} at a time)\n`);
+  await Promise.all(Array.from({ length: Math.min(concurrency, cases.length) }, worker));
   process.stdout.write("\n\n");
 
   // Aggregate by layer.
