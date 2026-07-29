@@ -64,7 +64,7 @@ async function main() {
     try {
       let transcript: string;
       if (c.turns?.length) {
-        const s = createSession(brain);
+        const s = await createSession(brain); // createSession is async (durable store adapters)
         const lines: string[] = [];
         for (const t of c.turns) {
           const d = await s.send(t, (c.signals ?? {}) as never);
