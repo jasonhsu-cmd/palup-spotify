@@ -88,6 +88,53 @@ export function runRuntimeStatePortContract(makeAdapter: () => RuntimeStatePort 
       expect(await s.readAudit(A)).toHaveLength(1);
     });
 
+    it("REJECTS a blank or missing tenantId on every method (a NULL/empty tenant filter is a cross-tenant wildcard)", async () => {
+      const s = await makeAdapter();
+      const bad = { tenantId: "" };
+      await expect(s.get(bad, "c", "k")).rejects.toThrow();
+      await expect(s.put(bad, "c", "k", { x: 1 })).rejects.toThrow();
+      await expect(s.delete(bad, "c", "k")).rejects.toThrow();
+      await expect(s.list(bad, "c")).rejects.toThrow();
+      await expect(s.append(bad, "s", { x: 1 })).rejects.toThrow();
+      await expect(s.readStream(bad, "s")).rejects.toThrow();
+      await expect(s.audit(bad, { actor: "system", action: "x" })).rejects.toThrow();
+      await expect(s.readAudit(bad)).rejects.toThrow();
+      await expect(s.verifyAudit(bad)).rejects.toThrow();
+      await expect(s.tx(bad, async () => {})).rejects.toThrow();
+      await expect(s.get({ tenantId: "   " }, "c", "k")).rejects.toThrow(); // whitespace-only too
+    });
+
+    it("a caller mutating the audit input after audit() cannot rewrite the stored record", async () => {
+      const s = await makeAdapter();
+      const input = { orderId: "1042", pii: "redacted" };
+      await s.audit(A, { actor: "system", action: "refund.route", input }, "2026-01-01T00:00:00.000Z");
+      input.orderId = "9999"; // mutate the caller's object after committing
+      expect((await s.verifyAudit(A)).ok).toBe(true); // stored record + its hash are unaffected
+      const [rec] = await s.readAudit(A);
+      expect((rec.input as { orderId: string }).orderId).toBe("1042");
+    });
+
+    it("verifyAudit with a trusted head anchor detects truncation/rewrite", async () => {
+      const s = await makeAdapter();
+      await s.audit(A, { actor: "operator", action: "kill.arm" }, "2026-01-01T00:00:00.000Z");
+      const head = await s.audit(A, { actor: "system", action: "guardrail" }, "2026-01-01T00:00:01.000Z");
+      expect((await s.verifyAudit(A, { expectedHead: { seq: head.seq, hash: head.hash } })).ok).toBe(true);
+      // A stale/mismatched anchor (what a truncated or rewritten chain would produce) is caught.
+      expect((await s.verifyAudit(A, { expectedHead: { seq: 5, hash: "0".repeat(64) } })).ok).toBe(false);
+    });
+
+    it("serializes concurrent same-tenant transactions (no lost update)", async () => {
+      const s = await makeAdapter();
+      await s.put(A, "counter", "n", { v: 0 });
+      const bump = () =>
+        s.tx(A, async (t) => {
+          const cur = (await s.get<{ v: number }>(A, "counter", "n"))!.v;
+          await t.put("counter", "n", { v: cur + 1 });
+        });
+      await Promise.all([bump(), bump()]);
+      expect(await s.get(A, "counter", "n")).toEqual({ v: 2 }); // both applied, neither lost
+    });
+
     it("tx ROLLS BACK all writes + audit when the body throws (atomicity)", async () => {
       const s = await makeAdapter();
       await s.put(A, "kill", "global", { reason: "pre-existing" });

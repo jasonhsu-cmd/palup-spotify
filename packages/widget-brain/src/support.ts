@@ -107,9 +107,15 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       return { reply: `I'm really sorry your item arrived damaged — that's not the experience we want, and you don't need to send any proof. I can arrange a replacement or a refund per our policy${above ? `; since this order is $${o!.total}, I'm routing the refund to a person to approve` : ""}. Which would you prefer?`, escalate: above, flags };
     }
     case "wrong_item":
-      return { reply: `I'm sorry — that's our mistake. I'll get the correct item sent to you right away and email a prepaid label to return the wrong one; you won't be charged for either. Sorry for the hassle!`, escalate: false, flags };
+      // HONESTY (no execution path): a reship + prepaid label + no-charge are actions the agent can't
+      // perform. Acknowledge fault, route to a person, don't claim it's done. (NN #1: money/fulfillment.)
+      flags.push("reship_routed", "escalate");
+      return { reply: `I'm sorry — that's our mistake, and you shouldn't be out of pocket for it. I can't send a replacement or issue the return label myself, so I've handed this to a member of our team to make it right — a corrected item plus a prepaid return for the wrong one. They'll follow up to confirm.`, escalate: true, flags };
     case "exchange":
-      return { reply: `Of course — I can set up an exchange for a different shade. Let me check we have it in stock, and I'll email you a prepaid label for the original. Which shade would you like?`, escalate: false, flags };
+      // Gather the detail, but frame fulfillment as team-executed — the agent can't set up an exchange
+      // or send a label itself, so it must not claim it will.
+      flags.push("exchange_offer");
+      return { reply: `Of course — I'd be glad to help arrange an exchange for a different shade. Which shade would you like? Once I know, I'll pass it to a member of our team to set up the exchange and send a prepaid label for the original — I can't process that myself, but they'll take care of it.`, escalate: false, flags };
     case "cancel_order": {
       if (namedButUnavailable) return denyOrder("cancel");
       const o = await resolveOwned();
@@ -123,10 +129,13 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       if (!sub?.active) return { reply: `You don't have an active subscription right now, so there's nothing to cancel — let me know if there's anything else I can help with.`, escalate: false, flags };
       // HONESTY + no dark pattern: honor the cancel intent promptly and offer pause WITHOUT pressure,
       // but don't claim it's already done — a person completes it (no execution path this phase).
-      flags.push("cancel_sub_routed", "escalate"); return { reply: `I hear you — I can't cancel the subscription myself, so I've handed it to a member of our team to process right away, effective immediately, so you won't be charged going forward. If you'd ever rather just pause instead that's an option too — no pressure. They'll confirm shortly.`, escalate: true, flags };
+      flags.push("cancel_sub_routed", "escalate"); return { reply: `I hear you — I can't cancel the subscription myself, so I've asked a member of our team to stop the billing right away; they'll confirm it's cancelled so you're not charged again. If you'd ever rather just pause instead, that's an option too — no pressure.`, escalate: true, flags };
     }
     case "skip_subscription":
-      return { reply: `Done — I've skipped your next subscription delivery. Your following order will ship as usual.`, escalate: false, flags };
+      // HONESTY (money-model adjacent — changes when the shopper is billed): no execution path, so don't
+      // claim it's done. Route to a person to apply the skip.
+      flags.push("skip_sub_routed", "escalate");
+      return { reply: `Sure — I can't change the subscription schedule myself, so I've passed your request to skip the next delivery to a member of our team to apply, and flagged it as time-sensitive. They'll confirm once it's set, and the following order would ship as usual.`, escalate: true, flags };
     case "lost_package": {
       if (namedButUnavailable) return denyOrder("act on");
       const o = await resolveOwned();
@@ -138,7 +147,10 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       const o = await resolveOwned();
       if (!o) { flags.push("escalate"); return { reply: `Happy to update a shipping address — which order? I can only change an order I can verify on your account.`, escalate: true, flags }; }
       if (o.fulfilled) { flags.push("escalate"); return { reply: `Order #${o.id} has already shipped, so the address can't be changed now — I can connect you with a person to try to redirect it with the carrier.`, escalate: true, flags }; }
-      return { reply: `Happy to help — I've confirmed order #${o.id} is on your account, and since it hasn't shipped yet I've updated the shipping address. You'll get a confirmation email.`, escalate: false, flags };
+      // HONESTY + SECURITY: a shipping-address change is an account-takeover / parcel-redirect vector
+      // and the agent has no execution path. Never claim it's done; route to a person to verify + apply.
+      flags.push("address_change_routed", "escalate");
+      return { reply: `I've confirmed order #${o.id} is on your account and it hasn't shipped yet, so the address can still be changed. For your security I can't change a shipping address myself — I've handed it to a member of our team to verify and update, and they'll confirm the change with you.`, escalate: true, flags };
     }
     case "billing":
       flags.push("escalate");

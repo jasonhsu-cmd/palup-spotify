@@ -72,15 +72,33 @@ export interface RuntimeStatePort {
   readStream<T>(ctx: RuntimeStateCtx, stream: string, opts?: { limit?: number }): Promise<T[]>;
 
   // --- Immutable, hash-chained Audit Log (NN #5) ---
+  //
+  // TRUST ASSUMPTION (immutability): the chain is tamper-EVIDENT, not tamper-proof by itself. In-place
+  // mutation, reorder, mid-chain removal, and naive insertion are caught by `verifyAudit`. But
+  // tail-truncation and a full re-hash are NOT catchable from the chain alone (no secret is stored),
+  // so immutability rests on the BACKING STORE being genuinely append-only. Adapters MUST enforce this:
+  // the Postgres adapter's audit table must grant NO UPDATE/DELETE to the app role (INSERT-only), and
+  // production SHOULD persist a periodic trusted head anchor and/or HMAC-sign records so truncation and
+  // store-level rewrite are detectable (pass the anchor to `verifyAudit`).
   /** Append an audit record to this tenant's chain; returns the committed record with its hash. */
   audit(ctx: RuntimeStateCtx, entry: AuditInput, at?: string): Promise<AuditRecord>;
   /** Read the audit log oldest-first; `limit` returns the most recent N. */
   readAudit(ctx: RuntimeStateCtx, opts?: { limit?: number }): Promise<AuditRecord[]>;
-  /** Recompute the chain and report whether it is intact (tamper detection). */
-  verifyAudit(ctx: RuntimeStateCtx): Promise<{ ok: boolean; brokenAt?: number }>;
+  /**
+   * Recompute the chain and report whether it is intact. Pass `expectedHead` (a trusted, separately
+   * persisted `{seq, hash}`) to also detect tail-truncation / rewrite the in-chain check can't see.
+   */
+  verifyAudit(
+    ctx: RuntimeStateCtx,
+    opts?: { expectedHead?: { seq: number; hash: string } },
+  ): Promise<{ ok: boolean; brokenAt?: number }>;
 
-  // --- Atomicity: run mutations + their audit record so they commit together or not at all ---
-  /** Execute `fn` atomically. If it throws, ALL writes/audit in the tx roll back. */
+  // --- Atomicity + isolation: run mutations + their audit record so they commit together or not at all ---
+  /**
+   * Execute `fn` atomically and ISOLATED. If it throws, ALL writes/audit in the tx roll back. Adapters
+   * MUST serialize/isolate concurrent transactions on the same tenant (the in-memory adapter serializes
+   * per tenant; the Postgres adapter uses SERIALIZABLE / row locks) so no concurrent write is lost.
+   */
   tx<T>(ctx: RuntimeStateCtx, fn: (t: RuntimeStateTx) => Promise<T>): Promise<T>;
 }
 

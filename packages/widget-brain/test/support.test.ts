@@ -64,6 +64,25 @@ describe("support guardrails (in code)", () => {
     expect(r.reply).toMatch(/pause/i); // still offers pause, no pressure
     expect(r.reply).not.toMatch(/^done — i've cancelled|you're all set/i); // no false completion claim
   });
+  it("routes a wrong-item reship to a person (no false 'I'll get it sent right away')", async () => {
+    const r = await handleSupport(c, shopper, "you sent me the wrong item");
+    expect(r.flags).toContain("reship_routed");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).not.toMatch(/i'?ll get the correct item sent to you right away|you won'?t be charged for either/i);
+  });
+  it("routes a subscription skip to a person (no false 'Done — I've skipped')", async () => {
+    const r = await handleSupport(c, shopper, "skip my next delivery");
+    expect(r.flags).toContain("skip_sub_routed");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).not.toMatch(/done — i'?ve skipped/i);
+  });
+  it("never claims to have changed a shipping address (ATO vector) — routes to a person", async () => {
+    const r = await handleSupport(c, shopper, "change the shipping address on my order #3100");
+    expect(r.flags).toContain("address_change_routed");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).toMatch(/security|verify/i);
+    expect(r.reply).not.toMatch(/i'?ve updated the shipping address/i);
+  });
   it("escalates when the shopper is stuck, never pitches", async () => {
     const r = await handleSupport(c, shopper, "none of this works, I just need help");
     expect(r.escalate).toBe(true);

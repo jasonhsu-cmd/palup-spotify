@@ -57,8 +57,11 @@ function snapshot(t: TenantData): TenantData {
 export class InMemoryRuntimeStore implements RuntimeStatePort {
   private tenants = new Map<string, TenantData>();
 
+  private txQueue = new Map<string, Promise<void>>();
+
   private data(tenantId: string): TenantData {
-    if (!tenantId) throw new Error("RuntimeStatePort: tenantId is required (tenant isolation)");
+    if (!tenantId || !tenantId.trim())
+      throw new Error("RuntimeStatePort: a non-blank tenantId is required (tenant isolation)");
     let t = this.tenants.get(tenantId);
     if (!t) {
       t = emptyTenant();
@@ -116,8 +119,11 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
       at,
       actor: entry.actor,
       action: entry.action,
-      input: entry.input,
-      decision: entry.decision,
+      // Clone input/decision BEFORE hashing + storing so a caller mutating its object after audit()
+      // returns can never rewrite the stored record's hashed content (would otherwise false-trip
+      // verifyAudit and be a post-commit tamper channel on the NN #5 log).
+      input: clone(entry.input),
+      decision: clone(entry.decision),
       reversalPath: entry.reversalPath,
       prevHash,
     };
@@ -136,7 +142,10 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
     return out.map((r) => clone(r));
   }
 
-  async verifyAudit(ctx: RuntimeStateCtx): Promise<{ ok: boolean; brokenAt?: number }> {
+  async verifyAudit(
+    ctx: RuntimeStateCtx,
+    opts?: { expectedHead?: { seq: number; hash: string } },
+  ): Promise<{ ok: boolean; brokenAt?: number }> {
     const a = this.data(ctx.tenantId).audit;
     let prev = AUDIT_GENESIS_HASH;
     for (const r of a) {
@@ -144,10 +153,18 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
       if (r.prevHash !== prev || hashRecord(base) !== hash) return { ok: false, brokenAt: r.seq };
       prev = hash;
     }
+    // Truncation/rewrite detection: the in-chain check alone cannot catch tail-truncation or a full
+    // re-hash (no secret is stored). A caller holding a trusted head anchor (persisted elsewhere) can
+    // detect both by asserting the current head still matches. See the port doc's trust assumption.
+    if (opts?.expectedHead) {
+      const head = a[a.length - 1];
+      if (!head || head.seq !== opts.expectedHead.seq || head.hash !== opts.expectedHead.hash)
+        return { ok: false, brokenAt: opts.expectedHead.seq };
+    }
     return { ok: true };
   }
 
-  async tx<T>(ctx: RuntimeStateCtx, fn: (t: RuntimeStateTx) => Promise<T>): Promise<T> {
+  private async runTx<T>(ctx: RuntimeStateCtx, fn: (t: RuntimeStateTx) => Promise<T>): Promise<T> {
     const t = this.data(ctx.tenantId);
     const backup = snapshot(t);
     const handle: RuntimeStateTx = {
@@ -165,5 +182,25 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
       t.audit = backup.audit;
       throw e;
     }
+  }
+
+  async tx<T>(ctx: RuntimeStateCtx, fn: (t: RuntimeStateTx) => Promise<T>): Promise<T> {
+    // Serialize transactions PER TENANT so two concurrent txs can't interleave across an await and
+    // have one's snapshot-rollback silently discard the other's writes (the runtime is concurrent).
+    // The contract requires adapters to run tx atomically AND isolated; the Postgres adapter enforces
+    // this with SERIALIZABLE / row locks (see the port doc).
+    const tenantId = ctx.tenantId;
+    if (!tenantId || !tenantId.trim())
+      throw new Error("RuntimeStatePort: a non-blank tenantId is required (tenant isolation)");
+    const prev = this.txQueue.get(tenantId) ?? Promise.resolve();
+    const run = prev.then(() => this.runTx(ctx, fn));
+    this.txQueue.set(
+      tenantId,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
   }
 }
