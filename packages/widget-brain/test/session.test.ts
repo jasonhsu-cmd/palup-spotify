@@ -10,7 +10,7 @@ const brain = () => createBrain(new MockModelAdapter());
 
 describe("session: multi-turn state", () => {
   it("INV-A: safety latches across a topic change", async () => {
-    const s = createSession(brain());
+    const s = await createSession(brain());
     await s.send("my face is burning after using it");
     const d = await s.send("anyway, add the serum to my cart", { cart: "has_items" });
     expect(d.mode).toBe("safety");
@@ -18,7 +18,7 @@ describe("session: multi-turn state", () => {
   });
 
   it("INV-E: one proactivity budget across the conversation (balanced = 2)", async () => {
-    const s = createSession(brain(), { level: "balanced" });
+    const s = await createSession(brain(), { level: "balanced" });
     const sig = { mood: "neutral" as const, cart: "has_items" as const };
     const d1 = await s.send("tell me about the serum", sig);
     const d2 = await s.send("what about the moisturizer", sig);
@@ -30,7 +30,7 @@ describe("session: multi-turn state", () => {
   });
 
   it("INV-B: an open support issue suppresses sales until resolved, then re-enables", async () => {
-    const s = createSession(brain());
+    const s = await createSession(brain());
     const t1 = await s.send("where's my order #1042?");
     expect(t1.mode).toBe("support");
     const t2 = await s.send("I'll grab the serum too", { cart: "has_items" });
@@ -44,9 +44,9 @@ describe("session: multi-turn state", () => {
 
   it("SW-12: open issues persist across sessions via the store", async () => {
     const store = createMemorySessionStore();
-    const s1 = createSession(brain(), { sessionId: "c1", store });
+    const s1 = await createSession(brain(), { sessionId: "c1", store });
     await s1.send("where's my order #1050?");
-    const s2 = createSession(brain(), { sessionId: "c1", store });
+    const s2 = await createSession(brain(), { sessionId: "c1", store });
     expect(s2.state.openIssues.length).toBeGreaterThan(0);
     const d = await s2.send("hi", { cart: "has_items" });
     expect(d.mode).toBe("support");

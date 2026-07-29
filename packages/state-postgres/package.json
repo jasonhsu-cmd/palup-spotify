@@ -1,0 +1,14 @@
+{
+  "name": "@palup/state-postgres",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@palup/platform-ports": "workspace:*",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.0"
+  }
+}

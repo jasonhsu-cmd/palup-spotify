@@ -7,6 +7,7 @@
     "@palup/platform-ports": "workspace:*",
     "@palup/widget-brain": "workspace:*",
     "@palup/model-vertex": "workspace:*",
-    "fastify": "^5.0.0"
+    "fastify": "^5.0.0",
+    "@palup/state-postgres": "workspace:*"
   }
 }

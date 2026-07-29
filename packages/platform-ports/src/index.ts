@@ -25,3 +25,15 @@ export type {
   CommercePolicy,
 } from "./commerce-port.js";
 export type { StorePort } from "./store-port.js";
+export type {
+  RuntimeStatePort,
+  RuntimeStateCtx,
+  RuntimeStateTx,
+  AuditInput,
+  AuditRecord,
+} from "./runtime-state-port.js";
+export { AUDIT_GENESIS_HASH } from "./runtime-state-port.js";
+export { InMemoryRuntimeStore } from "./in-memory-runtime-store.js";
+export { canonicalize, hashAuditBase } from "./audit-hash.js";
+// NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
+// into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.

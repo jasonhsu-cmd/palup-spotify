@@ -23,7 +23,9 @@ async function main() {
   const store = new FileStore(".palup-state");
 
   const rounds = Number(process.env.EVOLVE_ROUNDS ?? 3);
-  const autoApprove = process.env.EVOLVE_AUTO_APPROVE !== "false";
+  // NN #2: promotion requires a HUMAN by default. Auto-approve is strictly opt-IN (never the default),
+  // and even then only promotes a candidate that already passed the eval gate.
+  const autoApprove = process.env.EVOLVE_AUTO_APPROVE === "true";
 
   console.log(`\n=== SELF-IMPROVEMENT LOOP (live) — ${SCENARIOS.length} scenarios, up to ${rounds} rounds ===`);
   console.log("Grading the baseline champion…");

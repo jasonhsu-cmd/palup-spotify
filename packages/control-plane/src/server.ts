@@ -10,8 +10,8 @@ import { LiveGrader } from "./live-grader.js";
 import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
-import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY } from "./canary-controller.js";
-import { killStatus, armRuntimeKill, disarmRuntimeKill, type KillScope } from "./runtime-kill.js";
+import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT } from "./canary-controller.js";
+import { createRuntimeStore, killStatus, armKill, disarmKill, type KillScope } from "@palup/state-postgres";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -36,6 +36,10 @@ export async function buildServer() {
   const { grader, mode, judgeFamily } = chooseGrader();
   const championMetrics = await grader.grade(DEFAULT_POLICY);
   const engine = new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader });
+
+  // Shared run-time state store for operator actions on the LIVE plane (run-time kill switch). Prod
+  // points this at the same Cloud SQL as the widget backend (DATABASE_URL) so a kill propagates.
+  const { store: runtimeStore } = await createRuntimeStore();
 
   const app = Fastify({ logger: false });
   const state = () => ({
@@ -82,16 +86,20 @@ export async function buildServer() {
   app.post("/api/unkill", async () => act(() => engine.unkill()));
 
   // RUN-TIME plane kill (governance NN #4): halts the LIVE shopper agent for a scope (global / one
-  // tenant / one agent-type). The widget backend reads this registry per request and hands to a human.
-  // Distinct from /api/kill above — this stops the product, not the promotion pipeline.
-  app.get("/api/runtime-kill", async () => killStatus());
+  // tenant / one agent-type), via the SHARED RuntimeStatePort so it propagates to every serving
+  // instance (prod: both this plane and the backend point at the same Cloud SQL via DATABASE_URL).
+  // Distinct from /api/kill above — this stops the product, not the promotion pipeline. Arm/disarm is
+  // audited on the immutable log inside the store.
+  app.get("/api/runtime-kill", async () => ({ scopes: await killStatus(runtimeStore) }));
   app.post("/api/runtime-kill", async (req) => {
     const b = (req.body ?? {}) as { scope?: KillScope; reason?: string };
-    return armRuntimeKill(b.scope ?? "global", b.reason ?? "operator");
+    await armKill(runtimeStore, b.scope ?? "global", b.reason ?? "operator");
+    return { scopes: await killStatus(runtimeStore) };
   });
   app.post("/api/runtime-unkill", async (req) => {
     const b = (req.body ?? {}) as { scope?: KillScope };
-    return disarmRuntimeKill(b.scope);
+    await disarmKill(runtimeStore, b.scope);
+    return { scopes: await killStatus(runtimeStore) };
   });
   app.post("/api/monitor", async (req) => {
     const b = (req.body ?? {}) as { qualityScore?: number; safetyPass?: boolean };
@@ -124,7 +132,9 @@ export async function buildServer() {
         const proposer = new ModelProposer(createAnthropicApiAdapter(), 2);
         const championMetrics = await sgrader.grade(DEFAULT_POLICY);
         const eng = new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader: sgrader });
-        const loop = new AutoLoop({ engine: eng, grader: sgrader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: true });
+        // NN #2: the endpoint proposes → evaluates → gates and STOPS at human approval. It must never
+        // auto-promote a candidate to shoppers; a human approves + promotes via the Approval Center.
+        const loop = new AutoLoop({ engine: eng, grader: sgrader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: false });
         await loop.run(Number(process.env.EVOLVE_ROUNDS ?? 2));
       } catch (e) {
         console.error("[evolve]", (e as Error).message);
@@ -135,20 +145,21 @@ export async function buildServer() {
     return { started: true };
   });
 
-  // --- Shadow / canary: split real traffic to a canary policy, shadow-grade it, auto-rollback. ---
-  app.get("/api/canary", async () => ({ config: canaryConfig(), stats: canaryStats() }));
+  // --- Shadow / canary: split real traffic to a canary policy, shadow-grade it, auto-rollback. On the
+  // shared store, so a start/rollback reaches every serving instance and shadow reads real traffic. ---
+  app.get("/api/canary", async () => ({ config: await canaryConfig(runtimeStore), stats: await canaryStats(runtimeStore) }));
   app.post("/api/canary/start", async (req) => {
     const b = (req.body ?? {}) as { pct?: number };
-    return { config: startCanary(DEFAULT_CANARY, Number(b.pct ?? 10)) };
+    return { config: await startCanary(runtimeStore, DEFAULT_CANARY, Number(b.pct ?? MAX_CANARY_PCT)) };
   });
-  app.post("/api/canary/stop", async () => ({ config: stopCanary() }));
+  app.post("/api/canary/stop", async () => ({ config: await stopCanary(runtimeStore) }));
   // Shadow-grade the canary on real logged traffic (live model + judge). Auto-rolls-back on regression.
   app.post("/api/canary/shadow", async () => {
     if (!isVertexConfigured() || !isAnthropicApiConfigured()) return { error: "shadow eval needs GOOGLE_CLOUD_PROJECT + ANTHROPIC_API_KEY" };
-    const policy = canaryConfig()?.policy ?? DEFAULT_CANARY;
-    const result = await shadowEvaluate(createVertexAdapter(), createAnthropicApiJudge(), policy);
+    const policy = (await canaryConfig(runtimeStore))?.policy ?? DEFAULT_CANARY;
+    const result = await shadowEvaluate(runtimeStore, createVertexAdapter(), createAnthropicApiJudge(), policy);
     let rolledBack = false;
-    if (result.verdict === "rollback") { stopCanary(); rolledBack = true; }
+    if (result.verdict === "rollback") { await stopCanary(runtimeStore); rolledBack = true; }
     return { result, rolledBack };
   });
 

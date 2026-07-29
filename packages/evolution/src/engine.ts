@@ -99,13 +99,17 @@ export class EvolutionEngine {
   }
 
   /** HUMAN gate (HITL). Only a gated-pass candidate can be approved; blocked when the kill switch is on. */
-  approve(id: string, human = "operator"): CandidateRecord {
+  approve(id: string, approver = "operator"): CandidateRecord {
     if (this.killed) throw new Error("kill switch is ON — approvals halted");
     const rec = this.require(this.candidates.get(id), id);
     if (rec.status !== "awaiting_approval")
       throw new Error(`cannot approve ${id} in status ${rec.status}`);
     rec.status = "approved";
-    this.log("human", "approve", id, { human });
+    // NN #5 audit fidelity: record the TRUE actor. An automated (opt-in) auto-loop approval must not
+    // masquerade as a human in the immutable log — attribute it to "auto-loop" so it's auditable as
+    // a non-human approval.
+    const automated = approver === "auto-loop";
+    this.log(automated ? "auto-loop" : "human", "approve", id, { approver, automated });
     return rec;
   }
 

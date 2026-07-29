@@ -37,25 +37,51 @@ describe("support guardrails (in code)", () => {
     expect(r.escalate).toBe(true);
     expect(r.reply).toMatch(/route|team member|person/i);
   });
-  it("processes a refund within the ceiling without escalating", async () => {
+  it("routes a within-ceiling refund to a person to execute (no auto-execution / no false completion)", async () => {
     const r = await handleSupport(c, shopper, "refund order #1050");
     expect(r.flags).toContain("refund_within_ceiling");
-    expect(r.escalate).toBe(false);
+    expect(r.flags).toContain("refund_routed");
+    expect(r.escalate).toBe(true); // reply-and-escalate-only phase: a human completes it
+    expect(r.reply).toMatch(/team|person|hand(ed)?/i);
+    expect(r.reply).not.toMatch(/you'?ll see it back|i've processed|already refunded/i); // no false completion
   });
   it("won't silently cancel an already-shipped order", async () => {
     const r = await handleSupport(c, shopper, "cancel my order #1042");
     expect(r.escalate).toBe(true);
     expect(r.reply).toMatch(/already shipped/i);
   });
-  it("cancels a not-yet-shipped order", async () => {
+  it("routes a not-yet-shipped cancel to a person (no false 'I've cancelled it')", async () => {
     const r = await handleSupport(c, shopper, "cancel my order #3100");
-    expect(r.reply).toMatch(/cancelled/i);
-    expect(r.escalate).toBe(false);
+    expect(r.flags).toContain("cancel_routed");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).toMatch(/team|person|hand(ed)?/i);
+    expect(r.reply).not.toMatch(/i've cancelled it|you'?ll see the refund/i); // no false completion
   });
-  it("honors a subscription cancel immediately (no dark pattern)", async () => {
+  it("honors a subscription cancel promptly and offers pause without pressure (no dark pattern, no false 'Done')", async () => {
     const r = await handleSupport(c, shopper, "cancel my subscription");
-    expect(r.reply).toMatch(/cancelled/i);
-    expect(r.reply).toMatch(/immediately/i);
+    expect(r.flags).toContain("cancel_sub_routed");
+    expect(r.reply).toMatch(/right away|effective immediately|going forward/i); // honored promptly
+    expect(r.reply).toMatch(/pause/i); // still offers pause, no pressure
+    expect(r.reply).not.toMatch(/^done — i've cancelled|you're all set/i); // no false completion claim
+  });
+  it("routes a wrong-item reship to a person (no false 'I'll get it sent right away')", async () => {
+    const r = await handleSupport(c, shopper, "you sent me the wrong item");
+    expect(r.flags).toContain("reship_routed");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).not.toMatch(/i'?ll get the correct item sent to you right away|you won'?t be charged for either/i);
+  });
+  it("routes a subscription skip to a person (no false 'Done — I've skipped')", async () => {
+    const r = await handleSupport(c, shopper, "skip my next delivery");
+    expect(r.flags).toContain("skip_sub_routed");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).not.toMatch(/done — i'?ve skipped/i);
+  });
+  it("never claims to have changed a shipping address (ATO vector) — routes to a person", async () => {
+    const r = await handleSupport(c, shopper, "change the shipping address on my order #3100");
+    expect(r.flags).toContain("address_change_routed");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).toMatch(/security|verify/i);
+    expect(r.reply).not.toMatch(/i'?ve updated the shipping address/i);
   });
   it("escalates when the shopper is stuck, never pitches", async () => {
     const r = await handleSupport(c, shopper, "none of this works, I just need help");
