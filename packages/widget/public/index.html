@@ -186,11 +186,16 @@
   async function send(message, isRetry){
     if (!isRetry) add(message, "user");
     const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
-    lastSend = { message, signals };
+    // Stable idempotency key per turn, REUSED on retry, so a replayed request the server already
+    // processed is de-duplicated (never double-counts the pitch budget or double-audits).
+    const idempotencyKey = (isRetry && lastSend && lastSend.idempotencyKey)
+      ? lastSend.idempotencyKey
+      : ((crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + "-" + String(Math.random()).slice(2));
+    lastSend = { message, signals, idempotencyKey };
     const btn = $("#f button"); btn.disabled = true; typing(true);
     const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 15000);
     try{
-      const r = await fetch("/chat", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ message, signals, sessionId }), signal: ctrl.signal });
+      const r = await fetch("/chat", { method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify({ message, signals, sessionId, idempotencyKey }), signal: ctrl.signal });
       if (!r.ok) throw new Error("http " + r.status);
       const d = await r.json(); add(d.reply, "agent", d); if (d.escalate) enterHandoff();
     }catch(err){ offline(); }

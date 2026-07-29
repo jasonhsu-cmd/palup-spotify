@@ -13,6 +13,7 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
+import { auditDecision } from "./audit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -57,10 +58,25 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   });
 
   app.post("/chat", async (req, reply) => {
-    const body = (req.body ?? {}) as { message?: string; signals?: Signals; sessionId?: string };
+    const body = (req.body ?? {}) as {
+      message?: string;
+      signals?: Signals;
+      sessionId?: string;
+      idempotencyKey?: string;
+    };
     const sessionId = String(body.sessionId ?? "anon");
     const message = String(body.message ?? "");
+    const idemKey = typeof body.idempotencyKey === "string" && body.idempotencyKey ? body.idempotencyKey : undefined;
+    const serving = { tenantId: RUNTIME_TENANT };
     try {
+      // IDEMPOTENCY: a client retry (e.g. the widget's offline-retry replaying the same turn) must NOT
+      // re-process — that would double-count the governed pitch budget, double-audit, and re-open
+      // issues. If we've already answered this key, return the SAME response and do nothing else.
+      if (idemKey) {
+        const cached = await store.get<Record<string, unknown>>(serving, "idem", `${sessionId}:${idemKey}`);
+        if (cached) return cached;
+      }
+
       // TRUST BOUNDARY (governance NN #4): the shopper's browser must NOT be able to arm OR bypass the
       // operator Kill Switch. Strip any client-supplied `kill` and source the armed state server-side
       // from the operator registry. An operator halt thus takes effect for this session regardless of
@@ -76,8 +92,16 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       const session = await createSession(brainFor(policy), { sessionId, store: sessions });
       const d = await session.send(message, signals);
       logTraffic({ servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
+      // Immutable audit of a governance-relevant autonomous decision (NN #5), PII-safe (no raw message).
+      await auditDecision(store, RUNTIME_TENANT, {
+        sessionId,
+        messageLength: message.length,
+        servedBy: policy.id,
+        decision: d,
+        killScope: kill?.scope,
+      });
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
-      return {
+      const response = {
         reply: d.reply,
         mode: d.mode,
         pitch: d.pitch,
@@ -86,6 +110,8 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
         flags: d.flags,
         servedBy: policy.id,
       };
+      if (idemKey) await store.put(serving, "idem", `${sessionId}:${idemKey}`, response);
+      return response;
     } catch (e) {
       // A model/config failure must degrade gracefully — never hang or leak internals to the shopper.
       console.error(`[/chat] model error (${modelName}):`, (e as Error).message);
