@@ -79,6 +79,13 @@ export interface RuntimeStatePort {
   /** Read a stream oldest-first; `limit` returns the most recent N. */
   readStream<T>(ctx: RuntimeStateCtx, stream: string, opts?: { limit?: number }): Promise<T[]>;
 
+  // --- Atomic windowed counter (rate limiting) ---
+  /** Atomically increment a fixed-window counter keyed by `key` and return the new count. The counter
+   * RESETS to 1 once its window (`windowSeconds`) elapses. Unlike get-then-put this is atomic under
+   * concurrency (a concurrent burst can't all read the pre-increment value), so it soundly bounds a
+   * rate limit / cost ceiling. Tenant-scoped; the row self-expires. */
+  incrementWindow(ctx: RuntimeStateCtx, key: string, windowSeconds: number): Promise<number>;
+
   // --- Reclamation (bound growth: client-supplied idem/session keys + append-only traffic) ---
   /** Delete expired KV entries (TTL elapsed) across this store; returns how many were removed. Call
    * periodically — expiry is enforced on read, this reclaims the storage. */

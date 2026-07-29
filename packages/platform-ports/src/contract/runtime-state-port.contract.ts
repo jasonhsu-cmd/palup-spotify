@@ -62,6 +62,19 @@ export function runRuntimeStatePortContract(makeAdapter: () => RuntimeStatePort 
       expect(await s.readStream(A, "traffic")).toEqual([{ i: 5 }, { i: 6 }]);
     });
 
+    it("incrementWindow counts within a window and is atomic under concurrency (no lost update)", async () => {
+      const s = await makeAdapter();
+      expect(await s.incrementWindow(A, "rl:x", 60)).toBe(1);
+      expect(await s.incrementWindow(A, "rl:x", 60)).toBe(2);
+      expect(await s.incrementWindow(A, "rl:x", 60)).toBe(3);
+      // 5 concurrent increments on a fresh key must yield 5 DISTINCT counts 1..5 (none lost).
+      const results = await Promise.all(Array.from({ length: 5 }, () => s.incrementWindow(A, "rl:y", 60)));
+      expect(new Set(results).size).toBe(5);
+      expect(Math.max(...results)).toBe(5);
+      // tenant-isolated: another tenant's same key is independent.
+      expect(await s.incrementWindow(B, "rl:x", 60)).toBe(1);
+    });
+
     it("tx.get respects TTL — an expired key is invisible inside a transaction too", async () => {
       const s = await makeAdapter();
       await s.put(A, "kvt", "expired", { v: 1 }, { ttlSeconds: -1 });

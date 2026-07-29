@@ -53,12 +53,14 @@ export async function buildServer() {
   // same identity port next (identity-and-access.md §1-2).
   const operatorIdentity = createOperatorTokenIdentity(process.env.OPERATOR_TOKEN);
   app.addHook("onRequest", async (req, reply) => {
-    if (req.method !== "POST") return;
+    // Gate everything except the safe (read) methods, so a future non-POST mutation can't slip the gate.
+    if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return;
     const auth = req.headers["authorization"];
     const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
     const principal = await operatorIdentity.authenticate(token);
     if (!operatorIdentity.authorize(principal, "operator:mutate")) {
-      reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
+      await reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
+      return; // stop the hook chain / handler (defensive; Fastify already halts after send)
     }
   });
   const state = () => ({

@@ -14,7 +14,7 @@ import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { buildAuditInput } from "./audit.js";
-import { allowRequest } from "./rate-limit.js";
+import { allowRequest, clientIpKey } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -109,21 +109,22 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       return { reply: "Sorry — that message is too long. Could you shorten it?", mode: "support", pitch: "none", escalate: false, flags: ["input_rejected"] };
     }
 
-    // T6 — rate limit (denial-of-wallet): per-session, per-IP, per-tenant fixed windows on the shared
-    // store. Fail-OPEN on a store error so a hiccup can never take the widget down.
-    const ip = String(req.headers["x-forwarded-for"] ?? "").split(",")[0].trim() || req.ip || "unknown";
-    try {
-      const [okSession, okIp, okTenant] = await Promise.all([
-        allowRequest(store, serving, `session:${sessionId}`, RL_SESSION, RL_WINDOW),
-        allowRequest(store, serving, `ip:${ip}`, RL_IP, RL_WINDOW),
-        allowRequest(store, serving, "tenant", RL_TENANT, RL_WINDOW),
-      ]);
-      if (!okSession || !okIp || !okTenant) {
-        reply.code(429);
-        return { reply: "You're sending messages a little too fast — give me a moment and try again.", mode: "support", pitch: "none", escalate: false, flags: ["rate_limited"] };
-      }
-    } catch {
-      /* fail-open: never let the limiter break serving */
+    // T6 — rate limit (denial-of-wallet): per-session / per-IP / per-tenant, atomic windowed counters on
+    // the shared store. IP key is bounded/validated (an oversized X-Forwarded-For can't force a store
+    // error). Buckets evaluated independently; the per-tenant ceiling fails-CLOSED (see rate-limit.ts).
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    const allowed = await allowRequest(store, serving, {
+      sessionId,
+      ip: ipKey,
+      sessionLimit: RL_SESSION,
+      ipLimit: RL_IP,
+      tenantLimit: RL_TENANT,
+      windowSeconds: RL_WINDOW,
+    });
+    if (!allowed) {
+      reply.code(429);
+      return { reply: "You're sending messages a little too fast — give me a moment and try again.", mode: "support", pitch: "none", escalate: false, flags: ["rate_limited"] };
     }
 
     try {
