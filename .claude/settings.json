@@ -16,12 +16,7 @@
       "Bash(git add *)",
       "Bash(git commit *)"
     ],
-    "ask": [
-      "Bash(git push *)",
-      "Bash(gcloud *)",
-      "Bash(kubectl *)",
-      "Bash(terraform *)"
-    ],
+    "ask": [],
     "deny": [
       "Read(./**/*.env)",
       "Read(./**/secrets/**)",
