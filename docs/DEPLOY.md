@@ -8,8 +8,29 @@ green.
 > Status: **staging is LIVE and verified.** The widget backend is deployed to Cloud Run and serves the
 > real Gemini model — `/health` → `{"ok":true,"model":"vertex/gemini"}` and `/chat` returns a grounded
 > live reply; the widget UI is served at `/`. Every merge to `main` auto-redeploys.
-> **Open follow-up:** the service is currently public + unauthenticated (`--allow-unauthenticated`), so
-> add rate-limiting / an access token before sharing the URL widely.
+> **Run-time state is durable + shared:** backed by a Cloud SQL Postgres instance (`palup-staging`,
+> `db-f1-micro`) via the `RuntimeStatePort`, so the operator Kill Switch, session state, canary, and the
+> immutable audit log survive restarts and propagate across instances (NN #4/#5). `DATABASE_URL` is a
+> Secret Manager secret mounted at deploy; `PALUP_REQUIRE_DATABASE_URL=true` makes the backend refuse to
+> boot without it (no silent per-process fallback).
+> **Open follow-ups:** the service is still public + unauthenticated (`--allow-unauthenticated`) — add
+> rate-limiting / an access token before sharing widely (M1); and apply the `rs_audit` INSERT-only GRANT
+> for NN #5 immutability defense-in-depth (#19).
+
+## Cloud SQL (run-time state store, ADR-0004)
+
+- **Instance:** `palup-staging` (Postgres 16, `db-f1-micro`, single-zone, `us-central1`), connection name
+  `palup-jason:us-central1:palup-staging`. Resize the tier in place later with
+  `gcloud sql instances patch palup-staging --tier=…` (brief restart, no data migration).
+- **Secrets (Secret Manager, never in code):** `palup-staging-pg-root` (postgres su), `palup-staging-pg-app`
+  (app user), `palup-staging-database-url` (the full `DATABASE_URL`, mounted into Cloud Run via
+  `--set-secrets`). DB `palup`, app user `palup_app`.
+- **Connection:** Cloud Run attaches the instance with `--add-cloudsql-instances` and connects over the
+  unix socket (`host=/cloudsql/<conn>`). The runtime SA has `roles/cloudsql.client` + `secretAccessor`
+  on the URL secret.
+- **Schema:** auto-created on boot (`PostgresRuntimeStore.migrate()`), no manual migration.
+- **Deferred (#19):** `REVOKE UPDATE, DELETE ON rs_audit FROM palup_app` (INSERT/SELECT only) + a trusted
+  audit head-anchor — needs a psql/proxy session and a named human sign-off.
 
 ## One-time setup
 
