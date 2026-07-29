@@ -3,6 +3,7 @@ import {
   AUDIT_GENESIS_HASH,
   type AuditInput,
   type AuditRecord,
+  type PutOpts,
   type RuntimeStateCtx,
   type RuntimeStatePort,
   type RuntimeStateTx,
@@ -17,8 +18,13 @@ function clone<T>(v: T): T {
   return v === undefined ? v : (JSON.parse(JSON.stringify(v)) as T);
 }
 
+interface KvEntry {
+  value: unknown;
+  expiresAt?: number; // epoch ms; undefined = never expires
+}
+
 interface TenantData {
-  kv: Map<string, Map<string, unknown>>; // collection -> key -> value
+  kv: Map<string, Map<string, KvEntry>>; // collection -> key -> {value, expiresAt}
   streams: Map<string, unknown[]>; // stream -> entries
   audit: AuditRecord[];
 }
@@ -52,18 +58,20 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
   }
 
   async get<T>(ctx: RuntimeStateCtx, collection: string, key: string): Promise<T | null> {
-    const v = this.data(ctx.tenantId).kv.get(collection)?.get(key);
-    return v === undefined ? null : clone(v as T);
+    const e = this.data(ctx.tenantId).kv.get(collection)?.get(key);
+    if (!e || (e.expiresAt !== undefined && Date.now() > e.expiresAt)) return null; // expired = invisible
+    return clone(e.value as T);
   }
 
-  async put<T>(ctx: RuntimeStateCtx, collection: string, key: string, value: T): Promise<void> {
+  async put<T>(ctx: RuntimeStateCtx, collection: string, key: string, value: T, opts?: PutOpts): Promise<void> {
     const t = this.data(ctx.tenantId);
     let m = t.kv.get(collection);
     if (!m) {
       m = new Map();
       t.kv.set(collection, m);
     }
-    m.set(key, clone(value));
+    const expiresAt = opts?.ttlSeconds != null ? Date.now() + opts.ttlSeconds * 1000 : undefined;
+    m.set(key, { value: clone(value), expiresAt });
   }
 
   async delete(ctx: RuntimeStateCtx, collection: string, key: string): Promise<void> {
@@ -73,7 +81,39 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
   async list<T>(ctx: RuntimeStateCtx, collection: string): Promise<Array<{ key: string; value: T }>> {
     const m = this.data(ctx.tenantId).kv.get(collection);
     if (!m) return [];
-    return Array.from(m, ([key, value]) => ({ key, value: clone(value as T) }));
+    const now = Date.now();
+    const out: Array<{ key: string; value: T }> = [];
+    for (const [key, e] of m) {
+      if (e.expiresAt !== undefined && now > e.expiresAt) continue; // skip expired
+      out.push({ key, value: clone(e.value as T) });
+    }
+    return out;
+  }
+
+  async sweepExpired(): Promise<number> {
+    const now = Date.now();
+    let removed = 0;
+    for (const t of this.tenants.values()) {
+      for (const m of t.kv.values()) {
+        for (const [key, e] of m) {
+          if (e.expiresAt !== undefined && now > e.expiresAt) {
+            m.delete(key);
+            removed++;
+          }
+        }
+      }
+    }
+    return removed;
+  }
+
+  async trimStream(ctx: RuntimeStateCtx, stream: string, keepLast: number): Promise<number> {
+    const t = this.data(ctx.tenantId);
+    const s = t.streams.get(stream);
+    const keep = Math.max(0, keepLast);
+    if (!s || s.length <= keep) return 0;
+    const removed = s.length - keep;
+    t.streams.set(stream, s.slice(s.length - keep));
+    return removed;
   }
 
   async append<T>(ctx: RuntimeStateCtx, stream: string, entry: T): Promise<number> {
@@ -150,7 +190,7 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
     const backup = snapshot(t);
     const handle: RuntimeStateTx = {
       get: (collection, key) => this.get(ctx, collection, key),
-      put: (collection, key, value) => this.put(ctx, collection, key, value),
+      put: (collection, key, value, opts) => this.put(ctx, collection, key, value, opts),
       delete: (collection, key) => this.delete(ctx, collection, key),
       append: (stream, entry) => this.append(ctx, stream, entry),
       audit: (entry, at = new Date().toISOString()) => Promise.resolve(this.commitAudit(t, entry, at)),

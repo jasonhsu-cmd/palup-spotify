@@ -22,6 +22,15 @@ import { assignCanary, logTraffic } from "./canary.js";
 const RUNTIME_TENANT = "demo";
 const RUNTIME_AGENT_TYPE = "shopper";
 
+// Reclamation bounds (F3/F4): TTLs cap growth of the client-keyed idem/session KV; traffic is trimmed.
+// Reclamation runs opportunistically every N requests (Cloud Run throttles CPU between requests, so a
+// setInterval is unreliable — request-driven is the safe trigger). All overridable via env.
+const IDEM_TTL_SECONDS = Number(process.env.IDEM_TTL_SECONDS ?? 86_400); // 24h
+const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 2_592_000); // 30d (sliding — reset each turn)
+const TRAFFIC_KEEP_LAST = Number(process.env.TRAFFIC_KEEP_LAST ?? 5_000);
+const RECLAIM_EVERY = Number(process.env.RECLAIM_EVERY ?? 500);
+let reqCount = 0;
+
 const here = dirname(fileURLToPath(import.meta.url));
 const widgetHtml = readFileSync(
   join(here, "..", "..", "widget", "public", "index.html"),
@@ -100,9 +109,15 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // mid-turn store failure. Both live under the serving tenant. "session" matches session-store.ts.
       const auditEntry = buildAuditInput({ sessionId, messageLength: message.length, servedBy: policy.id, decision: d, killScope: kill?.scope });
       await store.tx(serving, async (t) => {
-        await t.put("session", sessionId, session.state);
+        await t.put("session", sessionId, session.state, { ttlSeconds: SESSION_TTL_SECONDS });
         if (auditEntry) await t.audit(auditEntry);
       });
+      // Opportunistic reclamation (F3/F4): bound idem/session growth + traffic retention. Fire-and-forget
+      // so it never delays or fails the response.
+      if (++reqCount % RECLAIM_EVERY === 0) {
+        void store.sweepExpired().catch(() => {});
+        void store.trimStream(serving, "traffic", TRAFFIC_KEEP_LAST).catch(() => {});
+      }
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
       const response = {
         reply: d.reply,
@@ -113,7 +128,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
         flags: d.flags,
         servedBy: policy.id,
       };
-      if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response);
+      if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
     } catch (e) {
       // A model/config failure must degrade gracefully — never hang or leak internals to the shopper.

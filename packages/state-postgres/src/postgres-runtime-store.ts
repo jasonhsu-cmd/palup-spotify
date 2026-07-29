@@ -3,6 +3,7 @@ import {
   hashAuditBase,
   type AuditInput,
   type AuditRecord,
+  type PutOpts,
   type RuntimeStateCtx,
   type RuntimeStatePort,
   type RuntimeStateTx,
@@ -47,6 +48,9 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
          tenant_id text NOT NULL, collection text NOT NULL, key text NOT NULL, value jsonb NOT NULL,
          PRIMARY KEY (tenant_id, collection, key))`,
     );
+    // TTL support (F4) — additive, so it upgrades an already-created rs_kv on redeploy.
+    await this.sql.query("ALTER TABLE rs_kv ADD COLUMN IF NOT EXISTS expires_at timestamptz");
+    await this.sql.query("CREATE INDEX IF NOT EXISTS rs_kv_expires ON rs_kv (expires_at) WHERE expires_at IS NOT NULL");
     await this.sql.query(
       `CREATE TABLE IF NOT EXISTS rs_stream (
          seq bigserial PRIMARY KEY, tenant_id text NOT NULL, stream text NOT NULL, entry jsonb NOT NULL)`,
@@ -66,18 +70,23 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
   async get<T>(ctx: RuntimeStateCtx, collection: string, key: string): Promise<T | null> {
     const t = requireTenant(ctx.tenantId);
     const { rows } = await this.sql.query<{ value: T }>(
-      "SELECT value FROM rs_kv WHERE tenant_id=$1 AND collection=$2 AND key=$3",
+      "SELECT value FROM rs_kv WHERE tenant_id=$1 AND collection=$2 AND key=$3 AND (expires_at IS NULL OR expires_at > now())",
       [t, collection, key],
     );
     return rows.length ? rows[0].value : null;
   }
 
-  async put<T>(ctx: RuntimeStateCtx, collection: string, key: string, value: T): Promise<void> {
-    const t = requireTenant(ctx.tenantId);
-    await this.sql.query(
-      `INSERT INTO rs_kv (tenant_id, collection, key, value) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (tenant_id, collection, key) DO UPDATE SET value = EXCLUDED.value`,
-      [t, collection, key, JSON.stringify(value)],
+  async put<T>(ctx: RuntimeStateCtx, collection: string, key: string, value: T, opts?: PutOpts): Promise<void> {
+    await this.putVia(this.sql, requireTenant(ctx.tenantId), collection, key, value, opts);
+  }
+
+  private async putVia<T>(sql: Sql, tenantId: string, collection: string, key: string, value: T, opts?: PutOpts): Promise<void> {
+    // expires_at computed on the DB clock (avoids app/db skew); NULL = never expires.
+    await sql.query(
+      `INSERT INTO rs_kv (tenant_id, collection, key, value, expires_at)
+       VALUES ($1,$2,$3,$4, CASE WHEN $5::int IS NULL THEN NULL ELSE now() + ($5::int * interval '1 second') END)
+       ON CONFLICT (tenant_id, collection, key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at`,
+      [tenantId, collection, key, JSON.stringify(value), opts?.ttlSeconds ?? null],
     );
   }
 
@@ -89,10 +98,28 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
   async list<T>(ctx: RuntimeStateCtx, collection: string): Promise<Array<{ key: string; value: T }>> {
     const t = requireTenant(ctx.tenantId);
     const { rows } = await this.sql.query<{ key: string; value: T }>(
-      "SELECT key, value FROM rs_kv WHERE tenant_id=$1 AND collection=$2 ORDER BY key",
+      "SELECT key, value FROM rs_kv WHERE tenant_id=$1 AND collection=$2 AND (expires_at IS NULL OR expires_at > now()) ORDER BY key",
       [t, collection],
     );
     return rows.map((r) => ({ key: r.key, value: r.value }));
+  }
+
+  async sweepExpired(): Promise<number> {
+    const { rows } = await this.sql.query<{ n: string }>(
+      "WITH d AS (DELETE FROM rs_kv WHERE expires_at IS NOT NULL AND expires_at <= now() RETURNING 1) SELECT count(*)::text AS n FROM d",
+    );
+    return Number(rows[0].n);
+  }
+
+  async trimStream(ctx: RuntimeStateCtx, stream: string, keepLast: number): Promise<number> {
+    const t = requireTenant(ctx.tenantId);
+    const { rows } = await this.sql.query<{ n: string }>(
+      `WITH keep AS (SELECT seq FROM rs_stream WHERE tenant_id=$1 AND stream=$2 ORDER BY seq DESC LIMIT $3),
+            d AS (DELETE FROM rs_stream WHERE tenant_id=$1 AND stream=$2 AND seq NOT IN (SELECT seq FROM keep) RETURNING 1)
+       SELECT count(*)::text AS n FROM d`,
+      [t, stream, Math.max(0, keepLast)],
+    );
+    return Number(rows[0].n);
   }
 
   private async appendVia<T>(sql: Sql, tenantId: string, stream: string, entry: T): Promise<number> {
@@ -215,13 +242,7 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
           );
           return rows.length ? rows[0].value : null;
         },
-        put: async (collection, key, value) => {
-          await txSql.query(
-            `INSERT INTO rs_kv (tenant_id, collection, key, value) VALUES ($1,$2,$3,$4)
-             ON CONFLICT (tenant_id, collection, key) DO UPDATE SET value = EXCLUDED.value`,
-            [t, collection, key, JSON.stringify(value)],
-          );
-        },
+        put: (collection, key, value, opts) => this.putVia(txSql, t, collection, key, value, opts),
         delete: async (collection, key) => {
           await txSql.query("DELETE FROM rs_kv WHERE tenant_id=$1 AND collection=$2 AND key=$3", [t, collection, key]);
         },
