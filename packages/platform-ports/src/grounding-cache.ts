@@ -6,7 +6,8 @@ import type { RuntimeStatePort } from "./runtime-state-port.js";
 // so this decorator:
 //   • caches each tenant's GroundingContext on the RuntimeStatePort (tenant-isolated by construction —
 //     tenant A can never read B's cache row), fresh for `ttlSeconds`;
-//   • bounds the upstream fetch with a hard timeout so a slow store can never hang /chat;
+//   • hard-timeouts BOTH the upstream fetch AND every store read/write, and fires the cache write
+//     fire-and-forget, so neither a slow Shopify nor a hung state store can ever hang /chat;
 //   • serves STALE-WHILE-ERROR: on fetch error/timeout, returns the last-known-good context (even past
 //     TTL) if we have one;
 //   • fails CLOSED to a SAFE-EMPTY context (no products) on a cold failure — the brain then honestly
@@ -31,6 +32,13 @@ export interface CachingGroundingOpts {
 interface CacheEntry {
   ctx: GroundingContext;
   fetchedAtMs: number;
+}
+
+// Guard the cached shape (F5): a corrupt/legacy row must be treated as a miss, never served as a
+// GroundingContext. Requires a numeric fetchedAtMs and an object ctx carrying the tenant.
+function isValidEntry(e: unknown): e is CacheEntry {
+  const c = e as CacheEntry | undefined;
+  return !!c && typeof c === "object" && typeof c.fetchedAtMs === "number" && !!c.ctx && typeof c.ctx === "object" && typeof c.ctx.tenantId === "string";
 }
 
 function safeEmpty(tenantId: string): GroundingContext {
@@ -65,16 +73,24 @@ export function createCachingGroundingPort(
 
   return {
     async getContext(tenantId: string): Promise<GroundingContext> {
-      // A reading of the cache never breaks serving (fall through to a fetch on any store error).
-      const cached = await store.get<CacheEntry>({ tenantId }, COLLECTION, KEY).catch(() => undefined);
+      // Reading the cache never breaks serving, and a HUNG store never hangs /chat (F1): the read is
+      // timeout-bounded and any error/timeout/corrupt row (F5) degrades to a cache miss.
+      const raw = await withTimeout(store.get<CacheEntry>({ tenantId }, COLLECTION, KEY), timeoutMs).catch(() => undefined);
+      const cached = isValidEntry(raw) ? raw : undefined;
       if (cached && now() - cached.fetchedAtMs < ttlMs) return cached.ctx; // fresh hit
 
       try {
         const ctx = await withTimeout(inner.getContext(tenantId), timeoutMs);
-        // Refresh the cache (best-effort — a write failure must not fail the request).
-        await store
-          .put({ tenantId }, COLLECTION, KEY, { ctx, fetchedAtMs: now() }, { ttlSeconds: retentionSeconds })
-          .catch(() => {});
+        // Defense-in-depth on the top multi-tenant control (F2): never cache or serve a context whose
+        // tenant doesn't match the request — a buggy upstream adapter must not be laundered through the
+        // cache. A mismatch is treated as a fetch failure (→ stale-while-error / safe-empty below).
+        if (ctx.tenantId !== tenantId) throw new Error("grounding tenant mismatch");
+        // Refresh the cache FIRE-AND-FORGET + timeout-bounded — a slow/hung store write never delays or
+        // fails the response (F1).
+        void withTimeout(
+          store.put({ tenantId }, COLLECTION, KEY, { ctx, fetchedAtMs: now() }, { ttlSeconds: retentionSeconds }),
+          timeoutMs,
+        ).catch(() => {});
         return ctx;
       } catch {
         if (cached) return cached.ctx; // stale-while-error: last-known-good beats a broken answer

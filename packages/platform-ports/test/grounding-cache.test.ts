@@ -71,6 +71,34 @@ describe("createCachingGroundingPort", () => {
     expect(out.products).toEqual([]);
   });
 
+  it("does not hang when the STORE hangs — read/write are timeout-bounded (F1)", async () => {
+    const { port } = fakeInner();
+    // A store whose get/put never resolve. The wrapper must still answer (fetch inner, return it).
+    const hungStore = { get: () => new Promise(() => {}), put: () => new Promise(() => {}) } as unknown as InMemoryRuntimeStore;
+    const cached = createCachingGroundingPort(port, hungStore, { ttlSeconds: 60, timeoutMs: 20 });
+    const out = await cached.getContext("demo"); // hung get → miss → fetch inner; hung put → fire-and-forget
+    expect(out.brandName).toBe("Brand-demo");
+  });
+
+  it("fails closed (never launders) when the upstream returns a MISMATCHED tenant (F2)", async () => {
+    const inner: GroundingPort = { async getContext() { return ctxFor("attacker-tenant", 3); } }; // wrong tenant!
+    const cached = createCachingGroundingPort(inner, new InMemoryRuntimeStore(), { ttlSeconds: 60 });
+    const out = await cached.getContext("victim");
+    expect(out.tenantId).toBe("victim");
+    expect(out.products).toEqual([]); // safe-empty, NOT the attacker-tenant catalog
+  });
+
+  it("treats a corrupt cached row as a miss (F5)", async () => {
+    const { state, port } = fakeInner();
+    const store = new InMemoryRuntimeStore();
+    // Poison the cache row with a malformed shape.
+    await store.put({ tenantId: "demo" }, "grounding", "context", { garbage: true } as never);
+    const cached = createCachingGroundingPort(port, store, { ttlSeconds: 60 });
+    const out = await cached.getContext("demo");
+    expect(out.brandName).toBe("Brand-demo"); // fetched fresh, not the corrupt row
+    expect(state.calls).toBe(1);
+  });
+
   it("is tenant-isolated — one tenant's cached catalog is never served to another", async () => {
     const { state, port } = fakeInner();
     let t = 0;
