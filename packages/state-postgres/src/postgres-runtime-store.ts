@@ -236,8 +236,10 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
     return this.sql.tx(async (txSql) => {
       const handle: RuntimeStateTx = {
         get: async <T2>(collection: string, key: string) => {
+          // Same TTL filter as the non-tx get/list — an expired entry must be invisible inside a tx too
+          // (behavior-equivalence with the in-memory adapter; a read-modify-write must not resurrect it).
           const { rows } = await txSql.query<{ value: T2 }>(
-            "SELECT value FROM rs_kv WHERE tenant_id=$1 AND collection=$2 AND key=$3",
+            "SELECT value FROM rs_kv WHERE tenant_id=$1 AND collection=$2 AND key=$3 AND (expires_at IS NULL OR expires_at > now())",
             [t, collection, key],
           );
           return rows.length ? rows[0].value : null;

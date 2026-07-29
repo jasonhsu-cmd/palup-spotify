@@ -59,7 +59,7 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
 
   async get<T>(ctx: RuntimeStateCtx, collection: string, key: string): Promise<T | null> {
     const e = this.data(ctx.tenantId).kv.get(collection)?.get(key);
-    if (!e || (e.expiresAt !== undefined && Date.now() > e.expiresAt)) return null; // expired = invisible
+    if (!e || (e.expiresAt !== undefined && Date.now() >= e.expiresAt)) return null; // expired = invisible
     return clone(e.value as T);
   }
 
@@ -84,7 +84,7 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
     const now = Date.now();
     const out: Array<{ key: string; value: T }> = [];
     for (const [key, e] of m) {
-      if (e.expiresAt !== undefined && now > e.expiresAt) continue; // skip expired
+      if (e.expiresAt !== undefined && now >= e.expiresAt) continue; // skip expired
       out.push({ key, value: clone(e.value as T) });
     }
     return out;
@@ -96,7 +96,7 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
     for (const t of this.tenants.values()) {
       for (const m of t.kv.values()) {
         for (const [key, e] of m) {
-          if (e.expiresAt !== undefined && now > e.expiresAt) {
+          if (e.expiresAt !== undefined && now >= e.expiresAt) {
             m.delete(key);
             removed++;
           }

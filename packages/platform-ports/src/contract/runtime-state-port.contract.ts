@@ -62,6 +62,16 @@ export function runRuntimeStatePortContract(makeAdapter: () => RuntimeStatePort 
       expect(await s.readStream(A, "traffic")).toEqual([{ i: 5 }, { i: 6 }]);
     });
 
+    it("tx.get respects TTL — an expired key is invisible inside a transaction too", async () => {
+      const s = await makeAdapter();
+      await s.put(A, "kvt", "expired", { v: 1 }, { ttlSeconds: -1 });
+      await s.put(A, "kvt", "live", { v: 2 }, { ttlSeconds: 300 });
+      await s.tx(A, async (t) => {
+        expect(await t.get("kvt", "expired")).toBeNull(); // must not resurrect an expired entry in a RMW
+        expect(await t.get("kvt", "live")).toEqual({ v: 2 });
+      });
+    });
+
     it("ENFORCES TENANT ISOLATION — a tenant never sees another tenant's data", async () => {
       const s = await makeAdapter();
       await s.put(A, "session", "s1", { secret: "A-only" });

@@ -25,10 +25,23 @@ const RUNTIME_AGENT_TYPE = "shopper";
 // Reclamation bounds (F3/F4): TTLs cap growth of the client-keyed idem/session KV; traffic is trimmed.
 // Reclamation runs opportunistically every N requests (Cloud Run throttles CPU between requests, so a
 // setInterval is unreliable — request-driven is the safe trigger). All overridable via env.
-const IDEM_TTL_SECONDS = Number(process.env.IDEM_TTL_SECONDS ?? 86_400); // 24h
-const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 2_592_000); // 30d (sliding — reset each turn)
-const TRAFFIC_KEEP_LAST = Number(process.env.TRAFFIC_KEEP_LAST ?? 5_000);
-const RECLAIM_EVERY = Number(process.env.RECLAIM_EVERY ?? 500);
+// Validate each knob: a typo / empty value must NOT silently become 0 (a 0 TTL would expire state
+// instantly → lost latch/budget) or NaN (a NaN modulo would disable reclamation). Reject non-positive
+// / non-finite and fall back to the documented default with a warning.
+function posInt(name: string, def: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return def;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v <= 0) {
+    console.warn(`[config] ${name}=${JSON.stringify(raw)} is not a positive number — using default ${def}`);
+    return def;
+  }
+  return v;
+}
+const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
+const SESSION_TTL_SECONDS = posInt("SESSION_TTL_SECONDS", 2_592_000); // 30d (sliding — reset each turn)
+const TRAFFIC_KEEP_LAST = posInt("TRAFFIC_KEEP_LAST", 5_000);
+const RECLAIM_EVERY = posInt("RECLAIM_EVERY", 500);
 let reqCount = 0;
 
 const here = dirname(fileURLToPath(import.meta.url));
