@@ -12,7 +12,7 @@ import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT } from "./canary-controller.js";
 import { createRuntimeStore, killStatus, armKill, disarmKill, type KillScope } from "@palup/state-postgres";
-import { createOperatorTokenIdentity } from "@palup/platform-ports";
+import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices } from "@palup/platform-ports";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -84,6 +84,33 @@ export async function buildServer() {
 
   app.get("/api/state", async () => state());
   app.get("/health", async () => ({ ok: true, mode }));
+
+  // M3 — cost/latency telemetry read (ADR-0013). EXPLICITLY operator-gated: cost data is sensitive and
+  // the global onRequest hook leaves GET open (dashboard reads; info-disclosure follow-up), so this
+  // route must NOT rely on that posture — it authenticates the bearer itself. $ is derived at read from
+  // the price table; an unpriced (real) model is flagged, never guessed; margin is unavailable until the
+  // ADR-0007 revenue ledger exists.
+  app.get("/api/telemetry", async (req, reply) => {
+    const auth = req.headers["authorization"];
+    const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+    const principal = await operatorIdentity.authenticate(token);
+    if (!operatorIdentity.authorize(principal, "operator:read")) {
+      await reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
+      return;
+    }
+    const q = (req.query as { tenantId?: unknown })?.tenantId;
+    const tenantId = typeof q === "string" && q ? q : "demo"; // coerce odd/array/missing → default
+    // Bound the read (review Finding 1): roll up the most recent N events, independent of stream-trim
+    // status, so an operator read can never load an unbounded stream into memory.
+    const rollup = await createStoreTelemetry(runtimeStore).query({ tenantId }, { limit: 10_000 });
+    const cost = deriveCostUsd(rollup, loadModelPrices());
+    return {
+      tenantId,
+      rollup,
+      cost,
+      margin: { status: "unavailable", reason: "revenue attribution (ADR-0007 outcome ledger) not yet built — showing COGS + latency only" },
+    };
+  });
   app.post("/api/seed", async () =>
     act(() => {
       const existing = new Set(engine.getCandidates().map((c) => c.policy.id));
