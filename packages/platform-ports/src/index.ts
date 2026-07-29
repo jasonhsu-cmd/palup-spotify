@@ -41,6 +41,7 @@ export { createWidgetTokenIdentity, mintWidgetToken } from "./widget-token-ident
 export { redactPII, createRedactingModelPort } from "./redaction.js";
 export type { TelemetryPort, TelemetryEvent, TelemetryRollup } from "./telemetry-port.js";
 export { createStoreTelemetry, rollupEvents } from "./telemetry-port.js";
+export { createMeteringModelPort } from "./metering.js";
 export { createCachingGroundingPort } from "./grounding-cache.js";
 export type { CachingGroundingOpts } from "./grounding-cache.js";
 export type { SecretsPort } from "./secrets-port.js";
