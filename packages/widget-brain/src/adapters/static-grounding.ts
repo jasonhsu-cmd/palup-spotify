@@ -33,8 +33,32 @@ const AURIA: GroundingContext = {
   },
 };
 
+// A second fixture tenant (a different vertical) so multi-tenant grounding + isolation are verifiable
+// now, without live Shopify — tenant "northwind" must never see "demo"'s catalog and vice-versa.
+const NORTHWIND: GroundingContext = {
+  tenantId: "northwind",
+  brandName: "Northwind Coffee",
+  products: [
+    { id: "beans-house", title: "House Blend Whole Beans (12oz)", price: "$16", description: "Balanced medium roast — cocoa and toasted nut; great for drip or espresso.", tags: ["beans", "medium", "blend"] },
+    { id: "beans-decaf", title: "Swiss-Water Decaf Beans (12oz)", price: "$17", description: "Chemical-free decaf; smooth and low-acid.", tags: ["beans", "decaf"] },
+    { id: "gear-dripper", title: "Ceramic Pour-Over Dripper", price: "$24", description: "Single-cup pour-over cone; fits standard #2 filters.", tags: ["gear", "brewer"] },
+    { id: "sub-monthly", title: "Monthly Bean Subscription", price: "$15/mo", description: "A fresh 12oz bag each month; pause or cancel anytime.", tags: ["subscription"] },
+  ],
+  policy: {
+    returns: "Unopened bags returnable within 14 days; opened coffee is not returnable for freshness.",
+    shipping: "Flat $5 US shipping; free over $40. Roasted-to-order, ships in 1–2 business days.",
+  },
+};
+
+// Fixtures-backed grounding: the demo/dev stand-in for the Shopify adapter (same GroundingPort,
+// ADR-0001). An UNKNOWN tenant gets a SAFE-EMPTY context (no products) so the brain honestly says it
+// can't find products rather than ever returning another merchant's catalog. The real Shopify adapter
+// swaps in behind this same port (M2 / ADR-0012).
+const FIXTURES: Record<string, GroundingContext> = { demo: AURIA, northwind: NORTHWIND };
+
 export class StaticGroundingAdapter implements GroundingPort {
   async getContext(tenantId: string): Promise<GroundingContext> {
-    return { ...AURIA, tenantId };
+    if (Object.hasOwn(FIXTURES, tenantId)) return { ...FIXTURES[tenantId], tenantId };
+    return { tenantId, brandName: "this store", products: [], policy: { returns: "", shipping: "" } };
   }
 }

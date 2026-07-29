@@ -79,6 +79,12 @@ export interface Signals {
   region?: "us" | "eu" | "uk" | "other";
   /** Operator kill switch for this session/scope — when true the agent halts and hands to a human. */
   kill?: boolean;
+  /**
+   * Tenant/merchant the agent is serving. SERVER-DERIVED from the verified widget token — never set by
+   * the client (deriveServingSignals overwrites any client value). Drives per-merchant grounding
+   * (the merchant's own catalog/policy) and model tenancy. Absent ⇒ the demo tenant during rollout.
+   */
+  tenantId?: string;
 }
 
 export interface Decision {

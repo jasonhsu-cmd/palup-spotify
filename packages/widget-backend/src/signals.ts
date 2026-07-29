@@ -10,6 +10,8 @@ const MOODS = new Set<string>(["frustrated", "upset", "anxious", "confused", "sk
 const CARTS = new Set<string>(["empty", "has_items", "high_value"]);
 
 export interface ServingSignalContext {
+  /** The verified tenant/merchant this request serves (from the widget token, server-side). */
+  tenantId: string;
   /** Operator kill state for this scope (from the registry, server-side). */
   kill: boolean;
   /** Merchant/geo jurisdiction (server config). */
@@ -25,6 +27,7 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     mood: typeof r.mood === "string" && MOODS.has(r.mood) ? r.mood : undefined,
     cart: typeof r.cart === "string" && CARTS.has(r.cart) ? r.cart : undefined,
     // Server-derived trust-bearing signals — never taken from the client.
+    tenantId: ctx.tenantId, // the verified merchant; drives per-merchant grounding — never client-set
     relationship: "anonymous", // no identified customer yet (M2); never client-claimed VIP/subscriber
     consent: { email: "unknown", sms: "unknown" }, // conservative; real consent store is a later subsystem
     groundingMode: ctx.groundingMode,
