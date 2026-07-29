@@ -10,6 +10,7 @@ import {
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY } from "@palup/widget-brain";
 import type { RuntimeStatePort } from "@palup/platform-ports";
+import { createWidgetTokenIdentity, mintWidgetToken } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -47,6 +48,23 @@ const RL_SESSION = posInt("RL_SESSION_PER_MIN", 30); // ~1 turn / 2s per convers
 const RL_IP = posInt("RL_IP_PER_MIN", 60);
 const RL_TENANT = posInt("RL_TENANT_PER_MIN", 2_000); // per-tenant ceiling (≈5× expected)
 const RL_WINDOW = posInt("RL_WINDOW_SECONDS", 60);
+// Widget tenant identity (T2/T3): the tenant is derived from a verified widget token. WIDGET_AUTH_REQUIRED
+// gates ENFORCEMENT — off during rollout (unauthenticated requests fall back to RUNTIME_TENANT); flip on
+// once the widget mints+sends a token and the signing secret is provisioned, retiring the fallback.
+// Publishable embed-key → merchantId registry (the key ships in the storefront snippet). JSON via env;
+// defaults to the demo tenant. NOT a secret — it only names which merchant a widget belongs to.
+function parseEmbedKeys(): Record<string, string> {
+  const raw = process.env.WIDGET_EMBED_KEYS;
+  if (raw) {
+    try {
+      const o = JSON.parse(raw);
+      if (o && typeof o === "object") return o as Record<string, string>;
+    } catch {
+      console.warn("[config] WIDGET_EMBED_KEYS is not valid JSON — using the demo default");
+    }
+  }
+  return { "demo-embed-key": "demo" };
+}
 const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
 // 48h sliding (reset each turn): this is conversation-scoped CONTROL state (safety latch / open issues
 // / pitch budget), not customer memory — it shouldn't outlive a conversation. Cross-visit shopper
@@ -81,8 +99,12 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads.
   const store = opts?.store ?? (await createRuntimeStore()).store;
-  // Per-conversation state (latch / open-issues / pitch budget), durable + tenant-scoped on that store.
-  const sessions = createRuntimeSessionStore(store, RUNTIME_TENANT);
+  // Widget-identity config (read per boot so a test / deploy can configure it).
+  const WIDGET_TOKEN_SECRET = process.env.WIDGET_TOKEN_SECRET;
+  const WIDGET_TOKEN_TTL_SECONDS = posInt("WIDGET_TOKEN_TTL_SECONDS", 3_600);
+  const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
+  const EMBED_KEYS = parseEmbedKeys();
+  const widgetIdentity = createWidgetTokenIdentity(WIDGET_TOKEN_SECRET);
   const app = Fastify({ logger: false });
 
   app.get("/health", async () => ({ ok: true, model: modelName }));
@@ -91,23 +113,57 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
     reply.type("text/html").send(widgetHtml);
   });
 
+  // Mint a short-TTL widget token for a valid publishable embed key. The storefront snippet calls this
+  // once, then sends the token on /chat. The tenant is bound here from the SERVER-side registry (never
+  // from a client-claimed value). 401 for an unknown key or if signing isn't configured.
+  app.get("/widget/token", async (req, reply) => {
+    const key = (req.query as { key?: string })?.key;
+    const merchantId = typeof key === "string" ? EMBED_KEYS[key] : undefined;
+    if (!merchantId || !WIDGET_TOKEN_SECRET) {
+      reply.code(401);
+      return { error: "invalid or unconfigured embed key" };
+    }
+    return { token: mintWidgetToken(WIDGET_TOKEN_SECRET, merchantId, WIDGET_TOKEN_TTL_SECONDS), expiresInSeconds: WIDGET_TOKEN_TTL_SECONDS };
+  });
+
   app.post("/chat", async (req, reply) => {
     const body = (req.body ?? {}) as {
       message?: string;
       signals?: Signals;
       sessionId?: string;
       idempotencyKey?: string;
+      widgetToken?: string;
     };
     const sessionId = String(body.sessionId ?? "anon");
     const message = String(body.message ?? "");
     const idemKey = typeof body.idempotencyKey === "string" && body.idempotencyKey ? body.idempotencyKey : undefined;
-    const serving = { tenantId: RUNTIME_TENANT };
 
     // T5 — input bounds: reject oversized input before any work (bounds the model + the KV keys).
     if (message.length > MAX_MESSAGE_CHARS || sessionId.length > MAX_ID_CHARS || (idemKey && idemKey.length > MAX_ID_CHARS)) {
       reply.code(400);
       return { reply: "Sorry — that message is too long. Could you shorten it?", mode: "support", pitch: "none", escalate: false, flags: ["input_rejected"] };
     }
+
+    // T3 — TENANT IDENTITY: derive the merchant/tenant from a VERIFIED widget token (Authorization:
+    // Bearer, or a body field). The tenant comes from signed claims, never a client-supplied value.
+    // During rollout (WIDGET_AUTH_REQUIRED off) an unauthenticated request falls back to the default
+    // tenant; once enforced, no token ⇒ 401 and the fallback is retired.
+    const authHeader = req.headers["authorization"];
+    const widgetToken =
+      typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7)
+        : typeof body.widgetToken === "string"
+          ? body.widgetToken
+          : undefined;
+    const principal = await widgetIdentity.authenticate(widgetToken);
+    if (principal.kind !== "merchant" && WIDGET_AUTH_REQUIRED) {
+      reply.code(401);
+      return { reply: "This assistant needs to be opened from the store page.", mode: "support", pitch: "none", escalate: false, flags: ["unauthenticated"] };
+    }
+    const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
+    const serving = { tenantId };
+    // Per-conversation state, durable + scoped to THIS tenant.
+    const sessions = createRuntimeSessionStore(store, tenantId);
 
     // T6 — rate limit (denial-of-wallet): per-session / per-IP / per-tenant, atomic windowed counters on
     // the shared store. IP key is bounded/validated (an oversized X-Forwarded-For can't force a store
@@ -144,7 +200,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // what the shopper's request contains.
       const clientSignals: Signals = { ...(body.signals ?? {}) };
       delete clientSignals.kill;
-      const kill = await matchedKill(store, { tenantId: RUNTIME_TENANT, agentType: RUNTIME_AGENT_TYPE });
+      const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
       const signals: Signals = kill ? { ...clientSignals, kill: true } : clientSignals;
 
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
@@ -153,7 +209,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
       const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
       const d = await session.send(message, signals);
-      await logTraffic(store, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
+      await logTraffic(store, tenantId, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
       // F11 (NN #5): commit the advanced session state AND its governance-audit record in ONE tx, so
       // the governed state (pitch budget / safety latch) can never advance without its audit on a
       // mid-turn store failure. Both live under the serving tenant. "session" matches session-store.ts.
@@ -167,7 +223,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // captures it immutably, OUTSIDE the DB's mutable surface. Reconciling these anchors against
       // rs_audit later detects tail-truncation / full re-hash that the in-DB chain alone can't (a
       // compromised DBA has no write path to Cloud Logging). PII-safe (seq + hash only).
-      if (auditRec) console.log(`AUDIT_ANCHOR ${JSON.stringify({ t: RUNTIME_TENANT, seq: auditRec.seq, hash: auditRec.hash, at: auditRec.at })}`);
+      if (auditRec) console.log(`AUDIT_ANCHOR ${JSON.stringify({ t: tenantId, seq: auditRec.seq, hash: auditRec.hash, at: auditRec.at })}`);
       // Opportunistic reclamation (F3/F4): bound idem/session growth + traffic retention. Fire-and-forget
       // so it never delays or fails the response.
       if (++reqCount % RECLAIM_EVERY === 0) {
