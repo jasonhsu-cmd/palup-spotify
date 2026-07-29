@@ -124,7 +124,9 @@ export async function buildServer() {
         const proposer = new ModelProposer(createAnthropicApiAdapter(), 2);
         const championMetrics = await sgrader.grade(DEFAULT_POLICY);
         const eng = new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader: sgrader });
-        const loop = new AutoLoop({ engine: eng, grader: sgrader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: true });
+        // NN #2: the endpoint proposes → evaluates → gates and STOPS at human approval. It must never
+        // auto-promote a candidate to shoppers; a human approves + promotes via the Approval Center.
+        const loop = new AutoLoop({ engine: eng, grader: sgrader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: false });
         await loop.run(Number(process.env.EVOLVE_ROUNDS ?? 2));
       } catch (e) {
         console.error("[evolve]", (e as Error).message);

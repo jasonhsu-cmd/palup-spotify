@@ -94,7 +94,10 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       if (!o) { flags.push("escalate"); return { reply: `Happy to help with a refund — which order is it? I can only refund an order I can verify on your account.`, escalate: true, flags }; }
       const above = o.total > policy.refundCeiling;
       if (above) { flags.push("refund_hitl", "escalate"); return { reply: `I'm sorry about that. A refund of $${o.total} on order #${o.id} is above the amount I can approve directly, so I've routed it to a team member to process — you'll hear back shortly, and I've checked there's no duplicate refund on this order.`, escalate: true, flags }; }
-      flags.push("refund_within_ceiling"); return { reply: `I'm sorry about that with order #${o.id} — I can process a refund within our policy, and I've confirmed there's no duplicate refund already on it. You'll see it back on your original payment method in a few business days.`, escalate: false, flags };
+      // HONESTY (reply-and-escalate-only phase): the agent has no execution path (no CommercePort
+      // refund method, no Approval Center yet), so it must NOT claim the refund is done. Route it to a
+      // person to execute; keep the within-ceiling flag so a later Approval-Center build can auto-execute.
+      flags.push("refund_within_ceiling", "refund_routed", "escalate"); return { reply: `I'm sorry about that with order #${o.id}. A refund is within our policy — I can't move the money myself, so I've handed it to a member of our team to complete, and flagged that there's no duplicate refund on this order. They'll take it from here.`, escalate: true, flags };
     }
     case "damaged": {
       if (namedButUnavailable) return denyOrder("act on");
@@ -112,12 +115,15 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       const o = await resolveOwned();
       if (!o) { flags.push("escalate"); return { reply: `I can help cancel an order — which one? I can only cancel an order I can verify on your account.`, escalate: true, flags }; }
       if (o.fulfilled) { flags.push("escalate"); return { reply: `I checked and order #${o.id} has already shipped, so I can't cancel it from here — but I can connect you with a person to arrange a return or intercept it with the carrier.`, escalate: true, flags }; }
-      return { reply: `I checked and order #${o.id} hasn't shipped yet, so I've cancelled it and you'll see the refund on your original payment method.`, escalate: false, flags };
+      // HONESTY: don't claim the cancel/refund happened — the agent can't execute it. Route to a person.
+      flags.push("cancel_routed", "escalate"); return { reply: `I checked and order #${o.id} hasn't shipped yet, so it can still be cancelled. I can't cancel it or move a refund myself, so I've handed it to a member of our team to complete — they'll take care of it and follow up.`, escalate: true, flags };
     }
     case "cancel_subscription": {
       const sub = await commerce.getSubscription(shopperId);
       if (!sub?.active) return { reply: `You don't have an active subscription right now, so there's nothing to cancel — let me know if there's anything else I can help with.`, escalate: false, flags };
-      return { reply: `Done — I've cancelled your subscription, effective immediately, and you won't be charged again. If you'd ever rather just pause it that's one tap too, but no pressure — you're all set.`, escalate: false, flags };
+      // HONESTY + no dark pattern: honor the cancel intent promptly and offer pause WITHOUT pressure,
+      // but don't claim it's already done — a person completes it (no execution path this phase).
+      flags.push("cancel_sub_routed", "escalate"); return { reply: `I hear you — I can't cancel the subscription myself, so I've handed it to a member of our team to process right away, effective immediately, so you won't be charged going forward. If you'd ever rather just pause instead that's an option too — no pressure. They'll confirm shortly.`, escalate: true, flags };
     }
     case "skip_subscription":
       return { reply: `Done — I've skipped your next subscription delivery. Your following order will ship as usual.`, escalate: false, flags };

@@ -98,7 +98,9 @@ async function route(line: string): Promise<"continue" | "quit"> {
     const proposer = new ModelProposer(createAnthropicApiAdapter(), 2, (m) => console.log(m));
     const metrics = await grader.grade(champion.policy);
     const engine = new EvolutionEngine({ champion: { policy: champion.policy, metrics }, grader });
-    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: true, log: (m) => console.log(m) });
+    // Local demo, but still governed: human-gate by default so it demonstrates the real pipeline
+    // (opt in with EVOLVE_AUTO_APPROVE=true to watch an auto-promote). NN #2: no default auto-promotion.
+    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: process.env.EVOLVE_AUTO_APPROVE === "true", log: (m) => console.log(m) });
     await store.write("improvement-timeline", []);
     const tl = await loop.run(Number(process.env.EVOLVE_ROUNDS ?? 2));
     champion = engine.getChampion();
