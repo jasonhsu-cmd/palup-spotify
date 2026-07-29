@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import type { RuntimeStatePort } from "@palup/platform-ports";
+import { redactPII } from "@palup/platform-ports";
 import type { Policy } from "@palup/widget-brain";
 
 // Canary traffic split + traffic logging (the run-time half of shadow/canary), now on the SHARED
@@ -45,8 +47,19 @@ export async function assignCanary(store: RuntimeStatePort, sessionId: string): 
 
 export async function logTraffic(store: RuntimeStatePort, tenantId: string, entry: Record<string, unknown>): Promise<void> {
   // Logging must never break serving. Traffic is written under the serving tenant's partition.
+  // This is the SINGLE choke point for at-rest traffic minimization (F3): redaction/hashing happens
+  // HERE, not at the call site, so no caller can accidentally persist raw PII. The `message`/`reply`
+  // text is PII-redacted (cards/SSNs) and the client-supplied `sessionId` is hashed (F5 — a shopper
+  // could otherwise stuff PII into it; the audit log already hashes it). Hash preserves per-session
+  // grouping for analytics while removing the raw identifier.
   try {
-    await store.append({ tenantId }, TRAFFIC, { ts: new Date().toISOString(), ...entry });
+    const safe: Record<string, unknown> = { ...entry };
+    if (typeof safe.message === "string") safe.message = redactPII(safe.message);
+    if (typeof safe.reply === "string") safe.reply = redactPII(safe.reply);
+    if (typeof safe.sessionId === "string") {
+      safe.sessionId = "sess_" + createHash("sha256").update(safe.sessionId).digest("hex").slice(0, 16);
+    }
+    await store.append({ tenantId }, TRAFFIC, { ts: new Date().toISOString(), ...safe });
   } catch {
     /* ignore */
   }

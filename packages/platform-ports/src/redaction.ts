@@ -28,17 +28,35 @@ function luhnOk(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+/** True if ANY 13–19 digit window of `digits` is Luhn-valid (catches a card embedded in a longer run). */
+function hasCardWindow(digits: string): boolean {
+  const n = digits.length;
+  if (n < 13) return false;
+  for (let len = 13; len <= 19; len++) {
+    for (let i = 0; i + len <= n; i++) {
+      if (luhnOk(digits.slice(i, i + len))) return true;
+    }
+  }
+  return false;
+}
+
 export function redactPII(text: string): string {
   if (!text) return text;
-  let out = text;
-  // Payment-card-like: 13–19 digits, optionally single-separated by spaces/hyphens. Redact ONLY when
-  // Luhn-valid so a 13+ digit order/tracking number isn't mistaken for a card.
-  out = out.replace(/\b\d(?:[ -]?\d){12,18}\b/g, (m) => {
-    const digits = m.replace(/[ -]/g, "");
-    return luhnOk(digits) ? "[redacted-card]" : m;
+  // NFKC folds fullwidth / Unicode digit variants (e.g. "４１１１") to ASCII so they can't evade matching.
+  let out = text.normalize("NFKC");
+  // Payment cards: a run of ASCII digits interleaved with common human separators (whitespace incl.
+  // newlines, hyphen, dot, comma, non-breaking space, slash). Redact the whole run if any 13–19-digit
+  // window is Luhn-valid — this defeats odd separators, line-split cards, and a card embedded in a
+  // longer digit run. Non-adversarial ways people type cards must not slip through. The Luhn gate keeps
+  // ordinary long numbers (order/tracking IDs) intact; a false negative would leak a card, so the gate
+  // stays conservative. Separator/digit classes are disjoint, so the quantifier can't backtrack (no ReDoS).
+  out = out.replace(/\d(?:[\s., /-]*\d){12,}/g, (m) => {
+    const digits = m.replace(/\D/g, "");
+    return hasCardWindow(digits) ? "[redacted-card]" : m;
   });
-  // US SSN: NNN-NN-NNNN (hyphen or space grouped).
-  out = out.replace(/\b\d{3}[- ]\d{2}[- ]\d{4}\b/g, "[redacted-ssn]");
+  // US SSN: NNN-NN-NNNN grouped by hyphen / space / dot. (Bare 9-digit SSNs are out of scope — matching
+  // every 9-digit run would over-redact ZIP+4 / account / order numbers; documented gap.)
+  out = out.replace(/\b\d{3}[-. ]\d{2}[-. ]\d{4}\b/g, "[redacted-ssn]");
   return out;
 }
 

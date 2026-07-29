@@ -13,6 +13,27 @@ describe("redactPII", () => {
     expect(redactPII("ssn 123-45-6789")).toBe("ssn [redacted-ssn]");
   });
 
+  it("defeats common bypasses (F1): odd separators, line-splits, fullwidth digits, embedded runs", () => {
+    // A valid card (Luhn-ok) typed with non-standard separators must still be caught.
+    expect(redactPII("4111.1111.1111.1111")).toBe("[redacted-card]"); // dots
+    expect(redactPII("4111/1111/1111/1111")).toBe("[redacted-card]"); // slashes
+    expect(redactPII("4111  1111  1111  1111")).toBe("[redacted-card]"); // double spaces
+    expect(redactPII("4111,1111,1111,1111")).toBe("[redacted-card]"); // commas
+    // Split across a newline.
+    expect(redactPII("card:\n4111 1111 1111\n1111").includes("[redacted-card]")).toBe(true);
+    // Fullwidth Unicode digits (NFKC-folded).
+    expect(redactPII("４１１１１１１１１１１１１１１１")).toBe("[redacted-card]");
+    // A card embedded in a longer digit run is still detected.
+    expect(redactPII("ref00004111111111111111zz").includes("[redacted-card]")).toBe(true);
+  });
+
+  it("is not vulnerable to ReDoS on adversarial digit/separator input", () => {
+    const evil = "1 ".repeat(4_000) + "x"; // 8k chars of digit+separator (2× the real message cap)
+    const start = performance.now();
+    redactPII(evil);
+    expect(performance.now() - start).toBeLessThan(500); // linear; well under a timeout budget
+  });
+
   it("does NOT redact things the agent legitimately needs (email, phone, order/tracking numbers)", () => {
     // Email + phone are kept (support lookups need them).
     expect(redactPII("email jane@example.com phone 415-555-0100")).toBe("email jane@example.com phone 415-555-0100");

@@ -29,7 +29,9 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     consent: { email: "unknown", sms: "unknown" }, // conservative; real consent store is a later subsystem
     groundingMode: ctx.groundingMode,
     region: ctx.region,
-    // proactivityLevel omitted ⇒ brain falls back to the merchant policy default (not the shopper)
+    // proactivityLevel omitted ⇒ the session applies its own server-side default ("balanced"), never
+    // the shopper. (A canary policy's proactivityDefault is not threaded onto /chat today — tracked;
+    // server-controlled either way, no client influence.)
     // openIssues / safetyLatched omitted ⇒ sourced only from persisted session state
     kill: ctx.kill ? true : undefined,
   };

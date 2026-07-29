@@ -10,7 +10,7 @@ import {
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY } from "@palup/widget-brain";
 import type { RuntimeStatePort } from "@palup/platform-ports";
-import { createWidgetTokenIdentity, mintWidgetToken, redactPII } from "@palup/platform-ports";
+import { createWidgetTokenIdentity, mintWidgetToken } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -236,7 +236,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       //   • openIssues / safetyLatched — sourced ONLY from persisted session state, never client-injected.
       //   • kill — armed state comes from the operator registry (server); the shopper can neither arm nor bypass it.
       const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
-      const signals: Signals = deriveServingSignals(body.signals, { kill, region: MERCHANT_REGION, groundingMode: MERCHANT_GROUNDING_MODE });
+      const signals: Signals = deriveServingSignals(body.signals, { kill: Boolean(kill), region: MERCHANT_REGION, groundingMode: MERCHANT_GROUNDING_MODE });
 
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
       const canary = await assignCanary(store, sessionId);
@@ -244,9 +244,9 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
       const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
       const d = await session.send(message, signals);
-      // T9 — the traffic log persists shopper messages/replies for shadow-grading, so redact the
-      // never-needed PII class (cards / SSNs) at rest. (Email/phone minimization here is a tracked follow-up.)
-      await logTraffic(store, tenantId, { servedBy: policy.id, sessionId, message: redactPII(message), reply: redactPII(d.reply), mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
+      // T9 — logTraffic is the choke point that redacts message/reply and hashes sessionId at the
+      // write boundary (see canary.ts), so no raw shopper PII lands in the shadow-grading log at rest.
+      await logTraffic(store, tenantId, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
       // F11 (NN #5): commit the advanced session state AND its governance-audit record in ONE tx, so
       // the governed state (pitch budget / safety latch) can never advance without its audit on a
       // mid-turn store failure. Both live under the serving tenant. "session" matches session-store.ts.
