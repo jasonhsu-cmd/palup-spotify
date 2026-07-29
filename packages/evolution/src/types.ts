@@ -82,7 +82,7 @@ export interface PromotionEvent {
 
 export interface AuditEntry {
   seq: number;
-  actor: "engine" | "human" | "monitor";
+  actor: "engine" | "human" | "monitor" | "auto-loop";
   action: string;
   target?: string;
   detail?: Record<string, unknown>;

@@ -27,6 +27,9 @@ async function main() {
     );
   }
 
+  // OFFLINE DEMO ONLY (pnpm evo:demo, MockGrader, disconnected from shoppers): "jason" is a stand-in
+  // HUMAN operator approving via the Approval Center — this scripts the human gate, it is not an
+  // autonomous approval path. NN #2's human gate is enforced in engine.approve/promote, not here.
   console.log("\n-- human reviews the passing candidate (Approval Center) --");
   engine.approve("cand-warm-concise", "jason");
   const champ = engine.promote("cand-warm-concise");
