@@ -58,9 +58,14 @@ export function runRuntimeStatePortContract(makeAdapter: () => RuntimeStatePort 
       expect(got?.openIssues).toEqual(["order-status"]);
     });
 
-    it("append preserves order; readStream limit returns the most recent N", async () => {
+    it("append preserves order + returns a monotonic cursor; readStream limit returns the most recent N", async () => {
       const s = await makeAdapter();
-      for (let i = 1; i <= 5; i++) expect(await s.append(A, "traffic", { i })).toBe(i);
+      let prev = 0;
+      for (let i = 1; i <= 5; i++) {
+        const cur = await s.append(A, "traffic", { i });
+        expect(cur).toBeGreaterThan(prev); // monotonic cursor (not a stable count)
+        prev = cur;
+      }
       expect(await s.readStream(A, "traffic")).toEqual([{ i: 1 }, { i: 2 }, { i: 3 }, { i: 4 }, { i: 5 }]);
       expect(await s.readStream(A, "traffic", { limit: 2 })).toEqual([{ i: 4 }, { i: 5 }]);
     });

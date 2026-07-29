@@ -13,7 +13,7 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
-import { auditDecision } from "./audit.js";
+import { buildAuditInput } from "./audit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -91,16 +91,17 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
       const canary = await assignCanary(store, sessionId);
       const policy = canary ? canary.policy : DEFAULT_POLICY;
-      const session = await createSession(brainFor(policy), { sessionId, store: sessions });
+      // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
+      const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
       const d = await session.send(message, signals);
       await logTraffic(store, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
-      // Immutable audit of a governance-relevant autonomous decision (NN #5), PII-safe (no raw message).
-      await auditDecision(store, RUNTIME_TENANT, {
-        sessionId,
-        messageLength: message.length,
-        servedBy: policy.id,
-        decision: d,
-        killScope: kill?.scope,
+      // F11 (NN #5): commit the advanced session state AND its governance-audit record in ONE tx, so
+      // the governed state (pitch budget / safety latch) can never advance without its audit on a
+      // mid-turn store failure. Both live under the serving tenant. "session" matches session-store.ts.
+      const auditEntry = buildAuditInput({ sessionId, messageLength: message.length, servedBy: policy.id, decision: d, killScope: kill?.scope });
+      await store.tx(serving, async (t) => {
+        await t.put("session", sessionId, session.state);
+        if (auditEntry) await t.audit(auditEntry);
       });
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
       const response = {

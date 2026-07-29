@@ -41,6 +41,12 @@ export interface SessionOptions {
   sessionId?: string;
   store?: SessionStore;
   level?: ProactivityLevel;
+  /**
+   * When true (default), send() persists the advanced state via `store` itself. Set false when the
+   * caller wants to persist the state atomically WITH something else (e.g. the per-turn audit record in
+   * one transaction) — then the caller reads `session.state` and persists it. See widget-backend /chat.
+   */
+  autoPersist?: boolean;
 }
 
 export async function createSession(brain: Brain, opts: SessionOptions = {}): Promise<Session> {
@@ -50,8 +56,9 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
     ? { ...restored, openIssues: [...restored.openIssues] }
     : { safetyLatched: false, openIssues: [], pitchesUsed: 0 };
 
+  const autoPersist = opts.autoPersist ?? true;
   const persist = async () => {
-    if (opts.sessionId && opts.store) await opts.store.save(opts.sessionId, state);
+    if (autoPersist && opts.sessionId && opts.store) await opts.store.save(opts.sessionId, state);
   };
 
   return {

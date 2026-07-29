@@ -96,19 +96,14 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
   }
 
   private async appendVia<T>(sql: Sql, tenantId: string, stream: string, entry: T): Promise<number> {
-    // Insert, then count in a SEPARATE statement (a data-modifying CTE's own insert is NOT visible to a
-    // SELECT in the same statement). Exact under the sequential use the contract exercises; under
-    // concurrency the returned length is monotonic-ish (reflects committed rows), which a log tolerates.
-    await sql.query("INSERT INTO rs_stream (tenant_id, stream, entry) VALUES ($1,$2,$3)", [
-      tenantId,
-      stream,
-      JSON.stringify(entry),
-    ]);
-    const { rows } = await sql.query<{ n: string }>(
-      "SELECT count(*)::text AS n FROM rs_stream WHERE tenant_id=$1 AND stream=$2",
-      [tenantId, stream],
+    // O(1): return the row's global bigserial `seq` (a monotonic cursor) via RETURNING — NOT a
+    // count(*) over the whole stream per append (which was O(n) on the hot traffic path, F5). The
+    // returned value is a strictly-increasing cursor, not a stable per-stream length.
+    const { rows } = await sql.query<{ seq: string }>(
+      "INSERT INTO rs_stream (tenant_id, stream, entry) VALUES ($1,$2,$3) RETURNING seq",
+      [tenantId, stream, JSON.stringify(entry)],
     );
-    return Number(rows[0].n);
+    return Number(rows[0].seq);
   }
 
   async append<T>(ctx: RuntimeStateCtx, stream: string, entry: T): Promise<number> {

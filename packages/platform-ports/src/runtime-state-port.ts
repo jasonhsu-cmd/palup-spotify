@@ -68,7 +68,8 @@ export interface RuntimeStatePort {
   list<T>(ctx: RuntimeStateCtx, collection: string): Promise<Array<{ key: string; value: T }>>;
 
   // --- Tenant-scoped append-only operational streams (traffic, cost telemetry) ---
-  /** Append one entry to a stream; returns the new length. */
+  /** Append one entry to a stream; returns a monotonic-increasing cursor for the entry (adapters may
+   * return the stream length or a global sequence — do NOT rely on it being a stable count; O(1)). */
   append<T>(ctx: RuntimeStateCtx, stream: string, entry: T): Promise<number>;
   /** Read a stream oldest-first; `limit` returns the most recent N. */
   readStream<T>(ctx: RuntimeStateCtx, stream: string, opts?: { limit?: number }): Promise<T[]>;
