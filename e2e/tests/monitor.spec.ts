@@ -3,6 +3,9 @@ import { test, expect } from "@playwright/test";
 // Drives the governed self-improvement loop through the dashboard: propose -> evaluate -> GATE
 // (blocks the bad candidate) -> human approve -> promote (champion changes) -> auto-rollback.
 test("self-improvement loop is observable and governed via the dashboard", async ({ page }) => {
+  // The control-plane is default-deny (M1 operator gate): the dashboard must present the operator token
+  // for its mutating actions. Inject it (matches OPERATOR_TOKEN in the webServer env) before load.
+  await page.addInitScript(() => localStorage.setItem("palup_operator_token", "e2e-op-token"));
   await page.goto("/");
   await expect(page.getByTestId("champion-label")).toContainText("Baseline");
 

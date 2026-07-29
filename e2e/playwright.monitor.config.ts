@@ -13,7 +13,7 @@ export default defineConfig({
     command: "pnpm monitor",
     cwd: "..",
     url: `http://127.0.0.1:${PORT}/health`,
-    env: { PORT: String(PORT) },
+    env: { PORT: String(PORT), OPERATOR_TOKEN: "e2e-op-token" },
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
   },
