@@ -108,10 +108,16 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // the governed state (pitch budget / safety latch) can never advance without its audit on a
       // mid-turn store failure. Both live under the serving tenant. "session" matches session-store.ts.
       const auditEntry = buildAuditInput({ sessionId, messageLength: message.length, servedBy: policy.id, decision: d, killScope: kill?.scope });
+      let auditRec: { seq: number; hash: string; at: string } | null = null;
       await store.tx(serving, async (t) => {
         await t.put("session", sessionId, session.state, { ttlSeconds: SESSION_TTL_SECONDS });
-        if (auditEntry) await t.audit(auditEntry);
+        if (auditEntry) auditRec = await t.audit(auditEntry);
       });
+      // External audit-chain anchor (#19 head-anchor): emit the chain head to stdout → Cloud Logging
+      // captures it immutably, OUTSIDE the DB's mutable surface. Reconciling these anchors against
+      // rs_audit later detects tail-truncation / full re-hash that the in-DB chain alone can't (a
+      // compromised DBA has no write path to Cloud Logging). PII-safe (seq + hash only).
+      if (auditRec) console.log(`AUDIT_ANCHOR ${JSON.stringify({ t: RUNTIME_TENANT, seq: auditRec.seq, hash: auditRec.hash, at: auditRec.at })}`);
       // Opportunistic reclamation (F3/F4): bound idem/session growth + traffic retention. Fire-and-forget
       // so it never delays or fails the response.
       if (++reqCount % RECLAIM_EVERY === 0) {

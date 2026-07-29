@@ -29,8 +29,12 @@ green.
   unix socket (`host=/cloudsql/<conn>`). The runtime SA has `roles/cloudsql.client` + `secretAccessor`
   on the URL secret.
 - **Schema:** auto-created on boot (`PostgresRuntimeStore.migrate()`), no manual migration.
-- **Deferred (#19):** `REVOKE UPDATE, DELETE ON rs_audit FROM palup_app` (INSERT/SELECT only) + a trusted
-  audit head-anchor — needs a psql/proxy session and a named human sign-off.
+- **Audit immutability (#19):** `rs_audit` is INSERT/SELECT-only for `palup_app` (applied on staging;
+  UPDATE/DELETE denied — verified). Re-apply for any new instance via
+  `scripts/setup-audit-immutability.sql` (run as `postgres` through the Cloud SQL proxy). The backend
+  also emits an `AUDIT_ANCHOR {seq,hash}` line to stdout per audited turn → Cloud Logging keeps an
+  immutable witness of the chain head *outside* the DB, so tail-truncation / rewrite by a compromised
+  DBA is reconcilable. (Automated anchor↔DB reconciliation is a monitoring follow-up.)
 
 ## One-time setup
 
