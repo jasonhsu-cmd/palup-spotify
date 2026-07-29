@@ -1,20 +1,21 @@
-import { readFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import type { RuntimeStatePort } from "@palup/platform-ports";
 import type { Policy } from "@palup/widget-brain";
 
-// Canary traffic split + traffic logging (the run-time half of shadow/canary). The control plane
-// WRITES .palup-state/canary-config.json (start a canary / roll it back) and READS the traffic log;
-// the backend READS the config per request (so a rollback takes effect live) and appends every served
-// interaction to the log. Shared-file coordination is fine for local/staging; production would put
-// both behind a shared StorePort (Postgres) — the same interface, a different adapter (ADR-0004).
+// Canary traffic split + traffic logging (the run-time half of shadow/canary), now on the SHARED
+// RuntimeStatePort so a canary start/rollback the control plane writes takes effect on EVERY serving
+// instance, and shadow-grading reads the same traffic (was a per-instance local file). Config + traffic
+// live under the reserved __system__ tenant (rollout is cross-tenant operator state; when real
+// multi-tenancy lands, traffic moves per-merchant). Keep the __system__/collection names in sync with
+// control-plane/canary-controller.ts.
 
-const STATE_DIR = ".palup-state";
-const CONFIG = join(STATE_DIR, "canary-config.json");
-const LOG = join(STATE_DIR, "traffic-log.jsonl");
+const SYSTEM = { tenantId: "__system__" };
+const CANARY = "canary"; // KV collection
+const CONFIG_KEY = "config";
+const TRAFFIC = "traffic"; // append stream
 
 export interface CanaryConfig {
   enabled: boolean;
-  pct: number; // 0..100 of sessions served by the canary policy
+  pct: number; // 0..N of sessions served by the canary policy
   policy: Policy;
 }
 
@@ -29,31 +30,21 @@ export function bucket(sessionId: string): number {
   return (h >>> 0) % 100;
 }
 
-let cache: { at: number; cfg: CanaryConfig | null } = { at: 0, cfg: null };
-export function readCanaryConfig(now = Date.now()): CanaryConfig | null {
-  if (now - cache.at < 3000) return cache.cfg; // 3s cache — control plane can flip it (rollback) live
-  let cfg: CanaryConfig | null = null;
-  try {
-    if (existsSync(CONFIG)) cfg = JSON.parse(readFileSync(CONFIG, "utf8")) as CanaryConfig;
-  } catch {
-    cfg = null;
-  }
-  cache = { at: now, cfg };
-  return cfg;
+export async function readCanaryConfig(store: RuntimeStatePort): Promise<CanaryConfig | null> {
+  return (await store.get<CanaryConfig>(SYSTEM, CANARY, CONFIG_KEY)) ?? null;
 }
 
 /** The canary config if this session should be served by the canary, else null (→ champion). */
-export function assignCanary(sessionId: string): CanaryConfig | null {
-  const cfg = readCanaryConfig();
+export async function assignCanary(store: RuntimeStatePort, sessionId: string): Promise<CanaryConfig | null> {
+  const cfg = await readCanaryConfig(store);
   if (!cfg?.enabled || cfg.pct <= 0) return null;
   return bucket(sessionId) < cfg.pct ? cfg : null;
 }
 
-export function logTraffic(entry: Record<string, unknown>): void {
+export async function logTraffic(store: RuntimeStatePort, entry: Record<string, unknown>): Promise<void> {
   // Logging must never break serving.
   try {
-    if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
-    appendFileSync(LOG, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
+    await store.append(SYSTEM, TRAFFIC, { ts: new Date().toISOString(), ...entry });
   } catch {
     /* ignore */
   }

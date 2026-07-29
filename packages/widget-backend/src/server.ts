@@ -87,11 +87,11 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       const signals: Signals = kill ? { ...clientSignals, kill: true } : clientSignals;
 
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
-      const canary = assignCanary(sessionId);
+      const canary = await assignCanary(store, sessionId);
       const policy = canary ? canary.policy : DEFAULT_POLICY;
       const session = await createSession(brainFor(policy), { sessionId, store: sessions });
       const d = await session.send(message, signals);
-      logTraffic({ servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
+      await logTraffic(store, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
       // Immutable audit of a governance-relevant autonomous decision (NN #5), PII-safe (no raw message).
       await auditDecision(store, RUNTIME_TENANT, {
         sessionId,

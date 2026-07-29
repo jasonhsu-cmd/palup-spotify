@@ -1,18 +1,22 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import type { JudgePort, ModelPort } from "@palup/platform-ports";
+import type { JudgePort, ModelPort, RuntimeStatePort } from "@palup/platform-ports";
 import { createBrain, StaticGroundingAdapter, MockCommerceAdapter, DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { CRITERIA } from "./scenarios.js";
 
-// The control-plane half of shadow/canary. Reads the real traffic the backend logs, shadow-grades a
-// canary policy against the champion on that real traffic, and (auto-)rolls the canary back on
-// regression by writing the shared canary-config the backend reads. Local/staging uses a shared file;
-// production swaps a shared StorePort behind the same calls (ADR-0004).
+// The control-plane half of shadow/canary, on the SHARED RuntimeStatePort. Reads the real traffic the
+// backend logs, shadow-grades a canary policy against the champion on that real traffic, and
+// (auto-)rolls the canary back on regression by writing the shared canary-config the backend reads
+// per request — so a rollback propagates across instances (was a per-instance local file). Keep the
+// __system__/collection names in sync with widget-backend/canary.ts.
 
-const DIR = ".palup-state";
-const CONFIG = join(DIR, "canary-config.json");
-const LOG = join(DIR, "traffic-log.jsonl");
+const SYSTEM = { tenantId: "__system__" };
+const CANARY = "canary"; // KV collection
+const CONFIG_KEY = "config";
+const TRAFFIC = "traffic"; // append stream
 const GENERAL = ["warm", "needs-first", "grounded", "concise", "no-pressure"]; // general sales-quality rubric
+
+// Evolution-pipeline canary stage is 1–5% of traffic (docs/AGENT-GOVERNANCE §2); a ramp to full is the
+// separate human-approved promote step, not the canary. Clamp here so a mis-set pct can't over-expose.
+export const MAX_CANARY_PCT = 5;
 
 export interface Interaction { ts: string; servedBy: string; sessionId: string; message: string; reply: string; mode: string; escalate: boolean }
 export interface CanaryConfig { enabled: boolean; pct: number; policy: Policy }
@@ -24,34 +28,40 @@ export const DEFAULT_CANARY: Policy = {
   proactivityDefault: "balanced",
 };
 
-export function readTrafficLog(): Interaction[] {
-  if (!existsSync(LOG)) return [];
-  return readFileSync(LOG, "utf8").trim().split("\n").filter(Boolean)
-    .map((l) => { try { return JSON.parse(l) as Interaction; } catch { return null; } })
-    .filter((x): x is Interaction => x !== null);
+export async function readTrafficLog(store: RuntimeStatePort): Promise<Interaction[]> {
+  return store.readStream<Interaction>(SYSTEM, TRAFFIC);
 }
-export function canaryConfig(): CanaryConfig | null {
-  try { return existsSync(CONFIG) ? (JSON.parse(readFileSync(CONFIG, "utf8")) as CanaryConfig) : null; } catch { return null; }
+export async function canaryConfig(store: RuntimeStatePort): Promise<CanaryConfig | null> {
+  return (await store.get<CanaryConfig>(SYSTEM, CANARY, CONFIG_KEY)) ?? null;
 }
-function write(cfg: CanaryConfig): void {
-  if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true });
-  writeFileSync(CONFIG, JSON.stringify(cfg, null, 2));
-}
-export function startCanary(policy: Policy, pct: number): CanaryConfig {
-  const cfg = { enabled: true, pct: Math.max(0, Math.min(100, pct)), policy };
-  write(cfg);
+export async function startCanary(store: RuntimeStatePort, policy: Policy, pct: number): Promise<CanaryConfig> {
+  const clamped = Math.max(0, Math.min(MAX_CANARY_PCT, pct));
+  const cfg: CanaryConfig = { enabled: true, pct: clamped, policy };
+  await store.tx(SYSTEM, async (t) => {
+    await t.put(CANARY, CONFIG_KEY, cfg);
+    await t.audit({
+      actor: "operator",
+      action: "canary.start",
+      input: { policyId: policy.id, requestedPct: pct, appliedPct: clamped },
+      decision: clamped < pct ? `clamped to ${MAX_CANARY_PCT}% (canary cap)` : "started",
+      reversalPath: "POST /api/canary/stop",
+    });
+  });
   return cfg;
 }
-export function stopCanary(): CanaryConfig {
-  const cfg = { enabled: false, pct: 0, policy: canaryConfig()?.policy ?? DEFAULT_CANARY };
-  write(cfg);
+export async function stopCanary(store: RuntimeStatePort): Promise<CanaryConfig> {
+  const cfg: CanaryConfig = { enabled: false, pct: 0, policy: (await canaryConfig(store))?.policy ?? DEFAULT_CANARY };
+  await store.tx(SYSTEM, async (t) => {
+    await t.put(CANARY, CONFIG_KEY, cfg);
+    await t.audit({ actor: "operator", action: "canary.stop", decision: "rolled back to champion", reversalPath: "POST /api/canary/start" });
+  });
   return cfg;
 }
 
 /** Per-policy live counts + escalation rate from the real traffic log. */
-export function canaryStats(): Record<string, { count: number; escalationRate: number }> {
+export async function canaryStats(store: RuntimeStatePort): Promise<Record<string, { count: number; escalationRate: number }>> {
   const by: Record<string, { count: number; esc: number }> = {};
-  for (const e of readTrafficLog()) {
+  for (const e of await readTrafficLog(store)) {
     const b = (by[e.servedBy] ??= { count: 0, esc: 0 });
     b.count++;
     if (e.escalate) b.esc++;
@@ -65,8 +75,8 @@ export function canaryStats(): Record<string, { count: number; escalationRate: n
  * reply on general sales-quality criteria; compare. This is a real signal from real conversations —
  * no synthetic corpus.
  */
-export async function shadowEvaluate(model: ModelPort, judge: JudgePort, canaryPolicy: Policy, sampleN = 8) {
-  const champ = readTrafficLog().filter((e) => e.servedBy === DEFAULT_POLICY.id && e.message.trim().length > 2);
+export async function shadowEvaluate(store: RuntimeStatePort, model: ModelPort, judge: JudgePort, canaryPolicy: Policy, sampleN = 8) {
+  const champ = (await readTrafficLog(store)).filter((e) => e.servedBy === DEFAULT_POLICY.id && e.message.trim().length > 2);
   const sample = champ.slice(-sampleN);
   const grounding = new StaticGroundingAdapter();
   const canaryBrain = createBrain(model, grounding, canaryPolicy, new MockCommerceAdapter(), "shopper-demo");
