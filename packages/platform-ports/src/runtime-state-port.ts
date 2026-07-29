@@ -47,10 +47,15 @@ export interface AuditRecord extends AuditInput {
 }
 
 /** The reads + mutations available inside a transaction (see `tx`). Reads-your-writes within the tx. */
+/** Optional per-write options. `ttlSeconds` makes a KV entry expire (invisible to get/list after). */
+export interface PutOpts {
+  ttlSeconds?: number;
+}
+
 export interface RuntimeStateTx {
   /** Read within the tx (use this for read-modify-write so the read shares the tx's connection/snapshot). */
   get<T>(collection: string, key: string): Promise<T | null>;
-  put<T>(collection: string, key: string, value: T): Promise<void>;
+  put<T>(collection: string, key: string, value: T, opts?: PutOpts): Promise<void>;
   delete(collection: string, key: string): Promise<void>;
   append<T>(stream: string, entry: T): Promise<number>;
   audit(entry: AuditInput, at?: string): Promise<AuditRecord>;
@@ -60,18 +65,26 @@ export interface RuntimeStatePort {
   // --- Tenant-scoped key/value (session state, kill-switch registry, canary config) ---
   /** Read a JSON doc, or null if absent. */
   get<T>(ctx: RuntimeStateCtx, collection: string, key: string): Promise<T | null>;
-  /** Write (overwrite) a JSON doc. */
-  put<T>(ctx: RuntimeStateCtx, collection: string, key: string, value: T): Promise<void>;
+  /** Write (overwrite) a JSON doc. `opts.ttlSeconds` makes it expire (invisible to get/list after). */
+  put<T>(ctx: RuntimeStateCtx, collection: string, key: string, value: T, opts?: PutOpts): Promise<void>;
   /** Delete a key (no-op if absent). */
   delete(ctx: RuntimeStateCtx, collection: string, key: string): Promise<void>;
-  /** All entries in a collection for this tenant. */
+  /** All non-expired entries in a collection for this tenant. */
   list<T>(ctx: RuntimeStateCtx, collection: string): Promise<Array<{ key: string; value: T }>>;
 
   // --- Tenant-scoped append-only operational streams (traffic, cost telemetry) ---
-  /** Append one entry to a stream; returns the new length. */
+  /** Append one entry to a stream; returns a monotonic-increasing cursor for the entry (adapters may
+   * return the stream length or a global sequence — do NOT rely on it being a stable count; O(1)). */
   append<T>(ctx: RuntimeStateCtx, stream: string, entry: T): Promise<number>;
   /** Read a stream oldest-first; `limit` returns the most recent N. */
   readStream<T>(ctx: RuntimeStateCtx, stream: string, opts?: { limit?: number }): Promise<T[]>;
+
+  // --- Reclamation (bound growth: client-supplied idem/session keys + append-only traffic) ---
+  /** Delete expired KV entries (TTL elapsed) across this store; returns how many were removed. Call
+   * periodically — expiry is enforced on read, this reclaims the storage. */
+  sweepExpired(): Promise<number>;
+  /** Retain only the most recent `keepLast` entries of a tenant's stream; returns how many were removed. */
+  trimStream(ctx: RuntimeStateCtx, stream: string, keepLast: number): Promise<number>;
 
   // --- Immutable, hash-chained Audit Log (NN #5) ---
   //

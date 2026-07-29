@@ -13,7 +13,7 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
-import { auditDecision } from "./audit.js";
+import { buildAuditInput } from "./audit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -21,6 +21,31 @@ import { assignCanary, logTraffic } from "./canary.js";
 // through here and into the brain's tenantId.
 const RUNTIME_TENANT = "demo";
 const RUNTIME_AGENT_TYPE = "shopper";
+
+// Reclamation bounds (F3/F4): TTLs cap growth of the client-keyed idem/session KV; traffic is trimmed.
+// Reclamation runs opportunistically every N requests (Cloud Run throttles CPU between requests, so a
+// setInterval is unreliable — request-driven is the safe trigger). All overridable via env.
+// Validate each knob: a typo / empty value must NOT silently become 0 (a 0 TTL would expire state
+// instantly → lost latch/budget) or NaN (a NaN modulo would disable reclamation). Reject non-positive
+// / non-finite and fall back to the documented default with a warning.
+function posInt(name: string, def: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return def;
+  const v = Number(raw);
+  if (!Number.isFinite(v) || v <= 0) {
+    console.warn(`[config] ${name}=${JSON.stringify(raw)} is not a positive number — using default ${def}`);
+    return def;
+  }
+  return v;
+}
+const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
+// 48h sliding (reset each turn): this is conversation-scoped CONTROL state (safety latch / open issues
+// / pitch budget), not customer memory — it shouldn't outlive a conversation. Cross-visit shopper
+// memory is a separate, consent-gated, identified-customer subsystem with its own retention policy.
+const SESSION_TTL_SECONDS = posInt("SESSION_TTL_SECONDS", 172_800);
+const TRAFFIC_KEEP_LAST = posInt("TRAFFIC_KEEP_LAST", 5_000);
+const RECLAIM_EVERY = posInt("RECLAIM_EVERY", 500);
+let reqCount = 0;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const widgetHtml = readFileSync(
@@ -91,17 +116,30 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
       const canary = await assignCanary(store, sessionId);
       const policy = canary ? canary.policy : DEFAULT_POLICY;
-      const session = await createSession(brainFor(policy), { sessionId, store: sessions });
+      // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
+      const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
       const d = await session.send(message, signals);
       await logTraffic(store, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
-      // Immutable audit of a governance-relevant autonomous decision (NN #5), PII-safe (no raw message).
-      await auditDecision(store, RUNTIME_TENANT, {
-        sessionId,
-        messageLength: message.length,
-        servedBy: policy.id,
-        decision: d,
-        killScope: kill?.scope,
+      // F11 (NN #5): commit the advanced session state AND its governance-audit record in ONE tx, so
+      // the governed state (pitch budget / safety latch) can never advance without its audit on a
+      // mid-turn store failure. Both live under the serving tenant. "session" matches session-store.ts.
+      const auditEntry = buildAuditInput({ sessionId, messageLength: message.length, servedBy: policy.id, decision: d, killScope: kill?.scope });
+      let auditRec: { seq: number; hash: string; at: string } | null = null;
+      await store.tx(serving, async (t) => {
+        await t.put("session", sessionId, session.state, { ttlSeconds: SESSION_TTL_SECONDS });
+        if (auditEntry) auditRec = await t.audit(auditEntry);
       });
+      // External audit-chain anchor (#19 head-anchor): emit the chain head to stdout → Cloud Logging
+      // captures it immutably, OUTSIDE the DB's mutable surface. Reconciling these anchors against
+      // rs_audit later detects tail-truncation / full re-hash that the in-DB chain alone can't (a
+      // compromised DBA has no write path to Cloud Logging). PII-safe (seq + hash only).
+      if (auditRec) console.log(`AUDIT_ANCHOR ${JSON.stringify({ t: RUNTIME_TENANT, seq: auditRec.seq, hash: auditRec.hash, at: auditRec.at })}`);
+      // Opportunistic reclamation (F3/F4): bound idem/session growth + traffic retention. Fire-and-forget
+      // so it never delays or fails the response.
+      if (++reqCount % RECLAIM_EVERY === 0) {
+        void store.sweepExpired().catch(() => {});
+        void store.trimStream(serving, "traffic", TRAFFIC_KEEP_LAST).catch(() => {});
+      }
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
       const response = {
         reply: d.reply,
@@ -112,7 +150,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
         flags: d.flags,
         servedBy: policy.id,
       };
-      if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response);
+      if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
     } catch (e) {
       // A model/config failure must degrade gracefully — never hang or leak internals to the shopper.

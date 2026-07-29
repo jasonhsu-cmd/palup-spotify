@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { RuntimeStatePort } from "@palup/platform-ports";
+import type { AuditInput } from "@palup/platform-ports";
 import type { Decision } from "@palup/widget-brain";
 
 // Per-turn audit of governance-relevant AUTONOMOUS decisions on the /chat path (NN #5: actor, input,
@@ -42,25 +42,27 @@ function actionFor(d: Decision): string {
   return "guardrail.other";
 }
 
-/** Audit a governance-relevant /chat decision. No-op for benign turns. PII-safe. */
-export async function auditDecision(
-  store: RuntimeStatePort,
-  tenantId: string,
-  args: { sessionId: string; messageLength: number; servedBy: string; decision: Decision; killScope?: string },
-): Promise<void> {
+/**
+ * Build the audit record for a /chat decision, or null for a benign turn (no silent-action noise).
+ * Pure + PII-safe: no raw shopper message, and the client-supplied sessionId is hashed to an opaque
+ * ref so nothing client-placed lands verbatim in the immutable (unredactable) log. The caller commits
+ * it — in the SAME transaction as the session-state write (F11) so state never advances without audit.
+ */
+export function buildAuditInput(args: {
+  sessionId: string;
+  messageLength: number;
+  servedBy: string;
+  decision: Decision;
+  killScope?: string;
+}): AuditInput | null {
   const d = args.decision;
-  if (!isGovernanceRelevant(d)) return;
-  // sessionId is client-supplied; hash it to an opaque id so no client-placed PII lands verbatim in the
-  // immutable (unredactable) audit log. Still correlatable across a session's records.
+  if (!isGovernanceRelevant(d)) return null;
   const sessionRef = createHash("sha256").update(args.sessionId).digest("hex").slice(0, 16);
-  await store.audit(
-    { tenantId },
-    {
-      actor: "agent:shopper",
-      action: actionFor(d),
-      input: { sessionRef, messageChars: args.messageLength, killScope: args.killScope }, // no raw text, no raw id
-      decision: { mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, flags: d.flags, servedBy: args.servedBy },
-      reversalPath: d.escalateToHuman ? "handed to a human via escalation" : "n/a — reply only, no state-changing action",
-    },
-  );
+  return {
+    actor: "agent:shopper",
+    action: actionFor(d),
+    input: { sessionRef, messageChars: args.messageLength, killScope: args.killScope }, // no raw text, no raw id
+    decision: { mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, flags: d.flags, servedBy: args.servedBy },
+    reversalPath: d.escalateToHuman ? "handed to a human via escalation" : "n/a — reply only, no state-changing action",
+  };
 }

@@ -38,6 +38,40 @@ export function runRuntimeStatePortContract(makeAdapter: () => RuntimeStatePort 
       expect(rows.map((r) => r.key).sort()).toEqual(["agent:shopper", "global"]);
     });
 
+    it("TTL: an expired entry is invisible to get + list; a live one is visible", async () => {
+      const s = await makeAdapter();
+      await s.put(A, "idem", "expired", { v: 1 }, { ttlSeconds: -1 }); // already in the past
+      await s.put(A, "idem", "live", { v: 2 }, { ttlSeconds: 300 });
+      expect(await s.get(A, "idem", "expired")).toBeNull();
+      expect(await s.get(A, "idem", "live")).toEqual({ v: 2 });
+      expect((await s.list(A, "idem")).map((r) => r.key)).toEqual(["live"]);
+    });
+
+    it("sweepExpired reclaims expired KV rows (leaves live ones)", async () => {
+      const s = await makeAdapter();
+      await s.put(A, "idem", "gone", { v: 1 }, { ttlSeconds: -1 });
+      await s.put(A, "idem", "stay", { v: 2 });
+      expect(await s.sweepExpired()).toBeGreaterThanOrEqual(1);
+      expect((await s.list(A, "idem")).map((r) => r.key)).toEqual(["stay"]);
+    });
+
+    it("trimStream retains only the most recent keepLast entries", async () => {
+      const s = await makeAdapter();
+      for (let i = 1; i <= 6; i++) await s.append(A, "traffic", { i });
+      expect(await s.trimStream(A, "traffic", 2)).toBe(4);
+      expect(await s.readStream(A, "traffic")).toEqual([{ i: 5 }, { i: 6 }]);
+    });
+
+    it("tx.get respects TTL — an expired key is invisible inside a transaction too", async () => {
+      const s = await makeAdapter();
+      await s.put(A, "kvt", "expired", { v: 1 }, { ttlSeconds: -1 });
+      await s.put(A, "kvt", "live", { v: 2 }, { ttlSeconds: 300 });
+      await s.tx(A, async (t) => {
+        expect(await t.get("kvt", "expired")).toBeNull(); // must not resurrect an expired entry in a RMW
+        expect(await t.get("kvt", "live")).toEqual({ v: 2 });
+      });
+    });
+
     it("ENFORCES TENANT ISOLATION — a tenant never sees another tenant's data", async () => {
       const s = await makeAdapter();
       await s.put(A, "session", "s1", { secret: "A-only" });
@@ -58,9 +92,14 @@ export function runRuntimeStatePortContract(makeAdapter: () => RuntimeStatePort 
       expect(got?.openIssues).toEqual(["order-status"]);
     });
 
-    it("append preserves order; readStream limit returns the most recent N", async () => {
+    it("append preserves order + returns a monotonic cursor; readStream limit returns the most recent N", async () => {
       const s = await makeAdapter();
-      for (let i = 1; i <= 5; i++) expect(await s.append(A, "traffic", { i })).toBe(i);
+      let prev = 0;
+      for (let i = 1; i <= 5; i++) {
+        const cur = await s.append(A, "traffic", { i });
+        expect(cur).toBeGreaterThan(prev); // monotonic cursor (not a stable count)
+        prev = cur;
+      }
       expect(await s.readStream(A, "traffic")).toEqual([{ i: 1 }, { i: 2 }, { i: 3 }, { i: 4 }, { i: 5 }]);
       expect(await s.readStream(A, "traffic", { limit: 2 })).toEqual([{ i: 4 }, { i: 5 }]);
     });
