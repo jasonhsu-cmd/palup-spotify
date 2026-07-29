@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { runRuntimeStatePortContract, InMemoryRuntimeStore } from "@palup/platform-ports";
+import { InMemoryRuntimeStore } from "@palup/platform-ports";
+import { runRuntimeStatePortContract } from "@palup/platform-ports/contract/runtime-state";
 import { PostgresRuntimeStore } from "../src/postgres-runtime-store.js";
 import type { Sql } from "../src/sql.js";
 

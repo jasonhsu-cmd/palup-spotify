@@ -35,6 +35,9 @@ importers:
       '@palup/platform-ports':
         specifier: workspace:*
         version: link:../platform-ports
+      '@palup/state-postgres':
+        specifier: workspace:*
+        version: link:../state-postgres
       '@palup/widget-brain':
         specifier: workspace:*
         version: link:../widget-brain
@@ -115,6 +118,9 @@ importers:
       '@palup/platform-ports':
         specifier: workspace:*
         version: link:../platform-ports
+      '@palup/state-postgres':
+        specifier: workspace:*
+        version: link:../state-postgres
       '@palup/widget-brain':
         specifier: workspace:*
         version: link:../widget-brain

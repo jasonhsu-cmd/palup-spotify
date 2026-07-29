@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./contract": "./src/contract/model-port.contract.ts",
-    "./contract/grounding": "./src/contract/grounding-port.contract.ts"
+    "./contract/grounding": "./src/contract/grounding-port.contract.ts",
+    "./contract/runtime-state": "./src/contract/runtime-state-port.contract.ts"
   }
 }

@@ -11,7 +11,7 @@ import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY } from "./canary-controller.js";
-import { killStatus, armRuntimeKill, disarmRuntimeKill, type KillScope } from "./runtime-kill.js";
+import { createRuntimeStore, killStatus, armKill, disarmKill, type KillScope } from "@palup/state-postgres";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -36,6 +36,10 @@ export async function buildServer() {
   const { grader, mode, judgeFamily } = chooseGrader();
   const championMetrics = await grader.grade(DEFAULT_POLICY);
   const engine = new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader });
+
+  // Shared run-time state store for operator actions on the LIVE plane (run-time kill switch). Prod
+  // points this at the same Cloud SQL as the widget backend (DATABASE_URL) so a kill propagates.
+  const { store: runtimeStore } = await createRuntimeStore();
 
   const app = Fastify({ logger: false });
   const state = () => ({
@@ -82,16 +86,20 @@ export async function buildServer() {
   app.post("/api/unkill", async () => act(() => engine.unkill()));
 
   // RUN-TIME plane kill (governance NN #4): halts the LIVE shopper agent for a scope (global / one
-  // tenant / one agent-type). The widget backend reads this registry per request and hands to a human.
-  // Distinct from /api/kill above — this stops the product, not the promotion pipeline.
-  app.get("/api/runtime-kill", async () => killStatus());
+  // tenant / one agent-type), via the SHARED RuntimeStatePort so it propagates to every serving
+  // instance (prod: both this plane and the backend point at the same Cloud SQL via DATABASE_URL).
+  // Distinct from /api/kill above — this stops the product, not the promotion pipeline. Arm/disarm is
+  // audited on the immutable log inside the store.
+  app.get("/api/runtime-kill", async () => ({ scopes: await killStatus(runtimeStore) }));
   app.post("/api/runtime-kill", async (req) => {
     const b = (req.body ?? {}) as { scope?: KillScope; reason?: string };
-    return armRuntimeKill(b.scope ?? "global", b.reason ?? "operator");
+    await armKill(runtimeStore, b.scope ?? "global", b.reason ?? "operator");
+    return { scopes: await killStatus(runtimeStore) };
   });
   app.post("/api/runtime-unkill", async (req) => {
     const b = (req.body ?? {}) as { scope?: KillScope };
-    return disarmRuntimeKill(b.scope);
+    await disarmKill(runtimeStore, b.scope);
+    return { scopes: await killStatus(runtimeStore) };
   });
   app.post("/api/monitor", async (req) => {
     const b = (req.body ?? {}) as { qualityScore?: number; safetyPass?: boolean };
