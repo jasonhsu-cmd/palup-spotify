@@ -15,16 +15,20 @@ export interface SessionState {
 }
 
 export interface SessionStore {
-  load(sessionId: string): SessionState | undefined;
-  save(sessionId: string, state: SessionState): void;
+  load(sessionId: string): Promise<SessionState | undefined>;
+  save(sessionId: string, state: SessionState): Promise<void>;
 }
 
-/** In-memory store — swap for a durable adapter (Redis/Postgres) behind this interface later. */
+/** In-memory store — for tests/dev. A durable adapter (RuntimeStatePort → Cloud SQL) implements the
+ * same async interface so conversation state survives restart/scale-to-zero and is shared across
+ * instances (see widget-backend/src/session-store.ts). */
 export function createMemorySessionStore(): SessionStore {
   const m = new Map<string, SessionState>();
   return {
-    load: (id) => m.get(id),
-    save: (id, s) => m.set(id, { ...s, openIssues: [...s.openIssues] }),
+    load: async (id) => m.get(id),
+    save: async (id, s) => {
+      m.set(id, { ...s, openIssues: [...s.openIssues] });
+    },
   };
 }
 
@@ -39,15 +43,15 @@ export interface SessionOptions {
   level?: ProactivityLevel;
 }
 
-export function createSession(brain: Brain, opts: SessionOptions = {}): Session {
+export async function createSession(brain: Brain, opts: SessionOptions = {}): Promise<Session> {
   const level = opts.level ?? "balanced";
-  const restored = opts.sessionId && opts.store ? opts.store.load(opts.sessionId) : undefined;
+  const restored = opts.sessionId && opts.store ? await opts.store.load(opts.sessionId) : undefined;
   const state: SessionState = restored
     ? { ...restored, openIssues: [...restored.openIssues] }
     : { safetyLatched: false, openIssues: [], pitchesUsed: 0 };
 
-  const persist = () => {
-    if (opts.sessionId && opts.store) opts.store.save(opts.sessionId, state);
+  const persist = async () => {
+    if (opts.sessionId && opts.store) await opts.store.save(opts.sessionId, state);
   };
 
   return {
@@ -88,7 +92,7 @@ export function createSession(brain: Brain, opts: SessionOptions = {}): Session 
         }
       }
 
-      persist();
+      await persist();
       return d;
     },
   };

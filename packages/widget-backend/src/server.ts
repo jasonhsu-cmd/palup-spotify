@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import {
   createBrain,
   createSession,
-  createMemorySessionStore,
   type Policy,
   type Signals,
 } from "@palup/widget-brain";
@@ -13,6 +12,7 @@ import { DEFAULT_POLICY } from "@palup/widget-brain";
 import type { RuntimeStatePort } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
+import { createRuntimeSessionStore } from "./session-store.js";
 import { assignCanary, logTraffic } from "./canary.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -41,13 +41,13 @@ function brainFor(policy: Policy) {
   return b;
 }
 brainFor(DEFAULT_POLICY); // champion
-// Per-conversation state (latch / open-issues / pitch budget) persists here keyed by sessionId.
-const sessions = createMemorySessionStore();
 
 export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads.
   const store = opts?.store ?? (await createRuntimeStore()).store;
+  // Per-conversation state (latch / open-issues / pitch budget), durable + tenant-scoped on that store.
+  const sessions = createRuntimeSessionStore(store, RUNTIME_TENANT);
   const app = Fastify({ logger: false });
 
   app.get("/health", async () => ({ ok: true, model: modelName }));
@@ -73,7 +73,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
       const canary = assignCanary(sessionId);
       const policy = canary ? canary.policy : DEFAULT_POLICY;
-      const session = createSession(brainFor(policy), { sessionId, store: sessions });
+      const session = await createSession(brainFor(policy), { sessionId, store: sessions });
       const d = await session.send(message, signals);
       logTraffic({ servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
