@@ -25,3 +25,13 @@ export type {
   CommercePolicy,
 } from "./commerce-port.js";
 export type { StorePort } from "./store-port.js";
+export type {
+  RuntimeStatePort,
+  RuntimeStateCtx,
+  RuntimeStateTx,
+  AuditInput,
+  AuditRecord,
+} from "./runtime-state-port.js";
+export { AUDIT_GENESIS_HASH } from "./runtime-state-port.js";
+export { InMemoryRuntimeStore } from "./in-memory-runtime-store.js";
+export { runRuntimeStatePortContract } from "./contract/runtime-state-port.contract.js";
