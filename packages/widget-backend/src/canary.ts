@@ -11,10 +11,8 @@ import type { Policy } from "@palup/widget-brain";
 const SYSTEM = { tenantId: "__system__" };
 const CANARY = "canary"; // KV collection (rollout config: operator/cross-instance state)
 const CONFIG_KEY = "config";
-// Traffic carries shopper messages/replies, so it lives in the SERVING tenant's own partition — NOT
-// the cross-tenant __system__ bucket. Single-tenant demo for now; per-merchant when tenancy lands.
-// (Retention/TTL + minimization before real multi-tenant — tracked follow-up.)
-const SERVING = { tenantId: "demo" };
+// Traffic carries shopper messages/replies, so it lives in the SERVING tenant's own partition (passed
+// in — the authenticated merchant tenant), NOT the cross-tenant __system__ bucket.
 const TRAFFIC = "traffic"; // append stream
 
 export interface CanaryConfig {
@@ -45,10 +43,10 @@ export async function assignCanary(store: RuntimeStatePort, sessionId: string): 
   return bucket(sessionId) < cfg.pct ? cfg : null;
 }
 
-export async function logTraffic(store: RuntimeStatePort, entry: Record<string, unknown>): Promise<void> {
-  // Logging must never break serving.
+export async function logTraffic(store: RuntimeStatePort, tenantId: string, entry: Record<string, unknown>): Promise<void> {
+  // Logging must never break serving. Traffic is written under the serving tenant's partition.
   try {
-    await store.append(SERVING, TRAFFIC, { ts: new Date().toISOString(), ...entry });
+    await store.append({ tenantId }, TRAFFIC, { ts: new Date().toISOString(), ...entry });
   } catch {
     /* ignore */
   }
