@@ -14,6 +14,7 @@ import { createWidgetTokenIdentity, mintWidgetToken } from "@palup/platform-port
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
+import { deriveServingSignals } from "./signals.js";
 import { buildAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
@@ -109,6 +110,18 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
   const EMBED_KEYS = parseEmbedKeys();
   const widgetIdentity = createWidgetTokenIdentity(WIDGET_TOKEN_SECRET);
+  // T7 — server-derived trust-bearing signals. These govern behavior/residency/competitor-mode, so they
+  // come from merchant/server config, never the shopper. Single-tenant defaults for now; when real
+  // multi-tenancy lands (post flag-flip) these are looked up per-merchant by tenantId. `region` should
+  // become geo-derived from the request; the conservative default here is the initial US market.
+  const MERCHANT_REGION: NonNullable<Signals["region"]> = (() => {
+    const r = process.env.MERCHANT_REGION;
+    return r === "us" || r === "eu" || r === "uk" || r === "other" ? r : "us";
+  })();
+  const MERCHANT_GROUNDING_MODE: NonNullable<Signals["groundingMode"]> = (() => {
+    const g = process.env.MERCHANT_GROUNDING_MODE;
+    return g === "off" || g === "general" || g === "full" ? g : "full";
+  })();
   const app = Fastify({ logger: false });
 
   app.get("/health", async () => ({ ok: true, model: modelName }));
@@ -210,14 +223,20 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
         if (cached) return cached;
       }
 
-      // TRUST BOUNDARY (governance NN #4): the shopper's browser must NOT be able to arm OR bypass the
-      // operator Kill Switch. Strip any client-supplied `kill` and source the armed state server-side
-      // from the operator registry. An operator halt thus takes effect for this session regardless of
-      // what the shopper's request contains.
-      const clientSignals: Signals = { ...(body.signals ?? {}) };
-      delete clientSignals.kill;
+      // TRUST BOUNDARY (T7 + NN #4): the shopper's `signals` are UNTRUSTED. Rather than spread client
+      // input and delete known-bad fields, we RECONSTRUCT signals from trusted sources — the safe default
+      // is that a field the shopper sends is ignored unless it is explicitly non-trust-bearing context.
+      //   • mood / cart  — shopper/UI context; accepted only if a valid enum value (from the storefront in prod).
+      //   • relationship — grants VIP/subscriber treatment ⇒ SERVER-derived. Anonymous until an identified
+      //     customer + history exist (M2 customer identity), never client-claimed.
+      //   • consent      — legally load-bearing (TCPA/CAN-SPAM, gates outbound) ⇒ conservative default
+      //     (unknown = no consent); a real consent store is a later, identified-customer subsystem.
+      //   • groundingMode/region — merchant policy + data-residency ⇒ server config, not the shopper.
+      //   • proactivityLevel — an autonomy lever ⇒ omitted so the brain uses the merchant policy default.
+      //   • openIssues / safetyLatched — sourced ONLY from persisted session state, never client-injected.
+      //   • kill — armed state comes from the operator registry (server); the shopper can neither arm nor bypass it.
       const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
-      const signals: Signals = kill ? { ...clientSignals, kill: true } : clientSignals;
+      const signals: Signals = deriveServingSignals(body.signals, { kill: Boolean(kill), region: MERCHANT_REGION, groundingMode: MERCHANT_GROUNDING_MODE });
 
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
       const canary = await assignCanary(store, sessionId);
@@ -225,6 +244,8 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
       const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
       const d = await session.send(message, signals);
+      // T9 — logTraffic is the choke point that redacts message/reply and hashes sessionId at the
+      // write boundary (see canary.ts), so no raw shopper PII lands in the shadow-grading log at rest.
       await logTraffic(store, tenantId, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
       // F11 (NN #5): commit the advanced session state AND its governance-audit record in ONE tx, so
       // the governed state (pitch budget / safety latch) can never advance without its audit on a
