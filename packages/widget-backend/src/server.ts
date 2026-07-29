@@ -39,7 +39,10 @@ function posInt(name: string, def: number): number {
   return v;
 }
 const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
-const SESSION_TTL_SECONDS = posInt("SESSION_TTL_SECONDS", 2_592_000); // 30d (sliding — reset each turn)
+// 48h sliding (reset each turn): this is conversation-scoped CONTROL state (safety latch / open issues
+// / pitch budget), not customer memory — it shouldn't outlive a conversation. Cross-visit shopper
+// memory is a separate, consent-gated, identified-customer subsystem with its own retention policy.
+const SESSION_TTL_SECONDS = posInt("SESSION_TTL_SECONDS", 172_800);
 const TRAFFIC_KEEP_LAST = posInt("TRAFFIC_KEEP_LAST", 5_000);
 const RECLAIM_EVERY = posInt("RECLAIM_EVERY", 500);
 let reqCount = 0;
