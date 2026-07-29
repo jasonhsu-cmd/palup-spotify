@@ -11,6 +11,7 @@ import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY } from "./canary-controller.js";
+import { killStatus, armRuntimeKill, disarmRuntimeKill, type KillScope } from "./runtime-kill.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -76,8 +77,22 @@ export async function buildServer() {
   app.post("/api/approve/:id", async (req) => act(() => engine.approve((req.params as { id: string }).id, "operator")));
   app.post("/api/reject/:id", async (req) => act(() => engine.reject((req.params as { id: string }).id, "operator")));
   app.post("/api/promote/:id", async (req) => act(() => engine.promote((req.params as { id: string }).id)));
+  // BUILD-TIME plane kill: halts candidate approvals/promotions in the evolution pipeline.
   app.post("/api/kill", async () => act(() => engine.kill("operator")));
   app.post("/api/unkill", async () => act(() => engine.unkill()));
+
+  // RUN-TIME plane kill (governance NN #4): halts the LIVE shopper agent for a scope (global / one
+  // tenant / one agent-type). The widget backend reads this registry per request and hands to a human.
+  // Distinct from /api/kill above — this stops the product, not the promotion pipeline.
+  app.get("/api/runtime-kill", async () => killStatus());
+  app.post("/api/runtime-kill", async (req) => {
+    const b = (req.body ?? {}) as { scope?: KillScope; reason?: string };
+    return armRuntimeKill(b.scope ?? "global", b.reason ?? "operator");
+  });
+  app.post("/api/runtime-unkill", async (req) => {
+    const b = (req.body ?? {}) as { scope?: KillScope };
+    return disarmRuntimeKill(b.scope);
+  });
   app.post("/api/monitor", async (req) => {
     const b = (req.body ?? {}) as { qualityScore?: number; safetyPass?: boolean };
     return act(() => engine.monitor({ qualityScore: Number(b.qualityScore ?? 0.4), safetyPass: b.safetyPass !== false }));

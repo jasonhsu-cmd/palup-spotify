@@ -29,6 +29,7 @@ const AURIA: GroundingContext = {
   policy: {
     returns: "30-day returns on unopened items; opened items reviewed case-by-case for reactions.",
     shipping: "Free US shipping over $75; 3–5 business days. Subscriptions ship free and can be paused or cancelled anytime.",
+    allergens: "Our products are formulated without tree-nut oils, but they're made in a facility that also handles nut-derived ingredients, so we can't guarantee against cross-contact — always check the full ingredient list on the product page.",
   },
 };
 
