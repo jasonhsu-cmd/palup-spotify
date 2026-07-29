@@ -42,6 +42,9 @@
     <span class="badge" data-testid="mode-badge" id="mode">mode …</span>
     <span class="badge" id="judge">judge …</span>
     <span class="sp"></span>
+    <input id="op-token" data-testid="op-token" type="password" placeholder="operator token"
+      title="Required for all actions (default-deny gate). Stored locally in this browser."
+      style="font:inherit;padding:2px 8px;border:1px solid var(--line,#ccc);border-radius:8px;width:150px" />
     <button id="kill" data-testid="kill-btn">Kill switch</button>
   </header>
   <main>
@@ -95,12 +98,20 @@
 <script>
   const $ = (s) => document.querySelector(s);
   let busy = false;
+  // Operator token for the default-deny control-plane gate. Stored in localStorage; the operator sets it
+  // via the field in the header (a minimal auth affordance until full SSO/passkey lands). Sent as a
+  // Bearer on every mutating request.
+  function opToken(){ try { return localStorage.getItem("palup_operator_token") || ""; } catch { return ""; } }
   async function post(path, body){
     busy=true; render(lastState, true);
     try{
-      const opts = { method:"POST" };
-      if (body){ opts.headers={"content-type":"application/json"}; opts.body=JSON.stringify(body); }
-      const r = await fetch(path, opts); return await r.json();
+      const opts = { method:"POST", headers:{} };
+      const tok = opToken();
+      if (tok) opts.headers["authorization"] = "Bearer " + tok;
+      if (body){ opts.headers["content-type"]="application/json"; opts.body=JSON.stringify(body); }
+      const r = await fetch(path, opts);
+      if (r.status === 401){ alert("Operator authentication required — set the operator token (top-right)."); return lastState; }
+      return await r.json();
     } finally{ busy=false; }
   }
   async function getState(){ const r=await fetch("/api/state"); return r.json(); }
@@ -195,6 +206,9 @@
     const act = b.dataset.act, id = b.dataset.id;
     if (act){ lastState = await post(`/api/${act}/${id}`); render(lastState); }
   });
+  // Operator-token field: restore from localStorage, persist on edit.
+  (function(){ const f=$("#op-token"); if(!f) return; f.value=opToken();
+    f.addEventListener("input", ()=>{ try{ localStorage.setItem("palup_operator_token", f.value); }catch{} }); })();
   refresh(); setInterval(()=>{ if(!busy) refresh(); }, 2000);
 </script>
 </body>

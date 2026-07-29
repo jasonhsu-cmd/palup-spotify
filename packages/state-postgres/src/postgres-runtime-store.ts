@@ -104,6 +104,25 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
     return rows.map((r) => ({ key: r.key, value: r.value }));
   }
 
+  async incrementWindow(ctx: RuntimeStateCtx, key: string, windowSeconds: number): Promise<number> {
+    // Atomic fixed-window counter in ONE statement (row lock on conflict): reset to 1 when the window
+    // elapsed, else count+1; expires_at only advances on reset. Sound under concurrency (unlike
+    // get-then-put), so the per-tenant cost ceiling actually holds against a burst.
+    const t = requireTenant(ctx.tenantId);
+    const { rows } = await this.sql.query<{ count: number }>(
+      `INSERT INTO rs_kv (tenant_id, collection, key, value, expires_at)
+         VALUES ($1, 'ratelimit', $2, '{"count":1}'::jsonb, now() + ($3::int * interval '1 second'))
+       ON CONFLICT (tenant_id, collection, key) DO UPDATE
+         SET value = CASE WHEN rs_kv.expires_at <= now() THEN '{"count":1}'::jsonb
+                          ELSE jsonb_set(rs_kv.value, '{count}', (((rs_kv.value->>'count')::int) + 1)::text::jsonb) END,
+             expires_at = CASE WHEN rs_kv.expires_at <= now() THEN now() + ($3::int * interval '1 second')
+                               ELSE rs_kv.expires_at END
+       RETURNING (value->>'count')::int AS count`,
+      [t, key, windowSeconds],
+    );
+    return Number(rows[0].count);
+  }
+
   async sweepExpired(): Promise<number> {
     const { rows } = await this.sql.query<{ n: string }>(
       "WITH d AS (DELETE FROM rs_kv WHERE expires_at IS NOT NULL AND expires_at <= now() RETURNING 1) SELECT count(*)::text AS n FROM d",

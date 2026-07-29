@@ -90,6 +90,23 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
     return out;
   }
 
+  async incrementWindow(ctx: RuntimeStateCtx, key: string, windowSeconds: number, now = Date.now()): Promise<number> {
+    // Atomic: read + write happen synchronously (no await between), so concurrent calls on the event
+    // loop can't interleave and lose an increment. Fixed window — expiresAt is NOT extended on a hit.
+    const t = this.data(ctx.tenantId);
+    let m = t.kv.get("ratelimit");
+    if (!m) {
+      m = new Map();
+      t.kv.set("ratelimit", m);
+    }
+    const e = m.get(key);
+    const expired = !e || e.expiresAt === undefined || now >= e.expiresAt;
+    const count = expired ? 1 : (e!.value as { count: number }).count + 1;
+    const expiresAt = expired ? now + windowSeconds * 1000 : e!.expiresAt;
+    m.set(key, { value: { count }, expiresAt });
+    return count;
+  }
+
   async sweepExpired(): Promise<number> {
     const now = Date.now();
     let removed = 0;

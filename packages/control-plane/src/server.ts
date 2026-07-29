@@ -12,6 +12,7 @@ import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT } from "./canary-controller.js";
 import { createRuntimeStore, killStatus, armKill, disarmKill, type KillScope } from "@palup/state-postgres";
+import { createOperatorTokenIdentity } from "@palup/platform-ports";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -42,6 +43,26 @@ export async function buildServer() {
   const { store: runtimeStore } = await createRuntimeStore();
 
   const app = Fastify({ logger: false });
+
+  // OPERATOR AUTH (M1 T4, governance NN #4/#2): default-deny every MUTATING (POST) route — arming/
+  // disarming the kill switch, approving/promoting a candidate, starting/stopping a canary. Caller must
+  // present `Authorization: Bearer <OPERATOR_TOKEN>`; an absent/wrong token → 401. FAIL-CLOSED: if
+  // OPERATOR_TOKEN is unset, every mutation is denied (the control plane can't be operated without it).
+  // Read routes stay open for the dashboard for now (info-disclosure follow-up when it gets an auth UI).
+  // The shared-token gate is the interim posture; SSO/passkey + step-up + two-person land behind the
+  // same identity port next (identity-and-access.md §1-2).
+  const operatorIdentity = createOperatorTokenIdentity(process.env.OPERATOR_TOKEN);
+  app.addHook("onRequest", async (req, reply) => {
+    // Gate everything except the safe (read) methods, so a future non-POST mutation can't slip the gate.
+    if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return;
+    const auth = req.headers["authorization"];
+    const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+    const principal = await operatorIdentity.authenticate(token);
+    if (!operatorIdentity.authorize(principal, "operator:mutate")) {
+      await reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
+      return; // stop the hook chain / handler (defensive; Fastify already halts after send)
+    }
+  });
   const state = () => ({
     mode,
     judgeFamily,
