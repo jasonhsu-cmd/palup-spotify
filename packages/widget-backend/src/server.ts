@@ -14,6 +14,7 @@ import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { buildAuditInput } from "./audit.js";
+import { allowRequest } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -38,6 +39,14 @@ function posInt(name: string, def: number): number {
   }
   return v;
 }
+// Input bounds (T5) — reject oversized inputs before any work.
+const MAX_MESSAGE_CHARS = posInt("MAX_MESSAGE_CHARS", 4_000);
+const MAX_ID_CHARS = posInt("MAX_ID_CHARS", 200); // sessionId / idempotencyKey
+// Rate limits (T6) — fixed-window, env-tunable; token-bucket-ish caps to stop denial-of-wallet.
+const RL_SESSION = posInt("RL_SESSION_PER_MIN", 30); // ~1 turn / 2s per conversation
+const RL_IP = posInt("RL_IP_PER_MIN", 60);
+const RL_TENANT = posInt("RL_TENANT_PER_MIN", 2_000); // per-tenant ceiling (≈5× expected)
+const RL_WINDOW = posInt("RL_WINDOW_SECONDS", 60);
 const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
 // 48h sliding (reset each turn): this is conversation-scoped CONTROL state (safety latch / open issues
 // / pitch budget), not customer memory — it shouldn't outlive a conversation. Cross-visit shopper
@@ -93,6 +102,30 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
     const message = String(body.message ?? "");
     const idemKey = typeof body.idempotencyKey === "string" && body.idempotencyKey ? body.idempotencyKey : undefined;
     const serving = { tenantId: RUNTIME_TENANT };
+
+    // T5 — input bounds: reject oversized input before any work (bounds the model + the KV keys).
+    if (message.length > MAX_MESSAGE_CHARS || sessionId.length > MAX_ID_CHARS || (idemKey && idemKey.length > MAX_ID_CHARS)) {
+      reply.code(400);
+      return { reply: "Sorry — that message is too long. Could you shorten it?", mode: "support", pitch: "none", escalate: false, flags: ["input_rejected"] };
+    }
+
+    // T6 — rate limit (denial-of-wallet): per-session, per-IP, per-tenant fixed windows on the shared
+    // store. Fail-OPEN on a store error so a hiccup can never take the widget down.
+    const ip = String(req.headers["x-forwarded-for"] ?? "").split(",")[0].trim() || req.ip || "unknown";
+    try {
+      const [okSession, okIp, okTenant] = await Promise.all([
+        allowRequest(store, serving, `session:${sessionId}`, RL_SESSION, RL_WINDOW),
+        allowRequest(store, serving, `ip:${ip}`, RL_IP, RL_WINDOW),
+        allowRequest(store, serving, "tenant", RL_TENANT, RL_WINDOW),
+      ]);
+      if (!okSession || !okIp || !okTenant) {
+        reply.code(429);
+        return { reply: "You're sending messages a little too fast — give me a moment and try again.", mode: "support", pitch: "none", escalate: false, flags: ["rate_limited"] };
+      }
+    } catch {
+      /* fail-open: never let the limiter break serving */
+    }
+
     try {
       // IDEMPOTENCY: a client retry (e.g. the widget's offline-retry replaying the same turn) must NOT
       // re-process — that would double-count the governed pitch budget, double-audit, and re-open
