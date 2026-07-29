@@ -21,8 +21,9 @@ describe("telemetry capture on /chat", () => {
     expect(turn.servedBy).toBeTruthy();
     expect(turn.mode).toBeTruthy();
     expect(typeof turn.latencyMs).toBe("number");
-    // PII-free: the turn event carries no shopper text.
-    expect(JSON.stringify(turn)).not.toContain("dark circles");
+    // PII-free across the WHOLE stream (both model_call AND turn events): no shopper message text.
+    expect(JSON.stringify(events)).not.toContain("dark circles");
+    expect(JSON.stringify(events).toLowerCase()).not.toContain("circles");
 
     // Rollup is queryable and tenant-scoped.
     const rollup = await createStoreTelemetry(store).query({ tenantId: "demo" });
