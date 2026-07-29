@@ -146,8 +146,11 @@ export function createBrain(
   commerce?: CommercePort,
   shopperId = "shopper-demo",
 ): Brain {
-  const tenantId = "demo";
-  const groundedMessages = async (message: string, systemExtra = "") => {
+  // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
+  // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
+  // never be baked into the brain here. `"demo"` is only the rollout fallback for an unauthenticated
+  // request while WIDGET_AUTH_REQUIRED is off.
+  const groundedMessages = async (message: string, tenantId: string, systemExtra = "") => {
     const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
     return [
       { role: "system" as const, content: systemPrompt(policy, ctx) + systemExtra },
@@ -156,6 +159,11 @@ export function createBrain(
   };
   return {
     async decide(signals: Signals, message: string): Promise<Decision> {
+      // Server-derived (see Signals.tenantId); never client-set. In production the server ALWAYS sets
+      // this (deriveServingSignals), so `?? "demo"` only serves direct/eval callers testing the demo
+      // merchant. The fail-closed backstop for an unknown tenant lives in the grounding adapter
+      // (unknown ⇒ safe-empty catalog); real-tenant unauthorized→safe-empty lands in the caching layer.
+      const tenantId = signals.tenantId ?? "demo";
       const text = message.toLowerCase();
       const flags: string[] = [];
 
@@ -295,7 +303,7 @@ export function createBrain(
         flags.push("mode_support", "no_pitch");
         const stuck = text.includes("just fix it") || text.includes("need help") || text.includes("none of this");
         if (stuck) flags.push("escalate");
-        const gen = await model.complete({ messages: await groundedMessages(message), temperature: 0, tenantId });
+        const gen = await model.complete({ messages: await groundedMessages(message, tenantId), temperature: 0, tenantId });
         const reply = stuck
           ? "I'm sorry this has been frustrating — I'm connecting you with a person who can resolve it."
           : `Let me help with that. ${gen.text}`;
@@ -362,7 +370,7 @@ export function createBrain(
         }
       }
       const gen = await model.complete({
-        messages: await groundedMessages(message, systemExtra + PITCH_PLAYBOOK[pitch]),
+        messages: await groundedMessages(message, tenantId, systemExtra + PITCH_PLAYBOOK[pitch]),
         temperature: 0,
         tenantId,
       });

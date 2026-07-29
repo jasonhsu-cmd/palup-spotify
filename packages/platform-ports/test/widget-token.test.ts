@@ -34,6 +34,12 @@ describe("widget token identity (tenant from verified claims)", () => {
     expect((await id.authenticate(expired)).kind).toBe("anonymous");
   });
 
+  it("rejects a token with an empty merchantId (would become an empty tenant)", async () => {
+    const id = createWidgetTokenIdentity(SECRET);
+    // A validly-signed token whose merchant claim is empty must not authenticate.
+    expect((await id.authenticate(mintWidgetToken(SECRET, "", 300))).kind).toBe("anonymous");
+  });
+
   it("FAILS CLOSED with no signing secret configured", async () => {
     const id = createWidgetTokenIdentity(undefined);
     expect((await id.authenticate(mintWidgetToken(SECRET, "m1", 300))).kind).toBe("anonymous");

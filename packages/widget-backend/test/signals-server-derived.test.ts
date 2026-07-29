@@ -5,10 +5,11 @@ import type { Signals } from "@palup/widget-brain";
 // T7: the shopper's browser must not be able to grant itself treatment, flip merchant policy, self-assert
 // marketing consent, arm/bypass the kill switch, or inject support/safety state via `signals`.
 describe("deriveServingSignals — client signals are untrusted", () => {
-  const ctx = { kill: false, region: "us" as const, groundingMode: "full" as const };
+  const ctx = { tenantId: "acme", kill: false, region: "us" as const, groundingMode: "full" as const };
 
   it("ignores every trust-bearing field the client tries to set", () => {
     const malicious: Signals = {
+      tenantId: "victim-merchant", // trying to impersonate another merchant's catalog
       relationship: "vip", // trying to grant VIP treatment
       consent: { email: "in", sms: "in" }, // trying to self-assert marketing consent
       groundingMode: "off", // trying to flip merchant competitor-mode
@@ -19,6 +20,7 @@ describe("deriveServingSignals — client signals are untrusted", () => {
       kill: true, // trying to arm/observe the kill switch
     };
     const out = deriveServingSignals(malicious, ctx);
+    expect(out.tenantId).toBe("acme"); // from ctx (verified token), NOT the client's "victim-merchant"
     expect(out.relationship).toBe("anonymous");
     expect(out.consent).toEqual({ email: "unknown", sms: "unknown" });
     expect(out.groundingMode).toBe("full"); // from ctx (merchant), not the client's "off"
@@ -47,7 +49,8 @@ describe("deriveServingSignals — client signals are untrusted", () => {
   });
 
   it("carries the merchant ctx values through", () => {
-    const out = deriveServingSignals(undefined, { kill: false, region: "eu", groundingMode: "general" });
+    const out = deriveServingSignals(undefined, { tenantId: "acme", kill: false, region: "eu", groundingMode: "general" });
+    expect(out.tenantId).toBe("acme");
     expect(out.region).toBe("eu");
     expect(out.groundingMode).toBe("general");
   });

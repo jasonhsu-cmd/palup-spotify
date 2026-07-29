@@ -236,7 +236,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       //   • openIssues / safetyLatched — sourced ONLY from persisted session state, never client-injected.
       //   • kill — armed state comes from the operator registry (server); the shopper can neither arm nor bypass it.
       const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
-      const signals: Signals = deriveServingSignals(body.signals, { kill: Boolean(kill), region: MERCHANT_REGION, groundingMode: MERCHANT_GROUNDING_MODE });
+      const signals: Signals = deriveServingSignals(body.signals, { tenantId, kill: Boolean(kill), region: MERCHANT_REGION, groundingMode: MERCHANT_GROUNDING_MODE });
 
       // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
       const canary = await assignCanary(store, sessionId);
