@@ -39,5 +39,7 @@ export type { IdentityPort, Principal } from "./identity-port.js";
 export { createOperatorTokenIdentity } from "./operator-identity.js";
 export { createWidgetTokenIdentity, mintWidgetToken } from "./widget-token-identity.js";
 export { redactPII, createRedactingModelPort } from "./redaction.js";
+export { createCachingGroundingPort } from "./grounding-cache.js";
+export type { CachingGroundingOpts } from "./grounding-cache.js";
 // NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
 // into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.
