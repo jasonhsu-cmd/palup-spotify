@@ -98,8 +98,11 @@ export async function buildServer() {
       await reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
       return;
     }
-    const tenantId = (req.query as { tenantId?: string })?.tenantId || "demo";
-    const rollup = await createStoreTelemetry(runtimeStore).query({ tenantId });
+    const q = (req.query as { tenantId?: unknown })?.tenantId;
+    const tenantId = typeof q === "string" && q ? q : "demo"; // coerce odd/array/missing → default
+    // Bound the read (review Finding 1): roll up the most recent N events, independent of stream-trim
+    // status, so an operator read can never load an unbounded stream into memory.
+    const rollup = await createStoreTelemetry(runtimeStore).query({ tenantId }, { limit: 10_000 });
     const cost = deriveCostUsd(rollup, loadModelPrices());
     return {
       tenantId,
