@@ -15,7 +15,7 @@ import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { buildAuditInput } from "./audit.js";
-import { allowRequest, clientIpKey } from "./rate-limit.js";
+import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -54,16 +54,20 @@ const RL_WINDOW = posInt("RL_WINDOW_SECONDS", 60);
 // Publishable embed-key → merchantId registry (the key ships in the storefront snippet). JSON via env;
 // defaults to the demo tenant. NOT a secret — it only names which merchant a widget belongs to.
 function parseEmbedKeys(): Record<string, string> {
+  const map: Record<string, string> = Object.create(null); // null proto: no __proto__/constructor keys
   const raw = process.env.WIDGET_EMBED_KEYS;
   if (raw) {
     try {
       const o = JSON.parse(raw);
-      if (o && typeof o === "object") return o as Record<string, string>;
+      if (o && typeof o === "object") {
+        for (const [k, v] of Object.entries(o)) if (typeof v === "string" && v) map[k] = v; // values must be non-empty strings
+      }
     } catch {
       console.warn("[config] WIDGET_EMBED_KEYS is not valid JSON — using the demo default");
     }
   }
-  return { "demo-embed-key": "demo" };
+  if (Object.keys(map).length === 0) map["demo-embed-key"] = "demo";
+  return map;
 }
 const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
 // 48h sliding (reset each turn): this is conversation-scoped CONTROL state (safety latch / open issues
@@ -117,9 +121,21 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // once, then sends the token on /chat. The tenant is bound here from the SERVER-side registry (never
   // from a client-claimed value). 401 for an unknown key or if signing isn't configured.
   app.get("/widget/token", async (req, reply) => {
+    // Rate-limit the (unauthenticated, public-embed-key) mint endpoint per IP so it can't be abused
+    // for unbounded HMAC/DoS. Bucketed under a reserved mint tenant.
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open: minting is cheap and the /chat model path is separately capped */
+    }
     const key = (req.query as { key?: string })?.key;
     const merchantId = typeof key === "string" ? EMBED_KEYS[key] : undefined;
-    if (!merchantId || !WIDGET_TOKEN_SECRET) {
+    if (typeof merchantId !== "string" || !WIDGET_TOKEN_SECRET) {
       reply.code(401);
       return { error: "invalid or unconfigured embed key" };
     }

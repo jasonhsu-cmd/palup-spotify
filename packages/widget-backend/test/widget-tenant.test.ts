@@ -16,6 +16,10 @@ describe("widget tenant identity", () => {
     expect(ok.statusCode).toBe(200);
     expect(typeof ok.json().token).toBe("string");
     expect((await app.inject({ method: "GET", url: "/widget/token?key=nope" })).statusCode).toBe(401);
+    // inherited object keys must NOT resolve to a merchant (null-proto registry) — 401, not a minted token
+    for (const k of ["__proto__", "constructor", "toString"]) {
+      expect((await app.inject({ method: "GET", url: `/widget/token?key=${k}` })).statusCode).toBe(401);
+    }
     await app.close();
   });
 
