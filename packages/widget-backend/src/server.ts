@@ -10,7 +10,7 @@ import {
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY } from "@palup/widget-brain";
 import type { RuntimeStatePort } from "@palup/platform-ports";
-import { createWidgetTokenIdentity, mintWidgetToken } from "@palup/platform-ports";
+import { createWidgetTokenIdentity, mintWidgetToken, createEnvSecrets } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -86,24 +86,29 @@ const widgetHtml = readFileSync(
 );
 
 const { port: modelPort, name: modelName } = createModelPort();
-const grounding = createGroundingPort();
 const commerce = createCommercePort();
-// One brain per active policy (champion + any canary), built lazily and cached by policy id.
-const brains = new Map<string, ReturnType<typeof createBrain>>();
-function brainFor(policy: Policy) {
-  let b = brains.get(policy.id);
-  if (!b) {
-    b = createBrain(modelPort, grounding, policy, commerce, "shopper-demo");
-    brains.set(policy.id, b);
-  }
-  return b;
-}
-brainFor(DEFAULT_POLICY); // champion
 
 export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads.
   const store = opts?.store ?? (await createRuntimeStore()).store;
+  // Per-merchant grounding needs the store (cache) + secrets (Shopify creds), so it is built here (not
+  // module-level). Construct secrets in the composition root after config load (per the slice-2 review).
+  const secrets = createEnvSecrets();
+  const grounding = createGroundingPort(store, secrets);
+  // One brain per active policy (champion + any canary), built lazily and cached by policy id. The
+  // brain is tenant-agnostic (grounding tenant rides each request via signals.tenantId); this cache is
+  // per-server-instance.
+  const brains = new Map<string, ReturnType<typeof createBrain>>();
+  const brainFor = (policy: Policy) => {
+    let b = brains.get(policy.id);
+    if (!b) {
+      b = createBrain(modelPort, grounding, policy, commerce, "shopper-demo");
+      brains.set(policy.id, b);
+    }
+    return b;
+  };
+  brainFor(DEFAULT_POLICY); // champion
   // Widget-identity config (read per boot so a test / deploy can configure it).
   const WIDGET_TOKEN_SECRET = process.env.WIDGET_TOKEN_SECRET;
   const WIDGET_TOKEN_TTL_SECONDS = posInt("WIDGET_TOKEN_TTL_SECONDS", 3_600);
