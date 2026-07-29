@@ -159,7 +159,11 @@ export function createBrain(
   };
   return {
     async decide(signals: Signals, message: string): Promise<Decision> {
-      const tenantId = signals.tenantId ?? "demo"; // server-derived (see Signals.tenantId); never client-set
+      // Server-derived (see Signals.tenantId); never client-set. In production the server ALWAYS sets
+      // this (deriveServingSignals), so `?? "demo"` only serves direct/eval callers testing the demo
+      // merchant. The fail-closed backstop for an unknown tenant lives in the grounding adapter
+      // (unknown ⇒ safe-empty catalog); real-tenant unauthorized→safe-empty lands in the caching layer.
+      const tenantId = signals.tenantId ?? "demo";
       const text = message.toLowerCase();
       const flags: string[] = [];
 

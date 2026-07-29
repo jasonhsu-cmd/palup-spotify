@@ -40,8 +40,8 @@ export function createWidgetTokenIdentity(secret: string | undefined, nowSec = (
           m?: unknown;
           exp?: unknown;
         };
-        if (typeof payload.m !== "string" || typeof payload.exp !== "number" || payload.exp <= nowSec()) {
-          return { kind: "anonymous" };
+        if (typeof payload.m !== "string" || !payload.m || typeof payload.exp !== "number" || payload.exp <= nowSec()) {
+          return { kind: "anonymous" }; // empty merchantId would become an empty tenant → reject
         }
         return { kind: "merchant", merchantId: payload.m };
       } catch {
