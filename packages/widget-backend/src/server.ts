@@ -10,7 +10,7 @@ import {
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY } from "@palup/widget-brain";
 import type { RuntimeStatePort } from "@palup/platform-ports";
-import { createWidgetTokenIdentity, mintWidgetToken, createEnvSecrets } from "@palup/platform-ports";
+import { createWidgetTokenIdentity, mintWidgetToken, createEnvSecrets, createStoreTelemetry, createMeteringModelPort } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -76,6 +76,10 @@ const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
 // memory is a separate, consent-gated, identified-customer subsystem with its own retention policy.
 const SESSION_TTL_SECONDS = posInt("SESSION_TTL_SECONDS", 172_800);
 const TRAFFIC_KEEP_LAST = posInt("TRAFFIC_KEEP_LAST", 5_000);
+// Telemetry is higher-volume (≥2 events/turn) but each row is tiny; keep a larger window. NOTE: once
+// trimmed, telemetry rollups are a ROLLING WINDOW, not a lifetime ledger — the cost read surface must
+// treat cumulative $ accordingly (ADR-0013 / slice-1 review F-5).
+const TELEMETRY_KEEP_LAST = posInt("TELEMETRY_KEEP_LAST", 20_000);
 const RECLAIM_EVERY = posInt("RECLAIM_EVERY", 500);
 let reqCount = 0;
 
@@ -96,6 +100,11 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // module-level). Construct secrets in the composition root after config load (per the slice-2 review).
   const secrets = createEnvSecrets();
   const grounding = createGroundingPort(store, secrets);
+  // M3 — telemetry (cost/latency measurement). The metering decorator wraps the model port so every
+  // model call's tokens + latency are recorded under the request tenant; fail-open, so it can never
+  // break serving. Built here because the store-backed telemetry adapter needs the store.
+  const telemetry = createStoreTelemetry(store);
+  const meteredModel = createMeteringModelPort(modelPort, telemetry, { agentType: RUNTIME_AGENT_TYPE });
   // One brain per active policy (champion + any canary), built lazily and cached by policy id. The
   // brain is tenant-agnostic (grounding tenant rides each request via signals.tenantId); this cache is
   // per-server-instance.
@@ -103,7 +112,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   const brainFor = (policy: Policy) => {
     let b = brains.get(policy.id);
     if (!b) {
-      b = createBrain(modelPort, grounding, policy, commerce, "shopper-demo");
+      b = createBrain(meteredModel, grounding, policy, commerce, "shopper-demo");
       brains.set(policy.id, b);
     }
     return b;
@@ -248,7 +257,14 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       const policy = canary ? canary.policy : DEFAULT_POLICY;
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
       const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
+      const turnStart = Date.now();
       const d = await session.send(message, signals);
+      // M3 — per-turn telemetry enrichment: the business dimensions (mode/pitch/servedBy/escalate) and
+      // end-to-end turn latency the model-port decorator can't see. PII-free (no message/reply). Under
+      // the server-derived tenant; fail-open like logTraffic.
+      void telemetry
+        .record(serving, { kind: "turn", agentType: RUNTIME_AGENT_TYPE, servedBy: policy.id, mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, latencyMs: Date.now() - turnStart })
+        .catch(() => {});
       // T9 — logTraffic is the choke point that redacts message/reply and hashes sessionId at the
       // write boundary (see canary.ts), so no raw shopper PII lands in the shadow-grading log at rest.
       await logTraffic(store, tenantId, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
@@ -271,6 +287,8 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       if (++reqCount % RECLAIM_EVERY === 0) {
         void store.sweepExpired().catch(() => {});
         void store.trimStream(serving, "traffic", TRAFFIC_KEEP_LAST).catch(() => {});
+        void store.trimStream(serving, "telemetry", TELEMETRY_KEEP_LAST).catch(() => {}); // F-4: bound growth
+
       }
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
       const response = {
