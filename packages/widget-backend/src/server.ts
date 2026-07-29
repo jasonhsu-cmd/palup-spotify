@@ -72,8 +72,10 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // IDEMPOTENCY: a client retry (e.g. the widget's offline-retry replaying the same turn) must NOT
       // re-process — that would double-count the governed pitch budget, double-audit, and re-open
       // issues. If we've already answered this key, return the SAME response and do nothing else.
-      if (idemKey) {
-        const cached = await store.get<Record<string, unknown>>(serving, "idem", `${sessionId}:${idemKey}`);
+      // Unambiguous composite key so ("a","b:c") and ("a:b","c") can't collide onto the same cache row.
+      const idemStoreKey = idemKey ? JSON.stringify([sessionId, idemKey]) : undefined;
+      if (idemStoreKey) {
+        const cached = await store.get<Record<string, unknown>>(serving, "idem", idemStoreKey);
         if (cached) return cached;
       }
 
@@ -110,7 +112,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
         flags: d.flags,
         servedBy: policy.id,
       };
-      if (idemKey) await store.put(serving, "idem", `${sessionId}:${idemKey}`, response);
+      if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response);
       return response;
     } catch (e) {
       // A model/config failure must degrade gracefully — never hang or leak internals to the shopper.

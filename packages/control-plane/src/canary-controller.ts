@@ -9,8 +9,10 @@ import { CRITERIA } from "./scenarios.js";
 // __system__/collection names in sync with widget-backend/canary.ts.
 
 const SYSTEM = { tenantId: "__system__" };
-const CANARY = "canary"; // KV collection
+const CANARY = "canary"; // KV collection (rollout config: operator/cross-instance state)
 const CONFIG_KEY = "config";
+// Traffic (shopper messages/replies) lives in the SERVING tenant's own partition, not __system__.
+const SERVING = { tenantId: "demo" };
 const TRAFFIC = "traffic"; // append stream
 const GENERAL = ["warm", "needs-first", "grounded", "concise", "no-pressure"]; // general sales-quality rubric
 
@@ -29,7 +31,7 @@ export const DEFAULT_CANARY: Policy = {
 };
 
 export async function readTrafficLog(store: RuntimeStatePort): Promise<Interaction[]> {
-  return store.readStream<Interaction>(SYSTEM, TRAFFIC);
+  return store.readStream<Interaction>(SERVING, TRAFFIC);
 }
 export async function canaryConfig(store: RuntimeStatePort): Promise<CanaryConfig | null> {
   return (await store.get<CanaryConfig>(SYSTEM, CANARY, CONFIG_KEY)) ?? null;

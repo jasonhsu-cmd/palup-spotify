@@ -45,7 +45,18 @@ export class PgPoolSql implements Sql {
   }
 }
 
-/** Build a PgPoolSql from a connection string (e.g. Cloud SQL). */
+/** Build a PgPoolSql from a connection string (e.g. Cloud SQL). Bounded so a hung/slow DB can't stall
+ * the serving path — node-postgres has NO default query timeout, and /chat awaits a per-request store
+ * read (incl. the kill-switch check), so an unbounded query would hang the request. */
 export function pgPoolSqlFromUrl(connectionString: string): PgPoolSql {
-  return new PgPoolSql(new pg.Pool({ connectionString }));
+  return new PgPoolSql(
+    new pg.Pool({
+      connectionString,
+      max: Number(process.env.PG_POOL_MAX ?? 10),
+      connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS ?? 5000),
+      statement_timeout: Number(process.env.PG_STATEMENT_TIMEOUT_MS ?? 10000),
+      query_timeout: Number(process.env.PG_QUERY_TIMEOUT_MS ?? 10000),
+      idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS ?? 30000),
+    }),
+  );
 }

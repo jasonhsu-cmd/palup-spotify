@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { RuntimeStatePort } from "@palup/platform-ports";
 import type { Decision } from "@palup/widget-brain";
 
@@ -49,12 +50,15 @@ export async function auditDecision(
 ): Promise<void> {
   const d = args.decision;
   if (!isGovernanceRelevant(d)) return;
+  // sessionId is client-supplied; hash it to an opaque id so no client-placed PII lands verbatim in the
+  // immutable (unredactable) audit log. Still correlatable across a session's records.
+  const sessionRef = createHash("sha256").update(args.sessionId).digest("hex").slice(0, 16);
   await store.audit(
     { tenantId },
     {
       actor: "agent:shopper",
       action: actionFor(d),
-      input: { sessionId: args.sessionId, messageChars: args.messageLength, killScope: args.killScope }, // no raw text
+      input: { sessionRef, messageChars: args.messageLength, killScope: args.killScope }, // no raw text, no raw id
       decision: { mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, flags: d.flags, servedBy: args.servedBy },
       reversalPath: d.escalateToHuman ? "handed to a human via escalation" : "n/a — reply only, no state-changing action",
     },

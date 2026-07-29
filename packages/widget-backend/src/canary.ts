@@ -9,8 +9,12 @@ import type { Policy } from "@palup/widget-brain";
 // control-plane/canary-controller.ts.
 
 const SYSTEM = { tenantId: "__system__" };
-const CANARY = "canary"; // KV collection
+const CANARY = "canary"; // KV collection (rollout config: operator/cross-instance state)
 const CONFIG_KEY = "config";
+// Traffic carries shopper messages/replies, so it lives in the SERVING tenant's own partition — NOT
+// the cross-tenant __system__ bucket. Single-tenant demo for now; per-merchant when tenancy lands.
+// (Retention/TTL + minimization before real multi-tenant — tracked follow-up.)
+const SERVING = { tenantId: "demo" };
 const TRAFFIC = "traffic"; // append stream
 
 export interface CanaryConfig {
@@ -44,7 +48,7 @@ export async function assignCanary(store: RuntimeStatePort, sessionId: string): 
 export async function logTraffic(store: RuntimeStatePort, entry: Record<string, unknown>): Promise<void> {
   // Logging must never break serving.
   try {
-    await store.append(SYSTEM, TRAFFIC, { ts: new Date().toISOString(), ...entry });
+    await store.append(SERVING, TRAFFIC, { ts: new Date().toISOString(), ...entry });
   } catch {
     /* ignore */
   }
