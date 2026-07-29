@@ -46,8 +46,10 @@ export interface AuditRecord extends AuditInput {
   hash: string;
 }
 
-/** The mutating subset available inside a transaction (see `tx`). Reads-your-writes within the tx. */
+/** The reads + mutations available inside a transaction (see `tx`). Reads-your-writes within the tx. */
 export interface RuntimeStateTx {
+  /** Read within the tx (use this for read-modify-write so the read shares the tx's connection/snapshot). */
+  get<T>(collection: string, key: string): Promise<T | null>;
   put<T>(collection: string, key: string, value: T): Promise<void>;
   delete(collection: string, key: string): Promise<void>;
   append<T>(stream: string, entry: T): Promise<number>;

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { hashAuditBase } from "./audit-hash.js";
 import {
   AUDIT_GENESIS_HASH,
   type AuditInput,
@@ -12,25 +12,6 @@ import {
 // behavioral oracle for the contract suite — the Postgres adapter must match it. It is single-process
 // (a Map), so it does NOT provide cross-instance durability; that is the Postgres adapter's job. All
 // values are deep-cloned in and out so callers can't mutate stored state by reference.
-
-/** Stable, key-sorted JSON so the audit hash is deterministic regardless of insertion order. */
-function canonical(value: unknown): string {
-  return JSON.stringify(value, (_k, v) => {
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      return Object.keys(v as Record<string, unknown>)
-        .sort()
-        .reduce((acc, k) => {
-          acc[k] = (v as Record<string, unknown>)[k];
-          return acc;
-        }, {} as Record<string, unknown>);
-    }
-    return v;
-  });
-}
-
-function hashRecord(r: Omit<AuditRecord, "hash">): string {
-  return createHash("sha256").update(canonical(r)).digest("hex");
-}
 
 function clone<T>(v: T): T {
   return v === undefined ? v : (JSON.parse(JSON.stringify(v)) as T);
@@ -127,7 +108,7 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
       reversalPath: entry.reversalPath,
       prevHash,
     };
-    const rec: AuditRecord = { ...base, hash: hashRecord(base) };
+    const rec: AuditRecord = { ...base, hash: hashAuditBase(base) };
     t.audit.push(rec);
     return clone(rec);
   }
@@ -150,7 +131,7 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
     let prev = AUDIT_GENESIS_HASH;
     for (const r of a) {
       const { hash, ...base } = r;
-      if (r.prevHash !== prev || hashRecord(base) !== hash) return { ok: false, brokenAt: r.seq };
+      if (r.prevHash !== prev || hashAuditBase(base) !== hash) return { ok: false, brokenAt: r.seq };
       prev = hash;
     }
     // Truncation/rewrite detection: the in-chain check alone cannot catch tail-truncation or a full
@@ -168,6 +149,7 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
     const t = this.data(ctx.tenantId);
     const backup = snapshot(t);
     const handle: RuntimeStateTx = {
+      get: (collection, key) => this.get(ctx, collection, key),
       put: (collection, key, value) => this.put(ctx, collection, key, value),
       delete: (collection, key) => this.delete(ctx, collection, key),
       append: (stream, entry) => this.append(ctx, stream, entry),

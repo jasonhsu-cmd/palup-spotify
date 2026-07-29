@@ -126,9 +126,11 @@ export function runRuntimeStatePortContract(makeAdapter: () => RuntimeStatePort 
     it("serializes concurrent same-tenant transactions (no lost update)", async () => {
       const s = await makeAdapter();
       await s.put(A, "counter", "n", { v: 0 });
+      // Read-modify-write ENTIRELY within the tx (via the tx handle) so the read shares the tx's
+      // snapshot/connection. Two concurrent bumps must serialize → final 2, neither increment lost.
       const bump = () =>
         s.tx(A, async (t) => {
-          const cur = (await s.get<{ v: number }>(A, "counter", "n"))!.v;
+          const cur = (await t.get<{ v: number }>("counter", "n"))!.v;
           await t.put("counter", "n", { v: cur + 1 });
         });
       await Promise.all([bump(), bump()]);

@@ -35,3 +35,4 @@ export type {
 export { AUDIT_GENESIS_HASH } from "./runtime-state-port.js";
 export { InMemoryRuntimeStore } from "./in-memory-runtime-store.js";
 export { runRuntimeStatePortContract } from "./contract/runtime-state-port.contract.js";
+export { canonicalize, hashAuditBase } from "./audit-hash.js";
