@@ -5,8 +5,10 @@
 
 export interface SecretsPort {
   /**
-   * Tenant-scoped secret lookup: the value for (tenantId, name), or undefined if unset. Implementations
-   * MUST be tenant-isolated (tenant A can never read tenant B's secret) and MUST NOT log/echo the value.
+   * Tenant-scoped secret lookup: the value for (tenantId, name), or undefined if unset. An empty value
+   * is treated as unset (undefined) so a blank can never be mistaken for a live credential.
+   * Implementations MUST be tenant-isolated (tenant A can never read tenant B's secret) and MUST NOT
+   * log/echo the value.
    */
   get(tenantId: string, name: string): Promise<string | undefined>;
 }
@@ -28,7 +30,7 @@ export function createEnvSecrets(raw: string | undefined = process.env.PALUP_SEC
           if (secrets && typeof secrets === "object") {
             const inner: Record<string, string> = Object.create(null);
             for (const [name, v] of Object.entries(secrets as Record<string, unknown>)) {
-              if (typeof v === "string") inner[name] = v;
+              if (typeof v === "string" && v) inner[name] = v; // empty ⇒ unset (never a live credential)
             }
             byTenant[tenant] = inner;
           }
