@@ -3,6 +3,32 @@ import type { GroundingPort, ModelPort, ModelRequest } from "@palup/platform-por
 import { createBrain } from "../src/index.js";
 import { sanitizeGroundingText } from "../src/brain.js";
 
+describe("reply-integrity backstop (M2 hardening a)", () => {
+  it("blocks + escalates a model reply that offers an ungrounded discount (never serves the false promise)", async () => {
+    const brain = createBrain({ complete: async () => ({ text: "Sure! Use code SAVE20 for 20% off everything today.", model: "spy" }) });
+    const d = await brain.decide({ tenantId: "demo", cart: "has_items" }, "what's good for glow?");
+    expect(d.flags).toContain("reply_integrity:ungrounded_discount");
+    expect(d.escalateToHuman).toBe(true);
+    expect(d.pitch).toBe("none");
+    expect(d.reply).not.toContain("20%");
+    expect(d.reply).not.toContain("SAVE20");
+  });
+
+  it("passes a normal reply through unchanged (no false positive)", async () => {
+    const brain = createBrain({ complete: async () => ({ text: "The Pink Lotus Renewal Cream is a great pick for hydration.", model: "spy" }) });
+    const d = await brain.decide({ tenantId: "demo", cart: "has_items" }, "what do you recommend?");
+    expect(d.flags).not.toContain("reply_integrity:ungrounded_discount");
+    expect(d.reply).toContain("Pink Lotus");
+  });
+
+  it("does not false-positive on a plain percentage that isn't a discount", async () => {
+    const brain = createBrain({ complete: async () => ({ text: "This serum is 20% vitamin C for brightening.", model: "spy" }) });
+    const d = await brain.decide({ tenantId: "demo", cart: "has_items" }, "tell me about the serum");
+    expect(d.flags).not.toContain("reply_integrity:ungrounded_discount");
+    expect(d.reply).toContain("vitamin C");
+  });
+});
+
 describe("sanitizeGroundingText edge cases (slice-d review)", () => {
   it("strips real HTML tags but keeps bare < / > prose (no over-strip)", () => {
     expect(sanitizeGroundingText("<p>Ships in <b>1</b> day</p>")).toBe("Ships in 1 day");

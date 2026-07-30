@@ -35,6 +35,28 @@ export function sanitizeGroundingText(s: string | undefined, max = 600): string 
     .slice(0, max);
 }
 
+// Deterministic reply-integrity backstop (M2 hardening a): PalUp grounds NO promos/discounts, so a
+// specific "% off" or a discount/coupon/promo code appearing in a MODEL reply is invented or injected
+// (e.g. from a poisoned catalog description). We never serve that false money promise — flag it and hand
+// to a human (NN#1). When a grounded promo field later exists, check the claim against it instead.
+const UNGROUNDED_DISCOUNT = /\b\d{1,3}\s*%\s*(off|discount)\b|\buse\s+(the\s+)?code\s+[a-z0-9]{2,}|\b(promo|coupon|discount|voucher)\s+code\s+[a-z0-9]{2,}/i;
+function replyOffersUngroundedDiscount(reply: string): boolean {
+  return UNGROUNDED_DISCOUNT.test(reply);
+}
+function discountGuardrail(flags: string[]): Decision {
+  flags.push("reply_integrity:ungrounded_discount", "escalate", "no_pitch");
+  return {
+    mode: "support",
+    reply: "I can't confirm a discount or promo code from here, and I won't promise one I'm not sure about — let me bring in a team member who can help with pricing.",
+    pitch: "none",
+    escalateToHuman: true,
+    outbound: false,
+    safetyClass: "none",
+    flags,
+    model: "guardrail",
+  };
+}
+
 function systemPrompt(policy: Policy, ctx?: GroundingContext): string {
   const rules = [
     policy.styleDirective, // ← the only policy-tunable line
@@ -327,6 +349,7 @@ export function createBrain(
         const stuck = text.includes("just fix it") || text.includes("need help") || text.includes("none of this");
         if (stuck) flags.push("escalate");
         const gen = await model.complete({ messages: await groundedMessages(message, tenantId), temperature: 0, tenantId });
+        if (replyOffersUngroundedDiscount(gen.text)) return discountGuardrail(flags); // (a) never serve an invented/injected discount
         const reply = stuck
           ? "I'm sorry this has been frustrating — I'm connecting you with a person who can resolve it."
           : `Let me help with that. ${gen.text}`;
@@ -397,6 +420,7 @@ export function createBrain(
         temperature: 0,
         tenantId,
       });
+      if (replyOffersUngroundedDiscount(gen.text)) return discountGuardrail(flags); // (a) never serve an invented/injected discount
       return {
         mode: "sales",
         reply: gen.text,
