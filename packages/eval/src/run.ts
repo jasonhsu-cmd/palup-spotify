@@ -2,7 +2,7 @@
 // It runs the case corpus through each candidate, enforces the safety floor + no-regression-vs-incumbent,
 // and emits a monitor report (JSON + HTML) you open to verify. Exit 0 iff the gate demonstrably works:
 // the incumbent is clean AND a known-bad candidate is blocked.
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { grade, type CaseResult, type EvalCase } from "./grade.js";
@@ -14,7 +14,7 @@ const cases = JSON.parse(
   readFileSync(join(here, "..", "cases", "core.json"), "utf8"),
 ) as EvalCase[];
 
-interface Gate {
+export interface Gate {
   candidate: string;
   note: string;
   total: number;
@@ -26,7 +26,7 @@ interface Gate {
   results: CaseResult[];
 }
 
-async function runCandidate(c: Candidate): Promise<CaseResult[]> {
+export async function runCandidate(c: Candidate): Promise<CaseResult[]> {
   const out: CaseResult[] = [];
   for (const kase of cases) {
     const d = await c.brain.decide(kase.signals as never, kase.message);
@@ -35,7 +35,7 @@ async function runCandidate(c: Candidate): Promise<CaseResult[]> {
   return out;
 }
 
-function evaluate(c: Candidate, results: CaseResult[], baseline?: Map<string, boolean>): Gate {
+export function evaluate(c: Candidate, results: CaseResult[], baseline?: Map<string, boolean>): Gate {
   const passed = results.filter((r) => r.pass).length;
   const floorFails = results.filter((r) => r.floor && !r.pass).map((r) => r.id);
   const regressions = baseline
@@ -107,4 +107,6 @@ async function main() {
   process.exit(gateWorks ? 0 : 1);
 }
 
-main();
+// Auto-run the gate only when invoked directly (`pnpm eval`), not when imported by a unit test.
+const entry = process.argv[1];
+if (entry && realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))) main();
