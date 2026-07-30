@@ -130,7 +130,12 @@ export function storefrontFetch(
       }
       return json.data ?? {};
     } finally {
-      log({ host: creds.shopDomain, status, ok, ms: Date.now() - start });
+      // Observability must never break the fetch — swallow any (injected) logger error.
+      try {
+        log({ host: creds.shopDomain, status, ok, ms: Date.now() - start });
+      } catch {
+        /* ignore logging errors */
+      }
     }
   };
 }

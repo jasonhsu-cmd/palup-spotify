@@ -21,6 +21,16 @@ describe("reply-integrity backstop (M2 hardening a)", () => {
     expect(d.reply).toContain("Pink Lotus");
   });
 
+  it("catches broadened discount phrasings (dollar-off, spelled percent, half off, code variants)", async () => {
+    for (const text of ["$10 off your first order", "take 50 percent off today", "everything is half off right now", "apply code SAVE20 at checkout", "the code is GLOW15"]) {
+      const brain = createBrain({ complete: async () => ({ text, model: "spy" }) });
+      const d = await brain.decide({ tenantId: "demo", cart: "has_items" }, "any deals?");
+      expect(d.flags, text).toContain("reply_integrity:ungrounded_discount");
+      expect(d.escalateToHuman, text).toBe(true);
+      expect(d.pitch).toBe("none");
+    }
+  });
+
   it("does not false-positive on a plain percentage that isn't a discount", async () => {
     const brain = createBrain({ complete: async () => ({ text: "This serum is 20% vitamin C for brightening.", model: "spy" }) });
     const d = await brain.decide({ tenantId: "demo", cart: "has_items" }, "tell me about the serum");
