@@ -18,6 +18,12 @@ export interface ServingSignalContext {
   region: NonNullable<Signals["region"]>;
   /** Merchant "discuss competitors" mode (merchant policy). */
   groundingMode: NonNullable<Signals["groundingMode"]>;
+  /**
+   * Shopper's LOCAL hour of day (0–23), computed server-side from the request locale/timezone.
+   * Optional: when omitted, quiet-hours OUTBOUND suppression is simply not applied. NEVER taken from
+   * the client (like tenantId/kill/region, this is the trusted, server-derived origin of the signal).
+   */
+  localHour?: number;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -37,5 +43,11 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // server-controlled either way, no client influence.)
     // openIssues / safetyLatched omitted ⇒ sourced only from persisted session state
     kill: ctx.kill ? true : undefined,
+    // Quiet-hours clock is SERVER-derived (ctx), never the client's r.localHour. Only a valid 0–23
+    // integer is honored; anything else ⇒ omitted ⇒ quiet-hours suppression simply does not apply.
+    localHour:
+      typeof ctx.localHour === "number" && Number.isInteger(ctx.localHour) && ctx.localHour >= 0 && ctx.localHour <= 23
+        ? ctx.localHour
+        : undefined,
   };
 }

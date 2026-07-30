@@ -157,6 +157,46 @@ const SUPPORT = [
 
 const UNKNOWN_FACT = ["competitor", "brand x", "cheaper elsewhere", "other store", "price of their"];
 
+// B2B / wholesale / bulk-order intent (§4 Persona: roles = for-self / gift / B2B → ESCALATE). A business
+// or bulk inquiry is routed to a human (a real wholesale/trade conversation), never answered with a
+// consumer pitch. Deterministic guardrail — kept low-false-positive: bare pack-size questions
+// ("how many units are in the box") are excluded via lookahead, and "for my <spa day>" is excluded by
+// limiting the noun list to business contexts. `text` is already lower-cased in decide().
+const B2B = new RegExp(
+  [
+    "\\bwholesale\\b",
+    "\\bb2b\\b",
+    "\\bresell(?:er|ers|ing)?\\b",
+    "\\bresale\\b",
+    "\\bdistributor\\b",
+    "\\bbulk\\b",
+    "\\bpurchase order\\b",
+    "\\bp\\.?o\\.? number\\b",
+    "\\bresale certificate\\b",
+    "\\btax[ -]?exempt(?:ion|ions)?\\b",
+    "\\bminimum order\\b",
+    "\\bmoq\\b",
+    "\\b(?:trade|business|wholesale) account\\b",
+    "\\bfor (?:my|our) (?:business|store|shop|company|boutique|salon)\\b",
+    "\\bstock (?:my|our) (?:store|shop|shelves|salon)\\b",
+    "\\bhow many units\\b(?!\\s+(?:are|come|in|per|does|is|of|inside))",
+  ].join("|"),
+  "i",
+);
+
+// Quiet-hours window (shopper LOCAL time): 21:00–07:59. Inside it we suppress OUTBOUND (an email/SMS
+// follow-up) but NEVER the reactive reply — the shopper is still answered this turn (§4 Contextual:
+// "quiet-hours suppresses outbound"). Server-derived localHour only; undefined/out-of-range ⇒ time
+// unknown ⇒ NOT quiet (the consent gate still applies), so callers without a clock behave exactly as before.
+const QUIET_START_HOUR = 21; // 9pm — first quiet hour
+const QUIET_END_HOUR = 8; //    8am — first non-quiet hour (window is [21:00, 08:00))
+function isQuietHour(localHour: number | undefined): boolean {
+  if (typeof localHour !== "number" || !Number.isInteger(localHour) || localHour < 0 || localHour > 23) {
+    return false;
+  }
+  return localHour >= QUIET_START_HOUR || localHour < QUIET_END_HOUR;
+}
+
 function classifySafety(text: string): SafetyClass {
   for (const group of SAFETY) {
     if (group.terms.some((t) => text.includes(t))) return group.class;
@@ -385,6 +425,26 @@ export function createBrain(
         };
       }
 
+      // 3.5 Persona: B2B / wholesale / bulk intent — divert to a human, never a consumer pitch (§4
+      // Persona: "B2B → escalate"). Ladder position 3.5 (see brain-precedence.test.ts): BELOW support(2)
+      // and honest-uncertainty(3) — a real support issue or an unverifiable-fact question still win — and
+      // ABOVE sales(4), so a business/bulk inquiry leaves the consumer sales path before any pitch is
+      // selected. No price/money commitment is made here; a person handles wholesale/trade terms.
+      if (B2B.test(text)) {
+        flags.push("persona:b2b", "offer_human", "no_pitch");
+        return {
+          mode: "support",
+          reply:
+            "It sounds like you're asking about a business or bulk order — that's something our team handles directly rather than through me. Let me connect you with a person who can help with wholesale or bulk pricing and set you up properly.",
+          pitch: "none",
+          escalateToHuman: true,
+          outbound: false,
+          safetyClass: "none",
+          flags,
+          model: "guardrail",
+        };
+      }
+
       // 4. Sales / smalltalk — reactive answer always; proactive pitch is gated.
       // Competitor-comparison handling per the merchant "discuss competitors" mode (default full).
       let systemExtra = "";
@@ -420,11 +480,16 @@ export function createBrain(
         // only permitted with valid consent (unknown = no-consent). Never do outbound otherwise.
         const wantsOutbound = pitch === "replenishment" || pitch === "cart_recovery";
         if (wantsOutbound) {
-          if (signals.consent?.email === "in") {
+          // Outbound requires consent AND not-quiet-hours. Consent is checked first (unknown = no consent);
+          // then quiet-hours (§4 Contextual). Either miss suppresses the follow-up; the reactive reply below
+          // is UNAFFECTED — we still answer this turn, we just don't initiate an outbound action.
+          if (signals.consent?.email !== "in") {
+            flags.push("outbound_suppressed_no_consent");
+          } else if (isQuietHour(signals.localHour)) {
+            flags.push("outbound_suppressed_quiet_hours");
+          } else {
             outbound = true;
             flags.push("outbound");
-          } else {
-            flags.push("outbound_suppressed_no_consent");
           }
         }
       }
