@@ -19,14 +19,15 @@ human merge/promotion gate** — not around it.
 
 ```
 work-item → orchestrator dispatch
-  → solution-architect (design note + task list; flags HITL/portability/plane)
-  → backend-builder ∥ frontend-builder (parallel where independent)
-  → test-engineer (unit/integration/port-contract/governance + E2E tests; coverage bar)
+  → solution-architect (design note + task list; each item an explicit acceptance criterion; flags HITL/portability/plane)
+  → test-engineer FIRST (author failing unit/integration/port-contract/governance + E2E tests from the criteria — red before any code; ATDD)
+  → backend-builder ∥ frontend-builder (parallel where independent; implement until the red tests go green)
+  → test-engineer (extend + verify; coverage bar; green ≠ correct)
   → security-reviewer (blocks on auth/creds/payments/customer-data/autonomy/isolation)
   → /governance-check (HITL boundary + no-self-deploy + portability)
   → fact-checker (re-derive every claim from primary sources; UNVERIFIABLE by default)
-  → OPEN PR (states plane touched + HITL crossing + named human owner)
-  ─────────────── human merges ───────────────
+  → OPEN PR (states plane touched + HITL crossing; governance-touching PRs name a human owner)
+  ────── self-merge routine green PRs · governance-touching PRs: named human owner merges ──────
   → CI: build + SAST/DAST + license-scan(oss-and-licensing) + SBOM + eval gate
        + application-E2E (Playwright, ephemeral env) + agent-behavioral eval suites
   → AUTO-DEPLOY to STAGING (behind flags) → critical-journey smoke on staging
@@ -37,7 +38,9 @@ work-item → orchestrator dispatch
 
 - **agent-evolution-steward** additionally gates any change to **run-time** agent behavior (it must
   walk the evolution pipeline, `governance-subsystems.md` §4).
-- The two human gates (merge, promote) are the only non-automated steps and are **required**.
+- The **promote** gate is always human. The **merge** gate is human for governance-touching PRs
+  (HITL boundary, evolution gate, or the operating manual) and self-served on routine green PRs; no
+  gate may be weakened (`HITL-POLICY.md` §5) and **prod is never auto-deployed**.
 
 **Every work-item is a `/goal`, not an open prompt.** Each item enters the loop with an **explicit,
 machine-checkable acceptance criterion** (e.g. "port-contract tests for `storage` pass; coverage ≥ bar;
@@ -68,8 +71,9 @@ cycle** — long sessions silently drop "don't do X" constraints (goal drift; th
 Not every task earns a loop; the wrong ones cost more than they return. A task is loop-eligible **only
 if all hold**: (1) it **recurs** (roughly weekly+), (2) an **objective automated gate** can reject bad
 output, (3) the agent can **run the code it changes** (repro env), (4) there is a **hard stop**
-(token/iteration/time budget), and (5) a **human reviews before any irreversible action** (merge,
-deploy, dependency/permission change). Miss one → keep it a manual, human-driven task.
+(token/iteration/time budget), and (5) a **human reviews before any irreversible or governance
+action** (prod promotion, governance-touching-PR merge, deploy, dependency/permission change).
+Miss one → keep it a manual, human-driven task.
 
 - **Loop-eligible (good first loops):** CI-failure triage, dependency-bump PRs, lint/type-fix passes,
   flaky-test reproduction, and coverage-matrix implementation on **well-tested slices with a real

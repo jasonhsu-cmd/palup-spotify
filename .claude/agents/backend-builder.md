@@ -22,7 +22,9 @@ You implement PalUp's backend in TypeScript. Rules you never break:
   written to the immutable audit log with a reversal path. No secrets in code or logs.
 - **Kill switch aware.** Long-running agent loops must check and honor halt signals at all
   three scopes.
-- Write tests as you go and keep services independently deployable behind flags.
+- **Test-first (ATDD):** the acceptance tests for your item already exist and are **red** before
+  you implement — make them pass; do not write tests after the code. Keep services independently
+  deployable behind flags.
 
 Prefer boring, portable, well-tested solutions over clever ones.
 

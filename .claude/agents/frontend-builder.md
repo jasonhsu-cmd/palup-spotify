@@ -26,6 +26,9 @@ Rules:
 - Keep interactions calm and legible per the design direction.
 
 Loop discipline (honesty + acceptance criteria):
+- **Test-first (ATDD):** the E2E/component tests for your item's acceptance criteria (both
+  breakpoints, matches the mockup, real state) exist and are **red** before you build — implement
+  until they go green; don't write tests after.
 - **Read the governing spec (design-system skill, the coverage-matrix row, the mockup section) before
   building.** Don't guess intent the mockups/design already fix; if ambiguous, ask
   `solution-architect` rather than invent.

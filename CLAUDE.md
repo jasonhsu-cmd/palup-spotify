@@ -55,7 +55,7 @@ governance is the single largest risk. Read `docs/adr/0002-two-plane-agent-archi
 | What | The Claude Code subagents in `.claude/agents/` that write, test, and ship PalUp's code | The product's AI sales partners + self-healing monitors that run in production |
 | Live where | Developer machines / CI | Vertex AI + Cloud Run/GKE, serving merchants & customers |
 | Governed by | The dev pipeline + `/governance-check` + human PR review | The **HITL policy** (`docs/HITL-POLICY.md`) + Approval Center + Kill Switch |
-| Can they self-modify prod? | **No.** They open PRs; humans merge. | Only through the evolution pipeline (`docs/AGENT-GOVERNANCE.md`), never directly |
+| Can they self-modify prod? | **No.** They open PRs; **prod is human-promoted** and governance-touching PRs are human-merged (routine green PRs self-merge). | Only through the evolution pipeline (`docs/AGENT-GOVERNANCE.md`), never directly |
 
 When a task says "the agent," always confirm **which plane**. If unclear, ask.
 
@@ -83,11 +83,15 @@ When a task says "the agent," always confirm **which plane**. If unclear, ask.
 
 ## 4. How we develop (build-time workflow)
 
-Claude Code orchestrates specialized subagents. The default loop:
+Claude Code orchestrates specialized subagents. Development is **test-first (ATDD)** — the default loop:
 
-1. **`solution-architect`** turns a request into a short design note + task list.
-2. **`backend-builder`** / **`frontend-builder`** implement in parallel where independent.
-3. **`test-engineer`** writes/extends tests; nothing merges below the coverage bar.
+1. **`solution-architect`** turns a request into a short design note + task list, each item
+   carrying an explicit, machine-checkable **acceptance criterion**.
+2. **`test-engineer`** writes the unit + E2E tests **first**, straight from those criteria —
+   they must exist and **fail (red)** before any implementation. The gate to start building is
+   *every acceptance criterion covered by a test* (criteria coverage), plus the standing coverage bar.
+3. **`backend-builder`** / **`frontend-builder`** implement (parallel where independent)
+   **until the red tests go green** — never code-then-test; extend tests as new cases surface.
 4. **`security-reviewer`** must pass on anything touching auth, credentials, payments,
    customer data, or agent autonomy.
 5. **`release-manager`** ships behind flags; prod is progressive (canary → full).
@@ -96,6 +100,16 @@ Claude Code orchestrates specialized subagents. The default loop:
 7. **`fact-checker`** independently verifies claims (code, tests/builds, library/vendor, and world
    facts) from primary sources before any commit or user-facing summary; defaults to UNVERIFIABLE and
    never rubber-stamps. See the Honesty rules above.
+
+**Per-work-item loop (follow every time).** ① Read the governing spec in detail → ② think;
+**interview a human first** if a load-bearing decision is unconfirmed → ③ reconcile any doc the
+change makes outdated/inconsistent, and **leave already-correct docs untouched** (no cosmetic
+rewrites) → ④ author the failing unit + E2E tests covering **every** acceptance criterion, then
+re-read the spec and think again → ⑤ develop to green → ⑥ run the full suite → ⑦ all green ⇒
+open a PR and **self-merge routine green PRs**; a **governance-touching PR** (HITL boundary,
+evolution gate, or this operating manual) keeps a **named human owner** who merges. Not green ⇒
+fix and return to ⑤. **Prod is never auto-deployed** (§3) and **no gate may be weakened**
+(`HITL-POLICY §5`), self-merge notwithstanding.
 
 Use `/ship` for the standard flow, `/eval` to run quality gates, `/governance-check`
 before anything that might touch a HITL boundary, and `/new-runtime-agent` to scaffold a
