@@ -62,6 +62,17 @@
     </div>
 
     <div class="panel">
+      <h2>Cost &amp; telemetry (per tenant — operator only)</h2>
+      <div class="row" style="margin-bottom:10px">
+        <input id="tel-tenant" data-testid="tel-tenant" placeholder="tenant (default: demo)"
+          style="font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--fg);width:170px" />
+        <button id="tel-refresh" data-testid="tel-refresh">Load</button>
+        <span class="metric" id="tel-status" data-testid="tel-status"></span>
+      </div>
+      <div id="telemetry" data-testid="telemetry"><span class="metric">set the operator token (top-right), then Load — measurement only (COGS + latency)</span></div>
+    </div>
+
+    <div class="panel">
       <h2>Self-improvement timeline (real — persisted to .palup-state/)</h2>
       <div class="row" style="margin-bottom:10px">
         <button class="primary" id="evolve" data-testid="evolve-btn" title="Run the loop live across the conversation scenarios: propose → evaluate → gate → promote">Run a live improvement round</button>
@@ -188,7 +199,43 @@
     $("#canary").innerHTML = status + rows + shadowHtml;
   }
   async function refreshCanary(){ try{ renderCanary(await (await fetch("/api/canary")).json()); }catch{} }
-  async function refresh(){ lastState = await getState(); render(lastState); refreshTimeline(); refreshCanary(); }
+
+  // M3 cost/telemetry (operator-only read — the endpoint self-gates, so this sends the Bearer token
+  // unlike the open reads above). Measurement only: COGS + latency; margin is honestly unavailable until
+  // a revenue signal exists, and an unpriced model is flagged, never shown as a fabricated $.
+  function usd(n){ return "$" + (n < 1 ? n.toFixed(4) : n.toFixed(2)); }
+  function num(n){ return (n||0).toLocaleString(); }
+  function renderTelemetry(t){
+    const r = t.rollup, c = t.cost;
+    const models = Object.entries(c.byModel || {});
+    const modelRows = models.length
+      ? models.map(([m, mc])=>`<div class="metric mono">${m}: ${num(mc.inputTokens)} in / ${num(mc.outputTokens)} out · ${c.unpricedModels.includes(m) ? '<span style="color:var(--warn)">unpriced</span>' : usd(mc.costUsd)}</div>`).join("")
+      : `<span class="metric">no telemetry recorded for this tenant yet — drive some chats at the widget</span>`;
+    const cost = c.fullyPriced
+      ? `<b>${usd(c.totalUsd)}</b> total COGS`
+      : `<b>${usd(c.totalUsd)}</b> total COGS · <span style="color:var(--warn)">${c.unpricedModels.length} model(s) unpriced — lower bound; set PALUP_MODEL_PRICES</span>`;
+    $("#telemetry").innerHTML = `
+      <div class="champ" style="gap:22px">
+        <div><div class="q" style="font-size:20px" data-testid="tel-events">${num(r.events)}</div><div class="metric">turns + model calls</div></div>
+        <div><div class="q" style="font-size:20px">${num(r.inputTokens + r.outputTokens)}</div><div class="metric">tokens (${num(r.inputTokens)} in / ${num(r.outputTokens)} out)</div></div>
+        <div><div class="q" style="font-size:20px">${r.latencyP50Ms==null?"–":r.latencyP50Ms+"ms"}</div><div class="metric">p50 latency · p95 ${r.latencyP95Ms==null?"–":r.latencyP95Ms+"ms"}</div></div>
+      </div>
+      <div style="margin-top:10px">${cost}</div>
+      <div style="margin-top:6px">${modelRows}</div>
+      <div class="metric" style="margin-top:8px">margin: <b>${t.margin.status}</b> — ${t.margin.reason}</div>`;
+  }
+  async function refreshTelemetry(){
+    const tenant = ($("#tel-tenant") && $("#tel-tenant").value.trim()) || "demo";
+    const tok = opToken();
+    if (!tok){ $("#tel-status").textContent = "operator token required (top-right)"; return; }
+    try{
+      const r = await fetch("/api/telemetry?tenantId=" + encodeURIComponent(tenant), { headers:{ authorization:"Bearer " + tok } });
+      if (r.status === 401){ $("#tel-status").textContent = "operator authentication required"; return; }
+      $("#tel-status").textContent = "tenant: " + tenant;
+      renderTelemetry(await r.json());
+    }catch{ $("#tel-status").textContent = "failed to load"; }
+  }
+  async function refresh(){ lastState = await getState(); render(lastState); refreshTimeline(); refreshCanary(); if (opToken()) refreshTelemetry(); }
   document.addEventListener("click", async (e)=>{
     const b = e.target.closest("button"); if(!b) return;
     if (b.id==="evolve"){ await post("/api/evolve"); refreshTimeline(); return; }
@@ -203,12 +250,16 @@
     if (b.id==="seed"){ lastState = await post("/api/seed"); render(lastState); return; }
     if (b.id==="regress"){ lastState = await post("/api/monitor",{qualityScore:0.4}); render(lastState); return; }
     if (b.id==="kill"){ lastState = await post(lastState && lastState.killed ? "/api/unkill":"/api/kill"); render(lastState); return; }
+    if (b.id==="tel-refresh"){ refreshTelemetry(); return; }
     const act = b.dataset.act, id = b.dataset.id;
     if (act){ lastState = await post(`/api/${act}/${id}`); render(lastState); }
   });
   // Operator-token field: restore from localStorage, persist on edit.
   (function(){ const f=$("#op-token"); if(!f) return; f.value=opToken();
     f.addEventListener("input", ()=>{ try{ localStorage.setItem("palup_operator_token", f.value); }catch{} }); })();
+  // Enter in the tenant field loads telemetry for that tenant.
+  (function(){ const f=$("#tel-tenant"); if(!f) return;
+    f.addEventListener("keydown", (e)=>{ if(e.key==="Enter") refreshTelemetry(); }); })();
   refresh(); setInterval(()=>{ if(!busy) refresh(); }, 2000);
 </script>
 </body>

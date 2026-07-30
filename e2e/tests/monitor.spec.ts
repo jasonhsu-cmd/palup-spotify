@@ -28,4 +28,11 @@ test("self-improvement loop is observable and governed via the dashboard", async
   // A simulated live regression auto-rolls back to the baseline.
   await page.getByTestId("regress-btn").click();
   await expect(page.getByTestId("champion-label")).toContainText("Baseline");
+
+  // M3 slice 7 — the operator can load per-tenant cost/telemetry. The read is operator-gated (the
+  // injected token authenticates it); it renders even with no traffic yet (events = 0).
+  await page.getByTestId("tel-refresh").click();
+  await expect(page.getByTestId("tel-events")).toBeVisible();
+  await expect(page.getByTestId("tel-status")).toContainText("tenant: demo");
+  await expect(page.getByTestId("telemetry")).not.toContainText("set the operator token");
 });
