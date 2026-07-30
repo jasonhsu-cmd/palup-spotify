@@ -21,8 +21,10 @@ export function isVertexConfigured(): boolean {
 
 export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModelAdapter {
   const project = opts.project ?? process.env.GOOGLE_CLOUD_PROJECT;
-  // "global" is the endpoint that served gemini-3.6-flash for this project (verified live 2026-07);
-  // some models/regions differ — override via GOOGLE_CLOUD_LOCATION.
+  // "global" is the default Vertex endpoint; staging pins GOOGLE_CLOUD_LOCATION=global and
+  // PALUP_MODEL=gemini-2.5-flash (.github/workflows/deploy-staging.yml). The live end-to-end call
+  // against that endpoint is NOT independently verified in this repo (see the UNVERIFIED-LIVE header
+  // above); some models/regions differ — override via GOOGLE_CLOUD_LOCATION.
   const location = opts.location ?? process.env.GOOGLE_CLOUD_LOCATION ?? "global";
   // Model ids change; keep it env-overridable. Confirm availability for your project/region in
   // Model Garden. (gemini-2.5-flash was GA as of 2026-07 with a retirement date of 2026-10-16.)

@@ -5,9 +5,14 @@ Staging **auto-deploys on merge to `main`**; **production is never auto-deployed
 `STAGING_ENABLED=true`); before setup the workflows were guarded by `STAGING_ENABLED` so `main` stayed
 green.
 
-> Status: **staging is LIVE and verified.** The widget backend is deployed to Cloud Run and serves the
-> real Gemini model — `/health` → `{"ok":true,"model":"vertex/gemini"}` and `/chat` returns a grounded
-> live reply; the widget UI is served at `/`. Every merge to `main` auto-redeploys.
+> Status: **staging is deployed to Cloud Run and boots.** The widget backend deploys via
+> `deploy-staging.yml` and passes the post-deploy health smoke — `/health` → `{"ok":true,"model":"vertex/gemini"}`
+> (the `model` field only reflects that the Vertex adapter is wired when `GOOGLE_CLOUD_PROJECT` is set; it is
+> not proof a live model call succeeded, and the smoke greps `"ok":true` only); the widget UI is served at `/`.
+> Every merge to `main` auto-redeploys. The live Gemini call and the exact model id are **as pinned in
+> `.github/workflows/deploy-staging.yml`** (`GOOGLE_CLOUD_LOCATION=global`, `PALUP_MODEL=gemini-2.5-flash`) and
+> are **NOT independently re-verified in this repo** — no in-repo smoke exercises `/chat` end-to-end against the
+> real model, so a grounded live reply is asserted by config, not proven here.
 > **Run-time state is durable + shared:** backed by a Cloud SQL Postgres instance (`palup-staging`,
 > `db-f1-micro`) via the `RuntimeStatePort`, so the operator Kill Switch, session state, canary, and the
 > immutable audit log survive restarts and propagate across instances (NN #4/#5). `DATABASE_URL` is a
