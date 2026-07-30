@@ -6,14 +6,15 @@ import type { ShopifyStoreCreds } from "./merchant-store.js";
 // port). Chosen over the Admin API for least-privilege (published storefront data only, no
 // inventory/cost/PII).
 //
-// HONESTY / UNVERIFIED-LIVE: the assumed Storefront response shape below and the (not-yet-written)
-// GraphQL query are RECOLLECTION of the Storefront API, NOT verified against current Shopify docs or a
-// real store this session (knowledge cutoff Jan 2026). Per CLAUDE.md we do NOT ship a guessed network
-// call: the live fetch is an explicit not-implemented stub. The MAPPING is pure logic, fixture-tested,
-// and independent of the live call. Enabling the live path is a §7 human step: verify the query +
-// field names against Shopify docs, provide a dev-store Storefront token, then implement `fetchImpl`.
+// The GraphQL query + response shape below were VERIFIED against the Shopify Storefront API docs
+// (version 2026-07, shopify.dev, retrieved 2026-07-30): products(first:){nodes{id,title,description,
+// tags,priceRange{minVariantPrice{amount,currencyCode}}}} and shop{name,refundPolicy{body},
+// shippingPolicy{body}} (ShopPolicy.body is String!). The pure mapping is fixture-tested; the LIVE
+// end-to-end call (auth + real response) is still UNVERIFIED until run against a real dev store + a
+// Storefront access token — turning it on for a tenant is a §7 go-live step (provision creds via the
+// SecretsPort, then a live smoke + security re-review).
 
-/** Assumed Storefront product node (shape TO VERIFY against Shopify Storefront API docs). */
+/** Storefront product node (Storefront API 2026-07). */
 export interface StorefrontProductNode {
   id: string;
   title: string;
@@ -22,7 +23,7 @@ export interface StorefrontProductNode {
   priceRange?: { minVariantPrice?: { amount?: string; currencyCode?: string } };
 }
 
-/** Assumed Storefront query response (shape TO VERIFY). */
+/** Storefront query response (the fields this adapter requests). */
 export interface StorefrontData {
   shop?: {
     name?: string;
@@ -32,6 +33,14 @@ export interface StorefrontData {
   products?: { nodes?: StorefrontProductNode[] };
 }
 
+// Bounds on merchant-supplied catalog text before it flows into the system prompt: caps prompt bloat and
+// limits the prompt-injection surface of merchant-authored fields (a merchant can only affect its OWN
+// tenant's agent — not cross-tenant — but bounding is prudent; deeper sanitization is a follow-up).
+const MAX_TITLE = 200;
+const MAX_DESC = 600;
+const MAX_TAGS = 20;
+const bound = (s: string | undefined, max: number): string => (s ?? "").slice(0, max);
+
 function formatPrice(p?: { amount?: string; currencyCode?: string }): string {
   if (!p?.amount) return "";
   return p.currencyCode && p.currencyCode !== "USD" ? `${p.amount} ${p.currencyCode}` : `$${p.amount}`;
@@ -40,39 +49,82 @@ function formatPrice(p?: { amount?: string; currencyCode?: string }): string {
 /**
  * Pure mapping: Storefront response → GroundingContext. Stamps the REQUESTED tenantId (never a value
  * from the response), so a mis-scoped fetch can't smuggle another tenant's id past the cache's
- * tenant-match assertion. Tested against synthetic fixtures.
+ * tenant-match assertion. Bounds merchant text. Tested against synthetic fixtures.
  */
 export function mapStorefrontToContext(tenantId: string, data: StorefrontData): GroundingContext {
   const products: Product[] = (data.products?.nodes ?? []).map((n) => ({
     id: n.id,
-    title: n.title,
-    description: n.description ?? "",
+    title: bound(n.title, MAX_TITLE),
+    description: bound(n.description, MAX_DESC),
     price: formatPrice(n.priceRange?.minVariantPrice),
-    tags: n.tags,
+    tags: (n.tags ?? []).slice(0, MAX_TAGS),
   }));
   const policy: StorePolicy = {
-    returns: data.shop?.refundPolicy?.body ?? "",
-    shipping: data.shop?.shippingPolicy?.body ?? "",
+    returns: bound(data.shop?.refundPolicy?.body, MAX_DESC),
+    shipping: bound(data.shop?.shippingPolicy?.body, MAX_DESC),
   };
-  return { tenantId, brandName: data.shop?.name ?? "this store", products, policy };
+  return { tenantId, brandName: bound(data.shop?.name, MAX_TITLE) || "this store", products, policy };
 }
 
 export type StorefrontFetch = (creds: ShopifyStoreCreds) => Promise<StorefrontData>;
 
-// The live Storefront GraphQL call is intentionally NOT implemented: it needs a query verified against
-// current Shopify docs + a real Storefront access token (§7 / ADR-0012). Throwing here means a tenant
-// that is credential-configured but whose live path isn't wired degrades SAFELY via the caching
-// wrapper (stale or safe-empty), rather than shipping a guessed network request.
-const notImplementedFetch: StorefrontFetch = async () => {
-  throw new Error(
-    "Shopify Storefront live fetch not implemented — requires a query verified against Shopify docs + a real Storefront token (§7 / ADR-0012)",
-  );
-};
+/** Current Storefront API version (verified 2026-07-30 against shopify.dev). */
+export const STOREFRONT_API_VERSION = "2026-07";
 
-/** GroundingPort backed by a merchant's Shopify store. `fetchImpl` is injectable for tests. */
+// The Storefront token is sent in a header to `shopDomain`, so refuse any host that isn't a Shopify
+// store host — a misconfigured/typo'd domain must never leak the token to an arbitrary server (SSRF /
+// credential-exfil defense-in-depth). shopDomain is operator config (not client), so this guards
+// operator error. Custom storefront domains would need an explicit allowlist — a follow-up.
+const SHOP_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
+
+const STOREFRONT_QUERY = `query PalUpGrounding($first: Int!) {
+  shop { name refundPolicy { body } shippingPolicy { body } }
+  products(first: $first) {
+    nodes { id title description tags priceRange { minVariantPrice { amount currencyCode } } }
+  }
+}`;
+
+/**
+ * The live Storefront GraphQL fetch. POSTs the verified query to
+ * `https://{shopDomain}/api/{version}/graphql.json` with the `X-Shopify-Storefront-Access-Token` header.
+ * `fetchFn` is injectable for tests (defaults to global fetch). Throws on a non-2xx response or a GraphQL
+ * error so the caching wrapper degrades safely (stale/safe-empty). AbortSignal.timeout cancels the
+ * underlying request on timeout (caching-review F3). Large catalogs (>first) need pagination — follow-up.
+ */
+export function storefrontFetch(
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  opts: { version?: string; first?: number; timeoutMs?: number } = {},
+): StorefrontFetch {
+  const version = opts.version ?? STOREFRONT_API_VERSION;
+  const first = opts.first ?? 250; // Storefront max page size
+  const timeoutMs = opts.timeoutMs ?? 4000;
+  return async (creds) => {
+    if (!SHOP_HOST.test(creds.shopDomain)) {
+      throw new Error("refusing Shopify fetch: shopDomain is not a *.myshopify.com host"); // never leak the token
+    }
+    const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
+    const res = await fetchFn(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "X-Shopify-Storefront-Access-Token": creds.accessToken },
+      body: JSON.stringify({ query: STOREFRONT_QUERY, variables: { first } }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    // These errors are swallowed by the caching wrapper (degrade to stale/safe-empty) and must NEVER be
+    // logged. Messages are STATIC — we do not interpolate the vendor response/status text, so no
+    // vendor- or (theoretically) credential-reflected content can ride an error into a future logger (F1).
+    if (!res.ok) throw new Error("Shopify Storefront API request failed");
+    const json = (await res.json()) as { data?: StorefrontData; errors?: Array<{ message?: string }> };
+    if (Array.isArray(json.errors) && json.errors.length) {
+      throw new Error("Shopify Storefront GraphQL error");
+    }
+    return json.data ?? {};
+  };
+}
+
+/** GroundingPort backed by a merchant's Shopify store. `fetchImpl` defaults to the live Storefront call. */
 export function createShopifyGroundingAdapter(
   creds: ShopifyStoreCreds,
-  fetchImpl: StorefrontFetch = notImplementedFetch,
+  fetchImpl: StorefrontFetch = storefrontFetch(),
 ): GroundingPort {
   return {
     async getContext(tenantId: string): Promise<GroundingContext> {
