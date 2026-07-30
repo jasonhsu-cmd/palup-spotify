@@ -50,5 +50,17 @@ export type { SecretsPort } from "./secrets-port.js";
 export { createEnvSecrets } from "./secrets-port.js";
 export type { VectorPort, VectorRecord, VectorQuery, VectorMatch } from "./vector-port.js";
 export { createInMemoryVectorStore } from "./vector-port.js";
+export type {
+  CommsPort,
+  CommsMessage,
+  CommsChannel,
+  CommsCheck,
+  CommsDenyReason,
+  SentMessage,
+  LiveChatHandle,
+  InMemoryComms,
+  InMemoryCommsOpts,
+} from "./comms-port.js";
+export { createInMemoryComms, CommsRejection } from "./comms-port.js";
 // NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
 // into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.
