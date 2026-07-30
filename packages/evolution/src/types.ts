@@ -86,6 +86,10 @@ export interface AuditEntry {
   action: string;
   target?: string;
   detail?: Record<string, unknown>;
+  /** Hash of the previous entry in this chain (genesis = 64 zeros) — mirrors the runtime-state chain. */
+  prevHash: string;
+  /** sha256 over the canonicalized entry (every field except this one). Chain-verifiable / tamper-evident. */
+  hash: string;
 }
 
 export interface Champion {
