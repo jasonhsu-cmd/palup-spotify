@@ -12,7 +12,10 @@ pipeline.
 
 1. **Self-improvement is allowed; self-deployment is not.** An agent may propose a better
    prompt, tool, policy, or model. It may never put that change in front of real users on
-   its own.
+   its own. (A *proposed* bounded exception for opted-in tenants — auto-promotion behind the
+   full automated gate set — is recorded in
+   `docs/adr/0014-merchant-opt-in-governed-auto-optimize.md`; it is **not enacted** and enables
+   nothing until Accepted with security sign-off.)
 2. **Gates are mandatory and ordered.** Every change walks the same path. Stages are never
    skipped, even for "obvious" improvements.
 3. **Humans own the boundary.** Any promotion that changes agent behavior, or that crosses
