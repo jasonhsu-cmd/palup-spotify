@@ -3,7 +3,7 @@ import { createRedactingModelPort, createCachingGroundingPort } from "@palup/pla
 import { MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import { resolveShopifyStore } from "./merchant-store.js";
-import { createShopifyGroundingAdapter } from "./shopify-grounding.js";
+import { createShopifyGroundingAdapter, type StorefrontFetch } from "./shopify-grounding.js";
 
 // Composition root: pick the real Vertex adapter when GOOGLE_CLOUD_PROJECT is set, else the
 // deterministic mock. Feature code only ever sees a ModelPort — it never knows which (ADR-0001).
@@ -21,14 +21,18 @@ export function createModelPort(): { port: ModelPort; name: string } {
 // mirrors isVertexConfigured() for the model port, but per-tenant. Wrapped in the caching + degradation
 // layer (per-tenant TTL cache, hard timeouts, stale-while-error, fail-closed safe-empty). The whole
 // thing stays behind GroundingPort. During rollout no tenant has Shopify creds ⇒ everyone gets fixtures.
-export function createGroundingPort(store: RuntimeStatePort, secrets: SecretsPort): GroundingPort {
+export function createGroundingPort(
+  store: RuntimeStatePort,
+  secrets: SecretsPort,
+  opts: { shopifyFetch?: StorefrontFetch } = {}, // injectable for tests; defaults to the live Storefront call
+): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
   const router: GroundingPort = {
     async getContext(tenantId: string): Promise<GroundingContext> {
       // tenantId here is the SERVER-DERIVED request tenant (threaded from the verified widget token via
       // the brain) — never client input, so one merchant can never resolve another's store creds.
       const creds = await resolveShopifyStore(tenantId, secrets);
-      if (creds) return createShopifyGroundingAdapter(creds).getContext(tenantId);
+      if (creds) return createShopifyGroundingAdapter(creds, opts.shopifyFetch).getContext(tenantId);
       return fixtures.getContext(tenantId);
     },
   };
