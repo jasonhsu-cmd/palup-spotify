@@ -73,7 +73,8 @@ describe("storefrontFetch (verified Storefront API 2026-07 call)", () => {
     const data = await storefrontFetch(fn)(creds);
     expect(calls[0].url).toBe(`https://acme.myshopify.com/api/${STOREFRONT_API_VERSION}/graphql.json`);
     expect(calls[0].init.method).toBe("POST");
-    expect(calls[0].init.headers["X-Shopify-Storefront-Access-Token"]).toBe("shptok_secret");
+    expect(calls[0].init.headers["Shopify-Storefront-Private-Token"]).toBe("shptok_secret"); // server-side private token
+    expect(calls[0].init.headers["X-Shopify-Storefront-Access-Token"]).toBeUndefined(); // not the public browser header
     const body = JSON.parse(calls[0].init.body);
     expect(body.query).toContain("products(first: $first)");
     expect(body.query).toContain("refundPolicy { body }");
