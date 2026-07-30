@@ -1,7 +1,8 @@
 # ADR-0013: Telemetry port + cost derivation (raw tokens now, dollars at read)
 
-- **Status:** Accepted (implementation in progress — M3; the authoritative price table + a real revenue
-  signal are human inputs, see Consequences)
+- **Status:** Accepted — implemented (M3 complete + merged): the `TelemetryPort`, the metering decorator
+  + `/chat` capture, cost derivation, and an operator-gated read + dashboard panel are live. The
+  authoritative price table and a real revenue signal for margin remain human inputs — see Consequences.
 - **Context:** PalUp's margin story and the model-tiering discipline (`CLAUDE.md` §5) need real
   per-request / per-tenant / per-agent **cost, latency, and margin** data. The raw material already
   exists — `ModelResponse.usage {inputTokens, outputTokens}` (`model-port.ts`), populated by the Vertex
