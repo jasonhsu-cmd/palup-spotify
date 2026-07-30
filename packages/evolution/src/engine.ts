@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { AUDIT_GENESIS_HASH, canonicalize } from "@palup/platform-ports";
 import type { Policy } from "@palup/widget-brain";
 import type {
   AuditEntry,
@@ -45,7 +47,14 @@ export class EvolutionEngine {
   }
 
   private log(actor: AuditEntry["actor"], action: string, target?: string, detail?: Record<string, unknown>) {
-    this.audit.push({ seq: this.next(), actor, action, target, detail });
+    // Hash-chain every entry (docs/AGENT-GOVERNANCE.md §3 "immutable audit ... no silent transitions";
+    // docs/design/governance-subsystems.md §6 "hash-chained (event_hash + prev_hash)"). prevHash links
+    // to the prior entry's hash (genesis sentinel for the first), so any in-place edit, reorder, or
+    // mid-chain removal is detectable by verifyAuditChain. Mirrors the runtime-state audit chain
+    // (packages/platform-ports/src/in-memory-runtime-store.ts) EXACTLY: same canonicalize + sha256.
+    const prevHash = this.audit.length ? this.audit[this.audit.length - 1].hash : AUDIT_GENESIS_HASH;
+    const base: Omit<AuditEntry, "hash"> = { seq: this.next(), prevHash, actor, action, target, detail };
+    this.audit.push({ ...base, hash: hashAuditEntry(base) });
   }
 
   private require(rec: CandidateRecord | undefined, id: string): CandidateRecord {
@@ -192,4 +201,45 @@ export class EvolutionEngine {
   getAudit(): AuditEntry[] {
     return [...this.audit];
   }
+
+  /** Recompute this engine's own audit chain and report whether it is intact (see verifyAuditChain). */
+  verifyAudit(opts?: { expectedHead?: { seq: number; hash: string } }): { ok: boolean; brokenAt?: number } {
+    return verifyAuditChain(this.audit, opts);
+  }
+}
+
+/**
+ * sha256 over the canonicalized audit body (every field except `hash`). Reuses platform-ports'
+ * `canonicalize` (recursively key-sorted JSON) + node:crypto sha256 so the evolution audit chain
+ * hashes IDENTICALLY to the runtime-state chain (packages/platform-ports/src/audit-hash.ts). No new
+ * dependency — node:crypto is stdlib and already used there.
+ */
+function hashAuditEntry(base: Omit<AuditEntry, "hash">): string {
+  return createHash("sha256").update(canonicalize(base)).digest("hex");
+}
+
+/**
+ * Recompute an evolution audit chain and report whether it is intact — mirrors
+ * RuntimeStatePort.verifyAudit (packages/platform-ports/src/in-memory-runtime-store.ts) EXACTLY.
+ * In-place mutation, reorder, and mid-chain removal are caught by the chain math (prevHash linkage +
+ * per-entry hash recompute). Tail-truncation and a full re-hash are NOT catchable from the chain alone
+ * (no secret is stored); pass a trusted `expectedHead` (a separately persisted head anchor) to detect
+ * those too — the same trust model the runtime-state port documents.
+ */
+export function verifyAuditChain(
+  entries: AuditEntry[],
+  opts?: { expectedHead?: { seq: number; hash: string } },
+): { ok: boolean; brokenAt?: number } {
+  let prev = AUDIT_GENESIS_HASH;
+  for (const r of entries) {
+    const { hash, ...base } = r;
+    if (r.prevHash !== prev || hashAuditEntry(base) !== hash) return { ok: false, brokenAt: r.seq };
+    prev = hash;
+  }
+  if (opts?.expectedHead) {
+    const head = entries[entries.length - 1];
+    if (!head || head.seq !== opts.expectedHead.seq || head.hash !== opts.expectedHead.hash)
+      return { ok: false, brokenAt: opts.expectedHead.seq };
+  }
+  return { ok: true };
 }
