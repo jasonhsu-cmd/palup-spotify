@@ -100,4 +100,21 @@ describe("storefrontFetch (verified Storefront API 2026-07 call)", () => {
     await expect(storefrontFetch(fn)({ shopDomain: "acme.myshopify.com.evil.com", accessToken: "t" })).rejects.toThrow();
     expect(calls.length).toBe(0); // no request was ever made
   });
+
+  it("logs host + status + latency per fetch, never the token (egress metric, c)", async () => {
+    const logs: Array<{ host: string; status: number; ok: boolean; ms: number }> = [];
+    const { fn } = fakeFetch(() => ({ status: 200, json: async () => ({ data: SAMPLE }) }));
+    await storefrontFetch(fn, { log: (i) => logs.push(i) })(creds);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ host: "acme.myshopify.com", status: 200, ok: true });
+    expect(typeof logs[0].ms).toBe("number");
+    expect(JSON.stringify(logs[0])).not.toContain("shptok_secret"); // token NEVER in the egress log
+  });
+
+  it("logs even when the fetch fails (status captured for debuggability)", async () => {
+    const logs: Array<{ status: number; ok: boolean }> = [];
+    const { fn } = fakeFetch(() => ({ ok: false, status: 503, json: async () => ({}) }));
+    await expect(storefrontFetch(fn, { log: (i) => logs.push(i) })(creds)).rejects.toThrow();
+    expect(logs[0]).toMatchObject({ status: 503, ok: false });
+  });
 });

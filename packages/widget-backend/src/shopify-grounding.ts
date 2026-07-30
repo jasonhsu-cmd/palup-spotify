@@ -95,31 +95,48 @@ const STOREFRONT_QUERY = `query PalUpGrounding($first: Int!) {
  */
 export function storefrontFetch(
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
-  opts: { version?: string; first?: number; timeoutMs?: number } = {},
+  opts: { version?: string; first?: number; timeoutMs?: number; log?: (info: { host: string; status: number; ok: boolean; ms: number }) => void } = {},
 ): StorefrontFetch {
   const version = opts.version ?? STOREFRONT_API_VERSION;
   const first = opts.first ?? 250; // Storefront max page size
   const timeoutMs = opts.timeoutMs ?? 4000;
+  // (c) Egress observability: log host + HTTP status + latency per fetch (NEVER the token) so operators
+  // can see Shopify health/misrouting during rollout. Injectable for tests; defaults to console.log →
+  // Cloud Logging. The thrown errors stay static + unlogged (F1); this line is structured + token-free.
+  const log = opts.log ?? ((info: { host: string; status: number; ok: boolean; ms: number }) => console.log("[grounding.shopify] " + JSON.stringify(info)));
   return async (creds) => {
     if (!SHOP_HOST.test(creds.shopDomain)) {
       throw new Error("refusing Shopify fetch: shopDomain is not a *.myshopify.com host"); // never leak the token
     }
     const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
-    const res = await fetchFn(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "Shopify-Storefront-Private-Token": creds.accessToken },
-      body: JSON.stringify({ query: STOREFRONT_QUERY, variables: { first } }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    // These errors are swallowed by the caching wrapper (degrade to stale/safe-empty) and must NEVER be
-    // logged. Messages are STATIC — we do not interpolate the vendor response/status text, so no
-    // vendor- or (theoretically) credential-reflected content can ride an error into a future logger (F1).
-    if (!res.ok) throw new Error("Shopify Storefront API request failed");
-    const json = (await res.json()) as { data?: StorefrontData; errors?: Array<{ message?: string }> };
-    if (Array.isArray(json.errors) && json.errors.length) {
-      throw new Error("Shopify Storefront GraphQL error");
+    const start = Date.now();
+    let status = 0;
+    let ok = false;
+    try {
+      const res = await fetchFn(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Shopify-Storefront-Private-Token": creds.accessToken },
+        body: JSON.stringify({ query: STOREFRONT_QUERY, variables: { first } }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      status = res.status;
+      ok = res.ok;
+      // These errors are swallowed by the caching wrapper (degrade to stale/safe-empty) and must NEVER be
+      // logged. Messages are STATIC — no vendor/credential content can ride an error into a future logger (F1).
+      if (!res.ok) throw new Error("Shopify Storefront API request failed");
+      const json = (await res.json()) as { data?: StorefrontData; errors?: Array<{ message?: string }> };
+      if (Array.isArray(json.errors) && json.errors.length) {
+        throw new Error("Shopify Storefront GraphQL error");
+      }
+      return json.data ?? {};
+    } finally {
+      // Observability must never break the fetch — swallow any (injected) logger error.
+      try {
+        log({ host: creds.shopDomain, status, ok, ms: Date.now() - start });
+      } catch {
+        /* ignore logging errors */
+      }
     }
-    return json.data ?? {};
   };
 }
 
