@@ -9,10 +9,12 @@ import type { ShopifyStoreCreds } from "./merchant-store.js";
 // The GraphQL query + response shape below were VERIFIED against the Shopify Storefront API docs
 // (version 2026-07, shopify.dev, retrieved 2026-07-30): products(first:){nodes{id,title,description,
 // tags,priceRange{minVariantPrice{amount,currencyCode}}}} and shop{name,refundPolicy{body},
-// shippingPolicy{body}} (ShopPolicy.body is String!). The pure mapping is fixture-tested; the LIVE
-// end-to-end call (auth + real response) is still UNVERIFIED until run against a real dev store + a
-// Storefront access token — turning it on for a tenant is a §7 go-live step (provision creds via the
-// SecretsPort, then a live smoke + security re-review).
+// shippingPolicy{body}} (ShopPolicy.body is String!). PalUp calls the Storefront API SERVER-SIDE, so
+// it authenticates with a PRIVATE (delegate) Storefront access token via the `Shopify-Storefront-
+// Private-Token` header (kept secret in the SecretsPort — not the public `X-Shopify-Storefront-Access-
+// Token` browser header). The pure mapping is fixture-tested; the LIVE end-to-end call (auth + real
+// response) is still UNVERIFIED until run against a real dev store + token — a §7 go-live step
+// (provision creds via the SecretsPort, then a live smoke + security re-review).
 
 /** Storefront product node (Storefront API 2026-07). */
 export interface StorefrontProductNode {
@@ -86,7 +88,7 @@ const STOREFRONT_QUERY = `query PalUpGrounding($first: Int!) {
 
 /**
  * The live Storefront GraphQL fetch. POSTs the verified query to
- * `https://{shopDomain}/api/{version}/graphql.json` with the `X-Shopify-Storefront-Access-Token` header.
+ * `https://{shopDomain}/api/{version}/graphql.json` with the server-side `Shopify-Storefront-Private-Token` header.
  * `fetchFn` is injectable for tests (defaults to global fetch). Throws on a non-2xx response or a GraphQL
  * error so the caching wrapper degrades safely (stale/safe-empty). AbortSignal.timeout cancels the
  * underlying request on timeout (caching-review F3). Large catalogs (>first) need pagination — follow-up.
@@ -105,7 +107,7 @@ export function storefrontFetch(
     const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
     const res = await fetchFn(url, {
       method: "POST",
-      headers: { "content-type": "application/json", "X-Shopify-Storefront-Access-Token": creds.accessToken },
+      headers: { "content-type": "application/json", "Shopify-Storefront-Private-Token": creds.accessToken },
       body: JSON.stringify({ query: STOREFRONT_QUERY, variables: { first } }),
       signal: AbortSignal.timeout(timeoutMs),
     });
