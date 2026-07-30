@@ -65,6 +65,11 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 - Removing or weakening a gate, or granting an agent self-promotion: **prohibited** (not
   even approvable through the normal flow; requires an explicit policy change with security
   signoff).
+- A governed auto-promote carve-out for opted-in tenants (`VALUE_VOICE_PROACTIVITY` only) is
+  **proposed** in `docs/adr/0014-merchant-opt-in-governed-auto-optimize.md` — **not enacted**
+  (both gate agents returned BLOCK). Until that ADR is Accepted with the recorded steward +
+  security sign-offs and its preconditions met, **human approval is never skipped** for any
+  agent behavior/prompt/model change to real users.
 
 ## 6. How this is enforced in code
 
