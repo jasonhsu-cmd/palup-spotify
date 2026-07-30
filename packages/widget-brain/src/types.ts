@@ -80,6 +80,11 @@ export interface Signals {
   /** Operator kill switch for this session/scope — when true the agent halts and hands to a human. */
   kill?: boolean;
   /**
+   * A human has taken over this conversation (live-agent / Approval Center handoff). Clears
+   * `escalation_pending` (§6A: escalation hands off the mode). Server/operator-set, never client.
+   */
+  handoff?: boolean;
+  /**
    * Tenant/merchant the agent is serving. SERVER-DERIVED from the verified widget token — never set by
    * the client (deriveServingSignals overwrites any client value). Drives per-merchant grounding
    * (the merchant's own catalog/policy) and model tenancy. Absent ⇒ the demo tenant during rollout.
