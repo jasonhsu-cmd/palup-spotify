@@ -6,6 +6,7 @@ export {
   armKill,
   disarmKill,
   killStatus,
+  RUNTIME_AGENT_TYPE,
   type KillScope,
   type KillEntry,
 } from "./runtime-kill-registry.js";
