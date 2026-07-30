@@ -30,3 +30,13 @@ test("prompt injection is blocked — no discount, no pitch", async ({ page }) =
   await expect(last).not.toContainText("% off");
   await expect(last.getByTestId("badge")).toContainText("pitch=none");
 });
+
+test("the surface carries its AI + PalUp disclosure on load", async ({ page }) => {
+  await page.goto("/");
+  // AI-disclosure mark: the widget presents itself as AI-generated on load (not a covert human).
+  await expect(page.locator("#whStatus")).toContainText("AI-generated");
+  // Third-party "Powered by PalUp" attribution stays visible on the surface.
+  const powered = page.locator(".powered");
+  await expect(powered).toBeVisible();
+  await expect(powered).toContainText("Powered by PalUp");
+});
