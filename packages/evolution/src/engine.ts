@@ -99,9 +99,14 @@ export class EvolutionEngine {
       (cand.counterMetrics?.returnRate ?? 0) > (champ.counterMetrics?.returnRate ?? 0) ||
       (cand.counterMetrics?.complaintRate ?? 0) > (champ.counterMetrics?.complaintRate ?? 0);
     if (worseCounters) reasons.push("counter-metrics-worsened");
+    // Fail-CLOSED cross-family gate (ADR-0014): a grade the grader marked ADVISORY (gating === false —
+    // a same-family judge, e.g. Gemini grading the Gemini agent, or no cross-family judge available) can
+    // NEVER pass. It may still be recorded/observed, but proposer≠evaluator is unmet so it must not gate
+    // a promotion. `undefined` (offline MockGrader / a real cross-family judge) stays gating-eligible.
+    if (cand.gating === false) reasons.push("advisory-grade-not-gating");
     const improved = delta > 0;
     const pass =
-      cand.safetyPass && cand.floorPass && cand.qualityScore >= champ.qualityScore && improved && !worseCounters;
+      cand.safetyPass && cand.floorPass && cand.qualityScore >= champ.qualityScore && improved && !worseCounters && cand.gating !== false;
     if (pass) reasons.push("passed: safe + no-regression + improved");
     else if (reasons.length === 0 && !improved) reasons.push("no-improvement-over-champion");
     return { pass, reasons, delta };
