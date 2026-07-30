@@ -8,7 +8,7 @@ import { createBrain, MockModelAdapter, StaticGroundingAdapter, MockCommerceAdap
 // (packages/widget-brain/src/brain.ts, decide()) is:
 //
 //   kill(-1) > injection(0) > safety(1) > AI-disclosure(1.5) > freebie(1.6) > support(2)
-//            > honest-uncertainty(3) > sales(4)
+//            > honest-uncertainty(3) > b2b-persona(3.5) > sales(4)
 //
 // Each test below fires BOTH a higher-priority trigger AND a lower-priority one (a buy signal / would-be
 // pitch) in the SAME message, and asserts the higher rung wins — no autonomous action, no pitch. The
@@ -95,6 +95,24 @@ describe("precedence ladder (§6A) — the higher trigger always wins over a buy
     expect(d.pitch).toBe("none"); // no pitch stapled onto an honest "I can't verify that"
     expect(d.model).toBe("guardrail");
     expect(d.reply).toMatch(/can't verify another store/i); // honest non-fabrication, no confident guess
+  });
+
+  it("b2b-persona(3.5) > sales: a wholesale/bulk inquiry + a buy signal → hands to a human, no consumer pitch", async () => {
+    // brain.ts step 3.5: B2B matches the literal "wholesale"; a buy signal + a would-be pitch ride along.
+    const d = await decide("do you offer wholesale pricing? I'll take the serum too — add it to my cart.", WOULD_PITCH);
+    expect(d.mode).toBe("support");
+    expect(d.flags).toEqual(expect.arrayContaining(["persona:b2b", "offer_human"]));
+    expect(d.escalateToHuman).toBe(true);
+    expect(d.pitch).toBe("none"); // diverts to a person; never pitches a B2B/bulk inquiry
+    expect(d.model).toBe("guardrail"); // short-circuits before the sales path → no pitch generated
+  });
+
+  it("support(2) > b2b-persona(3.5): an open support issue + a wholesale mention → support wins, not B2B", async () => {
+    // Proves the rung sits BELOW support: an open issue short-circuits before the B2B check runs.
+    const d = await decide("any update on my order? also, do you do wholesale?", { openIssues: ["order_1042_late"], ...WOULD_PITCH });
+    expect(d.mode).toBe("support");
+    expect(d.flags).not.toContain("persona:b2b"); // support outranks the B2B persona rung
+    expect(d.pitch).toBe("none");
   });
 
   it("sales(4): a clean sales turn with NO higher trigger → sales path may pitch", async () => {

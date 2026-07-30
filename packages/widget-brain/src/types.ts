@@ -90,6 +90,13 @@ export interface Signals {
    * (the merchant's own catalog/policy) and model tenancy. Absent ⇒ the demo tenant during rollout.
    */
   tenantId?: string;
+  /**
+   * Shopper's LOCAL hour of day (0–23), SERVER-DERIVED from the request's locale/timezone — never
+   * client-set (deriveServingSignals is the only origin, exactly like tenantId/region). Drives
+   * quiet-hours OUTBOUND suppression ONLY (never the reactive reply). Absent ⇒ time unknown ⇒ NOT
+   * treated as quiet hours (the consent gate still applies).
+   */
+  localHour?: number;
 }
 
 export interface Decision {
