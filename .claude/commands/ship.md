@@ -1,14 +1,16 @@
 ---
-description: Run the standard build→test→secure→release flow for a change, with all gates enforced.
+description: Run the standard test-first (ATDD) → build → secure → release flow for a change, with all gates enforced.
 argument-hint: <short description of the change>
 ---
 Orchestrate shipping this change end-to-end: **$ARGUMENTS**
 
 Follow the build-time workflow in `CLAUDE.md` §4 and delegate to subagents:
-1. `solution-architect` — design note + task list; identify agent plane, HITL boundary, and
-   portability impact up front.
-2. `backend-builder` / `frontend-builder` — implement (parallelize independent tasks).
-3. `test-engineer` — tests including governance + port-contract tests; a red one blocks.
+1. `solution-architect` — design note + task list with an explicit acceptance criterion per
+   item; identify agent plane, HITL boundary, and portability impact up front.
+2. `test-engineer` — **write the failing unit + E2E tests first** from those criteria (test-first/
+   ATDD); building starts only once every criterion is covered by a red test.
+3. `backend-builder` / `frontend-builder` — implement (parallelize independent tasks) **until the
+   tests go green**; a red governance or port-contract test still blocks.
 4. `security-reviewer` — required if this touches auth, secrets, payments, data, autonomy,
    or a governance surface.
 5. If this changes RUN-TIME agent behavior: `agent-evolution-steward` must pass, and the
