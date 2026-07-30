@@ -11,7 +11,7 @@ import {
 import { DEFAULT_POLICY } from "@palup/widget-brain";
 import type { RuntimeStatePort } from "@palup/platform-ports";
 import { createWidgetTokenIdentity, mintWidgetToken, createEnvSecrets, createStoreTelemetry, createMeteringModelPort } from "@palup/platform-ports";
-import { createRuntimeStore, matchedKill } from "@palup/state-postgres";
+import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -21,9 +21,10 @@ import { assignCanary, logTraffic } from "./canary.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
 // multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
-// through here and into the brain's tenantId.
+// through here and into the brain's tenantId. RUNTIME_AGENT_TYPE ("shopper") is imported from
+// @palup/state-postgres so the serving path and the evolution PROMOTION path check the SAME agent-type
+// against the kill registry (NN #4) — a single source of truth, no drift.
 const RUNTIME_TENANT = "demo";
-const RUNTIME_AGENT_TYPE = "shopper";
 
 // Reclamation bounds (F3/F4): TTLs cap growth of the client-keyed idem/session KV; traffic is trimmed.
 // Reclamation runs opportunistically every N requests (Cloud Run throttles CPU between requests, so a

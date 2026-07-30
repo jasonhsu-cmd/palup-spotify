@@ -17,6 +17,16 @@ export interface KillEntry {
   at: string;
 }
 
+/**
+ * The run-time agent-type of the live shopper agent — the SINGLE source of truth shared by the serving
+ * backend (widget-backend reads matchedKill per turn) and the evolution PROMOTION path (control-plane),
+ * so both check the SAME agent-type against this kill registry. If these two drifted, an operator kill
+ * armed at the `agent:shopper` scope would halt serving but NOT halt a promotion pushing new behavior to
+ * that agent — the exact gap this closes (governance NN #4, ADR-0014). Widen to a small registry when a
+ * second run-time agent-type ships.
+ */
+export const RUNTIME_AGENT_TYPE = "shopper";
+
 const SYSTEM = { tenantId: "__system__" };
 const KILL = "kill"; // KV collection under the system tenant
 

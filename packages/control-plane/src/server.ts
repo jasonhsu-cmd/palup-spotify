@@ -12,8 +12,8 @@ import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT } from "./canary-controller.js";
-import { createRuntimeStore, killStatus, armKill, disarmKill, type KillScope } from "@palup/state-postgres";
-import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices } from "@palup/platform-ports";
+import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, type KillScope, type KillEntry } from "@palup/state-postgres";
+import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices, type RuntimeStatePort } from "@palup/platform-ports";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "utf8");
@@ -38,14 +38,15 @@ function chooseGrader(): { grader: Grader; mode: string; judgeFamily: string } {
   return { grader: new MockGrader(MOCK_SCORES), mode: "mock", judgeFamily: "preset" };
 }
 
-export async function buildServer() {
+export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   const { grader, mode, judgeFamily } = chooseGrader();
   const championMetrics = await grader.grade(DEFAULT_POLICY);
   const engine = new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader });
 
   // Shared run-time state store for operator actions on the LIVE plane (run-time kill switch). Prod
-  // points this at the same Cloud SQL as the widget backend (DATABASE_URL) so a kill propagates.
-  const { store: runtimeStore } = await createRuntimeStore();
+  // points this at the same Cloud SQL as the widget backend (DATABASE_URL) so a kill propagates. Tests
+  // can inject a store so an operator kill is armed on the SAME instance the promotion path reads.
+  const runtimeStore = opts?.store ?? (await createRuntimeStore()).store;
 
   const app = Fastify({ logger: false });
 
@@ -85,6 +86,25 @@ export async function buildServer() {
     } catch (e) {
       return { ...state(), error: (e as Error).message };
     }
+  };
+
+  // RUN-TIME Kill Switch enforcement on the PROMOTION path (governance NN #4, ADR-0014). approve ->
+  // promote pushes new behavior to the LIVE shopper agent, so it must honor the operator's RUN-TIME kill
+  // — the 3-scope registry an operator actually arms via /api/runtime-kill on the SHARED store — NOT only
+  // the engine's in-process build-time `killed` flag (engine.approve/promote still enforce that
+  // SEPARATELY; this is IN ADDITION, not a replacement). The champion is platform-wide (no single tenant
+  // in scope), so we check the two scopes that halt the shopper agent everywhere: `global` and
+  // `agent:<RUNTIME_AGENT_TYPE>` (matchedKill with no tenantId — a per-tenant kill halts one merchant's
+  // serving, not a platform-wide promotion). FAIL CLOSED: if the registry can't be read, an unknown kill
+  // state is treated as KILLED. Reuses matchedKill + RUNTIME_AGENT_TYPE — no kill logic reimplemented.
+  const assertRuntimeNotKilled = async () => {
+    let kill: KillEntry | null = null;
+    try {
+      kill = await matchedKill(runtimeStore, { agentType: RUNTIME_AGENT_TYPE });
+    } catch (e) {
+      throw new Error(`run-time kill state unreadable — refusing to promote to the live agent (fail-closed): ${(e as Error).message}`);
+    }
+    if (kill) throw new Error(`run-time kill switch is ON (scope "${kill.scope}") — promotion to the live shopper agent is halted`);
   };
 
   app.get("/api/state", async () => state());
@@ -131,9 +151,9 @@ export async function buildServer() {
     if (mode !== "live") await p;
     return state();
   });
-  app.post("/api/approve/:id", async (req) => act(() => engine.approve((req.params as { id: string }).id, "operator")));
+  app.post("/api/approve/:id", async (req) => act(async () => { await assertRuntimeNotKilled(); engine.approve((req.params as { id: string }).id, "operator"); }));
   app.post("/api/reject/:id", async (req) => act(() => engine.reject((req.params as { id: string }).id, "operator")));
-  app.post("/api/promote/:id", async (req) => act(() => engine.promote((req.params as { id: string }).id)));
+  app.post("/api/promote/:id", async (req) => act(async () => { await assertRuntimeNotKilled(); engine.promote((req.params as { id: string }).id); }));
   // BUILD-TIME plane kill: halts candidate approvals/promotions in the evolution pipeline.
   app.post("/api/kill", async () => act(() => engine.kill("operator")));
   app.post("/api/unkill", async () => act(() => engine.unkill()));
