@@ -24,10 +24,11 @@ export const DEFAULT_POLICY: Policy = {
 // strip HTML tags (policy bodies arrive as HTML), collapse control chars/newlines to spaces, defang our
 // fence marker if it appears in merchant text, and hard-cap length. Applies to EVERY grounding source,
 // so a malicious/careless catalog can only affect its own tenant's replies as inert data (M2 hardening).
-function sanitizeGroundingText(s: string | undefined, max = 600): string {
+export function sanitizeGroundingText(s: string | undefined, max = 600): string {
   return (s ?? "")
-    .replace(/<[^>]*>/g, " ") // strip HTML tags
-    .replace(/[\u0000-\u001F\u007F]+/g, " ") // control chars incl. newlines/tabs -> space
+    .replace(/<\/?[a-z][a-z0-9-]*\b[^>]*>/gi, " ") // strip real HTML tags only (bare "< 2 days" prose survives)
+    .replace(/&(amp|#38);/gi, "&").replace(/&(quot|#34);/gi, '"').replace(/&(apos|#39);/gi, "'").replace(/&(nbsp|#160);/gi, " ") // decode SAFE entities only (never &lt;/&gt; -> no tag revival)
+    .replace(/[\u0000-\u001F\u007F\u0085\u2028\u2029]+/g, " ") // control + NEL / line / paragraph separators -> space
     .replace(/={3,}/g, "==") // never let merchant text forge the === fence
     .replace(/\s+/g, " ")
     .trim()
@@ -239,7 +240,9 @@ export function createBrain(
             // Allergy/ingredient question: ground the merchant's allergen statement, never guarantee safety.
             flags.push("safety:allergy");
             const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
-            const allergenNote = ctx?.policy.allergens ?? "I'd check the full ingredient list on the product page.";
+            // Sanitize the merchant allergen text before it goes into a shopper-facing reply (strip HTML
+            // so raw tags never surface as text; the widget renders replies as textContent, so no XSS).
+            const allergenNote = sanitizeGroundingText(ctx?.policy.allergens) || "I'd check the full ingredient list on the product page.";
             reply = `As an AI assistant I can't guarantee a product is safe for your allergy, and I won't guess about a specific product's ingredients from here. What I can share: ${allergenNote} For the exact ingredient list of a particular product, check its product page — or I can bring in a person to confirm it for you. Given your allergy a patch test is wise, and please check with your doctor if you're unsure.`;
           } else {
             // A reaction: empathize, don't dismiss, don't falsely reassure, no medical advice, escalate.
