@@ -220,19 +220,31 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
 
   // --- Shadow / canary: split real traffic to a canary policy, shadow-grade it, auto-rollback. On the
   // shared store, so a start/rollback reaches every serving instance and shadow reads real traffic. ---
-  app.get("/api/canary", async () => ({ config: await canaryConfig(runtimeStore), stats: await canaryStats(runtimeStore) }));
-  app.post("/api/canary/start", async (req) => {
-    const b = (req.body ?? {}) as { pct?: number };
-    return { config: await startCanary(runtimeStore, DEFAULT_CANARY, Number(b.pct ?? MAX_CANARY_PCT)) };
+  // Canary is keyed per SERVING tenant (ADR-0014 blast-radius fix): the operator names the merchant
+  // (query/body `tenantId`, default the demo tenant), and start/stop/read touch ONLY that tenant's
+  // config — never a cross-tenant __system__ bucket. Mirrors the /api/telemetry tenant coercion.
+  const canaryTenant = (v: unknown): string => (typeof v === "string" && v ? v : "demo");
+  app.get("/api/canary", async (req) => {
+    const tenantId = canaryTenant((req.query as { tenantId?: unknown })?.tenantId);
+    return { config: await canaryConfig(runtimeStore, tenantId), stats: await canaryStats(runtimeStore) };
   });
-  app.post("/api/canary/stop", async () => ({ config: await stopCanary(runtimeStore) }));
+  app.post("/api/canary/start", async (req) => {
+    const b = (req.body ?? {}) as { pct?: number; tenantId?: unknown };
+    return { config: await startCanary(runtimeStore, canaryTenant(b.tenantId), DEFAULT_CANARY, Number(b.pct ?? MAX_CANARY_PCT)) };
+  });
+  app.post("/api/canary/stop", async (req) => {
+    const b = (req.body ?? {}) as { tenantId?: unknown };
+    return { config: await stopCanary(runtimeStore, canaryTenant(b.tenantId)) };
+  });
   // Shadow-grade the canary on real logged traffic (live model + judge). Auto-rolls-back on regression.
-  app.post("/api/canary/shadow", async () => {
+  app.post("/api/canary/shadow", async (req) => {
     if (!isVertexConfigured() || !isAnthropicApiConfigured()) return { error: "shadow eval needs GOOGLE_CLOUD_PROJECT + ANTHROPIC_API_KEY" };
-    const policy = (await canaryConfig(runtimeStore))?.policy ?? DEFAULT_CANARY;
+    const b = (req.body ?? {}) as { tenantId?: unknown };
+    const tenantId = canaryTenant(b.tenantId);
+    const policy = (await canaryConfig(runtimeStore, tenantId))?.policy ?? DEFAULT_CANARY;
     const result = await shadowEvaluate(runtimeStore, createVertexAdapter(), createAnthropicApiJudge(), policy);
     let rolledBack = false;
-    if (result.verdict === "rollback") { await stopCanary(runtimeStore); rolledBack = true; }
+    if (result.verdict === "rollback") { await stopCanary(runtimeStore, tenantId); rolledBack = true; }
     return { result, rolledBack };
   });
 
