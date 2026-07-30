@@ -81,14 +81,16 @@ describe("storefrontFetch (verified Storefront API 2026-07 call)", () => {
     expect(data.shop!.name).toBe("Acme Skincare");
   });
 
-  it("throws on a non-2xx response (→ caching wrapper degrades, never serves garbage)", async () => {
+  it("throws (static message — no vendor text) on a non-2xx response → caching wrapper degrades", async () => {
     const { fn } = fakeFetch(() => ({ ok: false, status: 401, json: async () => ({}) }));
-    await expect(storefrontFetch(fn)(creds)).rejects.toThrow(/401/);
+    await expect(storefrontFetch(fn)(creds)).rejects.toThrow(/request failed/);
   });
 
-  it("throws on a GraphQL errors payload", async () => {
-    const { fn } = fakeFetch(() => ({ json: async () => ({ errors: [{ message: "bad token" }] }) }));
-    await expect(storefrontFetch(fn)(creds)).rejects.toThrow(/bad token/);
+  it("throws a STATIC error on a GraphQL errors payload (F1 — no vendor message echoed)", async () => {
+    const { fn } = fakeFetch(() => ({ json: async () => ({ errors: [{ message: "sensitive vendor detail" }] }) }));
+    const err = await storefrontFetch(fn)(creds).catch((e) => e as Error);
+    expect(err.message).toBe("Shopify Storefront GraphQL error");
+    expect(err.message).not.toContain("sensitive vendor detail");
   });
 
   it("REFUSES a non-*.myshopify.com host (never leaks the token to an arbitrary server)", async () => {

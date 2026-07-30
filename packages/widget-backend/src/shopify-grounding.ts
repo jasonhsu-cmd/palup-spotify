@@ -109,10 +109,13 @@ export function storefrontFetch(
       body: JSON.stringify({ query: STOREFRONT_QUERY, variables: { first } }),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) throw new Error(`Shopify Storefront API ${res.status}`);
+    // These errors are swallowed by the caching wrapper (degrade to stale/safe-empty) and must NEVER be
+    // logged. Messages are STATIC — we do not interpolate the vendor response/status text, so no
+    // vendor- or (theoretically) credential-reflected content can ride an error into a future logger (F1).
+    if (!res.ok) throw new Error("Shopify Storefront API request failed");
     const json = (await res.json()) as { data?: StorefrontData; errors?: Array<{ message?: string }> };
     if (Array.isArray(json.errors) && json.errors.length) {
-      throw new Error(`Shopify Storefront GraphQL error: ${json.errors[0]?.message ?? "unknown"}`);
+      throw new Error("Shopify Storefront GraphQL error");
     }
     return json.data ?? {};
   };
