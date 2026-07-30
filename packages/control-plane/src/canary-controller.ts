@@ -5,13 +5,16 @@ import { CRITERIA } from "./scenarios.js";
 // The control-plane half of shadow/canary, on the SHARED RuntimeStatePort. Reads the real traffic the
 // backend logs, shadow-grades a canary policy against the champion on that real traffic, and
 // (auto-)rolls the canary back on regression by writing the shared canary-config the backend reads
-// per request — so a rollback propagates across instances (was a per-instance local file). Keep the
-// __system__/collection names in sync with widget-backend/canary.ts.
+// per request — so a rollback propagates across instances (was a per-instance local file). The canary
+// config is keyed PER SERVING TENANT: start/stop take a tenantId and write/clear ONLY that merchant's
+// config, so a canary can never bucket another merchant's shoppers (ADR-0014 blast-radius fix). Keep
+// the collection/key names in sync with widget-backend/canary.ts.
 
-const SYSTEM = { tenantId: "__system__" };
-const CANARY = "canary"; // KV collection (rollout config: operator/cross-instance state)
+const CANARY = "canary"; // KV collection (rollout config), keyed per SERVING tenant
 const CONFIG_KEY = "config";
-// Traffic (shopper messages/replies) lives in the SERVING tenant's own partition, not __system__.
+// Traffic (shopper messages/replies) lives in the SERVING tenant's own partition. NOTE: the shadow /
+// stats reads below still target a single demo tenant — per-tenant shadow-grading is the separate,
+// deferred enablement work; THIS fix only isolates the canary CONFIG so start/stop can't go cross-tenant.
 const SERVING = { tenantId: "demo" };
 const TRAFFIC = "traffic"; // append stream
 const GENERAL = ["warm", "needs-first", "grounded", "concise", "no-pressure"]; // general sales-quality rubric
@@ -33,29 +36,31 @@ export const DEFAULT_CANARY: Policy = {
 export async function readTrafficLog(store: RuntimeStatePort): Promise<Interaction[]> {
   return store.readStream<Interaction>(SERVING, TRAFFIC);
 }
-export async function canaryConfig(store: RuntimeStatePort): Promise<CanaryConfig | null> {
-  return (await store.get<CanaryConfig>(SYSTEM, CANARY, CONFIG_KEY)) ?? null;
+export async function canaryConfig(store: RuntimeStatePort, tenantId: string): Promise<CanaryConfig | null> {
+  return (await store.get<CanaryConfig>({ tenantId }, CANARY, CONFIG_KEY)) ?? null;
 }
-export async function startCanary(store: RuntimeStatePort, policy: Policy, pct: number): Promise<CanaryConfig> {
+export async function startCanary(store: RuntimeStatePort, tenantId: string, policy: Policy, pct: number): Promise<CanaryConfig> {
   const clamped = Math.max(0, Math.min(MAX_CANARY_PCT, pct));
   const cfg: CanaryConfig = { enabled: true, pct: clamped, policy };
-  await store.tx(SYSTEM, async (t) => {
+  // Write + audit under THIS tenant's partition/chain, so the start affects only this merchant.
+  await store.tx({ tenantId }, async (t) => {
     await t.put(CANARY, CONFIG_KEY, cfg);
     await t.audit({
       actor: "operator",
       action: "canary.start",
-      input: { policyId: policy.id, requestedPct: pct, appliedPct: clamped },
+      input: { tenantId, policyId: policy.id, requestedPct: pct, appliedPct: clamped },
       decision: clamped < pct ? `clamped to ${MAX_CANARY_PCT}% (canary cap)` : "started",
       reversalPath: "POST /api/canary/stop",
     });
   });
   return cfg;
 }
-export async function stopCanary(store: RuntimeStatePort): Promise<CanaryConfig> {
-  const cfg: CanaryConfig = { enabled: false, pct: 0, policy: (await canaryConfig(store))?.policy ?? DEFAULT_CANARY };
-  await store.tx(SYSTEM, async (t) => {
+export async function stopCanary(store: RuntimeStatePort, tenantId: string): Promise<CanaryConfig> {
+  const cfg: CanaryConfig = { enabled: false, pct: 0, policy: (await canaryConfig(store, tenantId))?.policy ?? DEFAULT_CANARY };
+  // Clear + audit under THIS tenant only — a rollback for one merchant never touches another's canary.
+  await store.tx({ tenantId }, async (t) => {
     await t.put(CANARY, CONFIG_KEY, cfg);
-    await t.audit({ actor: "operator", action: "canary.stop", decision: "rolled back to champion", reversalPath: "POST /api/canary/start" });
+    await t.audit({ actor: "operator", action: "canary.stop", input: { tenantId }, decision: "rolled back to champion", reversalPath: "POST /api/canary/start" });
   });
   return cfg;
 }

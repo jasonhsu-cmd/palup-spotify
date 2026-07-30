@@ -3,18 +3,18 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
 import { redactPII } from "@palup/platform-ports";
 import type { Policy } from "@palup/widget-brain";
 
-// Canary traffic split + traffic logging (the run-time half of shadow/canary), now on the SHARED
+// Canary traffic split + traffic logging (the run-time half of shadow/canary), on the SHARED
 // RuntimeStatePort so a canary start/rollback the control plane writes takes effect on EVERY serving
-// instance, and shadow-grading reads the same traffic (was a per-instance local file). Config + traffic
-// live under the reserved __system__ tenant (rollout is cross-tenant operator state; when real
-// multi-tenancy lands, traffic moves per-merchant). Keep the __system__/collection names in sync with
+// instance, and shadow-grading reads the same traffic (was a per-instance local file). The canary
+// config is keyed PER SERVING TENANT (the authenticated merchant) — a canary the control plane starts
+// for one merchant must bucket ONLY that merchant's shoppers, and never leak cross-tenant onto every
+// merchant's traffic (ADR-0014 blast-radius fix). Keep the collection/key names in sync with
 // control-plane/canary-controller.ts.
 
-const SYSTEM = { tenantId: "__system__" };
-const CANARY = "canary"; // KV collection (rollout config: operator/cross-instance state)
+const CANARY = "canary"; // KV collection (rollout config), keyed per SERVING tenant
 const CONFIG_KEY = "config";
 // Traffic carries shopper messages/replies, so it lives in the SERVING tenant's own partition (passed
-// in — the authenticated merchant tenant), NOT the cross-tenant __system__ bucket.
+// in — the authenticated merchant tenant).
 const TRAFFIC = "traffic"; // append stream
 
 export interface CanaryConfig {
@@ -34,13 +34,15 @@ export function bucket(sessionId: string): number {
   return (h >>> 0) % 100;
 }
 
-export async function readCanaryConfig(store: RuntimeStatePort): Promise<CanaryConfig | null> {
-  return (await store.get<CanaryConfig>(SYSTEM, CANARY, CONFIG_KEY)) ?? null;
+export async function readCanaryConfig(store: RuntimeStatePort, tenantId: string): Promise<CanaryConfig | null> {
+  return (await store.get<CanaryConfig>({ tenantId }, CANARY, CONFIG_KEY)) ?? null;
 }
 
-/** The canary config if this session should be served by the canary, else null (→ champion). */
-export async function assignCanary(store: RuntimeStatePort, sessionId: string): Promise<CanaryConfig | null> {
-  const cfg = await readCanaryConfig(store);
+/** The SERVING tenant's canary config if this session should be served by the canary, else null (→ champion).
+ * Reads ONLY this tenant's config, so a tenant with no canary always gets the champion/DEFAULT_POLICY and
+ * a canary started for a DIFFERENT tenant can never bucket this tenant's shoppers (ADR-0014). */
+export async function assignCanary(store: RuntimeStatePort, tenantId: string, sessionId: string): Promise<CanaryConfig | null> {
+  const cfg = await readCanaryConfig(store, tenantId);
   if (!cfg?.enabled || cfg.pct <= 0) return null;
   return bucket(sessionId) < cfg.pct ? cfg : null;
 }

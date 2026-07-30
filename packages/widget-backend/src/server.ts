@@ -253,8 +253,10 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
       const signals: Signals = deriveServingSignals(body.signals, { tenantId, kill: Boolean(kill), region: MERCHANT_REGION, groundingMode: MERCHANT_GROUNDING_MODE });
 
-      // Canary split: a sticky fraction of sessions is served by the canary policy; the rest by champion.
-      const canary = await assignCanary(store, sessionId);
+      // Canary split: a sticky fraction of THIS tenant's sessions is served by that tenant's canary
+      // policy; the rest by champion. Keyed by the server-derived tenantId, so one merchant's canary can
+      // never bucket another merchant's shoppers (ADR-0014 blast-radius fix).
+      const canary = await assignCanary(store, tenantId, sessionId);
       const policy = canary ? canary.policy : DEFAULT_POLICY;
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
       const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
