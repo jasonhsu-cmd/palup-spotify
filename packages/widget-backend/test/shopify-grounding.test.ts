@@ -90,4 +90,11 @@ describe("storefrontFetch (verified Storefront API 2026-07 call)", () => {
     const { fn } = fakeFetch(() => ({ json: async () => ({ errors: [{ message: "bad token" }] }) }));
     await expect(storefrontFetch(fn)(creds)).rejects.toThrow(/bad token/);
   });
+
+  it("REFUSES a non-*.myshopify.com host (never leaks the token to an arbitrary server)", async () => {
+    const { fn, calls } = fakeFetch(() => ({ json: async () => ({ data: SAMPLE }) }));
+    await expect(storefrontFetch(fn)({ shopDomain: "evil.com", accessToken: "shptok_secret" })).rejects.toThrow(/myshopify\.com/);
+    await expect(storefrontFetch(fn)({ shopDomain: "acme.myshopify.com.evil.com", accessToken: "t" })).rejects.toThrow();
+    expect(calls.length).toBe(0); // no request was ever made
+  });
 });

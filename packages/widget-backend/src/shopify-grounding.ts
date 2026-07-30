@@ -71,6 +71,12 @@ export type StorefrontFetch = (creds: ShopifyStoreCreds) => Promise<StorefrontDa
 /** Current Storefront API version (verified 2026-07-30 against shopify.dev). */
 export const STOREFRONT_API_VERSION = "2026-07";
 
+// The Storefront token is sent in a header to `shopDomain`, so refuse any host that isn't a Shopify
+// store host — a misconfigured/typo'd domain must never leak the token to an arbitrary server (SSRF /
+// credential-exfil defense-in-depth). shopDomain is operator config (not client), so this guards
+// operator error. Custom storefront domains would need an explicit allowlist — a follow-up.
+const SHOP_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
+
 const STOREFRONT_QUERY = `query PalUpGrounding($first: Int!) {
   shop { name refundPolicy { body } shippingPolicy { body } }
   products(first: $first) {
@@ -93,6 +99,9 @@ export function storefrontFetch(
   const first = opts.first ?? 250; // Storefront max page size
   const timeoutMs = opts.timeoutMs ?? 4000;
   return async (creds) => {
+    if (!SHOP_HOST.test(creds.shopDomain)) {
+      throw new Error("refusing Shopify fetch: shopDomain is not a *.myshopify.com host"); // never leak the token
+    }
     const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
     const res = await fetchFn(url, {
       method: "POST",
