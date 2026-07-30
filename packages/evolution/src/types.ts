@@ -13,6 +13,13 @@ export interface PolicyMetrics {
   counterMetrics?: { returnRate?: number; complaintRate?: number };
   /** Pass rate (0..1) per criterion id, across the scenario set — the per-criteria improvement proof. */
   perCriteria?: Record<string, number>;
+  /**
+   * Whether this grade may GATE a promotion. `false` = ADVISORY ONLY — it came from a same-family
+   * judge (proposer≠evaluator unmet, e.g. Gemini grading a Gemini agent) or no cross-family judge was
+   * available, so engine.gate REFUSES to pass it (fail-closed, ADR-0014). Absent/`true` = gating-
+   * eligible (the offline deterministic MockGrader, or a real cross-family judge). See crossFamilyGuard.
+   */
+  gating?: boolean;
   detail?: Record<string, unknown>;
 }
 

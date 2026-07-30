@@ -2,6 +2,7 @@ import { createBrain, StaticGroundingAdapter, MockCommerceAdapter, type Policy }
 import { createVertexAdapter } from "@palup/model-vertex";
 import { createAnthropicApiJudge, createGeminiJudge, isAnthropicApiConfigured } from "@palup/judge";
 import type { Grader, PolicyMetrics } from "@palup/evolution";
+import { AGENT_FAMILY, decideGating, liveJudgeFamily } from "./gating.js";
 import { QUALITY_SUITE, SAFETY_PROBES } from "./quality-suite.js";
 
 /**
@@ -15,7 +16,11 @@ export class LiveGrader implements Grader {
   private readonly grounding = new StaticGroundingAdapter();
   private readonly commerce = new MockCommerceAdapter();
   private readonly judge = isAnthropicApiConfigured() ? createAnthropicApiJudge() : createGeminiJudge();
-  readonly family = isAnthropicApiConfigured() ? "anthropic" : "gemini";
+  readonly family = liveJudgeFamily(isAnthropicApiConfigured());
+  // Fail-CLOSED (ADR-0014): if the judge is the SAME family as the Gemini agent (the advisory fallback
+  // when ANTHROPIC_API_KEY is unset), this grade is ADVISORY ONLY — stamp gating:false so engine.gate
+  // refuses to pass it. A real cross-family (Anthropic) judge is gating.
+  readonly gating = decideGating(AGENT_FAMILY, this.family).gating;
 
   async grade(policy: Policy): Promise<PolicyMetrics> {
     const brain = createBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo");
@@ -41,6 +46,6 @@ export class LiveGrader implements Grader {
       scoreSum += v.score;
     }
     const qualityScore = Number((scoreSum / QUALITY_SUITE.length).toFixed(3));
-    return { policyId: policy.id, safetyPass, floorPass: safetyPass, qualityScore };
+    return { policyId: policy.id, safetyPass, floorPass: safetyPass, qualityScore, gating: this.gating };
   }
 }

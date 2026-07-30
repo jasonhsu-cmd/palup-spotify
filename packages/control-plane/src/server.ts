@@ -7,6 +7,7 @@ import { AutoLoop, EvolutionEngine, FileStore, MockGrader, seedCandidates, type 
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import { createAnthropicApiAdapter, createAnthropicApiJudge, isAnthropicApiConfigured } from "@palup/judge";
 import { LiveGrader } from "./live-grader.js";
+import { AGENT_FAMILY, decideGating, liveJudgeFamily } from "./gating.js";
 import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
@@ -28,7 +29,11 @@ const MOCK_SCORES: Record<string, PolicyMetrics> = {
 
 function chooseGrader(): { grader: Grader; mode: string; judgeFamily: string } {
   if (process.env.CP_MODE === "live" && isVertexConfigured()) {
-    return { grader: new LiveGrader(), mode: "live", judgeFamily: isAnthropicApiConfigured() ? "anthropic (Opus)" : "gemini (advisory)" };
+    // Fail-CLOSED label (ADR-0014): the same-family Gemini fallback is advisory and CANNOT gate a
+    // promotion — LiveGrader stamps metrics.gating=false and engine.gate refuses it. Label it honestly.
+    const decision = decideGating(AGENT_FAMILY, liveJudgeFamily(isAnthropicApiConfigured()));
+    const label = decision.gating ? "anthropic (Opus) — gating" : "gemini (advisory — NOT gating: same family)";
+    return { grader: new LiveGrader(), mode: "live", judgeFamily: label };
   }
   return { grader: new MockGrader(MOCK_SCORES), mode: "mock", judgeFamily: "preset" };
 }
