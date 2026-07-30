@@ -5,9 +5,11 @@ that gives Shopify merchants a 24/7 AI sales partner, gives PalUp its own growth
 runs a self-healing monitoring plane — all under a governance framework that fixes
 OpenClaw's missing HITL/evolution controls.
 
-This repo is the **operating layer** a team drops into the codebase: it tells Claude Code
-how to build PalUp safely and captures the design decisions and their justifications. The
-application packages (`packages/…`) are scaffolded by these artifacts, not shipped here.
+This repo is the **operating layer** (it tells Claude Code how to build PalUp safely and captures
+the design decisions and their justifications) — and now also holds the first **built** application
+code: the shopper-widget vertical slice in `packages/…` (platform ports, widget brain/backend/UI,
+eval/judge, evolution + control-plane, Postgres runtime state), running on staging. The broader
+platform (merchant/admin consoles, agent-runtime, payments, comms, ads, …) is still design + scaffold.
 
 ## Start here
 - **`CLAUDE.md`** — the operating manual, loaded every session. The non-negotiable rules and
@@ -32,7 +34,8 @@ application packages (`packages/…`) are scaffolded by these artifacts, not shi
   (`docs/design/README.md`). Produced as the pre-development review of whether the backend supports
   every UI detail and scales to millions of merchants.
 - **`docs/adr/`** — the load-bearing decisions, recorded as ADRs (0001–0003 strategic; 0004–0011
-  the scale/runtime/eventing/attribution/billing/vector/capacity/auth decisions).
+  the scale/runtime/eventing/attribution/billing/vector/capacity/auth decisions; 0012–0013 the
+  Shopify-grounding and telemetry/cost-derivation decisions implemented in the widget slice).
 
 ## What's in `.claude/`
 | Path | Purpose |

@@ -1,7 +1,9 @@
 # ADR-0012: Per-merchant grounding from Shopify, behind the grounding port
 
-- **Status:** Accepted (implementation in progress — M2; the live Shopify API surface is verified at
-  build time against current Shopify docs, see Consequences)
+- **Status:** Accepted — implemented (M2). Live on staging for one tenant (`demo` → a real Shopify dev
+  store); the Storefront API surface + fields were verified against **v2026-07** and the live fetch is
+  security-reviewed. Remaining: production multi-merchant onboarding (connect-store OAuth + per-tenant
+  enable + the `WIDGET_AUTH_REQUIRED` flip). See Consequences.
 - **Context:** The shopper widget's value is that it recommends the **merchant's own** products and
   answers with the **merchant's own** policies — never inventing SKUs or prices. Through M1 the agent's
   state/audit/kill/rate-limit/tenancy were made tenant-isolated, but its **grounding** (catalog +
@@ -72,9 +74,11 @@
 - (+) Resilient: a slow/down/unauthorized store degrades gracefully (stale or safe-empty), never hangs
   the widget; least-privilege token scope limits blast radius.
 - (+) Shippable and testable now (fixtures-first); live serving is human-gated per merchant.
-- (−) The **live Shopify API surface + exact GraphQL fields are UNVERIFIED** until the adapter is built
-  against current Shopify docs with real credentials — the mapping is testable against synthetic
-  fixtures, but the live call is `UNVERIFIED` until then (route through `fact-checker` + Shopify docs).
+- (resolved) The live Shopify API surface + fields were verified against the **Storefront API v2026-07**
+  docs (retrieved 2026-07-30) and the live fetch is implemented + running on staging against a real dev
+  store (private token via the SecretsPort; `*.myshopify.com` host guard; degrade-never-hang). Large
+  catalogs (>250 products) still need pagination (tracked); the query/fields should be re-verified when
+  Shopify bumps the API version.
 - (−) **Allergen has no native Shopify field** (recollection, verify) — sourced from a product metafield
   or a merchant-authored PalUp field, else omitted (`StorePolicy.allergens` is optional). A product
   decision.
