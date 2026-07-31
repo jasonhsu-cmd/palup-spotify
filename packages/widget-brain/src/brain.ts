@@ -268,6 +268,14 @@ const PITCH_PLAYBOOK: Record<PitchKind, string> = {
   none: "",
 };
 
+// Internal, agent-INITIATED instruction for a proactive exit-intent moment (§5). This is NOT a shopper
+// utterance and is never classified as one; it tells the model to make the single, honest cart-recovery
+// offer from the cart_recovery playbook, grounded in the store's own POLICY (shipping/returns). One
+// offer, low-pressure — no false urgency, no scarcity, and (enforced separately by the reply-integrity
+// backstop) never an invented discount.
+const EXIT_INTENT_PROMPT =
+  "The shopper is leaving the page with items still in their cart. Offer ONE brief, genuinely helpful reason to complete the order now - for example shipping or returns reassurance from the POLICY. Warm and low-pressure: no false urgency, no scarcity, and no discount.";
+
 // In-session multi-turn memory bounds (docs/design/shopper-widget.md §3.2, §6A). The CLIENT replays a
 // bounded recent transcript on each /chat; the brain threads it into the model context (groundedMessages)
 // so the model has prior-turn context. This is NOT server-side memory: the transcript is never persisted
@@ -540,6 +548,58 @@ export function createBrain(
       }
 
       // 4. Sales / smalltalk — reactive answer always; proactive pitch is gated.
+
+      // 4a. PROACTIVE trigger (§4 Behavioral: exit-intent; §5 Timing). AGENT-INITIATED, not a shopper
+      // message: it is never run through the intent classifiers (they key off the shopper's text, which
+      // is empty on a proactive turn). We only reach this rung on the CLEAN sales path — every higher rung
+      // already won if it applied, and the signal-based brakes (kill / safety latch / open issues) each
+      // short-circuited above — so a proactive trigger CANNOT override a brake. On this clean path it may
+      // surface AT MOST a single cart_recovery pitch (the value-aligned exit-intent moment, allowed at
+      // every proactivity level per §5), and ONLY with an unrecovered cart and no negative mood. Anything
+      // else is QUIET: no proactive message at all. The ONE INV-E budget (session.ts) still caps it — a
+      // spent budget converts it to none AND suppresses the message — so it can never nag. Gate on an
+      // EMPTY shopper turn so a real message can never be hijacked by a stray proactive flag.
+      if (signals.proactiveTrigger === "exit_intent" && text.trim() === "") {
+        flags.push("proactive:exit_intent");
+        const proactiveNegativeMood =
+          signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
+        const hasCart = signals.cart === "has_items" || signals.cart === "high_value";
+        if (proactiveNegativeMood) flags.push("mood_brake", "no_pitch");
+        else if (!hasCart) flags.push("no_cart", "no_pitch"); // empty cart / "just browsing" → never nag
+        if (proactiveNegativeMood || !hasCart) {
+          // QUIET: surface nothing (the client renders no message for an empty proactive reply).
+          return {
+            mode: "smalltalk",
+            reply: "",
+            pitch: "none",
+            escalateToHuman: false,
+            outbound: false,
+            safetyClass: "none",
+            flags,
+            model: "guardrail",
+          };
+        }
+        // Allowed → one honest, capped cart-recovery nudge, grounded in the store's own POLICY. outbound
+        // stays false: this is an in-session nudge, not a consent-gated email/SMS follow-up.
+        flags.push("pitch:cart_recovery");
+        const proGen = await model.complete({
+          messages: await groundedMessages(EXIT_INTENT_PROMPT, tenantId, PITCH_PLAYBOOK.cart_recovery, history),
+          temperature: 0,
+          tenantId,
+        });
+        if (replyOffersUngroundedDiscount(proGen.text)) return discountGuardrail(); // never serve an invented/injected discount
+        return {
+          mode: "sales",
+          reply: proGen.text,
+          pitch: "cart_recovery",
+          escalateToHuman: false,
+          outbound: false,
+          safetyClass: "none",
+          flags,
+          model: proGen.model,
+        };
+      }
+
       // Competitor-comparison handling per the merchant "discuss competitors" mode (default full).
       let systemExtra = "";
       if (/compare[ds]? (to|with)|compared to| versus | vs\b|better than|brand [a-z]\b|competitor/.test(text)) {

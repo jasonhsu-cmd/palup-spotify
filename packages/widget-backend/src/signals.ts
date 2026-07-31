@@ -32,6 +32,11 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // Accepted shopper/UI context — only when a valid enum value.
     mood: typeof r.mood === "string" && MOODS.has(r.mood) ? r.mood : undefined,
     cart: typeof r.cart === "string" && CARTS.has(r.cart) ? r.cart : undefined,
+    // Agent-initiated proactive UI trigger (§4 Behavioral: exit-intent) — non-trust-bearing UI context
+    // like mood/cart, accepted ONLY as the known enum. It can only route to a MORE restrained proactive
+    // cart_recovery on the clean sales path; every server cap still holds (precedence ladder, mood brake,
+    // support/safety suppression, and the ONE INV-E budget), so passing it through grants no autonomy.
+    proactiveTrigger: r.proactiveTrigger === "exit_intent" ? "exit_intent" : undefined,
     // Server-derived trust-bearing signals — never taken from the client.
     tenantId: ctx.tenantId, // the verified merchant; drives per-merchant grounding — never client-set
     relationship: "anonymous", // no identified customer yet (M2); never client-claimed VIP/subscriber

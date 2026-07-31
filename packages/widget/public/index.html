@@ -245,6 +245,43 @@
     finally{ clearTimeout(timer); typing(false); btn.disabled = false; }
   }
 
+  // Exit-intent (§4 Behavioral) → a SINGLE, capped, value-aligned proactive cart-recovery moment (§5).
+  // Restraint IS the feature: fire AT MOST ONCE per session, ONLY with an unrecovered cart, and NEVER
+  // re-fire. It posts an AGENT-INITIATED trigger (empty message + signals.proactiveTrigger) — never a
+  // fake shopper message — and the SERVER decides whether any nudge is allowed; every cap (precedence
+  // ladder, mood brake, support/safety suppression, the one proactivity budget) still holds server-side.
+  const EXIT_KEY = "palup.widget.exitintent.v1";
+  function exitIntentFired(){ try { return sessionStorage.getItem(EXIT_KEY) === "1"; } catch { return false; } }
+  function markExitIntentFired(){ try { sessionStorage.setItem(EXIT_KEY, "1"); } catch {} }
+  function cartHasItems(){ const c = $("#cart").value; return c === "has_items" || c === "high_value"; }
+  async function sendProactive(trigger){
+    if (exitIntentFired() || !cartHasItems()) return;   // once per session; only an unrecovered cart
+    markExitIntentFired();                                // mark BEFORE the request so it can never double-fire
+    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value, proactiveTrigger: trigger };
+    const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
+    try {
+      await ensureToken(false);
+      const headers = { "content-type": "application/json" };
+      if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      // Agent-initiated: NO user bubble is added, and the transcript is not touched.
+      const r = await fetch("/chat", { method:"POST", headers, body: JSON.stringify({ message: "", signals, sessionId, idempotencyKey, history: recentHistory() }) });
+      if (!r.ok) return;
+      const d = await r.json();
+      // The server may return NOTHING (capped, braked, or "just browsing"). Only surface a real,
+      // non-empty proactive pitch; otherwise stay silent — no nag.
+      if (d && d.reply && d.pitch && d.pitch !== "none"){
+        if (widget.hidden) setOpen(true);   // make the one nudge visible; still easily dismissed (minimize/Esc)
+        add(d.reply, "agent", d);
+        if (d.escalate) enterHandoff();
+      }
+    } catch { /* proactive is best-effort — a failure must never disrupt the shopper */ }
+  }
+  // Classic exit-intent: the pointer leaves the viewport toward the TOP (relatedTarget null, y at/above 0).
+  document.addEventListener("mouseout", (e) => {
+    if (e.relatedTarget || (e.clientY ?? 1) > 0) return;
+    sendProactive("exit_intent");
+  });
+
   // Continue the conversation across a reload: re-render the persisted transcript; otherwise greet.
   if (transcript.length){
     for (const t of transcript){ add(t.content, t.role === "agent" ? "agent" : "user"); }

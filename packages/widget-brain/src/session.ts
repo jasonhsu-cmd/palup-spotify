@@ -142,8 +142,10 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
       if (signals.handoff) state.escalationPending = false;
       else if (d.escalateToHuman) state.escalationPending = true;
 
-      // INV-D: preserve the last sales-turn topic so the detour can later be resumed as help.
-      if (d.mode === "sales") state.browsingContext = message.trim().slice(0, 200);
+      // INV-D: preserve the last sales-turn topic so the detour can later be resumed as help. Skip an
+      // empty turn — an agent-initiated proactive nudge (empty shopper message) has no browsing topic and
+      // must not wipe the context captured on a real sales turn.
+      if (d.mode === "sales" && message.trim()) state.browsingContext = message.trim().slice(0, 200);
 
       // INV-E: one budget across the whole conversation; switching modes never refills it.
       if (d.pitch !== "none") {
@@ -152,6 +154,10 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
             ...d,
             pitch: "none",
             outbound: false,
+            // A PROACTIVE nudge (§5) has no shopper turn to answer, so an over-budget one must surface
+            // NOTHING (INV-E one-strike: it can never nag). Blank its reply; a reactive answer is
+            // untouched — only its pitch flag is dropped.
+            reply: d.flags.includes("proactive:exit_intent") ? "" : d.reply,
             flags: [
               ...d.flags.filter((f) => !f.startsWith("pitch:") && f !== "outbound"),
               "budget_capped",
