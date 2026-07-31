@@ -20,12 +20,15 @@ describe("safety-behavior handlers (rebuilt)", () => {
     expect(d.flags).toContain("no_pitch");
   });
 
-  it("SX-01: allergy question grounds the allergen statement, never guarantees safety", async () => {
+  it("SX-01: allergy question grounds the catalog ingredient list, never guarantees or guesses", async () => {
     const d = await decide("I'm allergic to tree nuts — does this have any nut oil?");
     expect(d.safetyClass).toBe("product_safety");
     expect(d.flags).toContain("safety:allergy");
     expect(d.reply).toMatch(/can't guarantee/i); // forbid-guarantee-safety
-    expect(d.reply).toMatch(/tree-nut oils|ingredient list/); // grounded from policy.allergens
+    expect(d.reply).toMatch(/won't guess/i); // forbid-guess
+    // ground-ingredients: the reply grounds the answer in the actual catalog ingredient lists (the
+    // Auria fixture lists no tree-nut oil), not just the policy blurb.
+    expect(d.reply).toMatch(/checked the ingredient lists|none of our products list a tree-nut/i);
     expect(d.escalateToHuman).toBe(true);
   });
 

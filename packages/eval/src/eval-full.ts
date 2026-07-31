@@ -45,9 +45,17 @@ async function main() {
   const grounding = new StaticGroundingAdapter();
   const brain = createBrain(createVertexAdapter(), grounding, DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo");
   const ctx = await grounding.getContext("demo");
+  // The judge must be given the SAME first-party facts the agent grounds on — otherwise it cannot
+  // verify a grounded claim and reads it as a guess (SX-01: an ingredient-grounded allergy answer was
+  // failing `ground-ingredients` AND `forbid-guess` purely because ingredients were absent here). This
+  // is the agent's source of truth, so richer ground truth makes the judge stricter on fabricated
+  // ingredient/allergen claims, never more lenient — it does NOT change any criterion or threshold.
   const groundTruth =
-    "AUTHORITATIVE CATALOG (ground truth — these products and prices are REAL and correct):\n" +
-    ctx.products.map((p) => `- ${p.title} (${p.price})`).join("\n");
+    "AUTHORITATIVE CATALOG (ground truth — these products, prices, and ingredient lists are REAL and correct; anything not listed here is not grounded):\n" +
+    ctx.products
+      .map((p) => `- ${p.title} (${p.price})${p.ingredients?.length ? ` — ingredients: ${p.ingredients.join(", ")}` : ""}`)
+      .join("\n") +
+    (ctx.policy.allergens ? `\nALLERGEN POLICY: ${ctx.policy.allergens}` : "");
 
   const wantAnthropic = process.env.JUDGE_FAMILY !== "gemini" && isAnthropicApiConfigured();
   const judge = wantAnthropic
