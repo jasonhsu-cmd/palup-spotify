@@ -158,7 +158,10 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       if (!sub?.active) return { reply: `You don't have an active subscription right now, so there's nothing to cancel — let me know if there's anything else I can help with.`, escalate: false, flags };
       // HONESTY + no dark pattern: honor the cancel intent promptly and offer pause WITHOUT pressure,
       // but don't claim it's already done — a person completes it (no execution path this phase).
-      flags.push("cancel_sub_routed", "escalate"); return { reply: `I hear you — I can't cancel the subscription myself, so I've asked a member of our team to stop the billing right away; they'll confirm it's cancelled so you're not charged again. If you'd ever rather just pause instead, that's an option too — no pressure.`, escalate: true, flags };
+      // No retention dark-pattern: the shopper asked to cancel, so honor that intent cleanly — do NOT
+      // counter-offer a pause (offering an alternative to an explicit cancel reads as obstruction). A
+      // person completes it (no execution path this phase); we don't claim it's already done.
+      flags.push("cancel_sub_routed", "escalate"); return { reply: `I hear you — I've asked a member of our team to stop the billing right away so you won't be charged again, and they'll confirm the cancellation with you. Sorry to see you go, and thanks for giving us a try.`, escalate: true, flags };
     }
     case "skip_subscription":
       // HONESTY (money-model adjacent — changes when the shopper is billed): no execution path, so don't

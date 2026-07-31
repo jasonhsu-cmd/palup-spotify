@@ -87,11 +87,11 @@ describe("support guardrails (in code)", () => {
     expect(r.reply).toMatch(/team|person|hand(ed)?/i);
     expect(r.reply).not.toMatch(/i've cancelled it|you'?ll see the refund/i); // no false completion
   });
-  it("honors a subscription cancel promptly and offers pause without pressure (no dark pattern, no false 'Done')", async () => {
+  it("honors a subscription cancel cleanly, no retention counter-offer (no dark pattern, no false 'Done')", async () => {
     const r = await handleSupport(c, shopper, "cancel my subscription");
     expect(r.flags).toContain("cancel_sub_routed");
-    expect(r.reply).toMatch(/right away|effective immediately|going forward/i); // honored promptly
-    expect(r.reply).toMatch(/pause/i); // still offers pause, no pressure
+    expect(r.reply).toMatch(/right away|stop the billing/i); // honored promptly
+    expect(r.reply).not.toMatch(/pause instead|rather.*pause/i); // no retention counter-offer to an explicit cancel
     expect(r.reply).not.toMatch(/^done — i've cancelled|you're all set/i); // no false completion claim
   });
   it("routes a wrong-item reship to a person (no false 'I'll get it sent right away')", async () => {
