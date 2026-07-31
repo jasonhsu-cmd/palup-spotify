@@ -25,6 +25,14 @@ export interface ServingSignalContext {
    * the client (like tenantId/kill/region, this is the trusted, server-derived origin of the signal).
    */
   localHour?: number;
+  /**
+   * ADR-0017 — the server-VERIFIED shopper id for this request (from the shopper session token, after
+   * the /chat tenant re-binding check), or undefined when the shopper is anonymous / SHOPPER_AUTH is
+   * off. NEVER taken from the client. `shopperVerified` is carried alongside for clarity even though
+   * (in this slice) its presence and `shopperId`'s presence always coincide.
+   */
+  shopperId?: string;
+  shopperVerified?: boolean;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -43,7 +51,12 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     pageContext: typeof r.pageContext === "string" && r.pageContext ? r.pageContext.slice(0, 400) : undefined,
     // Server-derived trust-bearing signals — never taken from the client.
     tenantId: ctx.tenantId, // the verified merchant; drives per-merchant grounding — never client-set
-    relationship: "anonymous", // no identified customer yet (M2); never client-claimed VIP/subscriber
+    // ADR-0017 — the verified shopper id (if any) OVERWRITES any client-supplied `signals.shopperId`.
+    // relationship: a verified shopper is a KNOWN account with no history loaded yet ⇒ "new" — NEVER
+    // "vip"/"subscriber" here (that uplift is ADR-0015 Tier 2, keyed off order history, not this slice);
+    // anonymous (no verified shopper) ⇒ unchanged "anonymous", never client-claimed.
+    shopperId: ctx.shopperId,
+    relationship: ctx.shopperVerified && ctx.shopperId ? "new" : "anonymous",
     consent: {
       email: "unknown",
       sms: "unknown",

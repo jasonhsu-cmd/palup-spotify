@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import type { AuditInput } from "@palup/platform-ports";
 import type { Decision } from "@palup/widget-brain";
 
@@ -64,5 +64,39 @@ export function buildAuditInput(args: {
     input: { sessionRef, messageChars: args.messageLength, killScope: args.killScope }, // no raw text, no raw id
     decision: { mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, flags: d.flags, servedBy: args.servedBy },
     reversalPath: d.escalateToHuman ? "handed to a human via escalation" : "n/a — reply only, no state-changing action",
+  };
+}
+
+// --- ADR-0017 T8 — identity-resolution audit (PII-safe) --------------------------------------------
+//
+// F7: the shopperId (`shopify:<knownMerchant>:<numeric cid>`) is LOW-ENTROPY — a bare/unsalted hash of
+// it is brute-forceable (the merchant is public/known and the customer id space is small per store), so
+// the ref MUST be a KEYED HMAC (a server-held secret), never `createHash("sha256")` like `sessionRef`
+// above. This makes the ref pseudonymous (recoverable only by whoever holds the key), NOT de-identified.
+// The raw shopperId (which embeds the raw numeric customer id) is NEVER written to this audit input, any
+// log, or any error message — only the keyed ref.
+function hashShopperRef(hmacKey: string, shopperId: string): string {
+  return createHmac("sha256", hmacKey).update(shopperId).digest("hex").slice(0, 16);
+}
+
+/**
+ * Build the `identity.shopper.resolved` audit record for a /chat turn where the shopper resolved to a
+ * server-VERIFIED principal (ADR-0017 §4). Read-only identity resolution — never a state-changing
+ * action — so the reversal path is explicitly "n/a". Callers MUST NOT call this for an anonymous
+ * shopper (no audit noise for the common case, mirrors `isGovernanceRelevant`'s "don't audit every
+ * benign turn" policy) — see server.ts, which only calls this after a verified shopper resolves.
+ */
+export function buildIdentityAuditInput(args: {
+  shopperId: string;
+  source: "shopify" | "otp";
+  tenantId: string;
+  hmacKey: string;
+}): AuditInput {
+  return {
+    actor: "system:identity",
+    action: "identity.shopper.resolved",
+    input: { shopperRef: hashShopperRef(args.hmacKey, args.shopperId), source: args.source, tenantId: args.tenantId }, // NEVER the raw shopperId/customer id
+    decision: { verified: true },
+    reversalPath: "n/a — read-only identity",
   };
 }

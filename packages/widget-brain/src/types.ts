@@ -165,6 +165,14 @@ export interface Signals {
    * Absent ⇒ `createBrain`'s `memory.recall` is simply never consulted this turn (no subject to key on).
    */
   anonId?: string;
+  /**
+   * The SERVER-verified shopper id (ADR-0017), e.g. "shopify:<merchantId>:<customerId>" — SAME
+   * server-derived contract as `tenantId`: `deriveServingSignals` is the only origin, overwriting any
+   * client-supplied value; a client can never set/claim its own `shopperId`. Absent ⇒ anonymous shopper
+   * (the brain falls back to its constructor `shopperId`, the anonymous rollout default). Drives which
+   * account the support/commerce path (support.ts) verifies ownership against — never a constant.
+   */
+  shopperId?: string;
 }
 
 export interface Decision {

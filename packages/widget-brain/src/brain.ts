@@ -422,6 +422,12 @@ export function createBrain(
       // merchant. The fail-closed backstop for an unknown tenant lives in the grounding adapter
       // (unknown ⇒ safe-empty catalog); real-tenant unauthorized→safe-empty lands in the caching layer.
       const tenantId = signals.tenantId ?? "demo";
+      // ADR-0017 T6 — PER-REQUEST shopper identity: `signals.shopperId` is server-derived (deriveServingSignals,
+      // never client-set) and MUST win when present, exactly like tenantId above. The constructor `shopperId`
+      // (default "shopper-demo") is now ONLY the anonymous rollout fallback for an unauthenticated/pre-ADR-0017
+      // request — using it while a DIFFERENT shopper is making THIS request would be an IDOR (support.ts's
+      // ownership check would authorize against the wrong account).
+      const currentShopperId = signals.shopperId ?? shopperId;
       const text = message.toLowerCase();
       const flags: string[] = [];
 
@@ -555,7 +561,7 @@ export function createBrain(
       if (isSupport) {
         // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
         if (commerce) {
-          const r = await handleSupport(commerce, shopperId, message, signals.mood);
+          const r = await handleSupport(commerce, currentShopperId, message, signals.mood);
           return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
         }
         // Fallback when no commerce port is wired: generic grounded reply.
