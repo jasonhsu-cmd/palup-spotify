@@ -184,7 +184,7 @@ const INJECTION = [
 
 const SAFETY: { class: Exclude<SafetyClass, "none" | "injection">; terms: string[] }[] = [
   { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm", "don't want to be here", "dont want to be here", "don't want to live", "no reason to go on", "want to end it", "better off dead", "end my life"] },
-  { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "broke me out", "broke my", "breaking out", "breaking me out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
+  { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "broke me out", "broke my", "break out", "break me out", "will break", "breaking out", "breaking me out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
   { class: "medical", terms: ["cure", "treat ", "diagnos", "pregnan", "medication", "prescription", "tretinoin", "rosacea", "eczema", "mole", "infection"] },
   { class: "legal", terms: ["lawyer", "i'll sue", "lawsuit", "legal action"] },
   { class: "abuse", terms: ["you're useless", "you are useless", "i hate you", "stupid bot", "dumb bot", "worthless", "shut up", "screw you", "you people", "waste of my time", "piece of garbage"] },
@@ -477,7 +477,7 @@ export function createBrain(
             // pre-use worry (past reaction, considering rebuy → patch-test precaution). The same reply
             // can't serve SAFE-1's strict no-medical-advice AND SX-02's patch-test ask, so we branch.
             flags.push("safety:reaction");
-            const preUse = /before|last time|i'?ll be fine|will i be|should i|thinking of|planning to|is it safe/.test(text);
+            const preUse = /before|last time|i'?ll be fine|will i be|should i|thinking of|planning to|is it safe|worried|worry|anxious|will (this|it)|going to|scared|nervous/.test(text);
             reply = preUse
               ? "As an AI assistant, I can't promise you'll be fine — with a past reaction I wouldn't assume it's nothing. A patch test before using it again is a sensible precaution, and if you're unsure it's worth checking with a doctor. I'm not able to give medical advice myself. Want me to bring in a person to help?"
               : "As an AI assistant, I'm really sorry — that doesn't sound right and I wouldn't brush it off. I'm not able to give medical advice on a reaction, so if it continues or worries you the right step is to check with a doctor. I'm bringing in a person from our team to help right now.";
@@ -546,7 +546,7 @@ export function createBrain(
       if (isSupport) {
         // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
         if (commerce) {
-          const r = await handleSupport(commerce, shopperId, message);
+          const r = await handleSupport(commerce, shopperId, message, signals.mood);
           return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
         }
         // Fallback when no commerce port is wired: generic grounded reply.
@@ -669,14 +669,51 @@ export function createBrain(
         systemExtra +=
           "\nDATA-RESIDENCY POLICY: This shopper is in the EU. Handle their personal data under EU (GDPR) rules - EU data residency and opt-in consent by default - and do NOT apply US-default data handling. Briefly reassure them on this basis; do not assert specific infrastructure the merchant may not have.";
       }
+      // Skeptic / "does it actually work" — back claims with SPECIFIC catalog facts and disclose the AI,
+      // rather than an unqualified sales voice a skeptic distrusts (evidence-grounded + disclose-ai).
+      if (signals.mood === "skeptical" || /\b(actually|really) work|is (it|this) hype|worth it\b|snake oil|does it (really |actually )?work|any evidence|proof it works|is it legit/.test(text)) {
+        flags.push("skeptic_evidence");
+        systemExtra +=
+          "\nSKEPTIC POLICY: The shopper is skeptical about efficacy. Back every claim with SPECIFIC facts from the CATALOG (named actives/ingredients, what the product is formulated for, how to use it) — never vague hype. Be honest about what it can and can't do and that results vary. Disclose that you are an AI assistant.";
+      }
+      // Stated budget / gift — recommend within budget and never push over it (within-budget / in-budget).
+      // Require explicit budget INTENT, not a bare "$N" — "is the $18 cleanser any good?" is not a
+      // budget ceiling and must not suppress recommendations across the catalog.
+      const budgetMatch = text.match(/(?:under|below|around|about|~|up to|max(?:imum)?|budget(?: of)?|spend)\s*\$?\s*(\d{1,4})/);
+      const budgetCap = budgetMatch ? Number(budgetMatch[1]) : undefined;
+      const isGift = /\bgift\b|present for|for my (mom|mother|sister|friend|dad|father|partner|wife|husband|girlfriend|boyfriend|daughter|son|brother)/.test(text);
+      if (budgetCap !== undefined || isGift) {
+        flags.push(isGift ? "gift" : "budget");
+        systemExtra +=
+          `\nBUDGET/GIFT POLICY:${isGift ? " This is a gift — suggest gift-appropriate options and frame them as a gift." : ""}${budgetCap !== undefined ? ` Recommend ONLY catalog items at or below $${budgetCap}; do NOT suggest anything priced over that. If nothing fits the budget, say so honestly.` : ""}`;
+      }
       // Choose the pitch BEFORE generating so the reply can actually reflect it (RC1). The pitch
       // directive lands on the sales path only — after every guardrail short-circuit above.
       const negativeMood =
         signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
+      // Explicit buy/checkout signal — the shopper has DECIDED. Honor it and add NO upsell/cross-sell/
+      // bundle nudge: the system prompt already forbids this, but the pitch DIRECTIVE would still reach
+      // the model and contradict it, so we force pitch=none in code (restraint-after-close, §5). Narrow
+      // to unambiguous decide/checkout phrasing to avoid catching a question ("should I take the retinol?").
+      const buySignal =
+        /\b(i'?ll take it|i'?ll take the|i'?ll buy|i want to buy|i'?m ready to (buy|check ?out|purchase)|ready to (buy|check ?out|purchase)|take me to check ?out|proceed to check ?out|check ?out now|place (the|my) order|let'?s (buy|check ?out|do it))\b/.test(text) &&
+        !/\b(should i|shall i|do you think|is it worth|worth it|can i|could i)\b/.test(text); // not a deliberation
+      // Idle browser (NOT "no idea where to start", which wants a discovery rec) — a light greeting, no
+      // proactive pitch (no-proactive-pitch / build-trust). Narrow to unambiguous "just looking" phrasing.
+      const browsing = /just browsing|just looking|looking around|only browsing|not buying (anything |any )?today|not ready to buy|no thanks,? just/.test(text);
+      if (browsing) {
+        flags.push("browsing");
+        systemExtra +=
+          "\nBROWSING: The shopper is just looking, not buying now. Give a warm, brief, helpful greeting and offer to help if they'd like — do NOT push a product, recommendation, or pitch.";
+      }
       let pitch: PitchKind = "none";
       let outbound = false;
       if (negativeMood) {
         flags.push("mood_brake", "no_pitch");
+      } else if (buySignal) {
+        flags.push("buy_signal", "no_pitch"); // pitch stays "none" — move to checkout, don't pitch
+      } else if (browsing) {
+        flags.push("no_pitch"); // pitch stays "none" — idle browser
       } else {
         // Deterministic OBJECTION trigger: a price/fit/trust objection in THIS message routes the
         // otherwise-selected pitch to objection_close (still under every cap — see selectPitch). Audit

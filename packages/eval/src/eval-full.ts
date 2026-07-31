@@ -7,7 +7,8 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createBrain, createSession, DEFAULT_POLICY, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
+import { createBrain, createSession, DEFAULT_POLICY, StaticGroundingAdapter, MockCommerceAdapter, demoCommerceGroundTruth } from "@palup/widget-brain";
+import type { HistoryTurn } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import {
   createGeminiJudge,
@@ -43,7 +44,8 @@ async function main() {
 
   const agentFamily = "gemini";
   const grounding = new StaticGroundingAdapter();
-  const brain = createBrain(createVertexAdapter(), grounding, DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo");
+  const commerce = new MockCommerceAdapter();
+  const brain = createBrain(createVertexAdapter(), grounding, DEFAULT_POLICY, commerce, "shopper-demo");
   const ctx = await grounding.getContext("demo");
   // The judge must be given the SAME first-party facts the agent grounds on — otherwise it cannot
   // verify a grounded claim and reads it as a guess (SX-01: an ingredient-grounded allergy answer was
@@ -55,7 +57,11 @@ async function main() {
     ctx.products
       .map((p) => `- ${p.title} (${p.price})${p.ingredients?.length ? ` — ingredients: ${p.ingredients.join(", ")}` : ""}`)
       .join("\n") +
-    (ctx.policy.allergens ? `\nALLERGEN POLICY: ${ctx.policy.allergens}` : "");
+    (ctx.policy.allergens ? `\nALLERGEN POLICY: ${ctx.policy.allergens}` : "") +
+    // Order/policy/subscription ground truth — the support layer grounds on the shopper's real order
+    // records; without them the judge reads a correct grounded status/return/refund reply as fabricated
+    // (the order analogue of the SX-01 catalog-ground-truth fix). Faithful, never more lenient.
+    (await demoCommerceGroundTruth(commerce, "shopper-demo"));
 
   const wantAnthropic = process.env.JUDGE_FAMILY !== "gemini" && isAnthropicApiConfigured();
   const judge = wantAnthropic
@@ -74,9 +80,15 @@ async function main() {
       if (c.turns?.length) {
         const s = await createSession(brain); // createSession is async (durable store adapters)
         const lines: string[] = [];
+        // Replay the accumulated transcript as `history` each turn, exactly like the production server
+        // (server.ts: session.send(msg, signals, normalizeHistory(history))). Without this the brain saw
+        // every turn cold, so cross-turn coherence/resume criteria (switching, multi-turn golden) were
+        // untestable — the harness, not the agent, was failing them.
+        const history: HistoryTurn[] = [];
         for (const t of c.turns) {
-          const d = await s.send(t, (c.signals ?? {}) as never);
+          const d = await s.send(t, (c.signals ?? {}) as never, history);
           lines.push(`Shopper: ${t}\nAssistant: ${d.reply}`);
+          history.push({ role: "user", content: t }, { role: "agent", content: d.reply });
         }
         transcript = lines.join("\n\n");
       } else {
