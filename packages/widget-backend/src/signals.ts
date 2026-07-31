@@ -37,6 +37,9 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // cart_recovery on the clean sales path; every server cap still holds (precedence ladder, mood brake,
     // support/safety suppression, and the ONE INV-E budget), so passing it through grants no autonomy.
     proactiveTrigger: r.proactiveTrigger === "exit_intent" ? "exit_intent" : undefined,
+    // Page context (§4): the product/page the shopper is viewing — UNTRUSTED merchant-page content,
+    // bounded here (defense-in-depth) and sanitized again in the brain before it reaches the model.
+    pageContext: typeof r.pageContext === "string" && r.pageContext ? r.pageContext.slice(0, 400) : undefined,
     // Server-derived trust-bearing signals — never taken from the client.
     tenantId: ctx.tenantId, // the verified merchant; drives per-merchant grounding — never client-set
     relationship: "anonymous", // no identified customer yet (M2); never client-claimed VIP/subscriber
