@@ -22,8 +22,9 @@ green.
 > boot without it (no silent per-process fallback).
 > **Shipped since (M1/M2/M3):** rate-limiting, input bounds, PII redaction, the operator auth gate, and
 > widget tenant-identity are live (M1); the `rs_audit` INSERT-only GRANT is **applied + verified** (#19,
-> see the Cloud SQL section); **per-merchant Shopify grounding is live** (M2 — see *Shopify grounding*
-> below); and cost/latency telemetry is captured with an operator-gated read (M3).
+> see the Cloud SQL section); **per-merchant Shopify grounding is wired into the deploy + verified live
+> (2026-07-31)** (M2 — see *Shopify grounding* below); and cost/latency telemetry is captured with an
+> operator-gated read (M3).
 > **Auth enforcement — now ON (the demo keeps working):** the service is `--allow-unauthenticated` at the
 > Cloud Run edge, but `WIDGET_AUTH_REQUIRED=true` (repo variable, passed through at deploy), so the app-level
 > widget-token check is the tenancy gate — a `/chat` request without a valid widget token returns **401**
@@ -64,17 +65,20 @@ green.
 ## Shopify grounding (M2, ADR-0012)
 
 Per-merchant grounding pulls the merchant's live catalog + policies from the **Shopify Storefront API**
-(v2026-07) behind the `GroundingPort`. Staging config (not in code):
+(v2026-07) behind the `GroundingPort`. **Verified live 2026-07-31** against
+`palup-skincare-jason.myshopify.com` (HTTP 200; brand + refund/shipping policies + a real catalog). Both
+config values are set **by `deploy-staging.yml`** — `--set-secrets`/`--set-env-vars` REPLACE the whole set
+each deploy, so they must live in the workflow; dropping them silently reverts grounding to the fixtures:
 
 - **Secret Manager `palup-secrets`** — a nested JSON `{"<tenant>":{"shopify_storefront_token":"…"}}`
   read via the `SecretsPort`; holds each tenant's **private** Storefront token (`Shopify-Storefront-
-  Private-Token`). Mounted into Cloud Run as the `PALUP_SECRETS` env via `--update-secrets`. The runtime
+  Private-Token`). Mounted into Cloud Run as the `PALUP_SECRETS` env via `--set-secrets`. The runtime
   SA has `secretAccessor` on it.
 - **`SHOPIFY_STORES` env** — a non-secret `{"<tenant>":"<shop>.myshopify.com"}` map (validated to a
-  `*.myshopify.com` host before any fetch).
-- **Current mapping:** `demo → palup-skincare-jason.myshopify.com` (so unauthenticated staging traffic
-  grounds on a real store while `WIDGET_AUTH_REQUIRED` is off). A tenant with no resolved creds falls
-  back to the built-in fixtures — non-breaking.
+  `*.myshopify.com` host before any fetch), set in `deploy-staging.yml` via gcloud's `^@^` delimiter.
+- **Current mapping:** `demo → palup-skincare-jason.myshopify.com`, so staging traffic (the demo tenant)
+  grounds on the real store. A tenant with no resolved creds falls back to the built-in fixtures —
+  non-breaking.
 - Grounding is cached per tenant on the `RuntimeStatePort` (TTL) with degrade-to-stale/safe-empty, so a
   slow/down Shopify never hangs `/chat`.
 

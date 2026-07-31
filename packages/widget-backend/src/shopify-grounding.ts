@@ -13,8 +13,10 @@ import type { ShopifyStoreCreds } from "./merchant-store.js";
 // it authenticates with a PRIVATE (delegate) Storefront access token via the `Shopify-Storefront-
 // Private-Token` header (kept secret in the SecretsPort — not the public `X-Shopify-Storefront-Access-
 // Token` browser header). The pure mapping is fixture-tested; the LIVE end-to-end call (auth + real
-// response) is still UNVERIFIED until run against a real dev store + token — a §7 go-live step
-// (provision creds via the SecretsPort, then a live smoke + security re-review).
+// response) was VERIFIED 2026-07-31 against the real store `palup-skincare-jason.myshopify.com` (HTTP 200;
+// brand + refund/shipping policies + a real catalog returned) with the private token in Secret Manager
+// `palup-secrets`. It is wired into the deployed service via `SHOPIFY_STORES` + `PALUP_SECRETS` in
+// deploy-staging.yml (both REPLACE-set every deploy — see the note there).
 
 /** Storefront product node (Storefront API 2026-07). */
 export interface StorefrontProductNode {
