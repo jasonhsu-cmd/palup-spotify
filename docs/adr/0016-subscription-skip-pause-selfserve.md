@@ -1,12 +1,16 @@
-# ADR-0016: Subscription skip/pause self-serve — approved, preconditioned, NOT enacted
+# ADR-0016: Subscription skip/pause self-serve — approved; enacted mock-only behind a default-off flag
 
-- **Status: Approved (classification) — NOT enacted.** The named owner approved boundary decision **B**:
-  the shopper's own subscription **skip / pause** is a reversible, low-stakes, in-policy timing change and
-  belongs in HITL-POLICY §2 *auto-allowed*; subscription **cancel** ends recurring revenue and stays
-  merchant-approval. This ADR records that decision **and the enforcement prerequisites** an adversarial
-  governance review surfaced. **No autonomous execution ships until every precondition below is met and
-  `security-reviewer` + `agent-evolution-steward` sign off.** Until then, skip/pause is **human-routed,
-  exactly like cancel** (unchanged behavior).
+- **Status: Approved (classification); enacted mock-only behind a default-off flag
+  (`SUBSCRIPTION_SELFSERVE`) — the live Shopify subscription adapter is NOT yet enacted.** The named owner
+  approved boundary decision **B**: the shopper's own subscription **skip / pause** is a reversible,
+  low-stakes, in-policy timing change and belongs in HITL-POLICY §2 *auto-allowed*; subscription
+  **cancel** ends recurring revenue and stays merchant-approval. This ADR records that decision **and the
+  enforcement prerequisites** an adversarial governance review surfaced. The mock-only enactment (behind
+  `SUBSCRIPTION_SELFSERVE`, gated on a verified shopper) cleared every precondition below, and both
+  required reviewers — `security-reviewer` + `agent-evolution-steward` — signed off (PR #100); turning it
+  on against a **real** subscription backend is gated on the live-adapter obligations below. **With the
+  flag off (the default) skip/pause stays human-routed, exactly like cancel** — byte-identical prior
+  behavior.
 - **Owner (named):** jason.hsu@framy.co. **Plane:** run-time (shopper agent autonomy).
 - **Money/business-model + agent-autonomy → governed** (CLAUDE.md §3, HITL-POLICY).
 
