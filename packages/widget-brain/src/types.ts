@@ -121,6 +121,13 @@ export interface Signals {
    * is empty. Sentinel-valued.
    */
   proactiveTrigger?: "exit_intent";
+  /**
+   * The product/page the shopper is currently viewing (a short label from the embedding storefront), for
+   * grounding the conversation to what they're looking at (§4 Contextual). UNTRUSTED merchant-page content
+   * — sanitized (HTML stripped, newlines collapsed, the === fence defanged, capped) and fenced as DATA,
+   * never instructions, before it reaches the model, exactly like the catalog.
+   */
+  pageContext?: string;
 }
 
 export interface Decision {

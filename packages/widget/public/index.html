@@ -217,7 +217,7 @@
   });
   async function send(message, isRetry){
     if (!isRetry) add(message, "user");
-    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
+    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined };
     // Stable idempotency key per turn, REUSED on retry, so a replayed request the server already
     // processed is de-duplicated (never double-counts the pitch budget or double-audits).
     const idempotencyKey = (isRetry && lastSend && lastSend.idempotencyKey)
@@ -257,7 +257,7 @@
   async function sendProactive(trigger){
     if (exitIntentFired() || !cartHasItems()) return;   // once per session; only an unrecovered cart
     markExitIntentFired();                                // mark BEFORE the request so it can never double-fire
-    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value, proactiveTrigger: trigger };
+    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value, proactiveTrigger: trigger, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined };
     const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
     try {
       await ensureToken(false);
