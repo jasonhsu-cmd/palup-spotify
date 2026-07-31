@@ -111,6 +111,16 @@ export interface Signals {
    * treated as quiet hours (the consent gate still applies).
    */
   localHour?: number;
+  /**
+   * An AGENT-INITIATED proactive trigger (§4 Behavioral: exit-intent; §5 Timing) — NOT a shopper
+   * message. "exit_intent" = the shopper's pointer left toward the top of the viewport with an
+   * unrecovered cart. It is evaluated ONLY on the clean sales path (every higher precedence rung wins
+   * first) and NEVER overrides a brake: it may surface AT MOST a single, value-aligned cart_recovery
+   * pitch, still gated by the mood brake, support/safety suppression, and the ONE INV-E budget. It is
+   * never run through the shopper-message intent classifiers; the shopper turn on a proactive trigger
+   * is empty. Sentinel-valued.
+   */
+  proactiveTrigger?: "exit_intent";
 }
 
 export interface Decision {
