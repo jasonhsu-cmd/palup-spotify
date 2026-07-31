@@ -52,4 +52,12 @@ describe("classifier — classifyFact (conservative, narrow-only sensitivity pol
     const result = classifyFact("shopper mentioned sensitive skin");
     expect(result.class).toBe("special");
   });
+
+  it("drops a multi-category fact if ANY matched category is dropped (order-independent)", () => {
+    // "allergic to soy and pregnant" matches BOTH allergy and pregnancy; dropping pregnancy must drop it
+    // regardless of category match order (the old first-match logic missed this).
+    const r = classifyFact("allergic to soy and I'm pregnant", { dropCategories: ["pregnancy"] });
+    expect(r.class).toBe("special"); // class never narrows
+    expect(r.remember).toBe(false); // but the drop is honored
+  });
 });

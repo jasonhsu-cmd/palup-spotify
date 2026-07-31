@@ -48,12 +48,13 @@ const SPECIAL_CATEGORIES: Record<string, string[]> = {
   sexual_orientation: ["sexual orientation", "lesbian", "bisexual", "transgender"],
 };
 
-function matchCategory(text: string): string | undefined {
+// Return EVERY special category the text matches (not just the first), so a tenant's dropCategories
+// narrowing is order-independent: a fact matching allergy AND pregnancy is dropped if EITHER is dropped.
+function matchCategories(text: string): string[] {
   const t = text.toLowerCase();
-  for (const [category, terms] of Object.entries(SPECIAL_CATEGORIES)) {
-    if (terms.some((term) => t.includes(term))) return category;
-  }
-  return undefined;
+  return Object.entries(SPECIAL_CATEGORIES)
+    .filter(([, terms]) => terms.some((term) => t.includes(term)))
+    .map(([category]) => category);
 }
 
 /**
@@ -64,8 +65,10 @@ function matchCategory(text: string): string | undefined {
  * can NEVER change `class` back to `"ordinary"` (Inv 11: narrow-only).
  */
 export function classifyFact(text: string, policy?: TenantSensitivityPolicy): FactClassification {
-  const category = matchCategory(text);
-  if (!category) return { class: "ordinary", remember: true };
-  const dropped = policy?.dropCategories?.includes(category) ?? false;
+  const categories = matchCategories(text);
+  if (categories.length === 0) return { class: "ordinary", remember: true };
+  // Narrow-only: class stays "special" regardless (Consent 2 still governs if remembered); a fact is
+  // dropped if ANY of the special categories it matches is in dropCategories.
+  const dropped = categories.some((c) => policy?.dropCategories?.includes(c) ?? false);
   return { class: "special", remember: !dropped };
 }

@@ -177,3 +177,48 @@ describe("createMemoryService — audit (Inv 6: no silent memory action)", () =>
     expect(serialized).not.toContain("tree-nut");
   });
 });
+
+describe("createMemoryService — the enabled override is a TEST SEAM, not a production bypass (NN#1)", () => {
+  it("in production (no test env), deps.enabled:true does NOT bypass the double gate — stays inert", async () => {
+    const orig = { v: process.env.VITEST, n: process.env.NODE_ENV };
+    delete process.env.VITEST;
+    process.env.NODE_ENV = "production";
+    try {
+      const vector = spyVector();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const auditSpy = vi.spyOn(runtimeStore, "audit");
+      const service = createMemoryService({ vector, audit: runtimeStore, distiller: fixedDistiller(["x"]), enabled: true });
+      const ctx: MemoryCtx = { tenantId: "acme", anonId: "g", region: "us", consent1: "in", consent2: "in" };
+      await service.remember(ctx, { message: "a", reply: "b" });
+      // MEMORY_ADR_ACCEPTED is hardcoded false, so despite enabled:true the service is inert in prod.
+      expect(vector.upsert).not.toHaveBeenCalled();
+      expect(auditSpy).not.toHaveBeenCalled();
+    } finally {
+      if (orig.v === undefined) delete process.env.VITEST;
+      else process.env.VITEST = orig.v;
+      process.env.NODE_ENV = orig.n as string;
+    }
+  });
+});
+
+describe("createMemoryService — per-class TTL (Inv 4)", () => {
+  it("special (14d) expires on read before ordinary (60d)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const distiller = fixedDistiller(["prefers fragrance-free", "allergic to tree nuts"]);
+    let nowMs = new Date("2026-01-01T00:00:00Z").getTime();
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, clock: () => new Date(nowMs) });
+    const ctx: MemoryCtx = { tenantId: "acme-ttl", anonId: "guest-ttl", region: "us", consent1: "in", consent2: "in" };
+
+    const w = await service.remember(ctx, { message: "...", reply: "..." });
+    expect(w.written).toContain("ordinary");
+    expect(w.written).toContain("special");
+
+    // day 20: past SPECIAL_TTL_DAYS (14) but before ORDINARY_TTL_DAYS (60) — proves per-class TTL AND
+    // TTL-on-read (fails if the expiry filter or the per-class expiresAt write is broken).
+    nowMs += 20 * 24 * 60 * 60 * 1000;
+    const texts = (await service.recall(ctx)).map((f) => f.text);
+    expect(texts).toContain("prefers fragrance-free"); // ordinary still live
+    expect(texts).not.toContain("allergic to tree nuts"); // special expired
+  });
+});

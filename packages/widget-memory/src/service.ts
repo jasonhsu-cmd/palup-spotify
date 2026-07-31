@@ -42,15 +42,21 @@ export interface MemoryServiceDeps {
   classifier?: typeof classifyFact;
   /** Override for deterministic TTL tests; defaults to `() => new Date()`. */
   clock?: () => Date;
-  /** Override for tests; defaults to `isMemoryEnabled()` (the flag.ts double gate — always false until
-   * ADR-0015 is Accepted in code). */
+  /** TEST SEAM ONLY — honored solely under the test runner (see createMemoryService). In production the
+   * flag.ts double gate is authoritative and this field is IGNORED, so no caller can enable memory by
+   * config (NN#1). Defaults to `isMemoryEnabled()`. */
   enabled?: boolean;
 }
 
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   const classify = deps.classifier ?? classifyFact;
   const clock = deps.clock ?? (() => new Date());
-  const enabled = deps.enabled ?? isMemoryEnabled();
+  // The `deps.enabled` override is a test seam so the live path can be exercised without flipping
+  // MEMORY_ADR_ACCEPTED. It is honored ONLY under a test runner; in production the double gate
+  // (isMemoryEnabled) is authoritative, so a config value can never turn this package on (NN#1 — this
+  // preserves flag.ts's "no caller can flip this on by config alone" guarantee by construction).
+  const underTest = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const enabled = underTest ? (deps.enabled ?? isMemoryEnabled()) : isMemoryEnabled();
 
   async function remember(ctx: MemoryCtx, turn: MemoryTurn): Promise<{ written: FactClass[] }> {
     if (!enabled) return { written: [] }; // INERT — no vector call, no audit, nothing touched
