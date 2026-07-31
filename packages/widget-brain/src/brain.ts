@@ -158,6 +158,31 @@ const SUPPORT = [
 
 const UNKNOWN_FACT = ["competitor", "brand x", "cheaper elsewhere", "other store", "price of their"];
 
+// Price/fit/trust OBJECTION in the CURRENT shopper message → the reactive "objection→close" moment
+// (docs/design/shopper-widget.md §5, the 8 pitch kinds). Deterministic + low-false-positive: specific
+// self-objection phrasings only. A competitor-PRICE question ("cheaper elsewhere", "other store") is
+// DELIBERATELY not here — it is caught one rung higher by honest-uncertainty (UNKNOWN_FACT, step 3)
+// before the sales path, so a price doubt that actually reaches sales is the shopper's OWN objection to
+// address with honest value, not an external fact we'd have to fabricate. `text` is already lower-cased
+// in decide(); the "i" flag mirrors the B2B lexicon above.
+const OBJECTION = new RegExp(
+  [
+    "\\btoo expensive\\b",
+    "\\btoo pricey\\b",
+    "\\bcan'?t afford\\b",
+    "\\bcannot afford\\b",
+    "\\bnot worth\\b",
+    "\\bnot sure (it'?s|it is|this is) (right|worth|for me)\\b",
+    "\\bdoes it (really|actually) work\\b",
+    "\\bworried it (won'?t|wont)\\b",
+    "\\bon the fence\\b",
+    "\\bhesitant\\b",
+    "\\bnot convinced\\b",
+    "\\b(anything|something) cheaper\\b",
+  ].join("|"),
+  "i",
+);
+
 // B2B / wholesale / bulk-order intent (§4 Persona: roles = for-self / gift / B2B → ESCALATE). A business
 // or bulk inquiry is routed to a human (a real wholesale/trade conversation), never answered with a
 // consumer pitch. Deterministic guardrail — kept low-false-positive: bare pack-size questions
@@ -205,17 +230,28 @@ function classifySafety(text: string): SafetyClass {
   return "none";
 }
 
-function selectPitch(signals: Signals, policy: Policy): PitchKind {
+function selectPitch(signals: Signals, policy: Policy, isObjection = false): PitchKind {
   const level = signals.proactivityLevel ?? policy.proactivityDefault;
   const rel = signals.relationship;
   const cart = signals.cart;
+  let pitch: PitchKind;
   if (cart === "has_items" || cart === "high_value") {
-    return level === "cautious" ? "cart_recovery" : "cross_sell";
+    pitch = level === "cautious" ? "cart_recovery" : "cross_sell";
+  } else if ((rel === "replenishment_due" || rel === "lapsed") && level !== "cautious") {
+    pitch = "replenishment";
+  } else if (level === "cautious") {
+    pitch = "none";
+  } else {
+    pitch = "guided_rec"; // both "confident" and the Balanced default land on a guided recommendation
   }
-  if ((rel === "replenishment_due" || rel === "lapsed") && level !== "cautious") return "replenishment";
-  if (level === "cautious") return "none";
-  if (level === "confident") return "guided_rec";
-  return "guided_rec";
+  // A price/fit/trust OBJECTION is the reactive, value-aligned "objection→close" moment (§5). Route to
+  // objection_close ONLY when a pitch is otherwise ALLOWED here (pitch !== "none") — so the no-pitch
+  // state (e.g. cautious level with nothing in the cart to recover) still yields "none": an objection
+  // never MANUFACTURES a pitch where the caps already allow none. The mood brake + support/safety
+  // suppression (decide()) and the cross-turn proactivity budget (INV-E, session.ts) sit OUTSIDE this
+  // and still convert it to "none", so no hard cap is bypassed.
+  if (isObjection && pitch !== "none") return "objection_close";
+  return pitch;
 }
 
 // The chosen pitch has to reach the MODEL to shape the reply (RC1: it was computed but never used).
@@ -225,7 +261,7 @@ const PITCH_PLAYBOOK: Record<PitchKind, string> = {
   cross_sell: "\nPITCH - cross-sell: Suggest exactly ONE relevant complement from the CATALOG that pairs with what they added, framed as optional. If nothing is genuinely relevant, add nothing. Never be pushy.",
   cart_recovery: "\nPITCH - cart recovery: Make at most ONE helpful offer addressing a likely reason for hesitation (e.g. shipping/returns from POLICY). One offer only - no repeated nudges, no false urgency or scarcity.",
   replenishment: "\nPITCH - replenishment: Give ONE capped, value-aligned repurchase nudge tied to what they use (they may be running low). No urgency/scarcity, no desperation, do not repeat the nudge.",
-  objection_close: "\nPITCH - objection: Acknowledge and address the shopper's actual concern (e.g. price/value) with grounded reasons from the CATALOG/POLICY, not only a clarifying question.",
+  objection_close: "\nPITCH - objection: Acknowledge the shopper's real concern (price/value/fit/trust) and address it with honest, grounded reasons from the CATALOG/POLICY - reassure, don't dismiss, and don't answer with only a clarifying question. If price is the blocker, speak to value honestly and, if a cheaper item is the genuinely better fit, recommend it. NEVER invent or imply a discount, coupon, promo, or price cut (a real one is merchant-approved only), and create NO false urgency or scarcity.",
   subscription: "\nPITCH - subscription: Offer subscribe-and-save ONCE and state plainly they can pause or cancel anytime (per POLICY). Never hide the cancel option.",
   upsell: "\nPITCH - trade-up: Suggest a larger size/higher tier ONLY if genuinely a better fit or value; otherwise do not.",
   promo: "\nPITCH - promo: Surface an active merchant-approved promo ONLY if it appears in the grounded context, exactly as written. Never invent a promo, code, or terms.",
@@ -532,7 +568,12 @@ export function createBrain(
       if (negativeMood) {
         flags.push("mood_brake", "no_pitch");
       } else {
-        pitch = selectPitch(signals, policy);
+        // Deterministic OBJECTION trigger: a price/fit/trust objection in THIS message routes the
+        // otherwise-selected pitch to objection_close (still under every cap — see selectPitch). Audit
+        // the detection either way, even when a later cap (budget, session.ts) drops the pitch to none.
+        const isObjection = OBJECTION.test(text);
+        if (isObjection) flags.push("objection_detected");
+        pitch = selectPitch(signals, policy, isObjection);
         if (pitch !== "none") flags.push(`pitch:${pitch}`);
         // Consent-gated outbound: replenishment/cart-recovery imply an email/SMS follow-up, which is
         // only permitted with valid consent (unknown = no-consent). Never do outbound otherwise.
