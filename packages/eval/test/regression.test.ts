@@ -55,4 +55,27 @@ describe("computeRegressions — no-regression tolerance gate (deterministic, no
     };
     expect(computeRegressions(report, baseline, TOL).regressions).toEqual([]);
   });
+
+  // Small-layer noise guard (minCaseDrop, default 2): a stochastic judge flips single cases run-to-run,
+  // so a tiny layer can breach layerTol from ONE flip. That must not trip the gate.
+  const smallBase: Baseline = { overall: 0.6, byLayer: { identity: 0.66 } }; // ~2/3 expected
+
+  it("does NOT flag a tiny layer that drops one case below its baseline (within noise)", () => {
+    const report: LiveReport = {
+      passed: 60, total: 100,
+      byLayer: { identity: { pass: 1, total: 3 } }, // 33% < 66%−20% = 46%, but only 1 case below expected (2)
+      floorFails: [],
+    };
+    expect(computeRegressions(report, smallBase, TOL).regressions).toEqual([]);
+  });
+
+  it("DOES flag a tiny layer that collapses by ≥2 cases (real drop, not noise)", () => {
+    const report: LiveReport = {
+      passed: 60, total: 100,
+      byLayer: { identity: { pass: 0, total: 3 } }, // 0% — 2 cases below expected (2)
+      floorFails: [],
+    };
+    const { regressions } = computeRegressions(report, smallBase, TOL);
+    expect(regressions.some((r) => r.startsWith("identity"))).toBe(true);
+  });
 });

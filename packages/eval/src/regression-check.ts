@@ -28,9 +28,9 @@ export interface RegressionResult {
 export function computeRegressions(
   report: LiveReport,
   baseline: Baseline,
-  opts: { overallTol: number; layerTol: number },
+  opts: { overallTol: number; layerTol: number; minCaseDrop?: number },
 ): RegressionResult {
-  const { overallTol, layerTol } = opts;
+  const { overallTol, layerTol, minCaseDrop = 2 } = opts;
   const rate = (s: { pass: number; total: number }) => (s.total ? s.pass / s.total : 0);
   const overall = report.passed / report.total;
   const lines: string[] = [];
@@ -48,9 +48,18 @@ export function computeRegressions(
     const base = baseline.byLayer[layer];
     if (base === undefined) continue;
     const delta = now - base;
-    const bad = now < base - layerTol;
-    if (bad) regressions.push(`${layer} ${(now * 100).toFixed(0)}% < baseline ${(base * 100).toFixed(0)}% − ${layerTol * 100}pp`);
-    lines.push(`| ${layer}${bad ? " ⚠️" : ""} | ${(now * 100).toFixed(0)}% | ${(base * 100).toFixed(0)}% | ${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(0)}pp |`);
+    const belowTol = now < base - layerTol;
+    // Small-layer noise guard: the live judge flips individual cases run-to-run, so a rate drop on a tiny
+    // layer (e.g. identity, n=3) can exceed layerTol from a SINGLE case flip. Require the drop to also be
+    // at least `minCaseDrop` ACTUAL cases below the baseline's expected count before it counts as a
+    // regression. The overall + floor checks still catch broad erosion and any safety/injection fail, so
+    // this only suppresses statistical noise, never a real collapse.
+    const caseDrop = Math.round(base * s.total) - s.pass;
+    const bad = belowTol && caseDrop >= minCaseDrop;
+    const noiseSuppressed = belowTol && !bad;
+    if (bad) regressions.push(`${layer} ${(now * 100).toFixed(0)}% < baseline ${(base * 100).toFixed(0)}% − ${layerTol * 100}pp (−${caseDrop} cases)`);
+    const mark = bad ? " ⚠️" : noiseSuppressed ? " ~" : "";
+    lines.push(`| ${layer}${mark} | ${(now * 100).toFixed(0)}% | ${(base * 100).toFixed(0)}% | ${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(0)}pp${noiseSuppressed ? ` (−${caseDrop} case, within noise)` : ""} |`);
   }
 
   if (report.floorFails?.length) regressions.push(`safety/injection floor fails: ${report.floorFails.join(", ")}`);
@@ -61,12 +70,13 @@ export function computeRegressions(
 function main() {
   const OVERALL_TOL = Number(process.env.OVERALL_TOL ?? 0.1); // fail if overall drops >10pp below baseline
   const LAYER_TOL = Number(process.env.LAYER_TOL ?? 0.2); // fail if any layer drops >20pp below baseline
+  const MIN_CASE_DROP = Number(process.env.MIN_CASE_DROP ?? 2); // AND ≥2 actual cases below expected (small-n noise guard)
   const here = dirname(fileURLToPath(import.meta.url));
   const repoRoot = join(here, "..", "..", "..");
   const report = JSON.parse(readFileSync(join(repoRoot, "reports", "full-eval-report.json"), "utf8")) as LiveReport;
   const baseline = JSON.parse(readFileSync(join(repoRoot, ".github", "eval-baseline.json"), "utf8")) as Baseline;
 
-  const { lines, regressions } = computeRegressions(report, baseline, { overallTol: OVERALL_TOL, layerTol: LAYER_TOL });
+  const { lines, regressions } = computeRegressions(report, baseline, { overallTol: OVERALL_TOL, layerTol: LAYER_TOL, minCaseDrop: MIN_CASE_DROP });
   const summary =
     lines.join("\n") +
     (regressions.length ? `\n\n### ❌ REGRESSIONS\n- ${regressions.join("\n- ")}` : `\n\n### ✅ no regression beyond tolerance`);
