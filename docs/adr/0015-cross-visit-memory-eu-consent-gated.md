@@ -6,6 +6,12 @@
   consent/notice UX + retention/erasure subsystem exist. The **in-session** multi-turn memory already
   shipped (PR #76) is unaffected — that holds no server-side transcript; this ADR is the *durable,
   cross-visit* half.
+- **Decisions recorded (owner, this revision):** (a) **scope = B** — special-category (health/allergy)
+  facts *may* be remembered, but **only behind a separate, explicit Article-9 health-data consent**;
+  **not** non-sensitive-only, and **not** accounts-only (a consented guest may also have one remembered);
+  (b) consent is delivered via the **contextual two-layer flow** below (ordinary personal data, then an
+  explicit health tier, each just-in-time). Both still require legal + `security-reviewer` sign-off before
+  Accepted — the decision sets the design, not the go-live.
 - **Owner (named, CLAUDE.md §5):** jason.hsu@framy.co.
 - **Plane:** run-time (the shopper agent's personalization). **Customer data → governed** (`HITL-POLICY`,
   CLAUDE.md §3/§7, `SECURITY.md`).
@@ -22,7 +28,9 @@ retention, and erasure model — this ADR.
 
 ## Decision
 
-A **two-tier** memory model, **consent-gated by region**, storing **distilled facts, never transcripts**.
+A **two-tier** memory model (guest / signed-up), **consent-gated by region**, storing **distilled facts,
+never transcripts**, with every fact assigned one of two **sensitivity classes** — ordinary commerce facts
+and **special-category (health) facts** — the latter behind a *separate* explicit consent (scope **B**).
 
 ### Tier 1 — Guest (anonymous, cross-session)
 - A stable **first-party, per-tenant anonymous id** (a random id in the shopper's browser storage; **not**
@@ -36,8 +44,70 @@ A **two-tier** memory model, **consent-gated by region**, storing **distilled fa
 
 ### Tier 2 — Signed-up (identified account)
 - On sign-up/login, **merge the anonymous id's facts into the account namespace** (a one-time, audited
-  migration), then continue under the account. Consent is the account ToS; **erasure is by account**;
-  the **relationship** states (VIP / subscriber / lapsed) derive from account + order history.
+  migration), then continue under the account. Consent is the account ToS — **except** special-category
+  facts, which **still require the separate explicit health consent** (Consent 2) and are never folded
+  into sign-up ToS; **erasure is by account**; the **relationship** states (VIP / subscriber / lapsed)
+  derive from account + order history.
+
+### Fact sensitivity — two classes; the health-consent tier (scope decision **B**)
+
+Every candidate fact is classified *before* any write:
+
+- **Ordinary commerce facts** — preferences, likes, sizes, viewed items, routine (e.g. "prefers
+  fragrance-free", "viewed the vitamin-C serum"). Remembered under the ordinary cross-visit consent
+  (**Consent 1**), per the tier + region rules above.
+- **Special-category facts** — health / allergy / medical and anything GDPR Art. 9 covers. Remembered
+  **only behind a separate, explicit health-data consent (Consent 2)**, with **stricter handling**:
+  encrypted at rest, a **shorter TTL** than the 60-day default, extra audit, and erasure-first on
+  withdrawal. Available in **both tiers** — a *consented* anonymous guest may have one remembered; it is
+  **not** restricted to accounts.
+
+Two rules keep this safe:
+
+- **The safety guardrail is independent of memory.** An allergy/ingredient question is always answered
+  reactively — ground the ingredient scan, caveat cross-contact, never guarantee, escalate — and that
+  answer needs **no** consent (it stores nothing). Only *remembering* the fact engages Consent 2.
+- **Remembered sensitive facts may only ADD caution.** A recalled "tree-nut allergy" lets the agent
+  proactively steer away from and flag at-risk products; it may **never** assert a product is safe, skip
+  the caveat, or bypass escalation. Memory can raise caution, never lower a guardrail.
+
+**Keep other industries in mind — the sensitivity map is per-industry, the guardrails are not.** What
+counts as "sensitive" varies: skincare / food → allergies, pregnancy, skin & medical conditions;
+supplements / pharmacy → medications, diagnoses (strictest, may exceed GDPR); apparel → health-driven fit
+needs; general electronics / retail → effectively none. So the classifier is a **governed,
+per-industry-configurable policy with a conservative default**: Art-9 categories (health, biometric,
+genetic, sexual-orientation, …) are treated as special-category **unless** a tenant's *reviewed* policy
+narrows what is remembered — a tenant policy may only **narrow** memory, never reclassify special-category
+data as ordinary. The universal guardrails (safety branch, honesty, anti-manipulation) do not vary by
+industry; only the sensitivity map does.
+
+### Consent UX — contextual, two-layer (resolves the *Consent UX* open question)
+
+Consent is **just-in-time**, never two upfront walls:
+
+- **Layer 0 — default, zero consent.** The widget fully works: it answers, and the **reactive safety
+  branch works normally**. Nothing persists cross-visit. The product must be fully usable here, or later
+  consent is not *freely given*.
+- **Layer 1 — Consent 1 (ordinary personal data, Art. 6).** Offered when a durable preference is worth
+  keeping, **or honored from the storefront's existing CMP** preferences/functional category where
+  present. Enables ordinary-fact cross-visit memory.
+- **Layer 2 — Consent 2 (explicit special-category consent, Art. 9).** Prompted **only when a sensitive
+  fact actually arises** (the shopper volunteers an allergy) and **after** the reactive answer — e.g.
+  *"You mentioned a nut allergy — want me to remember it so I can flag products to avoid next time? It's
+  health info; I'll keep it encrypted, only with your explicit OK, and you can delete it anytime."*
+
+Flow invariants:
+
+- The **answer** needs no consent; only **storage** does.
+- **Consent 2 is independent of Consent 1** and never bundled — not into the prefs consent, not into
+  account sign-up ToS. Either may be granted without the other.
+- **Decline / no prompt ⇒ non-persisted for that fact**: used only for the current session's answer,
+  re-asked next visit.
+- **Withdrawal is symmetric** — an in-widget "manage what I remember / forget me" control; withdrawing
+  Consent 2 **purges** the sensitive fact (right-to-erasure).
+- **Region-gated exactly like Tier 1** — `region ∈ {eu, unknown}` fail-closed (explicit consent
+  required); `region = us` notice + opt-out, with explicit health consent still best practice (and
+  tracking emerging US state health-data law — confirm specifics with legal).
 
 ## Invariants (must hold; tests enforce before any write path ships)
 
@@ -58,13 +128,26 @@ A **two-tier** memory model, **consent-gated by region**, storing **distilled fa
 7. **Behind the vector port** (ADR-0001 portability) — feature code never touches a vendor memory SDK.
 8. **Anonymous id is not a tracking identifier** — first-party, per-tenant, random; not shared across
    merchants, not derived from device fingerprints, resettable by the shopper (clearing it forgets them).
+9. **Special-category facts need separate explicit consent** — no Art-9 (health/allergy/medical) fact is
+   ever written under the ordinary memory consent or account ToS; it requires **Consent 2** and stricter
+   storage (encryption, shorter TTL, extra audit, erasure-first). Enforced fail-closed.
+10. **Memory never lowers a guardrail** — a remembered sensitive fact may only *increase* caution
+    (proactive avoidance / flag); it never lets the agent assert safety, skip the safety branch, or
+    bypass escalation. The reactive safety answer is memory-independent and consent-free.
+11. **Conservative, narrow-only sensitivity classification** — the classifier defaults to treating Art-9
+    categories as sensitive; a per-tenant/industry policy may only **narrow** what is remembered, never
+    reclassify special-category data as ordinary. The classifier + distillation prompt are a **governed
+    behavior with their own eval + review** (they decide *what* is remembered and *its class*).
 
 ## The build (once Accepted; behind the already-merged vector port)
 
 1. **Guest id + consent gate:** the widget carries a per-tenant anon id; `/chat` (server-derived region +
    consent) decides whether memory may be read/written for this turn.
-2. **Fact distillation (audited):** on a consented turn, extract 0–N short facts (an LLM extraction step
-   whose output is redacted + capped + reviewed), upsert to `vector(tenant, anon-id)`.
+2. **Fact distillation + sensitivity classification (audited, governed):** on a consented turn, extract
+   0–N short facts (an LLM step whose output is redacted + capped) and classify each as ordinary vs
+   special-category using the tenant's **per-industry sensitivity policy** (conservative default). Ordinary
+   facts gate on Consent 1; special-category facts gate on **Consent 2** + stricter storage. The extraction
+   prompt + classifier ship with their **own eval + governance review** (Invariant 11).
 3. **Recall:** read the shopper's facts into the brain's grounding/personalization (drives `relationship`
    + tailored recommendations) — under the same honesty/anti-manipulation guardrails.
 4. **Erasure + retention:** a data-rights handler + a TTL sweep, both via the vector port.
@@ -90,21 +173,35 @@ A **two-tier** memory model, **consent-gated by region**, storing **distilled fa
   depends on them.
 - **Named owner** merge (this ADR) = the explicit policy decision to build the tier.
 
-## Open questions (resolve before Accepted)
+## Open questions
 
-- **Consent UX** — an in-widget consent prompt for EU, merchant-configured copy, or reuse the storefront's
-  existing CMP signal? (Prefer honoring an existing CMP where present.)
-- **Default retention** — 60 days for guest facts? Per-merchant configurable?
-- **Merchant control** — can a merchant disable cross-visit memory for their store (some will want to)?
-- **Fact distillation** — the extraction prompt is itself a governed behavior (it decides what's
-  remembered); does it need its own eval + review?
-- **Guest-id lifetime / reset** — surface a "forget me" control?
+**Resolved this revision:**
+- **Consent UX** — ✅ the **contextual two-layer flow** above (Layer 0 default → Consent 1 ordinary →
+  Consent 2 explicit health, each just-in-time; reuse the storefront CMP for Layer 1 where present).
+- **Fact distillation governance** — ✅ **yes**: the extraction prompt + the sensitivity classifier are a
+  governed behavior with their **own eval + review** (Invariant 11) — they decide *what* is remembered and
+  *its sensitivity class*.
+- **Memory scope** — ✅ **B**: special-category facts remembered only behind explicit Consent 2.
+
+**Still open (resolve before Accepted):**
+- **Sensitive-fact TTL** — how much shorter than the 60-day default should special-category facts live
+  (e.g. 7–14 days, or session-life + a short grace)? Set with legal.
+- **Default retention (ordinary)** — 60 days for guest facts? Per-merchant configurable?
+- **Merchant control** — a per-store disable toggle **and** who authors/reviews the per-industry
+  sensitivity policy (Invariant 11) — merchant-proposed, PalUp-reviewed?
+- **Guest-id lifetime / reset** — surface the "manage what I remember / forget me" control (also the
+  Consent-2 withdrawal path).
 
 ## Consequences
 
 - (+) Real personalization + the per-tenant memory moat, portable behind the vector port; erasure and
   isolation are first-class.
+- (+) Safety-relevant facts (allergies) can be remembered to **protect** the shopper — behind explicit
+  consent — so the agent flags at-risk products proactively instead of forgetting a stated allergy. The
+  per-industry sensitivity map carries this to other verticals without changing the guardrails.
 - (−) EU shoppers get **no** cross-visit memory without consent (by design) — the agent must degrade
   gracefully to anonymous behavior there.
-- (−) Prerequisites are real: a consent/notice UX, a retention/erasure subsystem, and **legal instruments**
-  (privacy notice, DPA) that do not yet exist. This ADR is inert until those land + sign-off is recorded.
+- (−) The **health tier is the heaviest slice**: special-category data means encryption, a shorter TTL,
+  the explicit Consent-2 UX, legal instruments (privacy notice + DPA that cover health data), and a
+  reviewed per-industry sensitivity policy **plus its eval**. This ADR is inert until those land + the
+  `security-reviewer` and legal/privacy sign-offs are recorded.
