@@ -484,7 +484,7 @@ export function createBrain(
           }
         } else if (cls === "medical") {
           reply =
-            "As an AI assistant, I can't give medical advice on that — please check with a doctor or pharmacist. I'm happy to connect you with a person for anything order- or product-related.";
+            "I'm really sorry you're dealing with that, and I understand wanting answers. As an AI assistant I can't give medical advice or tell you what's causing it — but something like this is worth getting looked at, so please have a doctor or pharmacist check it soon. I'm here for anything order- or product-related, and I can bring in a person from our team if that would help.";
         } else if (cls === "abuse") {
           flags.push("offer_human");
           reply =
