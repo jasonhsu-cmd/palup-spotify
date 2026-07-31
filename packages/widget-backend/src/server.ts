@@ -9,16 +9,29 @@ import {
   type Signals,
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY, normalizeHistory } from "@palup/widget-brain";
-import type { RuntimeStatePort, ModelPort, VectorPort } from "@palup/platform-ports";
-import { createWidgetTokenIdentity, mintWidgetToken, createEnvSecrets, createStoreTelemetry, createMeteringModelPort, createInMemoryVectorStore } from "@palup/platform-ports";
+import type { RuntimeStatePort, ModelPort, VectorPort, Principal } from "@palup/platform-ports";
+import {
+  createWidgetTokenIdentity,
+  mintWidgetToken,
+  createShopperTokenIdentity,
+  mintShopperToken,
+  shopperIdTenant,
+  createEnvSecrets,
+  createStoreTelemetry,
+  createMeteringModelPort,
+  createInMemoryVectorStore,
+} from "@palup/platform-ports";
 import { createMemoryService, createStubDistiller, isMemoryEnabled } from "@palup/widget-memory";
 import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
-import { buildAuditInput } from "./audit.js";
+import { buildAuditInput, buildIdentityAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
+import { guardCommercePort, withRequestPrincipal } from "./commerce-guard.js";
+import { verifyShopifyAppProxyShopper } from "./shopify-shopper-identity.js";
+import { parseStoreDomains } from "./merchant-store.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
 // multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
@@ -92,7 +105,12 @@ const widgetHtml = readFileSync(
 );
 
 const { port: modelPort, name: modelName } = createModelPort();
-const commerce = createCommercePort();
+// ADR-0017 T7 — every commerce call goes through the ADR-0016 fail-closed guard. `commerceIsLive` is a
+// capability marker from the composition root (model.ts): false for MockCommerceAdapter, so the guard
+// is a tested no-op today; a future live adapter sets it true and every read/write below automatically
+// requires a verified shopper principal (bound per-request via withRequestPrincipal in the /chat handler).
+const { port: rawCommerce, isLive: commerceIsLive } = createCommercePort();
+const commerce = guardCommercePort(rawCommerce, commerceIsLive);
 
 export async function buildServer(opts?: {
   store?: RuntimeStatePort;
@@ -164,6 +182,25 @@ export async function buildServer(opts?: {
   const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
   const EMBED_KEYS = parseEmbedKeys();
   const widgetIdentity = createWidgetTokenIdentity(WIDGET_TOKEN_SECRET);
+  // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
+  // F4 (startup precondition): SHOPPER_AUTH is only ever HONORED when WIDGET_AUTH_REQUIRED is ALSO on —
+  // it needs a VERIFIED widget tenant to cross-check the shopper's tenant against (F1); under the
+  // unauthenticated RUNTIME_TENANT fallback that check would be vacuous. Misconfiguration (flag on,
+  // precondition unmet) degrades to "shoppers are anonymous", never to an unchecked cross-tenant bypass.
+  const SHOPPER_AUTH_FLAG = process.env.SHOPPER_AUTH === "true";
+  if (SHOPPER_AUTH_FLAG && !WIDGET_AUTH_REQUIRED) {
+    console.warn("[config] SHOPPER_AUTH=true requires WIDGET_AUTH_REQUIRED=true (ADR-0017 F4) — shoppers will be treated as anonymous until both are set.");
+  }
+  const SHOPPER_AUTH_ENABLED = SHOPPER_AUTH_FLAG && WIDGET_AUTH_REQUIRED;
+  const SHOPPER_TOKEN_SECRET = process.env.SHOPPER_TOKEN_SECRET;
+  const SHOPPER_TOKEN_TTL_SECONDS = posInt("SHOPPER_TOKEN_TTL_SECONDS", 3_600);
+  const shopperIdentity = createShopperTokenIdentity(SHOPPER_TOKEN_SECRET);
+  // Keyed-HMAC key for the T8 identity-resolution audit ref (F7 — never a bare hash). A verified shopper
+  // principal can only reach /chat after /shopper/session minted a token with SHOPPER_TOKEN_SECRET, so
+  // that secret is guaranteed configured whenever this key is actually used; AUDIT_HMAC_SECRET is an
+  // optional, separately-provisionable override so the audit ref key needn't literally equal the token-
+  // signing key (defense-in-depth key separation), while still needing nothing extra to provision today.
+  const AUDIT_HMAC_SECRET = process.env.AUDIT_HMAC_SECRET || SHOPPER_TOKEN_SECRET;
   // T7 — server-derived trust-bearing signals. These govern behavior/residency/competitor-mode, so they
   // come from merchant/server config, never the shopper. Single-tenant defaults for now; when real
   // multi-tenancy lands (post flag-flip) these are looked up per-merchant by tenantId. `region` should
@@ -209,6 +246,58 @@ export async function buildServer(opts?: {
     return { token: mintWidgetToken(WIDGET_TOKEN_SECRET, merchantId, WIDGET_TOKEN_TTL_SECONDS), expiresInSeconds: WIDGET_TOKEN_TTL_SECONDS };
   });
 
+  // ADR-0017 T2/T4 — mint a shopper session token from a verified Shopify App-Proxy request. Reached via
+  // the store's App Proxy, so `req.query` carries the App-Proxy-signed params (shop, timestamp,
+  // logged_in_customer_id, signature, ...). The widget's OWN token (Authorization: Bearer) establishes
+  // WHICH merchant tenant this request is for — the App-Proxy `shop` MUST cross-check against THAT
+  // verified tenant (step 5), never a client-claimed one. Off (SHOPPER_AUTH not honored, F4) ⇒ 404, so
+  // the feature is fully inert rather than partially reachable.
+  app.get("/shopper/session", async (req, reply) => {
+    if (!SHOPPER_AUTH_ENABLED) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    // Rate-limit the mint endpoint per IP (mirrors /widget/token) so a holder of one valid widget token
+    // can't hammer it for unbounded HMAC/mint work. Bucketed under the reserved mint tenant.
+    const rlXff = req.headers["x-forwarded-for"];
+    const rlIpKey = clientIpKey(Array.isArray(rlXff) ? rlXff[0] : rlXff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${rlIpKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open: minting is cheap and the /chat model path is separately capped */
+    }
+    const authHeader = req.headers["authorization"];
+    const widgetToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+    const merchantPrincipal = await widgetIdentity.authenticate(widgetToken);
+    if (merchantPrincipal.kind !== "merchant") {
+      reply.code(401);
+      return { error: "unauthenticated" };
+    }
+    if (!SHOPPER_TOKEN_SECRET) {
+      reply.code(500);
+      return { error: "shopper auth not configured" };
+    }
+    // shop-domain -> tenant reverse lookup (the forward map, tenant -> domain, is the same registry
+    // model.ts's grounding router already reuses for Storefront creds — see merchant-store.ts).
+    const domains = parseStoreDomains();
+    const reverseDomains: Record<string, string> = Object.create(null); // null-proto: no __proto__ pollution
+    for (const [tenant, domain] of Object.entries(domains)) if (domain) reverseDomains[domain] = tenant;
+    const rawQuery = req.query as Record<string, unknown>;
+    const params: Record<string, string | undefined> = Object.create(null);
+    for (const [k, v] of Object.entries(rawQuery)) if (typeof v === "string") params[k] = v; // repeated-key arrays are ignored, not trusted
+    const principal = await verifyShopifyAppProxyShopper(params, {
+      expectedTenant: merchantPrincipal.merchantId,
+      resolveTenant: (shop) => (Object.hasOwn(reverseDomains, shop) ? reverseDomains[shop] : undefined),
+      secrets,
+    });
+    if (principal.kind !== "shopper") return { shopper: null }; // browsing, not logged in — not an error
+    const token = mintShopperToken(SHOPPER_TOKEN_SECRET, principal.shopperId, principal.source, SHOPPER_TOKEN_TTL_SECONDS);
+    return { token, expiresInSeconds: SHOPPER_TOKEN_TTL_SECONDS };
+  });
+
   app.post("/chat", async (req, reply) => {
     const body = (req.body ?? {}) as {
       message?: string;
@@ -216,6 +305,9 @@ export async function buildServer(opts?: {
       sessionId?: string;
       idempotencyKey?: string;
       widgetToken?: string;
+      /** ADR-0017 — the shopper session token minted by /shopper/session (Bearer alternative below is
+       * the x-shopper-token HEADER; this body field mirrors widgetToken's dual-transport fallback). */
+      shopperToken?: string;
       /** Client's bounded recent transcript for in-session memory (server-validated; never persisted). */
       history?: unknown;
     };
@@ -249,6 +341,27 @@ export async function buildServer(opts?: {
     const serving = { tenantId };
     // Per-conversation state, durable + scoped to THIS tenant.
     const sessions = createRuntimeSessionStore(store, tenantId);
+
+    // ADR-0017 — shopper identity. A client-supplied shopperId/signals.shopperId is ALWAYS ignored (only
+    // a shopper session TOKEN, verified here, can establish one). F1 /chat tenant re-binding: even a
+    // validly-signed shopper token degrades to anonymous unless its embedded tenant prefix
+    // (`shopify:<tenant>:…`) equals THIS request's verified widget tenant — the mint-time cross-shop
+    // check (shopify-shopper-identity.ts step 5) is not enough on its own, because it only proves the
+    // token was minted for SOME verified tenant, not that it's being presented on THAT tenant's session.
+    let shopperPrincipal: Principal = { kind: "anonymous" };
+    if (SHOPPER_AUTH_ENABLED && principal.kind === "merchant") {
+      const shopperTokenHeader = req.headers["x-shopper-token"];
+      const shopperToken =
+        typeof shopperTokenHeader === "string"
+          ? shopperTokenHeader
+          : typeof body.shopperToken === "string"
+            ? body.shopperToken
+            : undefined;
+      const resolvedShopper = await shopperIdentity.authenticate(shopperToken);
+      if (resolvedShopper.kind === "shopper" && shopperIdTenant(resolvedShopper.shopperId) === tenantId) {
+        shopperPrincipal = resolvedShopper;
+      }
+    }
 
     // T6 — rate limit (denial-of-wallet): per-session / per-IP / per-tenant, atomic windowed counters on
     // the shared store. IP key is bounded/validated (an oversized X-Forwarded-For can't force a store
@@ -292,7 +405,17 @@ export async function buildServer(opts?: {
       //   • openIssues / safetyLatched — sourced ONLY from persisted session state, never client-injected.
       //   • kill — armed state comes from the operator registry (server); the shopper can neither arm nor bypass it.
       const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
-      const signals: Signals = deriveServingSignals(body.signals, { tenantId, kill: Boolean(kill), region: MERCHANT_REGION, groundingMode: MERCHANT_GROUNDING_MODE });
+      const signals: Signals = deriveServingSignals(body.signals, {
+        tenantId,
+        kill: Boolean(kill),
+        region: MERCHANT_REGION,
+        groundingMode: MERCHANT_GROUNDING_MODE,
+        // ADR-0017 — server-verified only (never body.signals.shopperId, which deriveServingSignals never
+        // reads anyway): undefined when shopperPrincipal stayed anonymous (SHOPPER_AUTH off, no/invalid
+        // token, or the F1 re-binding check above failed).
+        shopperId: shopperPrincipal.kind === "shopper" ? shopperPrincipal.shopperId : undefined,
+        shopperVerified: shopperPrincipal.kind === "shopper" ? shopperPrincipal.verified : undefined,
+      });
 
       // Canary split: a sticky fraction of THIS tenant's sessions is served by that tenant's canary
       // policy; the rest by champion. Keyed by the server-derived tenantId, so one merchant's canary can
@@ -307,7 +430,11 @@ export async function buildServer(opts?: {
       // here (count + total chars; oversize is truncated, never rejected), redacted at the model port like
       // any user turn, and NEVER stored server-side — SessionState stays control-only.
       const history = normalizeHistory(body.history);
-      const d = await session.send(message, signals, history);
+      // ADR-0017 T7 — bind THIS request's shopper principal for the ADR-0016 fail-closed commerce guard
+      // (commerce-guard.ts), so any commerce-port call the brain/support path makes during this turn
+      // (support.ts's order lookups) is checked against the principal that reached /chat this turn,
+      // never a stale/shared one (AsyncLocalStorage keeps concurrent requests from bleeding together).
+      const d = await withRequestPrincipal(shopperPrincipal, () => session.send(message, signals, history));
       // M3 — per-turn telemetry enrichment: the business dimensions (mode/pitch/servedBy/escalate) and
       // end-to-end turn latency the model-port decorator can't see. PII-free (no message/reply). Under
       // the server-derived tenant; fail-open like logTraffic.
@@ -325,6 +452,15 @@ export async function buildServer(opts?: {
       await store.tx(serving, async (t) => {
         await t.put("session", sessionId, session.state, { ttlSeconds: SESSION_TTL_SECONDS });
         if (auditEntry) auditRec = await t.audit(auditEntry);
+        // ADR-0017 T8 — identity-resolution audit (PII-safe, F7 keyed HMAC): only for a turn where the
+        // shopper resolved to a server-verified principal (no noise for the anonymous common case,
+        // mirrors the governance-relevant-only policy above). AUDIT_HMAC_SECRET is guaranteed configured
+        // whenever shopperPrincipal.kind==="shopper" is reachable (see its declaration above).
+        if (shopperPrincipal.kind === "shopper" && AUDIT_HMAC_SECRET) {
+          await t.audit(
+            buildIdentityAuditInput({ shopperId: shopperPrincipal.shopperId, source: shopperPrincipal.source, tenantId, hmacKey: AUDIT_HMAC_SECRET }),
+          );
+        }
       });
       // External audit-chain anchor (#19 head-anchor): emit the chain head to stdout → Cloud Logging
       // captures it immutably, OUTSIDE the DB's mutable surface. Reconciling these anchors against

@@ -72,4 +72,28 @@ describe("deriveServingSignals — client signals are untrusted", () => {
     expect(out.region).toBe("eu");
     expect(out.groundingMode).toBe("general");
   });
+
+  // ADR-0017 T5: shopperId + relationship are server-derived from ctx, never the client.
+  describe("ADR-0017: shopperId + relationship", () => {
+    it("a client-sent shopperId/relationship is dropped — anonymous ctx ⇒ anonymous relationship, no shopperId", () => {
+      const out = deriveServingSignals({ shopperId: "evil-injected-id", relationship: "vip" } as Signals, ctx);
+      expect(out.shopperId).toBeUndefined();
+      expect(out.relationship).toBe("anonymous");
+    });
+
+    it("a verified ctx shopperId ⇒ relationship 'new' (never vip/subscriber — ADR-0015 Tier 2 territory)", () => {
+      const out = deriveServingSignals(
+        { shopperId: "evil-injected-id", relationship: "vip" } as Signals,
+        { ...ctx, shopperId: "shopify:acme:48291", shopperVerified: true },
+      );
+      expect(out.shopperId).toBe("shopify:acme:48291"); // from ctx, never the client's "evil-injected-id"
+      expect(out.relationship).toBe("new");
+    });
+
+    it("shopperId present but NOT verified ⇒ treated as anonymous (defense in depth)", () => {
+      const out = deriveServingSignals(undefined, { ...ctx, shopperId: "shopify:acme:48291", shopperVerified: false });
+      expect(out.relationship).toBe("anonymous");
+      expect(out.shopperId).toBeUndefined(); // the id is gated on `verified` too — never keys ownership unverified
+    });
+  });
 });

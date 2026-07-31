@@ -40,6 +40,9 @@ export function createGroundingPort(
 }
 
 // Commerce source: mock orders/policy/subscription for now; the Shopify adapter swaps in behind the port.
-export function createCommercePort(): CommercePort {
-  return new MockCommerceAdapter();
+// `isLive` (ADR-0017 T7 capability marker) tells the ADR-0016 fail-closed guard (commerce-guard.ts)
+// whether this IS a real/live adapter — false here, so the guard is a tested no-op for this slice. A
+// future live-adapter PR sets isLive:true and the guard's fail-closed check activates automatically.
+export function createCommercePort(): { port: CommercePort; isLive: boolean } {
+  return { port: new MockCommerceAdapter(), isLive: false };
 }
