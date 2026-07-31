@@ -104,7 +104,10 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       const o = await resolveOwned();
       // Past-window if the RESOLVED order is old OR the shopper states an age beyond the window — either
       // way honesty wins; never quote a mismatched order's age as if it were the one they mean.
-      const claimedPast = statedDays !== undefined && statedDays > policy.returnWindowDays;
+      // Only trust the shopper's stated age when NO order is named/resolved by id — a named order's
+      // actual placedDaysAgo is authoritative, so "return order #1042 — I've had this account 90 days"
+      // must NOT read the 90 as the order's age (the !orderId guard mirrors the order_status branch).
+      const claimedPast = !orderId && statedDays !== undefined && statedDays > policy.returnWindowDays;
       const past = (o ? o.placedDaysAgo > policy.returnWindowDays : false) || claimedPast;
       if (past) {
         flags.push("escalate");

@@ -53,6 +53,11 @@ describe("support guardrails (in code)", () => {
     expect(r.reply).not.toMatch(/within our 30-day window/);
     expect(r.escalate).toBe(true);
   });
+  it("a named in-window return is NOT denied because of an unrelated 'N days' figure", async () => {
+    // #1042 is 3 days old and named explicitly — a "90 days" account-age figure must not fabricate its age.
+    const r = await handleSupport(c, shopper, "I want to return order #1042 — I've had this account for 90 days");
+    expect(r.reply).not.toMatch(/past our 30-day/);
+  });
   it("does not answer an order-age question from a mismatched recent order", async () => {
     const r = await handleSupport(c, shopper, "it's been 8 days, where is it?");
     expect(r.reply).toMatch(/order number|8-day/i); // #1042 is 3 days old — don't assert it as the 8-day one

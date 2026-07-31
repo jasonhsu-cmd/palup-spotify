@@ -56,6 +56,18 @@ describe("grounding / honesty system prompt", () => {
     expect(sys(spy)).toMatch(/BROWSING/);
   });
 
+  it("a deliberating question is NOT a buy signal (false-positive boundary)", async () => {
+    const { brain } = spyBrain();
+    const d = await brain.decide({ cart: "has_items" }, "should I buy it, or is the other one better?");
+    expect(d.flags).not.toContain("buy_signal");
+  });
+
+  it("a bare price mention is NOT a budget ceiling (false-positive boundary)", async () => {
+    const { brain, spy } = spyBrain();
+    await brain.decide({ cart: "empty" }, "is the $18 cleanser any good?");
+    expect(sys(spy)).not.toMatch(/at or below \$/);
+  });
+
   it("word-boundary support gate: 'returning' (browsing) routes to sales, not support", async () => {
     const { brain } = spyBrain();
     const d = await brain.decide({}, "I'm returning to skincare after a long break — what's good for me?");

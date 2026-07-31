@@ -677,8 +677,10 @@ export function createBrain(
           "\nSKEPTIC POLICY: The shopper is skeptical about efficacy. Back every claim with SPECIFIC facts from the CATALOG (named actives/ingredients, what the product is formulated for, how to use it) — never vague hype. Be honest about what it can and can't do and that results vary. Disclose that you are an AI assistant.";
       }
       // Stated budget / gift — recommend within budget and never push over it (within-budget / in-budget).
-      const budgetMatch = text.match(/(?:under|below|around|about|~|up to|max(?:imum)?|budget of|spend)\s*\$?\s*(\d{1,4})|\$\s*(\d{1,4})\b/);
-      const budgetCap = budgetMatch ? Number(budgetMatch[1] ?? budgetMatch[2]) : undefined;
+      // Require explicit budget INTENT, not a bare "$N" — "is the $18 cleanser any good?" is not a
+      // budget ceiling and must not suppress recommendations across the catalog.
+      const budgetMatch = text.match(/(?:under|below|around|about|~|up to|max(?:imum)?|budget(?: of)?|spend)\s*\$?\s*(\d{1,4})/);
+      const budgetCap = budgetMatch ? Number(budgetMatch[1]) : undefined;
       const isGift = /\bgift\b|present for|for my (mom|mother|sister|friend|dad|father|partner|wife|husband|girlfriend|boyfriend|daughter|son|brother)/.test(text);
       if (budgetCap !== undefined || isGift) {
         flags.push(isGift ? "gift" : "budget");
@@ -694,7 +696,8 @@ export function createBrain(
       // the model and contradict it, so we force pitch=none in code (restraint-after-close, §5). Narrow
       // to unambiguous decide/checkout phrasing to avoid catching a question ("should I take the retinol?").
       const buySignal =
-        /\b(i'?ll take it|i'?ll take the|i'?ll buy|i want to buy|ready to (buy|check ?out|purchase)|check ?out|checkout|buy it|purchase it|place (the|my) order|let'?s (buy|check ?out|do it))\b/.test(text);
+        /\b(i'?ll take it|i'?ll take the|i'?ll buy|i want to buy|i'?m ready to (buy|check ?out|purchase)|ready to (buy|check ?out|purchase)|take me to check ?out|proceed to check ?out|check ?out now|place (the|my) order|let'?s (buy|check ?out|do it))\b/.test(text) &&
+        !/\b(should i|shall i|do you think|is it worth|worth it|can i|could i)\b/.test(text); // not a deliberation
       // Idle browser (NOT "no idea where to start", which wants a discovery rec) — a light greeting, no
       // proactive pitch (no-proactive-pitch / build-trust). Narrow to unambiguous "just looking" phrasing.
       const browsing = /just browsing|just looking|looking around|only browsing|not buying (anything |any )?today|not ready to buy|no thanks,? just/.test(text);
