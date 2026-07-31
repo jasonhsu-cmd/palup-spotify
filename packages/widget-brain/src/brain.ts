@@ -428,8 +428,14 @@ export function createBrain(
             const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
             // Sanitize the merchant allergen text before it goes into a shopper-facing reply (strip HTML
             // so raw tags never surface as text; the widget renders replies as textContent, so no XSS).
-            const allergenNote = sanitizeGroundingText(ctx?.policy.allergens) || "I'd check the full ingredient list on the product page.";
-            reply = `As an AI assistant I can't guarantee a product is safe for your allergy, and I won't guess about a specific product's ingredients from here. What I can share: ${allergenNote} For the exact ingredient list of a particular product, check its product page — or I can bring in a person to confirm it for you. Given your allergy a patch test is wise, and please check with your doctor if you're unsure.`;
+            // Ground the answer in the merchant's own allergen/ingredient statement FIRST — lead with it
+            // rather than burying it behind "I won't guess" (SX-01 wants the reply to actually ground the
+            // catalog fact) — then hold every safety guarantee: never promise a product is safe, advise a
+            // patch test + doctor, escalate to a human.
+            const allergen = sanitizeGroundingText(ctx?.policy.allergens);
+            reply = allergen
+              ? `Here's what our product information lists on that: ${allergen} Even so, as an AI assistant I can't guarantee any product is safe for your specific allergy, and I won't guess about a single product's full ingredients from here — for the exact ingredient list, check that product's page. Given your allergy a patch test is wise, please confirm with your doctor if you're unsure, and I can bring in a person to double-check for you.`
+              : `As an AI assistant I can't guarantee a product is safe for your allergy, and I won't guess about ingredients from here. For the exact ingredient list, check the product page; a patch test is wise given your allergy, please confirm with your doctor if you're unsure, and I can bring in a person to help.`;
           } else {
             // A reaction: empathize, don't dismiss, don't falsely reassure, no medical advice, escalate.
             // Split active-reaction (burning/red NOW → defer + escalate, no procedure advice) from a
