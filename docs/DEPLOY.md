@@ -5,14 +5,16 @@ Staging **auto-deploys on merge to `main`**; **production is never auto-deployed
 `STAGING_ENABLED=true`); before setup the workflows were guarded by `STAGING_ENABLED` so `main` stayed
 green.
 
-> Status: **staging is deployed to Cloud Run and boots.** The widget backend deploys via
-> `deploy-staging.yml` and passes the post-deploy health smoke — `/health` → `{"ok":true,"model":"vertex/gemini"}`
-> (the `model` field only reflects that the Vertex adapter is wired when `GOOGLE_CLOUD_PROJECT` is set; it is
-> not proof a live model call succeeded, and the smoke greps `"ok":true` only); the widget UI is served at `/`.
-> Every merge to `main` auto-redeploys. The live Gemini call and the exact model id are **as pinned in
-> `.github/workflows/deploy-staging.yml`** (`GOOGLE_CLOUD_LOCATION=global`, `PALUP_MODEL=gemini-2.5-flash`) and
-> are **NOT independently re-verified in this repo** — no in-repo smoke exercises `/chat` end-to-end against the
-> real model, so a grounded live reply is asserted by config, not proven here.
+> Status: **staging is deployed to Cloud Run and serves live `/chat`.** The widget backend deploys via
+> `deploy-staging.yml` and passes a post-deploy smoke that now exercises the **full serving path end-to-end**:
+> `/health` → `{"ok":true,"model":"vertex/gemini"}` (and **fails if `model` is `mock`**, guarding against a
+> silent fall-back off the Vertex adapter); an unauthenticated `/chat` is rejected with **401** (auth
+> enforced); then it mints a widget token and calls `/chat`, asserting a **real, non-empty model reply** (not
+> the auth fall-back or the oversize-input rejection). The widget UI is served at `/`. Every merge to `main`
+> auto-redeploys and re-runs this gate. The exact model id is pinned in `.github/workflows/deploy-staging.yml`
+> (`GOOGLE_CLOUD_LOCATION=global`, `PALUP_MODEL=gemini-2.5-flash`). Reply content is asserted **structurally**
+> (non-empty, not a canned string), not verbatim — the model is nondeterministic. This exact flow was also
+> verified live by hand against the deployed service (2026-07-31).
 > **Run-time state is durable + shared:** backed by a Cloud SQL Postgres instance (`palup-staging`,
 > `db-f1-micro`) via the `RuntimeStatePort`, so the operator Kill Switch, session state, canary, and the
 > immutable audit log survive restarts and propagate across instances (NN #4/#5). `DATABASE_URL` is a
@@ -22,12 +24,13 @@ green.
 > widget tenant-identity are live (M1); the `rs_audit` INSERT-only GRANT is **applied + verified** (#19,
 > see the Cloud SQL section); **per-merchant Shopify grounding is live** (M2 — see *Shopify grounding*
 > below); and cost/latency telemetry is captured with an operator-gated read (M3).
-> **Auth enforcement — how to flip it on (the demo keeps working):** the service is `--allow-unauthenticated`
-> at the Cloud Run edge and `WIDGET_AUTH_REQUIRED` is OFF during rollout, so `/chat` falls back to the demo
-> tenant for callers without a valid widget token. To enforce per-merchant identity:
-> 1. **Provision `WIDGET_TOKEN_SECRET`** (a random signing secret) in Secret Manager and mount it into the
->    Cloud Run service (`--update-secrets WIDGET_TOKEN_SECRET=…`). This is the HMAC key for widget tokens.
-> 2. **Set `WIDGET_AUTH_REQUIRED=true`** (env var).
+> **Auth enforcement — now ON (the demo keeps working):** the service is `--allow-unauthenticated` at the
+> Cloud Run edge, but `WIDGET_AUTH_REQUIRED=true` (repo variable, passed through at deploy), so the app-level
+> widget-token check is the tenancy gate — a `/chat` request without a valid widget token returns **401**
+> (verified live and asserted by the post-deploy smoke). The two enabling steps (both done):
+> 1. **`WIDGET_TOKEN_SECRET`** (a random signing secret) is provisioned in Secret Manager and mounted into the
+>    Cloud Run service (`--set-secrets WIDGET_TOKEN_SECRET=widget-token-secret:latest`) — the HMAC key for widget tokens.
+> 2. **`WIDGET_AUTH_REQUIRED=true`** (set as a repo variable).
 >
 > The **demo keeps working** with no other change: the served widget (`packages/widget/public/index.html`)
 > mints a short-TTL token from the built-in embed key `demo-embed-key` (→ tenant `demo`) via `/widget/token`
@@ -100,8 +103,10 @@ secrets/variables incl. `STAGING_ENABLED=true`). The manual equivalent:
 ## What runs
 
 - **`.github/workflows/deploy-staging.yml`** — on push to `main`: `gcloud run deploy` from source, then a
-  **post-deploy health smoke gate** (`/health` returns `{"ok":true}`). The service gets
-  `GOOGLE_CLOUD_PROJECT`/`LOCATION`/`PALUP_MODEL`, so it serves the **real Gemini** model.
+  **post-deploy smoke gate** that exercises the full serving path — `/health` (`ok:true` + live `vertex/gemini`
+  adapter, failing on `mock`), unauthenticated `/chat` → **401**, token mint, and an authenticated `/chat`
+  asserting a real non-empty model reply. The service gets `GOOGLE_CLOUD_PROJECT`/`LOCATION`/`PALUP_MODEL`, so
+  it serves the **real Gemini** model.
 - **`.github/workflows/drift-check.yml`** — **manual** ("Run workflow"), no schedule: a live-model smoke
   + the cross-family judge (guarded by `STAGING_ENABLED` / `JUDGE_ENABLED`). The offline eval is
   deterministic and already runs in CI on every PR, so it isn't re-run on a timer; trigger this only to

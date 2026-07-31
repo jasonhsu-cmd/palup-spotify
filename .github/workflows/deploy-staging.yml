@@ -32,10 +32,44 @@ jobs:
             --add-cloudsql-instances "${{ vars.GCP_PROJECT }}:${{ vars.GCP_REGION || 'us-central1' }}:palup-staging" \
             --set-secrets "DATABASE_URL=palup-staging-database-url:latest,WIDGET_TOKEN_SECRET=widget-token-secret:latest" \
             --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT }},GOOGLE_CLOUD_LOCATION=global,PALUP_MODEL=gemini-2.5-flash,PALUP_REQUIRE_DATABASE_URL=true,WIDGET_AUTH_REQUIRED=${{ vars.WIDGET_AUTH_REQUIRED || 'false' }}"
-      - name: Post-deploy smoke gate (health)
+      - name: Post-deploy smoke gate (health + live /chat + auth)
         run: |
+          set -euo pipefail
           URL=$(gcloud run services describe palup-widget-staging \
             --project "${{ vars.GCP_PROJECT }}" \
             --region "${{ vars.GCP_REGION || 'us-central1' }}" --format 'value(status.url)')
           echo "staging URL: $URL"
-          curl -fsS "$URL/health" | grep -q '"ok":true'
+
+          # 1) Health — service up AND the live Vertex model adapter is wired. Guards against a silent
+          #    fall-back to the mock adapter (e.g. if GOOGLE_CLOUD_PROJECT ever drops out of the deploy env).
+          HEALTH=$(curl -fsS --retry 5 --retry-connrefused --retry-delay 3 --max-time 30 "$URL/health")
+          echo "health: $HEALTH"
+          echo "$HEALTH" | jq -e '.ok == true' >/dev/null
+          if [ "$(echo "$HEALTH" | jq -r '.model')" = "mock" ]; then
+            echo "::error::/health reports model=mock — live Vertex adapter not wired"; exit 1
+          fi
+
+          # 2) Auth is ENFORCED — an unauthenticated /chat must be rejected (WIDGET_AUTH_REQUIRED=true).
+          CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -X POST "$URL/chat" \
+            -H 'Content-Type: application/json' -d '{"message":"hello","sessionId":"smoke-noauth"}')
+          [ "$CODE" = "401" ] || { echo "::error::unauthenticated /chat returned $CODE, expected 401"; exit 1; }
+          echo "auth enforced: no-token /chat -> 401"
+
+          # 3) Mint a widget token (built-in demo embed key -> demo tenant).
+          TOKEN=$(curl -fsS --max-time 30 "$URL/widget/token?key=demo-embed-key" | jq -r '.token')
+          [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "::error::widget token mint failed"; exit 1; }
+
+          # 4) Authenticated /chat exercises the FULL serving path end-to-end (HTTP -> token auth -> tenant
+          #    bind -> brain -> live Gemini) and must return a real, non-empty reply — not the auth fall-back
+          #    or the oversize-input rejection. Content is not asserted verbatim (the model is nondeterministic).
+          RESP=$(curl -fsS --max-time 60 -X POST "$URL/chat" \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d '{"message":"Do you have a moisturizer for dry, sensitive skin?","sessionId":"smoke-live"}')
+          echo "chat: $RESP"
+          echo "$RESP" | jq -e '.reply | type == "string" and length > 0' >/dev/null
+          REPLY=$(echo "$RESP" | jq -r '.reply')
+          case "$REPLY" in
+            "This assistant needs to be opened from the store page."*) echo "::error::authenticated /chat hit the auth fall-back"; exit 1 ;;
+            "Sorry — that message is too long."*) echo "::error::/chat rejected the smoke message"; exit 1 ;;
+          esac
+          echo "live /chat end-to-end OK: ${REPLY:0:80}"
