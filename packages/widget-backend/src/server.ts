@@ -9,8 +9,9 @@ import {
   type Signals,
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY, normalizeHistory } from "@palup/widget-brain";
-import type { RuntimeStatePort, ModelPort } from "@palup/platform-ports";
-import { createWidgetTokenIdentity, mintWidgetToken, createEnvSecrets, createStoreTelemetry, createMeteringModelPort } from "@palup/platform-ports";
+import type { RuntimeStatePort, ModelPort, VectorPort } from "@palup/platform-ports";
+import { createWidgetTokenIdentity, mintWidgetToken, createEnvSecrets, createStoreTelemetry, createMeteringModelPort, createInMemoryVectorStore } from "@palup/platform-ports";
+import { createMemoryService, createStubDistiller, isMemoryEnabled } from "@palup/widget-memory";
 import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -93,7 +94,14 @@ const widgetHtml = readFileSync(
 const { port: modelPort, name: modelName } = createModelPort();
 const commerce = createCommercePort();
 
-export async function buildServer(opts?: { store?: RuntimeStatePort; modelPort?: ModelPort }) {
+export async function buildServer(opts?: {
+  store?: RuntimeStatePort;
+  modelPort?: ModelPort;
+  /** ADR-0015 T12 test seam (mirrors `store`/`modelPort`): lets a test inject a spy VectorPort to prove
+   * the memory subsystem is never touched while the double gate (isMemoryEnabled) is off. Prod always
+   * uses the dev in-memory adapter below — a real vector-DB adapter is a later, separately-gated swap. */
+  vectorPort?: VectorPort;
+}) {
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads.
   const store = opts?.store ?? (await createRuntimeStore()).store;
@@ -109,6 +117,34 @@ export async function buildServer(opts?: { store?: RuntimeStatePort; modelPort?:
   // threaded message context. Prod always uses the module-level, redaction-wrapped adapter (model.ts).
   const activeModelPort = opts?.modelPort ?? modelPort;
   const meteredModel = createMeteringModelPort(activeModelPort, telemetry, { agentType: RUNTIME_AGENT_TYPE });
+  // ADR-0015 T12 — cross-visit memory, wired ONLY behind the double gate (flag.ts: MEMORY_ADR_ACCEPTED is
+  // hardcoded false, so `isMemoryEnabled()` is false today regardless of any env var — NN#1: no
+  // config-only flip). When off (always, in this PR), the MemoryService is never even constructed, so
+  // nothing here — including an injected test-seam vector port — is ever touched: the composition root
+  // (this file) MAY import @palup/widget-memory (the brain itself never does — no dep cycle). The dev
+  // in-memory vector adapter (or an injected spy) stands in for a real vector-DB adapter later; the
+  // runtime store's own audit surface is reused as-is (no new audit mechanism).
+  const memoryService = isMemoryEnabled()
+    ? createMemoryService({
+        vector: opts?.vectorPort ?? createInMemoryVectorStore(),
+        audit: store,
+        distiller: createStubDistiller(),
+      })
+    : undefined;
+  const memoryPort = memoryService
+    ? {
+        recall: (ctx: { tenantId: string; anonId: string }) =>
+          memoryService.recall({
+            tenantId: ctx.tenantId,
+            anonId: ctx.anonId,
+            // Consent tiers are enforced at WRITE time in the memory service (decideMemoryWrite); recall
+            // itself never consults them (service.ts) — these are structural placeholders to satisfy
+            // MemoryCtx's shape, not a live consent decision.
+            consent1: "unknown",
+            consent2: "unknown",
+          }),
+      }
+    : undefined;
   // One brain per active policy (champion + any canary), built lazily and cached by policy id. The
   // brain is tenant-agnostic (grounding tenant rides each request via signals.tenantId); this cache is
   // per-server-instance.
@@ -116,7 +152,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort; modelPort?:
   const brainFor = (policy: Policy) => {
     let b = brains.get(policy.id);
     if (!b) {
-      b = createBrain(meteredModel, grounding, policy, commerce, "shopper-demo");
+      b = createBrain(meteredModel, grounding, policy, commerce, "shopper-demo", memoryPort);
       brains.set(policy.id, b);
     }
     return b;

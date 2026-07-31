@@ -127,6 +127,9 @@ importers:
       '@palup/widget-brain':
         specifier: workspace:*
         version: link:../widget-brain
+      '@palup/widget-memory':
+        specifier: workspace:*
+        version: link:../widget-memory
       fastify:
         specifier: ^5.0.0
         version: 5.10.0
