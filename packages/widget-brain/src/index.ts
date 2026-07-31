@@ -1,4 +1,4 @@
-export { createBrain, DEFAULT_POLICY } from "./brain.js";
+export { createBrain, DEFAULT_POLICY, normalizeHistory, HISTORY_MAX_TURNS, HISTORY_MAX_CHARS } from "./brain.js";
 export type { Brain } from "./brain.js";
 export {
   createSession,

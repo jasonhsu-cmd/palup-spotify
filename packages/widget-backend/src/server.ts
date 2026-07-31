@@ -8,8 +8,8 @@ import {
   type Policy,
   type Signals,
 } from "@palup/widget-brain";
-import { DEFAULT_POLICY } from "@palup/widget-brain";
-import type { RuntimeStatePort } from "@palup/platform-ports";
+import { DEFAULT_POLICY, normalizeHistory } from "@palup/widget-brain";
+import type { RuntimeStatePort, ModelPort } from "@palup/platform-ports";
 import { createWidgetTokenIdentity, mintWidgetToken, createEnvSecrets, createStoreTelemetry, createMeteringModelPort } from "@palup/platform-ports";
 import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
@@ -93,7 +93,7 @@ const widgetHtml = readFileSync(
 const { port: modelPort, name: modelName } = createModelPort();
 const commerce = createCommercePort();
 
-export async function buildServer(opts?: { store?: RuntimeStatePort }) {
+export async function buildServer(opts?: { store?: RuntimeStatePort; modelPort?: ModelPort }) {
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads.
   const store = opts?.store ?? (await createRuntimeStore()).store;
@@ -105,7 +105,10 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // model call's tokens + latency are recorded under the request tenant; fail-open, so it can never
   // break serving. Built here because the store-backed telemetry adapter needs the store.
   const telemetry = createStoreTelemetry(store);
-  const meteredModel = createMeteringModelPort(modelPort, telemetry, { agentType: RUNTIME_AGENT_TYPE });
+  // Test seam (mirrors the injectable `store`): a test may inject a spy model port to observe the
+  // threaded message context. Prod always uses the module-level, redaction-wrapped adapter (model.ts).
+  const activeModelPort = opts?.modelPort ?? modelPort;
+  const meteredModel = createMeteringModelPort(activeModelPort, telemetry, { agentType: RUNTIME_AGENT_TYPE });
   // One brain per active policy (champion + any canary), built lazily and cached by policy id. The
   // brain is tenant-agnostic (grounding tenant rides each request via signals.tenantId); this cache is
   // per-server-instance.
@@ -177,6 +180,8 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       sessionId?: string;
       idempotencyKey?: string;
       widgetToken?: string;
+      /** Client's bounded recent transcript for in-session memory (server-validated; never persisted). */
+      history?: unknown;
     };
     const sessionId = String(body.sessionId ?? "anon");
     const message = String(body.message ?? "");
@@ -261,7 +266,12 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
       const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
       const turnStart = Date.now();
-      const d = await session.send(message, signals);
+      // In-session multi-turn memory: thread the CLIENT's bounded recent transcript into the model
+      // context so a follow-up ("what about the other one?") has its antecedent. It is validated + bounded
+      // here (count + total chars; oversize is truncated, never rejected), redacted at the model port like
+      // any user turn, and NEVER stored server-side — SessionState stays control-only.
+      const history = normalizeHistory(body.history);
+      const d = await session.send(message, signals, history);
       // M3 — per-turn telemetry enrichment: the business dimensions (mode/pitch/servedBy/escalate) and
       // end-to-end turn latency the model-port decorator can't see. PII-free (no message/reply). Under
       // the server-derived tenant; fail-open like logTraffic.

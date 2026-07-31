@@ -1,6 +1,7 @@
 import type { CommercePort, GroundingContext, GroundingPort, ModelPort } from "@palup/platform-ports";
 import type {
   Decision,
+  HistoryTurn,
   PitchKind,
   Policy,
   SafetyClass,
@@ -231,8 +232,50 @@ const PITCH_PLAYBOOK: Record<PitchKind, string> = {
   none: "",
 };
 
+// In-session multi-turn memory bounds (docs/design/shopper-widget.md §3.2, §6A). The CLIENT replays a
+// bounded recent transcript on each /chat; the brain threads it into the model context (groundedMessages)
+// so the model has prior-turn context. This is NOT server-side memory: the transcript is never persisted
+// (SessionState stays control-only) and — being non-system messages — is redacted at the model port
+// before egress. Bounds are enforced at the choke point so a client can't blow up the context window.
+export const HISTORY_MAX_TURNS = 8; // keep only the most recent N turns (messages)
+export const HISTORY_MAX_CHARS = 4_000; // total char budget across kept turns (matches MAX_MESSAGE_CHARS)
+
+/**
+ * Validate + BOUND an untrusted history array into safe, ordered prior turns: keep only well-formed
+ * turns (valid role + non-empty string content), cap the COUNT to the most-recent `maxTurns`, then cap
+ * the TOTAL characters newest→oldest (the boundary turn is truncated, older overflow is dropped). A
+ * non-array or malformed input yields `[]`. Shared by the server (bounds the request) and the brain
+ * (final guarantee), so however history arrives it can never exceed the cap. Never throws.
+ */
+export function normalizeHistory(
+  raw: unknown,
+  maxTurns = HISTORY_MAX_TURNS,
+  maxChars = HISTORY_MAX_CHARS,
+): HistoryTurn[] {
+  if (!Array.isArray(raw)) return [];
+  const valid: HistoryTurn[] = [];
+  for (const t of raw) {
+    if (!t || typeof t !== "object") continue;
+    const role = (t as { role?: unknown }).role;
+    const content = (t as { content?: unknown }).content;
+    if ((role === "user" || role === "agent") && typeof content === "string" && content.length > 0) {
+      valid.push({ role, content });
+    }
+  }
+  const recent = valid.slice(-Math.max(0, maxTurns)); // most-recent N turns
+  const out: HistoryTurn[] = [];
+  let budget = Math.max(0, maxChars);
+  for (let i = recent.length - 1; i >= 0 && budget > 0; i--) {
+    const turn = recent[i]!;
+    const content = turn.content.length > budget ? turn.content.slice(0, budget) : turn.content;
+    budget -= content.length;
+    out.unshift({ role: turn.role, content });
+  }
+  return out;
+}
+
 export interface Brain {
-  decide(signals: Signals, message: string): Promise<Decision>;
+  decide(signals: Signals, message: string, history?: HistoryTurn[]): Promise<Decision>;
 }
 
 export function createBrain(
@@ -246,15 +289,30 @@ export function createBrain(
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
   // never be baked into the brain here. `"demo"` is only the rollout fallback for an unauthenticated
   // request while WIDGET_AUTH_REQUIRED is off.
-  const groundedMessages = async (message: string, tenantId: string, systemExtra = "") => {
+  const groundedMessages = async (
+    message: string,
+    tenantId: string,
+    systemExtra = "",
+    history: HistoryTurn[] = [],
+  ) => {
     const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
+    // In-session multi-turn memory (§6A): thread the client's bounded recent transcript BETWEEN the
+    // system message and the CURRENT user turn, so a follow-up like "what about the other one?" has its
+    // antecedent. Client "agent" role → model "assistant". These are NON-system messages, so the
+    // redacting model port still masks any PII (a pasted card) in them at egress. Bounds are re-applied
+    // HERE — the single choke point that builds the model context — so no caller can blow up the window.
+    const prior = normalizeHistory(history).map((t) => ({
+      role: (t.role === "agent" ? "assistant" : "user") as "assistant" | "user",
+      content: t.content,
+    }));
     return [
       { role: "system" as const, content: systemPrompt(policy, ctx) + systemExtra },
+      ...prior,
       { role: "user" as const, content: message },
     ];
   };
   return {
-    async decide(signals: Signals, message: string): Promise<Decision> {
+    async decide(signals: Signals, message: string, history: HistoryTurn[] = []): Promise<Decision> {
       // Server-derived (see Signals.tenantId); never client-set. In production the server ALWAYS sets
       // this (deriveServingSignals), so `?? "demo"` only serves direct/eval callers testing the demo
       // merchant. The fail-closed backstop for an unknown tenant lives in the grounding adapter
@@ -401,7 +459,7 @@ export function createBrain(
         flags.push("mode_support", "no_pitch");
         const stuck = text.includes("just fix it") || text.includes("need help") || text.includes("none of this");
         if (stuck) flags.push("escalate");
-        const gen = await model.complete({ messages: await groundedMessages(message, tenantId), temperature: 0, tenantId });
+        const gen = await model.complete({ messages: await groundedMessages(message, tenantId, "", history), temperature: 0, tenantId });
         if (replyOffersUngroundedDiscount(gen.text)) return discountGuardrail(); // (a) never serve an invented/injected discount
         const reply = stuck
           ? "I'm sorry this has been frustrating — I'm connecting you with a person who can resolve it."
@@ -494,7 +552,7 @@ export function createBrain(
         }
       }
       const gen = await model.complete({
-        messages: await groundedMessages(message, tenantId, systemExtra + PITCH_PLAYBOOK[pitch]),
+        messages: await groundedMessages(message, tenantId, systemExtra + PITCH_PLAYBOOK[pitch], history),
         temperature: 0,
         tenantId,
       });
