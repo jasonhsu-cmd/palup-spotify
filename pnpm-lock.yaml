@@ -137,6 +137,15 @@ importers:
         specifier: workspace:*
         version: link:../platform-ports
 
+  packages/widget-memory:
+    dependencies:
+      '@palup/platform-ports':
+        specifier: workspace:*
+        version: link:../platform-ports
+      '@palup/widget-brain':
+        specifier: workspace:*
+        version: link:../widget-brain
+
 packages:
 
   '@anthropic-ai/sdk@0.115.0':
