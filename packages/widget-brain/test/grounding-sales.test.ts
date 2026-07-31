@@ -28,6 +28,14 @@ describe("grounding / honesty system prompt", () => {
     expect(sys(spy)).toMatch(/PITCH - cross-sell/);
   });
 
+  it("an explicit buy/checkout signal forces pitch=none — no upsell directive reaches the model (restraint-after-close)", async () => {
+    const { brain, spy } = spyBrain();
+    const d = await brain.decide({ cart: "has_items" }, "I'll take the niacinamide serum, checkout?");
+    expect(d.pitch).toBe("none");
+    expect(d.flags).toContain("buy_signal");
+    expect(sys(spy)).not.toMatch(/PITCH - cross-sell/); // the contradictory cross-sell nudge is gone
+  });
+
   it("word-boundary support gate: 'returning' (browsing) routes to sales, not support", async () => {
     const { brain } = spyBrain();
     const d = await brain.decide({}, "I'm returning to skincare after a long break — what's good for me?");

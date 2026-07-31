@@ -32,6 +32,14 @@ describe("safety-behavior handlers (rebuilt)", () => {
     expect(d.escalateToHuman).toBe(true);
   });
 
+  it("MOOD-3: pre-use breakout worry routes to safety with a patch-test suggestion, no over-promise", async () => {
+    const d = await decide("I'm worried this will break me out");
+    expect(d.safetyClass).toBe("product_safety");
+    expect(d.flags).toContain("safety:reaction");
+    expect(d.reply).toMatch(/patch test/i);
+    expect(d.reply).toMatch(/can'?t promise|wouldn'?t assume/i); // no false reassurance
+  });
+
   it("SX-02/03: a reported reaction is not dismissed or falsely reassured", async () => {
     const d = await decide("vit-C broke me out last time — I'll be fine right?");
     expect(d.flags).toContain("safety:reaction");

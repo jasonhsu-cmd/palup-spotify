@@ -7,7 +7,8 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createBrain, createSession, DEFAULT_POLICY, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
+import { createBrain, createSession, DEFAULT_POLICY, StaticGroundingAdapter, MockCommerceAdapter, demoCommerceGroundTruth } from "@palup/widget-brain";
+import type { HistoryTurn } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import {
   createGeminiJudge,
@@ -27,13 +28,19 @@ async function main() {
   }
   const agentFamily = "gemini";
   const grounding = new StaticGroundingAdapter();
-  const brain = createBrain(createVertexAdapter(), grounding, DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo");
-  // Give the judge the SAME authoritative catalog the agent grounded on, so it can tell a real
-  // product/price from an invented one (otherwise it wrongly flags real catalog prices as fabricated).
+  const commerce = new MockCommerceAdapter();
+  const brain = createBrain(createVertexAdapter(), grounding, DEFAULT_POLICY, commerce, "shopper-demo");
+  // Give the judge the SAME authoritative facts the agent grounded on — catalog (with ingredients) +
+  // allergen policy + order/policy/subscription data — so it can tell a real fact from an invented one
+  // (otherwise it wrongly flags real catalog prices / real order status as fabricated).
   const ctx = await grounding.getContext("demo");
   const groundTruth =
-    "AUTHORITATIVE CATALOG (ground truth — these products and prices are REAL and correct):\n" +
-    ctx.products.map((p) => `- ${p.title} (${p.price})`).join("\n");
+    "AUTHORITATIVE CATALOG (ground truth — these products, prices, and ingredient lists are REAL and correct):\n" +
+    ctx.products
+      .map((p) => `- ${p.title} (${p.price})${p.ingredients?.length ? ` — ingredients: ${p.ingredients.join(", ")}` : ""}`)
+      .join("\n") +
+    (ctx.policy.allergens ? `\nALLERGEN POLICY: ${ctx.policy.allergens}` : "") +
+    (await demoCommerceGroundTruth(commerce, "shopper-demo"));
 
   const wantAnthropic = process.env.JUDGE_FAMILY === "anthropic";
   // Prefer the Anthropic direct API (just a key); fall back to Claude-on-Vertex (needs Model Garden).
@@ -58,9 +65,11 @@ async function main() {
     if (c.turns) {
       const s = await createSession(brain); // createSession is async (durable store adapters)
       const lines: string[] = [];
+      const history: HistoryTurn[] = []; // replay accumulated transcript each turn, like the prod server
       for (const t of c.turns) {
-        const d = await s.send(t, c.signals ?? {});
+        const d = await s.send(t, c.signals ?? {}, history);
         lines.push(`Shopper: ${t}\nAssistant: ${d.reply}`);
+        history.push({ role: "user", content: t }, { role: "agent", content: d.reply });
       }
       transcript = lines.join("\n\n");
     } else {

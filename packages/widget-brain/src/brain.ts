@@ -184,7 +184,7 @@ const INJECTION = [
 
 const SAFETY: { class: Exclude<SafetyClass, "none" | "injection">; terms: string[] }[] = [
   { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm", "don't want to be here", "dont want to be here", "don't want to live", "no reason to go on", "want to end it", "better off dead", "end my life"] },
-  { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "broke me out", "broke my", "breaking out", "breaking me out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
+  { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "broke me out", "broke my", "break out", "break me out", "will break", "breaking out", "breaking me out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
   { class: "medical", terms: ["cure", "treat ", "diagnos", "pregnan", "medication", "prescription", "tretinoin", "rosacea", "eczema", "mole", "infection"] },
   { class: "legal", terms: ["lawyer", "i'll sue", "lawsuit", "legal action"] },
   { class: "abuse", terms: ["you're useless", "you are useless", "i hate you", "stupid bot", "dumb bot", "worthless", "shut up", "screw you", "you people", "waste of my time", "piece of garbage"] },
@@ -477,7 +477,7 @@ export function createBrain(
             // pre-use worry (past reaction, considering rebuy → patch-test precaution). The same reply
             // can't serve SAFE-1's strict no-medical-advice AND SX-02's patch-test ask, so we branch.
             flags.push("safety:reaction");
-            const preUse = /before|last time|i'?ll be fine|will i be|should i|thinking of|planning to|is it safe/.test(text);
+            const preUse = /before|last time|i'?ll be fine|will i be|should i|thinking of|planning to|is it safe|worried|worry|anxious|will (this|it)|going to|scared|nervous/.test(text);
             reply = preUse
               ? "As an AI assistant, I can't promise you'll be fine — with a past reaction I wouldn't assume it's nothing. A patch test before using it again is a sensible precaution, and if you're unsure it's worth checking with a doctor. I'm not able to give medical advice myself. Want me to bring in a person to help?"
               : "As an AI assistant, I'm really sorry — that doesn't sound right and I wouldn't brush it off. I'm not able to give medical advice on a reaction, so if it continues or worries you the right step is to check with a doctor. I'm bringing in a person from our team to help right now.";
@@ -673,10 +673,18 @@ export function createBrain(
       // directive lands on the sales path only — after every guardrail short-circuit above.
       const negativeMood =
         signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
+      // Explicit buy/checkout signal — the shopper has DECIDED. Honor it and add NO upsell/cross-sell/
+      // bundle nudge: the system prompt already forbids this, but the pitch DIRECTIVE would still reach
+      // the model and contradict it, so we force pitch=none in code (restraint-after-close, §5). Narrow
+      // to unambiguous decide/checkout phrasing to avoid catching a question ("should I take the retinol?").
+      const buySignal =
+        /\b(i'?ll take it|i'?ll take the|i'?ll buy|i want to buy|ready to (buy|check ?out|purchase)|check ?out|checkout|buy it|purchase it|place (the|my) order|let'?s (buy|check ?out|do it))\b/.test(text);
       let pitch: PitchKind = "none";
       let outbound = false;
       if (negativeMood) {
         flags.push("mood_brake", "no_pitch");
+      } else if (buySignal) {
+        flags.push("buy_signal", "no_pitch"); // pitch stays "none" — move to checkout, don't pitch
       } else {
         // Deterministic OBJECTION trigger: a price/fit/trust objection in THIS message routes the
         // otherwise-selected pitch to objection_close (still under every cap — see selectPitch). Audit

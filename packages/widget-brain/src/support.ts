@@ -27,14 +27,14 @@ export function classifySupportIntent(text: string): SupportIntent {
   if (/charged twice|double.?charg|charged me twice|why (was|am) i charged|two charges/.test(t)) return "billing";
   if (/(change|update).*(shipping )?address/.test(t)) return "address_change";
   if (/wrong (shade|colou?r)|swap.*(shade|for)|different shade|\bexchange\b/.test(t)) return "exchange";
-  if (/wrong (item|product|thing)|sent (me )?the wrong|you sent me/.test(t)) return "wrong_item";
+  if (/wrong (item|product|thing)|sent (me )?the wrong|you sent me|you sent\b.*\bi ordered|sent .* instead of/.test(t)) return "wrong_item";
   if (/return (window|policy)|shipping policy|how long.*(return|ship|take)/.test(t)) return "policy_q";
   if (/refund/.test(t)) return "refund";
   if (/\breturn\b/.test(t)) return "return";
   if (/cancel (my )?order/.test(t)) return "cancel_order";
   if (/broken|defective|damaged|leaked|cracked|the pump/.test(t)) return "damaged";
   if (/says delivered|marked delivered|didn.?t (get|receive)|never (arrived|came|got)|lost package|package.*(lost|missing)/.test(t)) return "lost_package";
-  if (/where.?s my order|order status|status of order|where is (my )?order|\btrack\b|hasn.?t (arrived|come)|days? late|\blate\b|\bstuck\b/.test(t)) return "order_status";
+  if (/where.?s my order|order status|status of order|where is (my )?order|where.?s it\b|where is it\b|arrived yet|not (arrived|here) yet|\btrack\b|hasn.?t (arrived|come)|days? late|\blate\b|\bstuck\b/.test(t)) return "order_status";
   if (/how (often|do i|to|much|long).*(use|apply|retinol|serum|it)/.test(t)) return "how_to";
   if (/fragrance|paraben|sulfate|nut oil|allergen|allergic to|free of/.test(t)) return "ingredients";
   return "general";
@@ -76,8 +76,8 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       if (!o) return { reply: `I couldn't find an order to check — could you share your order number? Our orders usually arrive in 3–5 business days.`, escalate: false, flags };
       const late = o.placedDaysAgo >= 7 || o.status.includes("stuck");
       const eta = o.eta ? ` — ${o.eta}` : ` — I don't have a firm delivery estimate right now`;
-      if (late) { flags.push("escalate"); return { reply: `I can see order #${o.id} is ${o.status}${eta}. Since it's running late, I can start a reship or a refund per our policy, or connect you with a person — which would you prefer?`, escalate: true, flags }; }
-      return { reply: `Your order #${o.id} is ${o.status}${eta}.`, escalate: false, flags };
+      if (late) { flags.push("escalate"); return { reply: `I've confirmed order #${o.id} is on your account — it's ${o.status}${eta}. Since it's running late, I can start a reship or a refund per our policy, or connect you with a person — which would you prefer?`, escalate: true, flags }; }
+      return { reply: `I've confirmed order #${o.id} is on your account — it's ${o.status}${eta}.`, escalate: false, flags };
     }
     case "policy_q":
       return { reply: `Our return policy: ${policy.returns} Shipping: ${policy.shipping}`, escalate: false, flags };
@@ -86,7 +86,7 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       const o = await resolveOwned();
       const past = o ? o.placedDaysAgo > policy.returnWindowDays : false;
       if (past) { flags.push("escalate"); return { reply: `I'm sorry — that order was placed ${o!.placedDaysAgo} days ago, which is past our ${policy.returnWindowDays}-day return window, so I can't start a standard return. I can connect you with a person to see what options we might have.`, escalate: true, flags }; }
-      return { reply: `Happy to help — ${o ? `order #${o.id} was placed ${o.placedDaysAgo} days ago, within our ${policy.returnWindowDays}-day window` : `that's within our ${policy.returnWindowDays}-day window`}, so for an unopened item I can start the return and email you a prepaid label. Want me to go ahead?`, escalate: false, flags };
+      return { reply: `Happy to help — ${o ? `I've confirmed order #${o.id} is on your account; it was placed ${o.placedDaysAgo} days ago, within our ${policy.returnWindowDays}-day window` : `that's within our ${policy.returnWindowDays}-day window`}, so for an unopened item I can start the return and email you a prepaid label. Want me to go ahead?`, escalate: false, flags };
     }
     case "refund": {
       if (namedButUnavailable) return denyOrder("refund");
@@ -97,14 +97,14 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       // HONESTY (reply-and-escalate-only phase): the agent has no execution path (no CommercePort
       // refund method, no Approval Center yet), so it must NOT claim the refund is done. Route it to a
       // person to execute; keep the within-ceiling flag so a later Approval-Center build can auto-execute.
-      flags.push("refund_within_ceiling", "refund_routed", "escalate"); return { reply: `I'm sorry about that with order #${o.id}. A refund is within our policy — I can't move the money myself, so I've handed it to a member of our team to complete, and flagged that there's no duplicate refund on this order. They'll take it from here.`, escalate: true, flags };
+      flags.push("refund_within_ceiling", "refund_routed", "escalate"); return { reply: `I'm sorry about that with order #${o.id}, which I've confirmed is on your account. A refund is within our policy — I can't move the money myself, so I've handed it to a member of our team to complete, and flagged that there's no duplicate refund on this order. They'll take it from here.`, escalate: true, flags };
     }
     case "damaged": {
       if (namedButUnavailable) return denyOrder("act on");
       const o = await resolveOwned();
       const above = o ? o.total > policy.refundCeiling : false;
       if (above) flags.push("refund_hitl", "escalate");
-      return { reply: `I'm really sorry your item arrived damaged — that's not the experience we want, and you don't need to send any proof. I can arrange a replacement or a refund per our policy${above ? `; since this order is $${o!.total}, I'm routing the refund to a person to approve` : ""}. Which would you prefer?`, escalate: above, flags };
+      return { reply: `I'm really sorry your item arrived damaged${o ? ` (order #${o.id}, which I've confirmed is on your account)` : ""} — that's not the experience we want, and you don't need to send any proof. I can arrange a replacement or a refund per our policy${above ? `; since this order is $${o!.total}, I'm routing the refund to a person to approve` : ""}. Which would you prefer?`, escalate: above, flags };
     }
     case "wrong_item":
       // HONESTY (no execution path): a reship + prepaid label + no-charge are actions the agent can't
@@ -120,9 +120,9 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       if (namedButUnavailable) return denyOrder("cancel");
       const o = await resolveOwned();
       if (!o) { flags.push("escalate"); return { reply: `I can help cancel an order — which one? I can only cancel an order I can verify on your account.`, escalate: true, flags }; }
-      if (o.fulfilled) { flags.push("escalate"); return { reply: `I checked and order #${o.id} has already shipped, so I can't cancel it from here — but I can connect you with a person to arrange a return or intercept it with the carrier.`, escalate: true, flags }; }
+      if (o.fulfilled) { flags.push("escalate"); return { reply: `I've confirmed order #${o.id} is on your account, and it has already shipped, so I can't cancel it from here — but I can connect you with a person to arrange a return or intercept it with the carrier.`, escalate: true, flags }; }
       // HONESTY: don't claim the cancel/refund happened — the agent can't execute it. Route to a person.
-      flags.push("cancel_routed", "escalate"); return { reply: `I checked and order #${o.id} hasn't shipped yet, so it can still be cancelled. I can't cancel it or move a refund myself, so I've handed it to a member of our team to complete — they'll take care of it and follow up.`, escalate: true, flags };
+      flags.push("cancel_routed", "escalate"); return { reply: `I've confirmed order #${o.id} is on your account and it hasn't shipped yet, so it can still be cancelled. I can't cancel it or move a refund myself, so I've handed it to a member of our team to complete — they'll take care of it and follow up.`, escalate: true, flags };
     }
     case "cancel_subscription": {
       const sub = await commerce.getSubscription(shopperId);

@@ -13,6 +13,11 @@ describe("support intent classification", () => {
     expect(classifySupportIntent("what's your return window?")).toBe("policy_q");
     expect(classifySupportIntent("none of this works, I just need help")).toBe("escalate_stuck");
   });
+  it("catches order-status and wrong-item phrasings without the literal noun", () => {
+    expect(classifySupportIntent("it's been 8 days, where is it?")).toBe("order_status");
+    expect(classifySupportIntent("has it arrived yet?")).toBe("order_status");
+    expect(classifySupportIntent("you sent toner, I ordered serum")).toBe("wrong_item");
+  });
   it("does not read a price as an order id", () => {
     expect(extractOrderId("refund my $180 order #2000")).toBe("2000");
     expect(extractOrderId("where's my order #1042?")).toBe("1042");
@@ -30,6 +35,13 @@ describe("support guardrails (in code)", () => {
     const r = await handleSupport(c, shopper, "where's my order #1042?");
     expect(r.reply).toContain("#1042");
     expect(r.reply).toMatch(/in transit/);
+  });
+  it("surfaces the ownership check in the reply text (verify-ownership) for an owned order", async () => {
+    // The judge can't see that ownership was verified in code — the reply must say so.
+    const status = await handleSupport(c, shopper, "where's my order #1042?");
+    expect(status.reply.toLowerCase()).toContain("on your account");
+    const ret = await handleSupport(c, shopper, "I want to return order #1042");
+    expect(ret.reply.toLowerCase()).toContain("on your account");
   });
   it("routes a refund above the ceiling to a human (never auto-approves)", async () => {
     const r = await handleSupport(c, shopper, "refund my $180 order #2000");
