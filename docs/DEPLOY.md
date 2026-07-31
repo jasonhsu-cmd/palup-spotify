@@ -22,10 +22,22 @@ green.
 > widget tenant-identity are live (M1); the `rs_audit` INSERT-only GRANT is **applied + verified** (#19,
 > see the Cloud SQL section); **per-merchant Shopify grounding is live** (M2 — see *Shopify grounding*
 > below); and cost/latency telemetry is captured with an operator-gated read (M3).
-> **Still open:** the service is `--allow-unauthenticated` at the Cloud Run edge and `WIDGET_AUTH_REQUIRED`
-> is OFF, so `/chat` still falls back to the demo tenant for callers without a valid widget token. Before
-> onboarding a second real merchant, provision `WIDGET_TOKEN_SECRET` + set `WIDGET_AUTH_REQUIRED=true` to
-> enforce per-merchant identity (and give each merchant its own tenant id + embed key).
+> **Auth enforcement — how to flip it on (the demo keeps working):** the service is `--allow-unauthenticated`
+> at the Cloud Run edge and `WIDGET_AUTH_REQUIRED` is OFF during rollout, so `/chat` falls back to the demo
+> tenant for callers without a valid widget token. To enforce per-merchant identity:
+> 1. **Provision `WIDGET_TOKEN_SECRET`** (a random signing secret) in Secret Manager and mount it into the
+>    Cloud Run service (`--update-secrets WIDGET_TOKEN_SECRET=…`). This is the HMAC key for widget tokens.
+> 2. **Set `WIDGET_AUTH_REQUIRED=true`** (env var).
+>
+> The **demo keeps working** with no other change: the served widget (`packages/widget/public/index.html`)
+> mints a short-TTL token from the built-in embed key `demo-embed-key` (→ tenant `demo`) via `/widget/token`
+> and sends it as a `Bearer` on `/chat`; a request without a valid token now returns 401. This exact flow —
+> flag on + only the demo tenant configured → 200 under `demo` — is asserted by `widget-tenant.test.ts`
+> ("WIDGET_AUTH_REQUIRED=true: the DEMO still works via the default demo-embed-key"). For a **real second
+> merchant**, add `WIDGET_EMBED_KEYS={"<their-embed-key>":"<their-tenant>"}` and give them that embed key +
+> their own tenant id/store creds — no code change. (The Cloud Run edge staying `--allow-unauthenticated`
+> is fine: the app-level widget-token check is the tenancy gate; the edge is open only so the public embed
+> can reach `/widget/token` and `/`.)
 
 ## Cloud SQL (run-time state store, ADR-0004)
 
