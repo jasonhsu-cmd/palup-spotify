@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createBrain, DEFAULT_POLICY, MockModelAdapter, StaticGroundingAdapter } from "../src/index.js";
-import type { CommercePort, CommercePolicy, Order, Subscription } from "@palup/platform-ports";
+import type { CommercePort, CommercePolicy, Order, Subscription, SubscriptionActionResult } from "@palup/platform-ports";
 
 // ADR-0017 T6: the brain must use the PER-REQUEST `signals.shopperId` (server-derived), not the
 // constructor default, for the support/commerce ownership check — otherwise a stale/constant
@@ -31,6 +31,20 @@ class StubCommerce implements CommercePort {
   }
   async getSubscription(): Promise<Subscription | null> {
     return null;
+  }
+  // Not exercised by this suite (ADR-0017 T6 IDOR focus) — stub so the class still satisfies
+  // CommercePort after ADR-0016's new subscription-action methods.
+  async skipNextDelivery(): Promise<SubscriptionActionResult> {
+    return { ok: false, detail: "not used in this suite", reversalPath: "n/a" };
+  }
+  async pauseSubscription(): Promise<SubscriptionActionResult> {
+    return { ok: false, detail: "not used in this suite", reversalPath: "n/a" };
+  }
+  async resumeSubscription(): Promise<SubscriptionActionResult> {
+    return { ok: false, detail: "not used in this suite", reversalPath: "n/a" };
+  }
+  async unskipNextDelivery(): Promise<SubscriptionActionResult> {
+    return { ok: false, detail: "not used in this suite", reversalPath: "n/a" };
   }
 }
 

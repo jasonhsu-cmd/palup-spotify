@@ -64,6 +64,23 @@ subscriptions; it does not weaken it (HITL-POLICY §5). Cancel is unchanged (hum
 - **Portability** — `SubscriptionActionResult` is vendor-neutral; the port abstraction leaks no Shopify types.
 - **Evolution pipeline untouched** — a static, human-authored change via the normal dev pipeline; §5 gates intact.
 
+## Live-adapter obligations (carry-forwards from the enactment review)
+
+The enactment (mock-only, behind `SUBSCRIPTION_SELFSERVE`, gated on a verified shopper) passed both
+governance reviews. Two items are **not defects in the mock slice** but MUST be satisfied by the future
+real Shopify subscription adapter PR:
+
+- **Atomic act-then-record (security A1).** The external mutation runs inside `session.send` *before* the
+  audit row is committed in the per-turn tx — if that tx fails, a real mutation could go un-audited. Harmless
+  with the in-process mock (a client retry is an idempotent no-op that still emits the flag), but the live
+  adapter needs an **act-then-record-with-reconciliation / outbox** pattern so an executed mutation can never
+  be permanently un-audited (§3 rule 5).
+- **Adapter-level idempotency + concurrency.** The mock is idempotent single-threaded; the live adapter must
+  implement per-(subscription, cycle) idempotency **atomically** so concurrent/retried skips cannot exceed
+  the cap or double-execute (a stealth-cancel vector).
+- (Done in the enactment, reinforced here: the fail-closed guard now asserts the call targets the verified
+  principal's own id — ownership at the choke point, not only in the caller.)
+
 ## Consequences
 
 - (+) The owner's boundary decision is recorded and unambiguous; the enactment build has a precise,

@@ -379,6 +379,12 @@ export function createBrain(
   // uncertainty/b2b/proactive) returns before this point is ever reached, so `memory.recall` is
   // structurally unreachable from any of them.
   memory?: MemoryRecallPort,
+  // ADR-0016 enactment — the SUBSCRIPTION_SELFSERVE posture flag (widget-backend env, read + threaded
+  // here exactly like every other posture flag; never hardcoded on). Default OFF ⇒ every existing call
+  // site keeps working unchanged: skip/pause stays human-routed exactly as before this ADR (support.ts's
+  // own gate requires this flag AND a server-verified shopper AND an affirmative request before it ever
+  // calls a subscription-action port method).
+  subscriptionSelfServeEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -428,6 +434,12 @@ export function createBrain(
       // request — using it while a DIFFERENT shopper is making THIS request would be an IDOR (support.ts's
       // ownership check would authorize against the wrong account).
       const currentShopperId = signals.shopperId ?? shopperId;
+      // ADR-0016 #1/#2 — "is THIS shopper server-VERIFIED?" == signals.shopperId !== undefined.
+      // ADR-0017's deriveServingSignals sets signals.shopperId ONLY for a server-verified principal
+      // (gated on `verified`, never client-set); its absence means anonymous. Deliberately NOT derived
+      // from the shopperId STRING (currentShopperId) — a constant/demo id (the constructor default, or
+      // any future spoofed value) must never be mistaken for verified.
+      const shopperVerified = signals.shopperId !== undefined;
       const text = message.toLowerCase();
       const flags: string[] = [];
 
@@ -552,7 +564,7 @@ export function createBrain(
       }
 
       // 2. Open support issue OR a support intent — suppresses sales (INV-B).
-      const supportIntent = classifySupportIntent(text);
+      const supportIntent = classifySupportIntent(text, subscriptionSelfServeEnabled);
       // Word-boundary match: substring scanning mis-routed "returning"/"cancellation" (and browsing
       // "returning shopper" cases) into support. \b keeps genuine "return"/"cancel" routing intact.
       const supportKeywordHit = SUPPORT.some((p) => new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text));
@@ -561,7 +573,10 @@ export function createBrain(
       if (isSupport) {
         // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
         if (commerce) {
-          const r = await handleSupport(commerce, currentShopperId, message, signals.mood);
+          const r = await handleSupport(commerce, currentShopperId, message, signals.mood, {
+            enabled: subscriptionSelfServeEnabled,
+            shopperVerified,
+          });
           return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
         }
         // Fallback when no commerce port is wired: generic grounded reply.

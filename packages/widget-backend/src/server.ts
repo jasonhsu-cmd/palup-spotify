@@ -163,6 +163,12 @@ export async function buildServer(opts?: {
           }),
       }
     : undefined;
+  // ADR-0016 enactment — the subscription skip/pause self-serve posture flag. Default OFF ⇒ byte-
+  // identical to today (skip/pause always human-routed); read here (not hardcoded) and threaded into
+  // every brain exactly like every other posture flag (WIDGET_AUTH_REQUIRED/SHOPPER_AUTH below). The
+  // brain/support.ts layer independently re-requires a server-VERIFIED shopper before ever auto-executing
+  // — this flag alone can never grant autonomy to an anonymous shopper.
+  const SUBSCRIPTION_SELFSERVE = process.env.SUBSCRIPTION_SELFSERVE === "true";
   // One brain per active policy (champion + any canary), built lazily and cached by policy id. The
   // brain is tenant-agnostic (grounding tenant rides each request via signals.tenantId); this cache is
   // per-server-instance.
@@ -170,7 +176,7 @@ export async function buildServer(opts?: {
   const brainFor = (policy: Policy) => {
     let b = brains.get(policy.id);
     if (!b) {
-      b = createBrain(meteredModel, grounding, policy, commerce, "shopper-demo", memoryPort);
+      b = createBrain(meteredModel, grounding, policy, commerce, "shopper-demo", memoryPort, SUBSCRIPTION_SELFSERVE);
       brains.set(policy.id, b);
     }
     return b;
@@ -192,6 +198,13 @@ export async function buildServer(opts?: {
     console.warn("[config] SHOPPER_AUTH=true requires WIDGET_AUTH_REQUIRED=true (ADR-0017 F4) — shoppers will be treated as anonymous until both are set.");
   }
   const SHOPPER_AUTH_ENABLED = SHOPPER_AUTH_FLAG && WIDGET_AUTH_REQUIRED;
+  // ADR-0016 — SUBSCRIPTION_SELFSERVE has no effect at all unless shoppers can actually BE verified
+  // (SHOPPER_AUTH_ENABLED); without it `signals.shopperId` is never set, so support.ts's own
+  // shopperVerified gate is always false and skip/pause stays human-routed regardless of this flag. This
+  // is a safe (never security-relevant) degrade — warn, don't hard-gate like SHOPPER_AUTH_ENABLED's F4.
+  if (SUBSCRIPTION_SELFSERVE && !SHOPPER_AUTH_ENABLED) {
+    console.warn("[config] SUBSCRIPTION_SELFSERVE=true has no effect without SHOPPER_AUTH enabled (ADR-0016 prereq #1) — every shopper is unverified, so skip/pause stays human-routed.");
+  }
   const SHOPPER_TOKEN_SECRET = process.env.SHOPPER_TOKEN_SECRET;
   const SHOPPER_TOKEN_TTL_SECONDS = posInt("SHOPPER_TOKEN_TTL_SECONDS", 3_600);
   const shopperIdentity = createShopperTokenIdentity(SHOPPER_TOKEN_SECRET);
