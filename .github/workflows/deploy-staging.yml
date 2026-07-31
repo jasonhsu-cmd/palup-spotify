@@ -30,8 +30,8 @@ jobs:
             --region "${{ vars.GCP_REGION || 'us-central1' }}" \
             --allow-unauthenticated \
             --add-cloudsql-instances "${{ vars.GCP_PROJECT }}:${{ vars.GCP_REGION || 'us-central1' }}:palup-staging" \
-            --set-secrets "DATABASE_URL=palup-staging-database-url:latest" \
-            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT }},GOOGLE_CLOUD_LOCATION=global,PALUP_MODEL=gemini-2.5-flash,PALUP_REQUIRE_DATABASE_URL=true"
+            --set-secrets "DATABASE_URL=palup-staging-database-url:latest,WIDGET_TOKEN_SECRET=widget-token-secret:latest" \
+            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT }},GOOGLE_CLOUD_LOCATION=global,PALUP_MODEL=gemini-2.5-flash,PALUP_REQUIRE_DATABASE_URL=true,WIDGET_AUTH_REQUIRED=${{ vars.WIDGET_AUTH_REQUIRED || 'false' }}"
       - name: Post-deploy smoke gate (health)
         run: |
           URL=$(gcloud run services describe palup-widget-staging \
