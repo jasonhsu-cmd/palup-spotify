@@ -62,6 +62,20 @@ export interface Policy {
 /** Consent state per channel (legally load-bearing; unknown is treated as no-consent). */
 export type Consent = "in" | "out" | "unknown";
 
+/**
+ * A single prior conversational turn the CLIENT replays on /chat to give the model in-session,
+ * multi-turn context (docs/design/shopper-widget.md §3.2 personalization, §6A conversation
+ * continuity) — the fix for the "widget doesn't remember" gap. Client-facing wire shape: `role` is
+ * "user" (shopper) or "agent" (assistant), mapped to the model port's user/assistant roles when
+ * threaded. This is TRANSIENT request context: it is NEVER persisted server-side (SessionState stays
+ * control-only) and, being a non-system message, is redacted at the model port like any user turn
+ * before it reaches the provider. Cross-visit / durable per-customer recall is out of scope here.
+ */
+export interface HistoryTurn {
+  role: "user" | "agent";
+  content: string;
+}
+
 export interface Signals {
   mood?: Mood;
   relationship?: Relationship;

@@ -1,5 +1,5 @@
 import type { Brain } from "./brain.js";
-import type { Decision, Mode, Mood, ProactivityLevel, Signals } from "./types.js";
+import type { Decision, HistoryTurn, Mode, Mood, ProactivityLevel, Signals } from "./types.js";
 import { classifySupportIntent, extractOrderId } from "./support.js";
 
 // Conversation state (§6A): the stateless brain decides per turn; the Session carries the state
@@ -57,7 +57,12 @@ export function createMemorySessionStore(): SessionStore {
 }
 
 export interface Session {
-  send(message: string, signals?: Signals): Promise<Decision>;
+  /**
+   * `history` is the CLIENT's bounded recent transcript for in-session multi-turn memory (§6A). It is
+   * passed straight to the brain for model context and is NEVER written to SessionState — the state
+   * stays control-only (safety latch / open issues / pitch budget), no shopper transcript persisted.
+   */
+  send(message: string, signals?: Signals, history?: HistoryTurn[]): Promise<Decision>;
   /**
    * INV-D: at most once, return a non-pushy "pick up where you left off?" offer for the preserved
    * browsing context — but only when the detour is fully over (no open issue, safety not latched, no
@@ -105,7 +110,7 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
       state.resumeOffered = true;
       return `Want to pick up where you left off — ${state.browsingContext}?`;
     },
-    async send(message: string, signals: Signals = {}): Promise<Decision> {
+    async send(message: string, signals: Signals = {}, history: HistoryTurn[] = []): Promise<Decision> {
       const lc = message.toLowerCase();
       // Merge carried state INTO signals so the stateless brain sees the latch + open issues.
       const merged: Signals = {
@@ -114,7 +119,9 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
         safetyLatched: state.safetyLatched || Boolean(signals.safetyLatched),
         openIssues: [...state.openIssues, ...(signals.openIssues ?? [])],
       };
-      let d = await brain.decide(merged, message);
+      // history threads to the brain for model context ONLY — it is deliberately NOT merged into signals
+      // or state, so the persisted SessionState carries no shopper transcript (control-only).
+      let d = await brain.decide(merged, message, history);
 
       // §4: mood is transient — snapshot THIS turn only (overwrite; never accumulate a mood profile).
       state.mood = signals.mood;

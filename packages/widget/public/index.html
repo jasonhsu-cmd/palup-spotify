@@ -128,7 +128,26 @@
   const $ = (s) => document.querySelector(s);
   const msgs = $("#messages");
   const widget = $("#widget"), launcher = $("#launcher");
-  const sessionId = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
+  // In-session, per-tab conversation memory (docs/design/shopper-widget.md §3.2, §6A) — the fix for
+  // "the widget doesn't remember". We persist the sessionId + a bounded recent transcript in
+  // sessionStorage so a RELOAD continues the same conversation and the model keeps its multi-turn
+  // context. Per-tab only: durable, cross-visit per-customer recall is a separate, consent-gated
+  // subsystem (out of scope). No transcript is ever stored server-side.
+  const HISTORY_LIMIT = 8;                    // keep + send only the last N turns (the server re-bounds)
+  const SS_KEY = "palup.widget.session.v1";
+  function loadPersisted(){
+    try { const raw = sessionStorage.getItem(SS_KEY); const o = raw ? JSON.parse(raw) : null; if (o && typeof o === "object") return o; } catch {}
+    return null;
+  }
+  const persisted = loadPersisted();
+  const sessionId = (persisted && typeof persisted.sessionId === "string" && persisted.sessionId)
+    || (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
+  let transcript = Array.isArray(persisted && persisted.history)
+    ? persisted.history.filter((t) => t && (t.role === "user" || t.role === "agent") && typeof t.content === "string").slice(-HISTORY_LIMIT)
+    : [];
+  function persistSession(){ try { sessionStorage.setItem(SS_KEY, JSON.stringify({ sessionId, history: transcript.slice(-HISTORY_LIMIT) })); } catch {} }
+  function recentHistory(){ return transcript.slice(-HISTORY_LIMIT); }   // PRIOR turns sent as `history`
+  function recordTurn(userMsg, agentReply){ transcript.push({ role: "user", content: userMsg }, { role: "agent", content: agentReply }); transcript = transcript.slice(-HISTORY_LIMIT); persistSession(); }
   let handedOff = false, lastSend = null;
 
   // Merchant tenant identity: the publishable embed key ships in this snippet; the widget mints a
@@ -204,25 +223,35 @@
     const idempotencyKey = (isRetry && lastSend && lastSend.idempotencyKey)
       ? lastSend.idempotencyKey
       : ((crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + "-" + String(Math.random()).slice(2));
-    lastSend = { message, signals, idempotencyKey };
+    // Send the bounded recent transcript (PRIOR turns only) so the model can resolve a follow-up. On a
+    // retry, reuse the exact history captured for the first attempt so the idempotent replay is identical.
+    const history = (isRetry && lastSend) ? lastSend.history : recentHistory();
+    lastSend = { message, signals, idempotencyKey, history };
     const btn = $("#f button"); btn.disabled = true; typing(true);
     const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 15000);
     const doFetch = async () => {
       await ensureToken(false);
       const headers = { "content-type": "application/json" };
       if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
-      return fetch("/chat", { method:"POST", headers, body: JSON.stringify({ message, signals, sessionId, idempotencyKey }), signal: ctrl.signal });
+      return fetch("/chat", { method:"POST", headers, body: JSON.stringify({ message, signals, sessionId, idempotencyKey, history }), signal: ctrl.signal });
     };
     try{
       let r = await doFetch();
       if (r.status === 401){ await ensureToken(true); r = await doFetch(); } // token expired → refresh once
       if (!r.ok) throw new Error("http " + r.status);
       const d = await r.json(); add(d.reply, "agent", d); if (d.escalate) enterHandoff();
+      recordTurn(message, d.reply); // persist the completed turn so the next follow-up (and a reload) keep context
     }catch(err){ offline(); }
     finally{ clearTimeout(timer); typing(false); btn.disabled = false; }
   }
 
-  add("Hi! I'm Auria's assistant — ask me about a product or your order.", "agent");
+  // Continue the conversation across a reload: re-render the persisted transcript; otherwise greet.
+  if (transcript.length){
+    for (const t of transcript){ add(t.content, t.role === "agent" ? "agent" : "user"); }
+  } else {
+    add("Hi! I'm Auria's assistant — ask me about a product or your order.", "agent");
+  }
+  persistSession(); // stamp the sessionId now so a reload before the first turn still continues this session
 </script>
 </body>
 </html>
