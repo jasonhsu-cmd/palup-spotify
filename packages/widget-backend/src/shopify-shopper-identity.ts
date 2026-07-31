@@ -8,16 +8,24 @@ import { buildShopifyShopperId } from "@palup/platform-ports";
 // vendor SDK, node:crypto only (ADR-0001).
 //
 // ****************************************************************************************************
-// HONESTY / SPIKE GATE (T2b, ADR-0017 "Shopify mechanism — honesty calibration"): the EXACT wire format
-// below — which params Shopify signs, whether `logged_in_customer_id` is INSIDE the signed set (the
-// linchpin, F3 — if it is NOT signed, this whole adapter is forgeable from any validly-signed proxy
-// URL), and the precise signature algorithm (sort+concatenate, hex vs base64, etc.) — is UNVERIFIED
-// this session (recollection only; could not be re-confirmed from shopify.dev this session). This file
-// implements a SELF-CONSISTENT stub: it signs/verifies with the SAME routine (`signAppProxyParams`), so
-// every security invariant below (signature integrity, replay, cross-shop, namespace validation) is
-// deterministically testable NOW, independent of whether the stub's concatenation matches Shopify's
-// real one. The live cutover (pointing this at real App-Proxy traffic) stays BLOCKED until T2b confirms
-// (a) in particular — do not remove this comment when T2b lands; replace it with the citation instead.
+// WIRE FORMAT (ADR-0017 T2b) — VERIFIED against shopify.dev "Authenticate app proxies"
+// (https://shopify.dev/docs/apps/build/online-store/app-proxies/authenticate-app-proxies, retrieved
+// 2026-08-01): drop the `signature` param; render each remaining param as `key=value` with any repeated
+// (multi-value) key joined by ','; sort the pairs lexicographically; concatenate with NO delimiter
+// (unlike OAuth's '&'); HMAC-SHA256 keyed by the app's shared secret; hex; constant-time compare.
+// CRUCIALLY, `logged_in_customer_id` IS one of the signed params per the doc (F3 linchpin — the shopper
+// id cannot be forged from a proxy URL validly signed for a DIFFERENT customer). `signAppProxyParams`
+// below implements exactly this. `shopify-shopper-identity.test.ts` checks it against a from-the-spec
+// transcription of the SAME algorithm — that catches drift between our signer and the documented steps,
+// but it is NOT independent proof that our bytes match Shopify's LIVE output (both sides share the one
+// transcription). TRUE conformance needs a GOLDEN VECTOR — a real (secret, params, signature) triple
+// captured from actual App-Proxy traffic — captured at the live-cutover smoke below.
+//
+// LIVE CUTOVER is now an OPERATIONAL go-live (no longer a format question): provision the app-proxy
+// shared secret — the custom app's API secret, from a custom app that has an App Proxy configured; the
+// Headless channel does NOT provide one — into the SecretsPort under SHOPIFY_APP_PROXY_SECRET_*, flip
+// SHOPPER_AUTH on (F4 also needs WIDGET_AUTH_REQUIRED), then a live smoke against real App-Proxy traffic
+// + a security re-review.
 // ****************************************************************************************************
 
 /** App-scoped shared secret (F8: ONE secret for the whole app, NOT per-tenant — its compromise forges
@@ -28,20 +36,43 @@ import { buildShopifyShopperId } from "@palup/platform-ports";
 export const SHOPIFY_APP_PROXY_SECRET_SCOPE = "__shopify_app__";
 export const SHOPIFY_APP_PROXY_SECRET_NAME = "shopify_app_proxy_secret";
 
-export type AppProxyParams = Record<string, string | undefined>;
+// A repeated query key parses to a string[]; Shopify signs it comma-joined (see WIRE FORMAT above).
+export type AppProxyParams = Record<string, string | string[] | undefined>;
 
 /**
- * Sign the App-Proxy params: sort keys lexicographically, concatenate `key=value` with no separator,
- * HMAC-SHA256 keyed by the app shared secret, hex digest (STUB routine — see the honesty note above).
- * `signature` (if present in `params`) is excluded — it is what we are computing, not what we sign over.
+ * Sign the App-Proxy params per the verified Shopify format (see the WIRE FORMAT note above): drop
+ * `signature`, render each param as `key=value` with any multi-value (repeated) key joined by ',', sort
+ * lexicographically, concatenate with no separator, HMAC-SHA256 keyed by the app shared secret, hex.
  * Exported so tests can mint validly-signed params with the SAME routine (no drift between mint/verify).
  */
 export function signAppProxyParams(secret: string, params: AppProxyParams): string {
   const keys = Object.keys(params)
     .filter((k) => k !== "signature" && params[k] !== undefined)
     .sort();
-  const concatenated = keys.map((k) => `${k}=${params[k]}`).join("");
+  const concatenated = keys
+    .map((k) => {
+      const v = params[k];
+      return `${k}=${Array.isArray(v) ? v.join(",") : v}`;
+    })
+    .join("");
   return createHmac("sha256", secret).update(concatenated).digest("hex");
+}
+
+/**
+ * Normalize a raw parsed query (`req.query`) into `AppProxyParams` for verification. Keeps string values
+ * and repeated-key **string arrays** — Shopify signs repeated params comma-joined, so dropping them would
+ * make a legitimately-signed request fail-closed to anonymous — and drops any other value (numbers,
+ * objects, mixed arrays) as untrusted. Null-proto output so an attacker-controlled key (`__proto__`,
+ * `constructor`) can't pollute. The verifier's semantic fields (`shop`/`timestamp`/`logged_in_customer_id`)
+ * still reject array values via their own `typeof` guards — this only preserves them for the signature.
+ */
+export function normalizeAppProxyQuery(rawQuery: Record<string, unknown>): AppProxyParams {
+  const params: AppProxyParams = Object.create(null);
+  for (const [k, v] of Object.entries(rawQuery)) {
+    if (typeof v === "string") params[k] = v;
+    else if (Array.isArray(v) && v.every((x) => typeof x === "string")) params[k] = v as string[];
+  }
+  return params;
 }
 
 export interface ShopifyShopperVerifyOptions {

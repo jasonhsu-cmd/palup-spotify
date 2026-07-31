@@ -30,7 +30,7 @@ import { buildAuditInput, buildIdentityAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 import { guardCommercePort, withRequestPrincipal } from "./commerce-guard.js";
-import { verifyShopifyAppProxyShopper } from "./shopify-shopper-identity.js";
+import { verifyShopifyAppProxyShopper, normalizeAppProxyQuery } from "./shopify-shopper-identity.js";
 import { parseStoreDomains } from "./merchant-store.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -298,9 +298,9 @@ export async function buildServer(opts?: {
     const domains = parseStoreDomains();
     const reverseDomains: Record<string, string> = Object.create(null); // null-proto: no __proto__ pollution
     for (const [tenant, domain] of Object.entries(domains)) if (domain) reverseDomains[domain] = tenant;
-    const rawQuery = req.query as Record<string, unknown>;
-    const params: Record<string, string | undefined> = Object.create(null);
-    for (const [k, v] of Object.entries(rawQuery)) if (typeof v === "string") params[k] = v; // repeated-key arrays are ignored, not trusted
+    // Preserve repeated-key arrays (Shopify signs them comma-joined) so a legitimately-signed request
+    // isn't rejected; non-string junk is dropped. Semantic fields are still single-value-guarded downstream.
+    const params = normalizeAppProxyQuery(req.query as Record<string, unknown>);
     const principal = await verifyShopifyAppProxyShopper(params, {
       expectedTenant: merchantPrincipal.merchantId,
       resolveTenant: (shop) => (Object.hasOwn(reverseDomains, shop) ? reverseDomains[shop] : undefined),
