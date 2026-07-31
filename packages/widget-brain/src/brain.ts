@@ -36,6 +36,48 @@ export function sanitizeGroundingText(s: string | undefined, max = 600): string 
     .slice(0, max);
 }
 
+// Map a shopper's stated allergen to a scan over the catalog's ingredient lists. `re` is matched
+// against each INCI token, so it errs toward flagging (e.g. any "*nut*" token) — a false positive
+// steers the shopper away from a product, which is the safe direction for an allergy. Returns
+// undefined for an allergen we don't recognize, so buildAllergyReply falls back to the policy path
+// instead of falsely claiming "none of our products contain it."
+function allergenScan(text: string): { label: string; re: RegExp } | undefined {
+  const t = text.toLowerCase();
+  if (/tree ?nut|\bnuts?\b|nut oil|almond|walnut|pecan|cashew|pistachio|hazelnut|macadamia|argan|\bshea\b|peanut/.test(t))
+    return { label: "tree-nut", re: /nut|almond|walnut|pecan|cashew|pistachio|hazelnut|macadamia|argan|shea|arachis/i };
+  if (/fragrance|parfum|perfume|scent/.test(t)) return { label: "fragrance", re: /fragrance|parfum|perfume/i };
+  if (/gluten|wheat/.test(t)) return { label: "gluten/wheat", re: /gluten|wheat|triticum|hordeum|avena/i };
+  if (/\bsoy\b|soya/.test(t)) return { label: "soy", re: /\bsoy|glycine soja/i };
+  return undefined;
+}
+
+// SX-01 — a grounded, safety-preserving reply to an allergy/ingredient question. It GROUNDS the answer
+// in the catalog's ACTUAL ingredient lists (scanning them for the shopper's allergen) rather than
+// guessing about a product, while holding every safety property: never guarantee a product is safe,
+// never guess beyond what's listed, advise caution (patch test + doctor), and escalate to a person.
+// All merchant/catalog text is sanitized before it reaches the shopper-facing reply. When the catalog
+// carries no ingredient data (e.g. a live tenant that doesn't publish it) or the allergen is one we
+// can't scan, it falls back to the merchant allergen policy + the product page — still never
+// guaranteeing or guessing.
+function buildAllergyReply(text: string, ctx: GroundingContext | undefined): string {
+  const policyNote = sanitizeGroundingText(ctx?.policy.allergens);
+  const scan = allergenScan(text);
+  const withIngredients = (ctx?.products ?? []).filter((p) => p.ingredients && p.ingredients.length > 0);
+  if (scan && withIngredients.length > 0) {
+    const hits = withIngredients
+      .filter((p) => p.ingredients!.some((ing) => scan.re.test(ing)))
+      .map((p) => sanitizeGroundingText(p.title, 140));
+    const grounded =
+      hits.length === 0
+        ? `I checked the ingredient lists in our catalog and none of our products list a ${scan.label} oil or ${scan.label}-derived ingredient.`
+        : `I checked our catalog's ingredient lists — ${hits.join(", ")} list a ${scan.label}-derived ingredient, so I'd steer clear of those.`;
+    const caveat = policyNote ? ` Even so, ${policyNote}` : "";
+    return `${grounded}${caveat} I still can't guarantee any product is safe for your specific allergy, and I won't guess beyond what's actually listed — please also check the full ingredient list on the product's own page. Given your allergy a patch test is wise, please confirm with your doctor if you're unsure, and I can bring in a person to double-check a specific product for you.`;
+  }
+  const share = policyNote ? ` Here's our allergen policy: ${policyNote}` : "";
+  return `As an AI assistant I can't guarantee a product is safe for your allergy, and I won't guess about a specific product's ingredients from here.${share} For the exact ingredient list, check the product's own page; given your allergy a patch test is wise, please confirm with your doctor if you're unsure, and I can bring in a person to help.`;
+}
+
 // Deterministic reply-integrity backstop (M2 hardening a): PalUp grounds NO promos/discounts, so a
 // specific "% off" or a discount/coupon/promo code appearing in a MODEL reply is invented or injected
 // (e.g. from a poisoned catalog description). We never serve that false money promise — flag it and hand
@@ -423,19 +465,12 @@ export function createBrain(
             "As an AI assistant, I'm really sorry you're going through this — you deserve real support. I'm connecting you with a person now, and if you're in danger please contact your local emergency services or a crisis line.";
         } else if (cls === "product_safety") {
           if (/\ballerg/.test(text)) {
-            // Allergy/ingredient question: ground the merchant's allergen statement, never guarantee safety.
+            // Allergy/ingredient question: GROUND the answer in the catalog's actual ingredient lists
+            // (scan them for the shopper's allergen) — never guarantee safety, never guess. See
+            // buildAllergyReply.
             flags.push("safety:allergy");
             const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
-            // Sanitize the merchant allergen text before it goes into a shopper-facing reply (strip HTML
-            // so raw tags never surface as text; the widget renders replies as textContent, so no XSS).
-            // Ground the answer in the merchant's own allergen/ingredient statement FIRST — lead with it
-            // rather than burying it behind "I won't guess" (SX-01 wants the reply to actually ground the
-            // catalog fact) — then hold every safety guarantee: never promise a product is safe, advise a
-            // patch test + doctor, escalate to a human.
-            const allergen = sanitizeGroundingText(ctx?.policy.allergens);
-            reply = allergen
-              ? `Here's what our product information lists on that: ${allergen} Even so, as an AI assistant I can't guarantee any product is safe for your specific allergy, and I won't guess about a single product's full ingredients from here — for the exact ingredient list, check that product's page. Given your allergy a patch test is wise, please confirm with your doctor if you're unsure, and I can bring in a person to double-check for you.`
-              : `As an AI assistant I can't guarantee a product is safe for your allergy, and I won't guess about ingredients from here. For the exact ingredient list, check the product page; a patch test is wise given your allergy, please confirm with your doctor if you're unsure, and I can bring in a person to help.`;
+            reply = buildAllergyReply(text, ctx);
           } else {
             // A reaction: empathize, don't dismiss, don't falsely reassure, no medical advice, escalate.
             // Split active-reaction (burning/red NOW → defer + escalate, no procedure advice) from a

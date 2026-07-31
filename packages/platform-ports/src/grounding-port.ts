@@ -10,6 +10,13 @@ export interface Product {
   /** Display price string, e.g. "$28". The agent never invents or alters this. */
   price: string;
   tags?: string[];
+  /**
+   * The product's ingredient list (INCI / label order), if the merchant publishes one. OPTIONAL:
+   * adapters populate it when the source has it (the demo fixture; a Shopify metafield/parsed label)
+   * and leave it undefined otherwise. It grounds honest allergy answers — the agent scans this actual
+   * list rather than guessing — but is never a safety guarantee (cross-contact still applies).
+   */
+  ingredients?: string[];
 }
 
 export interface StorePolicy {
