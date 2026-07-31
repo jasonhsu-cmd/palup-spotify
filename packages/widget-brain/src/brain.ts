@@ -546,7 +546,7 @@ export function createBrain(
       if (isSupport) {
         // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
         if (commerce) {
-          const r = await handleSupport(commerce, shopperId, message);
+          const r = await handleSupport(commerce, shopperId, message, signals.mood);
           return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
         }
         // Fallback when no commerce port is wired: generic grounded reply.
@@ -669,6 +669,22 @@ export function createBrain(
         systemExtra +=
           "\nDATA-RESIDENCY POLICY: This shopper is in the EU. Handle their personal data under EU (GDPR) rules - EU data residency and opt-in consent by default - and do NOT apply US-default data handling. Briefly reassure them on this basis; do not assert specific infrastructure the merchant may not have.";
       }
+      // Skeptic / "does it actually work" — back claims with SPECIFIC catalog facts and disclose the AI,
+      // rather than an unqualified sales voice a skeptic distrusts (evidence-grounded + disclose-ai).
+      if (signals.mood === "skeptical" || /\b(actually|really) work|is (it|this) hype|worth it\b|snake oil|does it (really |actually )?work|any evidence|proof it works|is it legit/.test(text)) {
+        flags.push("skeptic_evidence");
+        systemExtra +=
+          "\nSKEPTIC POLICY: The shopper is skeptical about efficacy. Back every claim with SPECIFIC facts from the CATALOG (named actives/ingredients, what the product is formulated for, how to use it) — never vague hype. Be honest about what it can and can't do and that results vary. Disclose that you are an AI assistant.";
+      }
+      // Stated budget / gift — recommend within budget and never push over it (within-budget / in-budget).
+      const budgetMatch = text.match(/(?:under|below|around|about|~|up to|max(?:imum)?|budget of|spend)\s*\$?\s*(\d{1,4})|\$\s*(\d{1,4})\b/);
+      const budgetCap = budgetMatch ? Number(budgetMatch[1] ?? budgetMatch[2]) : undefined;
+      const isGift = /\bgift\b|present for|for my (mom|mother|sister|friend|dad|father|partner|wife|husband|girlfriend|boyfriend|daughter|son|brother)/.test(text);
+      if (budgetCap !== undefined || isGift) {
+        flags.push(isGift ? "gift" : "budget");
+        systemExtra +=
+          `\nBUDGET/GIFT POLICY:${isGift ? " This is a gift — suggest gift-appropriate options and frame them as a gift." : ""}${budgetCap !== undefined ? ` Recommend ONLY catalog items at or below $${budgetCap}; do NOT suggest anything priced over that. If nothing fits the budget, say so honestly.` : ""}`;
+      }
       // Choose the pitch BEFORE generating so the reply can actually reflect it (RC1). The pitch
       // directive lands on the sales path only — after every guardrail short-circuit above.
       const negativeMood =
@@ -679,12 +695,22 @@ export function createBrain(
       // to unambiguous decide/checkout phrasing to avoid catching a question ("should I take the retinol?").
       const buySignal =
         /\b(i'?ll take it|i'?ll take the|i'?ll buy|i want to buy|ready to (buy|check ?out|purchase)|check ?out|checkout|buy it|purchase it|place (the|my) order|let'?s (buy|check ?out|do it))\b/.test(text);
+      // Idle browser (NOT "no idea where to start", which wants a discovery rec) — a light greeting, no
+      // proactive pitch (no-proactive-pitch / build-trust). Narrow to unambiguous "just looking" phrasing.
+      const browsing = /just browsing|just looking|looking around|only browsing|not buying (anything |any )?today|not ready to buy|no thanks,? just/.test(text);
+      if (browsing) {
+        flags.push("browsing");
+        systemExtra +=
+          "\nBROWSING: The shopper is just looking, not buying now. Give a warm, brief, helpful greeting and offer to help if they'd like — do NOT push a product, recommendation, or pitch.";
+      }
       let pitch: PitchKind = "none";
       let outbound = false;
       if (negativeMood) {
         flags.push("mood_brake", "no_pitch");
       } else if (buySignal) {
         flags.push("buy_signal", "no_pitch"); // pitch stays "none" — move to checkout, don't pitch
+      } else if (browsing) {
+        flags.push("no_pitch"); // pitch stays "none" — idle browser
       } else {
         // Deterministic OBJECTION trigger: a price/fit/trust objection in THIS message routes the
         // otherwise-selected pitch to objection_close (still under every cap — see selectPitch). Audit

@@ -36,6 +36,26 @@ describe("grounding / honesty system prompt", () => {
     expect(sys(spy)).not.toMatch(/PITCH - cross-sell/); // the contradictory cross-sell nudge is gone
   });
 
+  it("a skeptic efficacy question adds an evidence + AI-disclosure steer", async () => {
+    const { brain, spy } = spyBrain();
+    await brain.decide({ cart: "empty" }, "does this actually work or is it just hype?");
+    expect(sys(spy)).toMatch(/SKEPTIC POLICY/);
+  });
+
+  it("a stated gift budget caps recommendations in the prompt", async () => {
+    const { brain, spy } = spyBrain();
+    await brain.decide({ cart: "empty" }, "a gift for my sister with sensitive skin, around $50");
+    expect(sys(spy)).toMatch(/at or below \$50/);
+  });
+
+  it("an idle browser gets no pitch and a light-greeting steer", async () => {
+    const { brain, spy } = spyBrain();
+    const d = await brain.decide({ cart: "empty" }, "just browsing, thanks");
+    expect(d.pitch).toBe("none");
+    expect(d.flags).toContain("browsing");
+    expect(sys(spy)).toMatch(/BROWSING/);
+  });
+
   it("word-boundary support gate: 'returning' (browsing) routes to sales, not support", async () => {
     const { brain } = spyBrain();
     const d = await brain.decide({}, "I'm returning to skincare after a long break — what's good for me?");

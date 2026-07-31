@@ -43,6 +43,24 @@ describe("support guardrails (in code)", () => {
     const ret = await handleSupport(c, shopper, "I want to return order #1042");
     expect(ret.reply.toLowerCase()).toContain("on your account");
   });
+  it("acknowledges frustration before the status when the shopper is annoyed (empathize)", async () => {
+    const r = await handleSupport(c, shopper, "my package is late and I'm annoyed", "upset");
+    expect(r.reply.toLowerCase()).toMatch(/sorry|frustrat/);
+  });
+  it("is honest about a past-window return the shopper dates themselves — no fabricated in-window", async () => {
+    const r = await handleSupport(c, shopper, "I want to return this, I bought it 60 days ago");
+    expect(r.reply).toMatch(/past our 30-day/);
+    expect(r.reply).not.toMatch(/within our 30-day window/);
+    expect(r.escalate).toBe(true);
+  });
+  it("does not answer an order-age question from a mismatched recent order", async () => {
+    const r = await handleSupport(c, shopper, "it's been 8 days, where is it?");
+    expect(r.reply).toMatch(/order number|8-day/i); // #1042 is 3 days old — don't assert it as the 8-day one
+  });
+  it("does not claim a shipped order can't be cancelled when the shopper says it hasn't shipped", async () => {
+    const r = await handleSupport(c, shopper, "cancel my order, it hasn't shipped yet");
+    expect(r.reply).toMatch(/shows as already shipped|different order/i);
+  });
   it("routes a refund above the ceiling to a human (never auto-approves)", async () => {
     const r = await handleSupport(c, shopper, "refund my $180 order #2000");
     expect(r.flags).toContain("refund_hitl");
