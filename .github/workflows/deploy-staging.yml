@@ -23,6 +23,12 @@ jobs:
           service_account: ${{ secrets.GCP_DEPLOY_SA }}
       - uses: google-github-actions/setup-gcloud@v2
       - name: Deploy widget backend to Cloud Run (staging)
+        # NOTE: --set-secrets / --set-env-vars REPLACE the whole set on every deploy — any secret/env the
+        # service needs MUST be listed here or it is silently dropped on the next merge-deploy. PALUP_SECRETS
+        # + SHOPIFY_STORES wire live Shopify grounding (ADR-0012, docs/DEPLOY.md); omitting them reverts
+        # grounding to the built-in fixtures with no error. SHOPIFY_STORES is JSON, so --set-env-vars uses
+        # gcloud's ^@^ custom delimiter (pairs split on '@', not ',') to preserve its quotes/colons — the
+        # value contains no '@'.
         run: |
           gcloud run deploy palup-widget-staging \
             --source . \
@@ -30,8 +36,8 @@ jobs:
             --region "${{ vars.GCP_REGION || 'us-central1' }}" \
             --allow-unauthenticated \
             --add-cloudsql-instances "${{ vars.GCP_PROJECT }}:${{ vars.GCP_REGION || 'us-central1' }}:palup-staging" \
-            --set-secrets "DATABASE_URL=palup-staging-database-url:latest,WIDGET_TOKEN_SECRET=widget-token-secret:latest" \
-            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT }},GOOGLE_CLOUD_LOCATION=global,PALUP_MODEL=gemini-2.5-flash,PALUP_REQUIRE_DATABASE_URL=true,WIDGET_AUTH_REQUIRED=${{ vars.WIDGET_AUTH_REQUIRED || 'false' }}"
+            --set-secrets "DATABASE_URL=palup-staging-database-url:latest,WIDGET_TOKEN_SECRET=widget-token-secret:latest,PALUP_SECRETS=palup-secrets:latest" \
+            --set-env-vars "^@^GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT }}@GOOGLE_CLOUD_LOCATION=global@PALUP_MODEL=gemini-2.5-flash@PALUP_REQUIRE_DATABASE_URL=true@WIDGET_AUTH_REQUIRED=${{ vars.WIDGET_AUTH_REQUIRED || 'false' }}@SHOPIFY_STORES={\"demo\":\"palup-skincare-jason.myshopify.com\"}"
       - name: Post-deploy smoke gate (health + live /chat + auth)
         run: |
           set -euo pipefail
