@@ -24,10 +24,22 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 - Anything changing **price, discounts, or promotions**.
 - **Launching** a marketing campaign or paid spend / changing ad budget.
 - Changes to the merchant's **sales or marketing ROI** posture or business model.
-- Issuing refunds, cancellations, or anything moving money.
+- Issuing refunds, cancellations (incl. **subscription cancel** — it ends recurring revenue),
+  or anything moving money.
 - Contacting customers outside approved templates/frequency, or new outreach channels.
 - Any action that materially affects the merchant's revenue.
 - Changing the agent's own behavior scope (autonomy escalation).
+
+> **Subscription skip/pause — classification approved (owner jason.hsu@framy.co, 2026-07-31),
+> NOT yet enacted.** A reversible skip/pause *defers* a shipment/charge and never ends the plan or
+> moves money now, so per §1 it belongs in "auto-allowed" — the owner has approved that classification.
+> It is **not enacted**: the enforcement controls it relies on do not exist yet — a per-request
+> **verified shopper identity** (today the widget authenticates only the merchant; the shopper is
+> anonymous and `shopperId` is a constant), an **audited** autonomous action with a real reversal path,
+> an **executable reversal** capability on the port, and a **skip cap / idempotency**. Both governance
+> reviewers returned **BLOCK** on an un-preconditioned build. Until those prerequisites land and
+> `security-reviewer` + `agent-evolution-steward` sign off, subscription **skip/pause is human-routed,
+> exactly like cancel**. Design + prerequisites: `docs/adr/0016-subscription-skip-pause-selfserve.md`.
 
 ## 3. PalUp plane (agent acts for PalUp; **PalUp administrator** approves)
 
