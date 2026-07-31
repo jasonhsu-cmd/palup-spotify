@@ -93,6 +93,7 @@ describe("deriveServingSignals — client signals are untrusted", () => {
     it("shopperId present but NOT verified ⇒ treated as anonymous (defense in depth)", () => {
       const out = deriveServingSignals(undefined, { ...ctx, shopperId: "shopify:acme:48291", shopperVerified: false });
       expect(out.relationship).toBe("anonymous");
+      expect(out.shopperId).toBeUndefined(); // the id is gated on `verified` too — never keys ownership unverified
     });
   });
 });

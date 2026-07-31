@@ -257,6 +257,18 @@ export async function buildServer(opts?: {
       reply.code(404);
       return { error: "not found" };
     }
+    // Rate-limit the mint endpoint per IP (mirrors /widget/token) so a holder of one valid widget token
+    // can't hammer it for unbounded HMAC/mint work. Bucketed under the reserved mint tenant.
+    const rlXff = req.headers["x-forwarded-for"];
+    const rlIpKey = clientIpKey(Array.isArray(rlXff) ? rlXff[0] : rlXff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${rlIpKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open: minting is cheap and the /chat model path is separately capped */
+    }
     const authHeader = req.headers["authorization"];
     const widgetToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
     const merchantPrincipal = await widgetIdentity.authenticate(widgetToken);

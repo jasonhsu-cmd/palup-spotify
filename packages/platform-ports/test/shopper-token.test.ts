@@ -1,6 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { mintShopperToken, createShopperTokenIdentity } from "../src/shopper-token-identity.js";
 import { mintWidgetToken, createWidgetTokenIdentity } from "../src/widget-token-identity.js";
+import { b64url, hmacSign } from "../src/token-codec.js";
+
+// Craft a validly-SIGNED token with an arbitrary body — to prove the `typ` guard (not mere field-absence)
+// is what blocks cross-verification. A body carrying BOTH discriminators (`m` and `sid`) reaches the
+// type check with a valid signature; only the `typ` guard can then reject it.
+function craftSignedToken(secret: string, payload: Record<string, unknown>): string {
+  const body = b64url(Buffer.from(JSON.stringify(payload)));
+  return `${body}.${hmacSign(secret, body)}`;
+}
 
 const SECRET = "shopper-signing-secret";
 
@@ -60,6 +69,20 @@ describe("shopper token identity (T3, mirrors widget-token-identity)", () => {
       const p = await shopperIdentity.authenticate(widgetToken);
       expect(p.kind).toBe("anonymous");
       expect(p.kind).not.toBe("shopper");
+    });
+
+    // Hardened: the token carries BOTH `m` (widget's field) AND `sid`/`src` (shopper's), validly signed,
+    // with the WRONG `typ` — so ONLY the `typ` guard can reject it. Deleting either guard flips these red.
+    const exp = Math.floor(Date.now() / 1000) + 300;
+    it("a both-fields token with typ:'shopper' is rejected by the WIDGET verifier ON TYP (not field-absence)", async () => {
+      const tok = craftSignedToken(SHARED_SECRET, { typ: "shopper", m: "acme", sid: "shopify:acme:1", src: "shopify", exp });
+      const p = await createWidgetTokenIdentity(SHARED_SECRET).authenticate(tok);
+      expect(p.kind).toBe("anonymous"); // without the typ guard, `m:"acme"` would yield a MERCHANT principal
+    });
+    it("a both-fields token with typ:'widget' is rejected by the SHOPPER verifier ON TYP (not field-absence)", async () => {
+      const tok = craftSignedToken(SHARED_SECRET, { typ: "widget", m: "acme", sid: "shopify:acme:1", src: "shopify", exp });
+      const p = await createShopperTokenIdentity(SHARED_SECRET).authenticate(tok);
+      expect(p.kind).toBe("anonymous"); // without the typ guard, `sid` would yield a SHOPPER principal
     });
   });
 });

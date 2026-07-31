@@ -55,7 +55,9 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // relationship: a verified shopper is a KNOWN account with no history loaded yet ⇒ "new" — NEVER
     // "vip"/"subscriber" here (that uplift is ADR-0015 Tier 2, keyed off order history, not this slice);
     // anonymous (no verified shopper) ⇒ unchanged "anonymous", never client-claimed.
-    shopperId: ctx.shopperId,
+    // Gate the id on the VERIFIED flag too (not just relationship) — an (id-set, unverified) ctx (e.g. a
+    // future OTP adapter mid-verify) must never key the ownership check on an unverified id.
+    shopperId: ctx.shopperVerified && ctx.shopperId ? ctx.shopperId : undefined,
     relationship: ctx.shopperVerified && ctx.shopperId ? "new" : "anonymous",
     consent: {
       email: "unknown",
