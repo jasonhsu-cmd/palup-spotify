@@ -23,7 +23,9 @@ export type {
   OrderItem,
   Subscription,
   CommercePolicy,
+  SubscriptionActionResult,
 } from "./commerce-port.js";
+export { SUBSCRIPTION_SKIP_CAP } from "./commerce-port.js";
 export type { StorePort } from "./store-port.js";
 export type {
   RuntimeStatePort,

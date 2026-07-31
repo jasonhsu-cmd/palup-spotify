@@ -1,4 +1,4 @@
-import type { CommercePolicy, CommercePort, Order, Subscription } from "@palup/platform-ports";
+import { SUBSCRIPTION_SKIP_CAP, type CommercePolicy, type CommercePort, type Order, type Subscription, type SubscriptionActionResult } from "@palup/platform-ports";
 
 // Demo commerce data (stands in for the Shopify adapter). Shopper "shopper-demo" owns #1042/#1050/#2000
 // and a subscription; #9999 belongs to someone else (used to test ownership verification).
@@ -17,7 +17,21 @@ const POLICY: CommercePolicy = {
   shipping: "free over $75; 3–5 business days in the US. Lost/undelivered packages: reship or refund after a carrier check.",
 };
 
+// ADR-0016 #3/#4 — mutable per-subscription state for the skip/pause/resume/unskip actions. INSTANCE
+// state (not module-level): each `new MockCommerceAdapter()` starts fresh, so tests that skip/pause
+// never bleed state into each other via a shared module singleton.
+interface SubState {
+  active: boolean;
+  consecutiveSkips: number;
+  paused: boolean;
+  nextDeliverySkipped: boolean;
+}
+
 export class MockCommerceAdapter implements CommercePort {
+  private subscriptions: Record<string, SubState> = {
+    "shopper-demo": { active: true, consecutiveSkips: 0, paused: false, nextDeliverySkipped: false },
+  };
+
   async getOrder(orderId: string): Promise<Order | null> {
     return ORDERS[orderId.replace(/[^0-9]/g, "")] ?? null;
   }
@@ -30,7 +44,64 @@ export class MockCommerceAdapter implements CommercePort {
     return POLICY;
   }
   async getSubscription(shopperId: string): Promise<Subscription | null> {
-    return shopperId === "shopper-demo" ? { id: "sub-1", shopperId, active: true } : null;
+    const s = this.subscriptions[shopperId];
+    if (!s) return null;
+    return {
+      id: "sub-1",
+      shopperId,
+      active: s.active,
+      consecutiveSkips: s.consecutiveSkips,
+      paused: s.paused,
+      nextDeliverySkipped: s.nextDeliverySkipped,
+    };
+  }
+  async skipNextDelivery(shopperId: string): Promise<SubscriptionActionResult> {
+    const s = this.subscriptions[shopperId];
+    if (!s?.active) return { ok: false, detail: "no active subscription on this account", reversalPath: "n/a" };
+    // Idempotency (#4): a repeated identical skip before a cycle turnover is a no-op, not a double-skip.
+    if (s.nextDeliverySkipped) {
+      return { ok: true, detail: "the next delivery is already set to skip — no change", reversalPath: "unskipNextDelivery" };
+    }
+    // Defense-in-depth cap enforcement (#4): the primary gate lives in support.ts (so an over-cap
+    // request never even reaches here), but the port itself must never allow a NEW skip past the cap
+    // regardless of caller — a stealth-cancel guard that doesn't depend on the caller behaving.
+    if (s.consecutiveSkips >= SUBSCRIPTION_SKIP_CAP) {
+      return { ok: false, detail: `consecutive-skip cap (${SUBSCRIPTION_SKIP_CAP}) reached`, reversalPath: "n/a" };
+    }
+    s.nextDeliverySkipped = true;
+    s.consecutiveSkips += 1;
+    return { ok: true, detail: "next delivery skipped; the following order ships as usual", reversalPath: "unskipNextDelivery" };
+  }
+  async pauseSubscription(shopperId: string): Promise<SubscriptionActionResult> {
+    const s = this.subscriptions[shopperId];
+    if (!s?.active) return { ok: false, detail: "no active subscription on this account", reversalPath: "n/a" };
+    if (s.paused) return { ok: true, detail: "already paused — no change", reversalPath: "resumeSubscription" };
+    s.paused = true;
+    return { ok: true, detail: "subscription paused indefinitely", reversalPath: "resumeSubscription" };
+  }
+  async resumeSubscription(shopperId: string): Promise<SubscriptionActionResult> {
+    const s = this.subscriptions[shopperId];
+    if (!s?.active) return { ok: false, detail: "no active subscription on this account", reversalPath: "n/a" };
+    if (!s.paused) return { ok: true, detail: "already active — no change", reversalPath: "pauseSubscription" };
+    s.paused = false;
+    return { ok: true, detail: "subscription resumed", reversalPath: "pauseSubscription" };
+  }
+  async unskipNextDelivery(shopperId: string): Promise<SubscriptionActionResult> {
+    const s = this.subscriptions[shopperId];
+    if (!s?.active) return { ok: false, detail: "no active subscription on this account", reversalPath: "n/a" };
+    if (!s.nextDeliverySkipped) return { ok: true, detail: "nothing to undo — no change", reversalPath: "skipNextDelivery" };
+    s.nextDeliverySkipped = false;
+    s.consecutiveSkips = Math.max(0, s.consecutiveSkips - 1);
+    return { ok: true, detail: "next-delivery skip undone", reversalPath: "skipNextDelivery" };
+  }
+  /**
+   * Test/demo-only seam (NOT on CommercePort, mirrors `ordersFor` below): directly set a shopper's
+   * subscription skip/pause state so a test can simulate "N consecutive skip cycles already used"
+   * without modeling real cycle-turnover timing.
+   */
+  seedSubscriptionState(shopperId: string, patch: Partial<SubState>): void {
+    const s = this.subscriptions[shopperId];
+    if (s) Object.assign(s, patch);
   }
   /**
    * Demo-adapter-only (NOT on CommercePort): the orders a shopper owns. Used by the eval harness to

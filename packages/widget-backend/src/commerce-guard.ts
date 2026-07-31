@@ -68,5 +68,24 @@ export function guardCommercePort(port: CommercePort, isLive: boolean, getPrinci
       check("getSubscription");
       return port.getSubscription(shopperId);
     },
+    // ADR-0016 #3/#4 — these are WRITES on a live adapter; the guard covers them identically to every
+    // read above (ADR-0017 §3 "reads AND writes"), so a future live subscription adapter can never be
+    // reached behind an unverified/constant shopperId by construction.
+    async skipNextDelivery(shopperId) {
+      check("skipNextDelivery");
+      return port.skipNextDelivery(shopperId);
+    },
+    async pauseSubscription(shopperId) {
+      check("pauseSubscription");
+      return port.pauseSubscription(shopperId);
+    },
+    async resumeSubscription(shopperId) {
+      check("resumeSubscription");
+      return port.resumeSubscription(shopperId);
+    },
+    async unskipNextDelivery(shopperId) {
+      check("unskipNextDelivery");
+      return port.unskipNextDelivery(shopperId);
+    },
   };
 }

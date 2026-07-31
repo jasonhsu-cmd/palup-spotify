@@ -1,4 +1,4 @@
-import type { CommercePort, Order } from "@palup/platform-ports";
+import { SUBSCRIPTION_SKIP_CAP, type CommercePort, type Order } from "@palup/platform-ports";
 
 // Real support handling grounded in the commerce port. The guardrails are in CODE: verify ownership
 // before revealing an order; refunds above the policy ceiling are HITL (never auto-approved); cancels/
@@ -13,6 +13,21 @@ export type SupportIntent =
 
 export interface SupportResult { reply: string; escalate: boolean; flags: string[] }
 
+/**
+ * ADR-0016 enactment — the two controls that gate an autonomous skip/pause. Both must independently be
+ * true before support.ts will EVER call a CommercePort subscription-action method; either false (or
+ * omitted, the default for every existing call site) preserves today's human-routed behavior exactly.
+ */
+export interface SubscriptionSelfServeOptions {
+  /** The SUBSCRIPTION_SELFSERVE posture flag (widget-backend env, threaded via createBrain). Default
+   * OFF — mirrors WIDGET_AUTH_REQUIRED/SHOPPER_AUTH: never hardcoded on. */
+  enabled?: boolean;
+  /** ADR-0016 #1/#2 — server-VERIFIED shopper only. The caller (brain.ts) MUST derive this from
+   * `signals.shopperId !== undefined` (ADR-0017 gates that on a verified principal) — NEVER infer it
+   * from the shopperId STRING itself (a constant/demo id must never look verified). */
+  shopperVerified?: boolean;
+}
+
 export function extractOrderId(text: string): string | undefined {
   // Prefer a #-prefixed number; else a bare 4+ digit number (order ids are 4 digits — avoids matching
   // a price like "$180").
@@ -23,7 +38,11 @@ export function classifySupportIntent(text: string): SupportIntent {
   const t = text.toLowerCase();
   if (/none of this|just fix it|nothing.*work|just need help|this isn.?t working/.test(t)) return "escalate_stuck";
   if (/cancel (my )?subscription|cancel.*subscription/.test(t)) return "cancel_subscription";
-  if (/(skip|pause).*(month|delivery|subscription|shipment)|skip (my )?next/.test(t)) return "skip_subscription";
+  // ADR-0016 #3 — "a shopper path to invoke [the reversal]": resume/unpause/undo-the-skip phrasing is
+  // classified into the SAME skip_subscription bucket (the handler dispatches on which action word is
+  // actually present) so the reversal promised in the confirmation reply is genuinely reachable, not an
+  // unbacked promise.
+  if (/(skip|pause|resume|unpause|un-pause).*(month|delivery|subscription|shipment)|skip (my )?next|resume (my )?subscription|unpause (my )?subscription|undo (the |my )?skip|put (it|my delivery) back/.test(t)) return "skip_subscription";
   if (/charged twice|double.?charg|charged me twice|why (was|am) i charged|two charges/.test(t)) return "billing";
   if (/(change|update).*(shipping )?address/.test(t)) return "address_change";
   if (/wrong (shade|colou?r)|swap.*(shade|for)|different shade|\bexchange\b/.test(t)) return "exchange";
@@ -43,7 +62,41 @@ export function classifySupportIntent(text: string): SupportIntent {
   return "general";
 }
 
-export async function handleSupport(commerce: CommercePort, shopperId: string, message: string, mood?: string): Promise<SupportResult> {
+// ADR-0016 #5 — affirmative-intent tightening. A skip/pause/resume/unskip AUTO-EXECUTES only on a
+// genuine, present-tense REQUEST for the action — never on a negation ("please DON'T skip") or a
+// retrospective/interrogative question ABOUT a past action ("WHY DID you skip", "DID you skip my
+// delivery?"). Deliberately conservative: anything ambiguous falls through to the existing human-routed
+// path (never the reverse), so tightening this can only ever remove auto-execution, never add it.
+function isAffirmativeSubscriptionIntent(message: string): boolean {
+  const t = message.toLowerCase().trim();
+  // Negation — the shopper does NOT want the action taken.
+  if (/\b(don'?t|do not|didn'?t|did not|won'?t|will not|never|shouldn'?t)\b/.test(t)) return false;
+  // A retrospective/interrogative question about a PAST action is not a request to act now.
+  if (/^(why|was|were|has|have)\b/.test(t)) return false;
+  if (/^did (you|it|my|this)\b/.test(t)) return false;
+  return true;
+}
+
+// Which subscription-schedule action the message actually asks for. Resume/unskip phrasing routes to
+// the SAME handler bucket as skip/pause (classifySupportIntent above) precisely so the reversal
+// promised in the confirmation reply ("you can undo this anytime") is a real, reachable shopper path
+// (ADR-0016 #3), not just a port method nobody can invoke.
+type SubscriptionAction = "skip" | "pause" | "resume" | "unskip";
+function detectSubscriptionAction(message: string): SubscriptionAction {
+  const t = message.toLowerCase();
+  if (/\bresume\b|\bunpause\b|\bun-pause\b|start (it|my subscription) again|restart (it|my subscription)/.test(t)) return "resume";
+  if (/undo (the |my )?skip|put (it|my delivery) back|\bunskip\b|un-skip/.test(t)) return "unskip";
+  if (/\bpause\b/.test(t)) return "pause";
+  return "skip";
+}
+
+export async function handleSupport(
+  commerce: CommercePort,
+  shopperId: string,
+  message: string,
+  mood?: string,
+  selfServe?: SubscriptionSelfServeOptions,
+): Promise<SupportResult> {
   const intent = classifySupportIntent(message);
   const flags = ["mode_support", "no_pitch", `support:${intent}`];
   const policy = await commerce.getPolicy();
@@ -166,11 +219,83 @@ export async function handleSupport(commerce: CommercePort, shopperId: string, m
       // person completes it (no execution path this phase); we don't claim it's already done.
       flags.push("cancel_sub_routed", "escalate"); return { reply: `I hear you — I've asked a member of our team to stop the billing right away so you won't be charged again, and they'll confirm the cancellation with you. Sorry to see you go, and thanks for giving us a try.`, escalate: true, flags };
     }
-    case "skip_subscription":
-      // HONESTY (money-model adjacent — changes when the shopper is billed): no execution path, so don't
-      // claim it's done. Route to a person to apply the skip.
-      flags.push("skip_sub_routed", "escalate");
-      return { reply: `Sure — I can't change the subscription schedule myself, so I've passed your request to skip the next delivery to a member of our team to apply, and flagged it as time-sensitive. They'll confirm once it's set, and the following order would ship as usual.`, escalate: true, flags };
+    case "skip_subscription": {
+      // HONESTY (money-model adjacent — changes when/whether the shopper is billed): the DEFAULT, exactly
+      // like every other money-model-adjacent case above, is to route to a person rather than claim it's
+      // done — and this default path must stay BYTE-IDENTICAL to pre-ADR-0016 behavior (never even
+      // touching the commerce port), so it's checked FIRST, before any subscription lookup. ADR-0016
+      // enactment: auto-execute ONLY when the SUBSCRIPTION_SELFSERVE flag is on AND the shopper is
+      // server-VERIFIED (never inferred from the id string — the caller derives this from
+      // signals.shopperId !== undefined) AND the message is an affirmative request, not a negation/question.
+      const routeToHuman = (): SupportResult => {
+        flags.push("skip_sub_routed", "escalate");
+        return {
+          reply: `Sure — I can't change the subscription schedule myself, so I've passed your request to skip the next delivery to a member of our team to apply, and flagged it as time-sensitive. They'll confirm once it's set, and the following order would ship as usual.`,
+          escalate: true,
+          flags,
+        };
+      };
+      const autoAllowed = Boolean(selfServe?.enabled) && Boolean(selfServe?.shopperVerified) && isAffirmativeSubscriptionIntent(message);
+      if (!autoAllowed) return routeToHuman();
+
+      const sub = await commerce.getSubscription(shopperId);
+      if (!sub?.active) {
+        return { reply: `You don't have an active subscription right now, so there's nothing to skip or pause — let me know if there's anything else I can help with.`, escalate: false, flags };
+      }
+      const action = detectSubscriptionAction(message);
+      if (action === "skip") {
+        // ADR-0016 #4 — cap: once the shopper has skipped SUBSCRIPTION_SKIP_CAP cycles in a row without
+        // an intervening resume/unskip, don't auto-skip again — a repeated skip could otherwise become a
+        // stealth cancel. Route to a human instead (never auto-cancel, never silently keep skipping).
+        if ((sub.consecutiveSkips ?? 0) >= SUBSCRIPTION_SKIP_CAP) {
+          flags.push("skip_cap_reached", "skip_sub_routed", "escalate");
+          return {
+            reply: `It looks like this has become a repeated pattern, so rather than skip it again automatically, let me bring in a person to take a look with you.`,
+            escalate: true,
+            flags,
+          };
+        }
+        const result = await commerce.skipNextDelivery(shopperId);
+        if (!result.ok) return routeToHuman();
+        flags.push("sub_skipped", "autonomous_action", `reversal:${result.reversalPath}`);
+        return {
+          reply: `Done — I've skipped your next delivery; the order after that will ship as usual. You can undo this anytime — just tell me and I'll put it back.`,
+          escalate: false,
+          flags,
+        };
+      }
+      if (action === "pause") {
+        // Indefinite pause has no cap (it's fully reversible and never ships anything unwanted) but is
+        // always flagged (#4) — a stronger action than a single skip, so it stays audit-visible.
+        const result = await commerce.pauseSubscription(shopperId);
+        if (!result.ok) return routeToHuman();
+        flags.push("sub_paused", "indefinite_pause", "autonomous_action", `reversal:${result.reversalPath}`);
+        return {
+          reply: `Done — I've paused your subscription until you say otherwise. You can undo this anytime — just ask and I'll resume it.`,
+          escalate: false,
+          flags,
+        };
+      }
+      if (action === "resume") {
+        const result = await commerce.resumeSubscription(shopperId);
+        if (!result.ok) return routeToHuman();
+        flags.push("sub_resumed", "autonomous_action", `reversal:${result.reversalPath}`);
+        return {
+          reply: `Done — I've resumed your subscription; it's back on its normal schedule. Let me know if you'd like to change anything else.`,
+          escalate: false,
+          flags,
+        };
+      }
+      // action === "unskip" — the executable reversal of a prior skip.
+      const result = await commerce.unskipNextDelivery(shopperId);
+      if (!result.ok) return routeToHuman();
+      flags.push("sub_skip_undone", "autonomous_action", `reversal:${result.reversalPath}`);
+      return {
+        reply: `Done — I've put your next delivery back on schedule.`,
+        escalate: false,
+        flags,
+      };
+    }
     case "lost_package": {
       if (namedButUnavailable) return denyOrder("act on");
       const o = await resolveOwned();
