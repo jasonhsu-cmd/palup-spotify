@@ -29,7 +29,7 @@ const REVERSAL_PATHS: Record<MemoryAction, string> = {
   recall: "n/a — read-only, no state change",
   "erase.subject": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
   "erase.tenant": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
-  merge: "the pre-merge anon-id namespace is retained until its TTL and can restore prior state",
+  merge: "irreversible: the pre-merge anon-id namespace is DELETED on merge; the migrated facts live under the account namespace, from which the account's own erasure/withdrawal applies",
   ttl_sweep: "n/a — expiry is policy-driven; a fresh consent grant starts a new TTL",
 };
 

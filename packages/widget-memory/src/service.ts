@@ -6,32 +6,22 @@ import { decideMemoryWrite } from "./consent.js";
 import { classifyFact, type FactClass } from "./classifier.js";
 import { sanitizeFact, type FactDistiller } from "./distiller.js";
 import { buildMemoryAudit } from "./audit.js";
-import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact } from "./types.js";
+import { ttlForClass } from "./retention.js";
+import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact, FactMetadata } from "./types.js";
 
 // ADR-0015 PR A (T7): wires flag -> consent -> classifier -> distiller -> VectorPort + audit. The
 // double gate (flag.ts) is the outermost check on BOTH methods — when off, neither method touches the
 // vector port or the audit log at all (not even a read), so shipping this package changes NOTHING on
 // the /chat path until a later, explicitly-gated PR wires it in and flips the flag.
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-// ADR-0015 Inv 4 default guest retention (ordinary facts). The ADR marks the exact numbers "Still
-// open — resolve before Accepted" (sensitive-fact TTL, per-merchant configurability); these are
-// placeholders using the ADR's own suggested figures, pending legal review.
-// UNVERIFIED-with-legal.
-const ORDINARY_TTL_DAYS = 60;
-const SPECIAL_TTL_DAYS = 14; // shorter TTL for special-category facts (ADR "Still open": 7-14 days)
+// ADR-0015 Inv 4/9 TTL day-counts (ORDINARY_TTL_DAYS / SPECIAL_TTL_DAYS) now live in retention.ts (T8) —
+// the single source of truth, so this module and the retention/sweep module can never drift apart.
 
 // A generous per-subject cap on how many facts `recall` retrieves in one call. The vector port has no
 // native "list all" op; querying with an empty text scores every record 0 (tie) and returns them in
 // stable id order up to `k`, which is exactly "give me everything for this subject" for the modest
 // per-subject fact counts this system deals in.
 const RECALL_LIMIT = 500;
-
-interface FactMetadata {
-  text: string;
-  class: FactClass;
-  expiresAt: string; // ISO-8601
-}
 
 export interface MemoryServiceDeps {
   vector: VectorPort;
@@ -80,11 +70,10 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       const mayWrite = factClass === "special" ? capability.mayWriteSpecial : capability.mayWriteOrdinary;
       if (!mayWrite) continue; // consent gate (Inv 3 / Inv 9)
 
-      const ttlDays = factClass === "special" ? SPECIAL_TTL_DAYS : ORDINARY_TTL_DAYS;
       const metadata: FactMetadata = {
         text: sanitized,
         class: factClass,
-        expiresAt: new Date(now + ttlDays * DAY_MS).toISOString(),
+        expiresAt: new Date(now + ttlForClass(factClass)).toISOString(),
       };
       const record: VectorRecord = { id: randomUUID(), text: sanitized, metadata };
       written.push(factClass);

@@ -32,6 +32,16 @@ export interface RecalledFact {
   class: FactClass;
 }
 
+/** The shape every stored fact's `VectorRecord.metadata` carries (service.ts `remember`/`recall`; also
+ * read by retention.ts/erasure.ts/merge.ts, T8-T10). Kept here — not in service.ts — so those modules
+ * can depend on the shape without ever importing service.ts itself (avoids a cycle: service.ts imports
+ * `ttlForClass` from retention.ts). */
+export interface FactMetadata {
+  text: string;
+  class: FactClass;
+  expiresAt: string; // ISO-8601
+}
+
 export interface MemoryService {
   /** Distill + classify + consent-gate + (maybe) persist facts from one turn. No-op `{written: []}`
    * touching nothing when the double gate (flag.ts) is off. */
