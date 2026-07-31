@@ -76,6 +76,31 @@ export interface HistoryTurn {
   content: string;
 }
 
+/**
+ * A single durable, cross-visit fact recalled about a shopper (ADR-0015 T11). Defined HERE — NOT
+ * imported from @palup/widget-memory — so this package never depends on that one (no dep cycle;
+ * widget-memory already depends on widget-brain for the shared Consent/region vocabulary). The shape is
+ * structurally compatible with widget-memory's own `RecalledFact`, so any real MemoryService satisfies
+ * `MemoryRecallPort` with zero adapter code. `class` is optional/untyped here (a bare string) precisely
+ * because the brain must treat it as opaque, untrusted DATA — it is NEVER branched on to change
+ * guardrail behavior (Inv 10).
+ */
+export interface RecalledFact {
+  text: string;
+  class?: string;
+}
+
+/**
+ * The brain's own, minimal port for cross-visit memory RECALL (ADR-0015 T11). Read-only by design: the
+ * brain only ever needs to READ prior facts to add caution to the clean sales path — it never writes
+ * (that's the memory service's `remember`, called elsewhere, outside the brain). Consulted ONLY on the
+ * clean sales path, after every guardrail rung has already short-circuited, and ONLY when an `anonId` is
+ * available on `Signals` — never on the kill/injection/safety/support/uncertainty/b2b/proactive rungs.
+ */
+export interface MemoryRecallPort {
+  recall(ctx: { tenantId: string; anonId: string }): Promise<RecalledFact[]>;
+}
+
 export interface Signals {
   mood?: Mood;
   relationship?: Relationship;
@@ -85,8 +110,12 @@ export interface Signals {
   cart?: "empty" | "has_items" | "high_value";
   /** True once a safety event has latched this conversation (INV-A). */
   safetyLatched?: boolean;
-  /** Marketing consent per channel; drives outbound gating (TCPA/CAN-SPAM). */
-  consent?: { email?: Consent; sms?: Consent };
+  /** Marketing consent per channel; drives outbound gating (TCPA/CAN-SPAM). Also carries the two
+   * cross-visit MEMORY consent tiers (ADR-0015 T12: `memoryOrdinary` = Consent 1, `memorySpecial` =
+   * Consent 2 — independent of each other and of email/sms). Server/CMP-derived, never client-set;
+   * unknown behaves as no-consent. These are consumed by the memory SERVICE at write-time, not by the
+   * brain — the brain's own `memory.recall` call carries no consent (see `MemoryRecallPort`). */
+  consent?: { email?: Consent; sms?: Consent; memoryOrdinary?: Consent; memorySpecial?: Consent };
   /** Merchant "discuss competitors" mode (default full). Governs competitor-comparison replies. */
   groundingMode?: "off" | "general" | "full";
   /** Shopper jurisdiction; drives data-residency / consent regime (unknown = treat conservatively). */
@@ -128,6 +157,14 @@ export interface Signals {
    * never instructions, before it reaches the model, exactly like the catalog.
    */
   pageContext?: string;
+  /**
+   * The SERVER-derived, per-subject key for cross-visit memory recall (ADR-0015 T12) — the guest anon
+   * id, or the account id post sign-up merge. Like tenantId/region, this arrives via
+   * `deriveServingSignals`, never trusted verbatim from the client: a client-sent id is only honored
+   * after `validateAnonId` (charset+length bound); a bad/oversized one is dropped to `undefined`.
+   * Absent ⇒ `createBrain`'s `memory.recall` is simply never consulted this turn (no subject to key on).
+   */
+  anonId?: string;
 }
 
 export interface Decision {

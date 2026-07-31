@@ -1,4 +1,5 @@
 import type { Signals } from "@palup/widget-brain";
+import { validateAnonId } from "@palup/widget-memory";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -43,7 +44,16 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // Server-derived trust-bearing signals — never taken from the client.
     tenantId: ctx.tenantId, // the verified merchant; drives per-merchant grounding — never client-set
     relationship: "anonymous", // no identified customer yet (M2); never client-claimed VIP/subscriber
-    consent: { email: "unknown", sms: "unknown" }, // conservative; real consent store is a later subsystem
+    consent: {
+      email: "unknown",
+      sms: "unknown",
+      // ADR-0015 T12: the two cross-visit MEMORY consent tiers. Hardcoded "unknown" here — real
+      // consent (a CMP / server-side consent record) is a later, separately-gated subsystem, exactly
+      // like email/sms above. NEVER taken from the client's `signals.consent` (a shopper can't
+      // self-assert their own memory consent any more than they can self-assert VIP status).
+      memoryOrdinary: "unknown",
+      memorySpecial: "unknown",
+    },
     groundingMode: ctx.groundingMode,
     region: ctx.region,
     // proactivityLevel omitted ⇒ the session applies its own server-side default ("balanced"), never
@@ -57,5 +67,13 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
       typeof ctx.localHour === "number" && Number.isInteger(ctx.localHour) && ctx.localHour >= 0 && ctx.localHour <= 23
         ? ctx.localHour
         : undefined,
+    // ADR-0015 T12: the cross-visit memory subject key. A client MAY replay a previously-minted anon id
+    // (so the same browser recognizes itself across visits) — but it is NEVER trusted verbatim: it must
+    // pass `validateAnonId` (charset + length bound, from @palup/widget-memory — the composition root
+    // may import that package) before it can key a vector namespace. A bad/oversized/forged value is
+    // dropped to `undefined` (never thrown), exactly like an invalid mood/cart enum above. Recall stays
+    // inert regardless (the flag.ts double gate), so this is wiring-correctness ahead of go-live, not a
+    // live capability.
+    anonId: validateAnonId(typeof r.anonId === "string" ? r.anonId : undefined),
   };
 }
