@@ -34,7 +34,7 @@ export function extractOrderId(text: string): string | undefined {
   return text.match(/#(\d{3,})/)?.[1] ?? text.match(/\b(\d{4,})\b/)?.[1];
 }
 
-export function classifySupportIntent(text: string): SupportIntent {
+export function classifySupportIntent(text: string, selfServeEnabled = false): SupportIntent {
   const t = text.toLowerCase();
   if (/none of this|just fix it|nothing.*work|just need help|this isn.?t working/.test(t)) return "escalate_stuck";
   if (/cancel (my )?subscription|cancel.*subscription/.test(t)) return "cancel_subscription";
@@ -42,7 +42,13 @@ export function classifySupportIntent(text: string): SupportIntent {
   // classified into the SAME skip_subscription bucket (the handler dispatches on which action word is
   // actually present) so the reversal promised in the confirmation reply is genuinely reachable, not an
   // unbacked promise.
-  if (/(skip|pause|resume|unpause|un-pause).*(month|delivery|subscription|shipment)|skip (my )?next|resume (my )?subscription|unpause (my )?subscription|undo (the |my )?skip|put (it|my delivery) back/.test(t)) return "skip_subscription";
+  // Base skip/pause phrasing — present on main; classifies regardless of the flag (its DEFAULT is
+  // human-routed, unchanged when self-serve is off).
+  if (/(skip|pause).*(month|delivery|subscription|shipment)|skip (my )?next/.test(t)) return "skip_subscription";
+  // Resume/unpause/undo — the REVERSAL phrasing — is a skip_subscription intent ONLY when self-serve is
+  // enabled, so flag-OFF behavior stays byte-identical to main (these otherwise fall through to `general`,
+  // not a mis-worded skip route). (steward finding 2.)
+  if (selfServeEnabled && /\bresume\b|\bunpause\b|un-pause|resume (my )?subscription|undo (the |my )?skip|put (it|my delivery) back|\bunskip\b|un-skip/.test(t)) return "skip_subscription";
   if (/charged twice|double.?charg|charged me twice|why (was|am) i charged|two charges/.test(t)) return "billing";
   if (/(change|update).*(shipping )?address/.test(t)) return "address_change";
   if (/wrong (shade|colou?r)|swap.*(shade|for)|different shade|\bexchange\b/.test(t)) return "exchange";
@@ -74,6 +80,10 @@ function isAffirmativeSubscriptionIntent(message: string): boolean {
   // A retrospective/interrogative question about a PAST action is not a request to act now.
   if (/^(why|was|were|has|have)\b/.test(t)) return false;
   if (/^did (you|it|my|this)\b/.test(t)) return false;
+  // A retrospective STATEMENT about an already-taken action ("you skipped my delivery, why?", "you
+  // already paused it") — even without a leading interrogative — is a complaint/query, not a request to
+  // act again. (security-review L1.)
+  if (/\byou (already |just )?(skipped|paused|resumed|unskipped|cancell?ed)\b/.test(t)) return false;
   return true;
 }
 
@@ -97,7 +107,7 @@ export async function handleSupport(
   mood?: string,
   selfServe?: SubscriptionSelfServeOptions,
 ): Promise<SupportResult> {
-  const intent = classifySupportIntent(message);
+  const intent = classifySupportIntent(message, Boolean(selfServe?.enabled));
   const flags = ["mode_support", "no_pitch", `support:${intent}`];
   const policy = await commerce.getPolicy();
   const orderId = extractOrderId(message);
@@ -229,13 +239,33 @@ export async function handleSupport(
       // signals.shopperId !== undefined) AND the message is an affirmative request, not a negation/question.
       const routeToHuman = (): SupportResult => {
         flags.push("skip_sub_routed", "escalate");
+        // Keep the SKIP route byte-identical to pre-ADR-0016; word the others (pause/resume/unskip)
+        // correctly so a routed resume request isn't described as a "skip" (steward finding 2).
+        const routedAction = detectSubscriptionAction(message);
+        // Flag-OFF stays BYTE-IDENTICAL to main (the original single reply for any phrasing); only when
+        // self-serve is enabled do we word a routed pause/resume/unskip correctly.
+        if (!selfServe?.enabled || routedAction === "skip") {
+          return {
+            reply: `Sure — I can't change the subscription schedule myself, so I've passed your request to skip the next delivery to a member of our team to apply, and flagged it as time-sensitive. They'll confirm once it's set, and the following order would ship as usual.`,
+            escalate: true,
+            flags,
+          };
+        }
+        const phrase =
+          routedAction === "resume" ? "resume your subscription" : routedAction === "unskip" ? "undo the skip on your next delivery" : "pause your subscription";
         return {
-          reply: `Sure — I can't change the subscription schedule myself, so I've passed your request to skip the next delivery to a member of our team to apply, and flagged it as time-sensitive. They'll confirm once it's set, and the following order would ship as usual.`,
+          reply: `Sure — I can't change the subscription schedule myself, so I've passed your request to ${phrase} to a member of our team, and flagged it as time-sensitive. They'll confirm once it's set.`,
           escalate: true,
           flags,
         };
       };
-      const autoAllowed = Boolean(selfServe?.enabled) && Boolean(selfServe?.shopperVerified) && isAffirmativeSubscriptionIntent(message);
+      // Cancel-firewall (steward finding 1, HIGH): a message that ALSO mentions cancel / refund / ending
+      // the plan must NEVER be auto-skipped — route the WHOLE message to a human so the cancel intent is
+      // seen. A mixed "cancel, or at least skip next month" must not be silently downgraded to an
+      // auto-skip that drops the cancel from human view (pre-branch, such a message escalated).
+      const mentionsCancelOrMoney = /\bcancel\b|\brefund\b|stop (billing|charging|payments?)|\bend (my |the )?(subscription|plan|membership)\b/.test(message.toLowerCase());
+      const autoAllowed =
+        Boolean(selfServe?.enabled) && Boolean(selfServe?.shopperVerified) && !mentionsCancelOrMoney && isAffirmativeSubscriptionIntent(message);
       if (!autoAllowed) return routeToHuman();
 
       const sub = await commerce.getSubscription(shopperId);

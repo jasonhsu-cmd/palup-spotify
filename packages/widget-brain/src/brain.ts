@@ -564,7 +564,7 @@ export function createBrain(
       }
 
       // 2. Open support issue OR a support intent — suppresses sales (INV-B).
-      const supportIntent = classifySupportIntent(text);
+      const supportIntent = classifySupportIntent(text, subscriptionSelfServeEnabled);
       // Word-boundary match: substring scanning mis-routed "returning"/"cancellation" (and browsing
       // "returning shopper" cases) into support. \b keeps genuine "return"/"cancel" routing intact.
       const supportKeywordHit = SUPPORT.some((p) => new RegExp(`\\b${p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(text));

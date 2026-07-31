@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SUBSCRIPTION_SKIP_CAP } from "@palup/platform-ports";
-import { createBrain, DEFAULT_POLICY, MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter, handleSupport } from "../src/index.js";
+import { createBrain, DEFAULT_POLICY, MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter, handleSupport, classifySupportIntent } from "../src/index.js";
 
 // ADR-0016 enactment — prerequisites #2-#6 + the gated execution, now that #1 (verified shopper
 // identity, ADR-0017 #99) is merged. "Verified" == signals.shopperId !== undefined (deriveServingSignals
@@ -221,6 +221,42 @@ describe("cancel_subscription stays UNCHANGED — always human-routed, never aut
     const r = await handleSupport(c, shopper, "cancel my subscription, skip billing me", undefined, { enabled: true, shopperVerified: true });
     expect(r.flags).toContain("cancel_sub_routed");
     expect(r.flags).not.toContain("sub_skipped");
+  });
+
+  // steward finding 1 (HIGH): a MIXED message classified as skip must not auto-skip and drop the cancel
+  // from human view (pre-branch such a message escalated).
+  for (const msg of [
+    "cancel but skip next month",
+    "I want to cancel, or at least skip next month",
+    "can you cancel my plan? otherwise skip next delivery",
+    "please cancel — but for now just skip next delivery",
+  ]) {
+    it(`mixed intent "${msg}" ⇒ routes to a human, never auto-skips`, async () => {
+      const c = new MockCommerceAdapter();
+      const r = await handleSupport(c, shopper, msg, undefined, { enabled: true, shopperVerified: true });
+      expect(r.escalate).toBe(true);
+      expect(r.flags).not.toContain("sub_skipped");
+      expect(r.flags).not.toContain("autonomous_action");
+    });
+  }
+});
+
+describe("ADR-0016 review nits — retrospective intent + flag-gated reversal classification", () => {
+  it('security-review L1: "you skipped my delivery, why?" never auto-executes a NEW skip', async () => {
+    const c = new MockCommerceAdapter();
+    const r = await handleSupport(c, shopper, "you skipped my delivery, why?", undefined, { enabled: true, shopperVerified: true });
+    expect(r.flags).not.toContain("sub_skipped");
+    expect(r.flags).not.toContain("autonomous_action");
+  });
+  it("steward finding 2: reversal-only phrasing is flag-gated (flag-off is byte-identical to main)", () => {
+    // "resume my subscription" / "put my delivery back" contain NO skip/pause substring, so flag-off they
+    // fall through to the generic path exactly like main; flag-on they become a reachable reversal intent.
+    // (NB "unpause" DOES contain "pause" → the base regex classifies it as skip_subscription either way,
+    // which is byte-identical to main — the flag-gate is only load-bearing for the no-skip/pause phrasings.)
+    expect(classifySupportIntent("resume my subscription", false)).not.toBe("skip_subscription");
+    expect(classifySupportIntent("put my delivery back", false)).not.toBe("skip_subscription");
+    expect(classifySupportIntent("resume my subscription", true)).toBe("skip_subscription");
+    expect(classifySupportIntent("put my delivery back", true)).toBe("skip_subscription");
   });
 });
 

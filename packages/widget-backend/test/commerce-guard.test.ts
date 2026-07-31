@@ -66,6 +66,15 @@ describe("guardCommercePort (T7, ADR-0016 fail-closed)", () => {
     await expect(withRequestPrincipal(verifiedShopper, () => guarded.getPolicy())).resolves.toEqual(POLICY);
   });
 
+  it("live + VERIFIED shopper but a MISMATCHED shopperId arg ⇒ fails closed (ownership at the choke point, steward finding 3)", async () => {
+    const guarded = guardCommercePort(new FakeLiveCommerce(), true);
+    // The principal is shopify:acme:1, but the call targets a DIFFERENT shopper — must refuse, so even a
+    // caller bug can't act on another shopper's account on a live adapter.
+    await expect(withRequestPrincipal(verifiedShopper, () => guarded.getSubscription("shopify:acme:999"))).rejects.toBeInstanceOf(CommerceGuardRefusalError);
+    await expect(withRequestPrincipal(verifiedShopper, () => guarded.getRecentOrder("shopify:acme:999"))).rejects.toBeInstanceOf(CommerceGuardRefusalError);
+    await expect(withRequestPrincipal(verifiedShopper, () => guarded.skipNextDelivery("shopify:acme:999"))).rejects.toBeInstanceOf(CommerceGuardRefusalError);
+  });
+
   it("mock (isLive:false) ⇒ ok regardless of principal (tested no-op for this slice)", async () => {
     const guarded = guardCommercePort(new FakeLiveCommerce(), false);
     await expect(withRequestPrincipal(anon, () => guarded.getRecentOrder("shopper-demo"))).resolves.toEqual(ORDER);
