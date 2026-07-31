@@ -9,6 +9,7 @@
     "@palup/model-vertex": "workspace:*",
     "@palup/judge": "workspace:*",
     "@palup/evolution": "workspace:*",
+    "@palup/eval": "workspace:*",
     "fastify": "^5.0.0",
     "@palup/state-postgres": "workspace:*"
   }

@@ -2,6 +2,8 @@
   "name": "@palup/eval",
   "version": "0.0.0",
   "type": "module",
+  "main": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
   "dependencies": {
     "@palup/platform-ports": "workspace:*",
     "@palup/widget-brain": "workspace:*",

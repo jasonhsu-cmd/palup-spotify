@@ -23,6 +23,9 @@ importers:
 
   packages/control-plane:
     dependencies:
+      '@palup/eval':
+        specifier: workspace:*
+        version: link:../eval
       '@palup/evolution':
         specifier: workspace:*
         version: link:../evolution
