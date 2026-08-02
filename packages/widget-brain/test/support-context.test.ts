@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { MockCommerceAdapter } from "../src/index.js";
-import { handleSupport, type SupportContext } from "../src/support.js";
+import { handleSupport, classifySupportIntent, type SupportContext } from "../src/support.js";
 
 // D1 (conversation-quality wave 1): the support handler is context-aware — it resumes an open issue,
 // bridges a pending escalation, escalates a frustrated complaint, recalls an order named earlier, and
@@ -54,5 +54,29 @@ describe("D1 — context-aware support fallback", () => {
     const r = await call("hmm");
     expect(r.escalate).toBe(false);
     expect(r.reply).toMatch(/tell me a bit more|share your order number/i);
+  });
+});
+
+describe("D4 — how_to no longer over-matches ambiguous efficacy questions", () => {
+  it("an ambiguous 'does it work / how long till results' question is NOT how_to", () => {
+    expect(classifySupportIntent("is this the better one and does it work and how long till i see results with the whole routine?")).not.toBe("how_to");
+  });
+  it("a genuine usage question still classifies as how_to", () => {
+    expect(classifySupportIntent("how do I use the retinol?")).toBe("how_to");
+    expect(classifySupportIntent("how often should I apply the serum?")).toBe("how_to");
+  });
+});
+
+describe("D5 — above-ceiling refund with no named order → HITL + expectation", () => {
+  it("a stated amount above the refund ceiling → route to a person + set the expectation", async () => {
+    const r = await call("$180 order, refund it all");
+    expect(r.flags).toContain("refund_hitl");
+    expect(r.escalate).toBe(true);
+    expect(r.reply).toMatch(/reviews? refunds|above the amount|\$180/i);
+  });
+  it("a small refund with no order still just asks which order (unchanged)", async () => {
+    const r = await call("refund my $12 order");
+    expect(r.flags).not.toContain("refund_hitl");
+    expect(r.reply).toMatch(/which order/i);
   });
 });

@@ -552,6 +552,41 @@ export function createBrain(
         };
       }
 
+      // 1.5b Data-rights / erasure (DSAR) — a "delete/erase my data" request is HONORED, never denied.
+      // The agent has no execution path, so it logs + routes the erasure to a person and confirms the
+      // cascade; it must NEVER deflect with "we don't store anything about you" (false + dismissive).
+      if (/\b(delete|erase|remove|wipe|forget)\b[^.!?]*\b(everything|all|my (data|info|information|account|details|records)|about me|me)\b|\bright to (be forgotten|erasure|delete)\b|\b(gdpr|ccpa|data[ -]?subject|dsar)\b/.test(text)) {
+        flags.push("data_rights_erasure", "escalate", "no_pitch");
+        return {
+          mode: "support",
+          reply:
+            "Absolutely — you have the right to have your data deleted, and I've logged that request and handed it to our team to erase the personal data we hold for you (your account, order history, subscriptions, and any saved preferences). They'll confirm once it's complete. If you'd like a copy of your data before it's removed, I can arrange that too.",
+          pitch: "none",
+          escalateToHuman: true,
+          outbound: false,
+          safetyClass: "none",
+          flags,
+          model: "guardrail",
+        };
+      }
+
+      // 1.5c Own-order/account request while NOT identified — never guess about their account; invite the
+      // shopper to sign in (identity is required to see order history).
+      if (signals.relationship === "anonymous" && !/#\s?\d{3,}/.test(text) /* an order number CAN be looked up */ && /\b(my (last |previous |past |recent )?orders?|my order history|what did i (order|buy)|my (subscription|account|purchases?))\b/.test(text)) {
+        flags.push("identity_required", "no_pitch");
+        return {
+          mode: "support",
+          reply:
+            "I'd love to pull that up, but I can't see your order history unless you're signed in — I don't want to guess about your account. If you sign in (or share your order number), I can look it up right away. In the meantime I'm glad to help with anything about our products.",
+          pitch: "none",
+          escalateToHuman: false,
+          outbound: false,
+          safetyClass: "none",
+          flags,
+          model: "guardrail",
+        };
+      }
+
       // 1.6 Emotional pressure for an unauthorized freebie/giveaway — empathize, never grant it, escalate.
       if (/(give|send|hand|get|want|need) me\b[^.!?]*\bfree\b|\bfree one\b/.test(text)) {
         flags.push("giveaway_declined", "escalate", "no_autonomous_action", "no_pitch");

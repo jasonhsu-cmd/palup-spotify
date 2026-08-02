@@ -41,6 +41,11 @@ const COMPLAINT_RE = /\b(a mess|messed up|angry|furious|failing|keeps? (failing|
 const RESOLUTION_RE = /^\s*(thanks?|thank you|that'?s all|that'?s it|all set|i'?m good|we'?re good|no,? thanks?|nvm|never ?mind)\b/;
 const ISSUE_LABELS: Record<string, string> = { shipping_issue: "shipping issue", order_status: "order status", damaged_item: "damaged item", lost_package: "missing package", refund: "refund", return: "return" };
 const humanizeIssue = (code: string): string => ISSUE_LABELS[code] ?? code.replace(/_/g, " ");
+/** A dollar amount the shopper stated (e.g. "$180", "180 dollars") — for the D5 above-ceiling refund gate. */
+function extractStatedAmount(text: string): number | undefined {
+  const m = text.match(/\$\s?(\d{1,6})(?:\.\d{2})?\b/) ?? text.match(/\b(\d{2,6})\s*(?:dollars|usd|bucks)\b/i);
+  return m ? Number(m[1]) : undefined;
+}
 
 /**
  * ADR-0016 enactment — the two controls that gate an autonomous skip/pause. Both must independently be
@@ -89,7 +94,7 @@ export function classifySupportIntent(text: string, selfServeEnabled = false): S
   if (/broken|defective|damaged|leaked|cracked|the pump/.test(t)) return "damaged";
   if (/says delivered|marked delivered|didn.?t (get|receive)|never (arrived|came|got)|lost package|package.*(lost|missing)/.test(t)) return "lost_package";
   if (/where.?s my order|order status|status of order|where is (my )?order|where.?s it\b|where is it\b|arrived yet|not (arrived|here) yet|\btrack\b|hasn.?t (arrived|come)|days? late|\blate\b|\bstuck\b/.test(t)) return "order_status";
-  if (/how (often|do i|to|much|long).*(use|apply|retinol|serum|it)/.test(t)) return "how_to";
+  if (/how (often|do i|to|much|long).*(use|apply|retinol|serum)/.test(t)) return "how_to"; // D4: bare "it" over-matched ambiguous efficacy Qs ("how long till I see results") — dropped
   // NOTE: a non-allergy ingredient question ("does the moisturizer have fragrance?") is intentionally
   // NOT a support intent — it falls through to the grounded sales path so the model answers it from the
   // catalog ingredient list (grounded-ingredient). Allergy/safety wording is caught upstream by the
@@ -212,7 +217,17 @@ export async function handleSupport(
     case "refund": {
       if (namedButUnavailable) return denyOrder("refund");
       const o = await resolveOwned(false); // money action — require an explicit, verified order
-      if (!o) { flags.push("escalate"); return { reply: `Happy to help with a refund — which order is it? I can only refund an order I can verify on your account.`, escalate: true, flags }; }
+      if (!o) {
+        // D5 — even without a named order, if the shopper states an amount ABOVE the ceiling, set the HITL
+        // expectation now (a refund that size is human-reviewed) + route it, while asking for the order.
+        const statedAmt = extractStatedAmount(message);
+        if (statedAmt !== undefined && statedAmt > policy.refundCeiling) {
+          flags.push("refund_hitl", "escalate");
+          return { reply: `Happy to help. A refund around $${statedAmt} is above the amount I can approve on my own, so a member of our team reviews refunds that size — I've flagged this for them. Could you share the order number so they can pull it up and complete it?`, escalate: true, flags };
+        }
+        flags.push("escalate");
+        return { reply: `Happy to help with a refund — which order is it? I can only refund an order I can verify on your account.`, escalate: true, flags };
+      }
       const above = o.total > policy.refundCeiling;
       if (above) { flags.push("refund_hitl", "escalate"); return { reply: `I'm sorry about that. A refund of $${o.total} on order #${o.id} is above the amount I can approve directly, so I've routed it to a team member to process — you'll hear back shortly, and I've checked there's no duplicate refund on this order.`, escalate: true, flags }; }
       // HONESTY (reply-and-escalate-only phase): the agent has no execution path (no CommercePort
