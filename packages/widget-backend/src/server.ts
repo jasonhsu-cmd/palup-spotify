@@ -29,6 +29,7 @@ import { deriveServingSignals } from "./signals.js";
 import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
+import { readActiveChampion } from "./champion.js";
 import { guardCommercePort, withRequestPrincipal } from "./commerce-guard.js";
 import { verifyShopifyAppProxyShopper, normalizeAppProxyQuery } from "./shopify-shopper-identity.js";
 import { createCustomerGrantStore } from "./customer-grant-store.js";
@@ -199,16 +200,22 @@ export async function buildServer(opts?: {
   // One brain per active policy (champion + any canary), built lazily and cached by policy id. The
   // brain is tenant-agnostic (grounding tenant rides each request via signals.tenantId); this cache is
   // per-server-instance.
+  // Keyed by (tenantId, policy.id): champion/candidate policy ids are non-tenant-scoped constants
+  // (e.g. "prop-0"), so a global policy.id key would serve tenant A's cached brain (its styleDirective/
+  // proactivity) to tenant B whenever both promote a same-id/different-content policy. The composite key
+  // keeps each tenant's champion AND canary brains isolated (blast-radius; matches the per-tenant champion
+  // store keying).
   const brains = new Map<string, ReturnType<typeof createBrain>>();
-  const brainFor = (policy: Policy) => {
-    let b = brains.get(policy.id);
+  const brainFor = (tenantId: string, policy: Policy) => {
+    const key = `${tenantId}::${policy.id}`;
+    let b = brains.get(key);
     if (!b) {
       b = createBrain(meteredModel, grounding, policy, commerce, "shopper-demo", memoryPort, SUBSCRIPTION_SELFSERVE);
-      brains.set(policy.id, b);
+      brains.set(key, b);
     }
     return b;
   };
-  brainFor(DEFAULT_POLICY); // champion
+  brainFor(RUNTIME_TENANT, DEFAULT_POLICY); // prewarm the default-tenant champion
   // Widget-identity config (read per boot so a test / deploy can configure it).
   const WIDGET_TOKEN_SECRET = process.env.WIDGET_TOKEN_SECRET;
   const WIDGET_TOKEN_TTL_SECONDS = posInt("WIDGET_TOKEN_TTL_SECONDS", 3_600);
@@ -643,9 +650,14 @@ export async function buildServer(opts?: {
       // policy; the rest by champion. Keyed by the server-derived tenantId, so one merchant's canary can
       // never bucket another merchant's shoppers (ADR-0014 blast-radius fix).
       const canary = await assignCanary(store, tenantId, sessionId);
-      const policy = canary ? canary.policy : DEFAULT_POLICY;
+      // Champion is the store-backed active champion the control plane persisted on a human-approved
+      // promotion (champion.ts / control-plane champion-promoter.ts), falling back to DEFAULT_POLICY when
+      // nothing has been promoted yet — this is what makes engine.promote actually reach shoppers
+      // (ADR-0003 promote→serving). Canary still overrides for its sticky traffic slice.
+      const champion = (await readActiveChampion(store, tenantId)) ?? DEFAULT_POLICY;
+      const policy = canary ? canary.policy : champion;
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
-      const session = await createSession(brainFor(policy), { sessionId, store: sessions, autoPersist: false });
+      const session = await createSession(brainFor(tenantId, policy), { sessionId, store: sessions, autoPersist: false });
       const turnStart = Date.now();
       // In-session multi-turn memory: thread the CLIENT's bounded recent transcript into the model
       // context so a follow-up ("what about the other one?") has its antecedent. It is validated + bounded

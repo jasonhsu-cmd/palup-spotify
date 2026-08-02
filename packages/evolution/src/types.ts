@@ -77,6 +77,12 @@ export interface CandidateRecord {
   metrics?: PolicyMetrics;
   gate?: GateResult;
   seq: number;
+  /** Who approved this candidate (set by engine.approve) — the audit-of-record actor for any downstream
+   * promotion. A serving-promotion path must bind its audit to THIS, never a caller-supplied string. */
+  approvedBy?: string;
+  /** True when the approval was AUTOMATED (approver "auto-loop"), not a human. The human promote→serving
+   * path (control-plane/champion-promoter.ts) REFUSES an automated approval — "approved" ≠ "human-approved". */
+  automated?: boolean;
 }
 
 export interface PromotionEvent {
