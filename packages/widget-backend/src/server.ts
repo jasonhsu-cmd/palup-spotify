@@ -26,12 +26,13 @@ import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/stat
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
-import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput } from "./audit.js";
+import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 import { guardCommercePort, withRequestPrincipal } from "./commerce-guard.js";
 import { verifyShopifyAppProxyShopper, normalizeAppProxyQuery } from "./shopify-shopper-identity.js";
 import { createCustomerGrantStore } from "./customer-grant-store.js";
+import { logoutGrant } from "./refreshing-grant-store.js";
 import {
   startCustomerLogin,
   completeCustomerCallback,
@@ -469,6 +470,43 @@ export async function buildServer(opts?: {
       return { token: null };
     }
     return { token, expiresInSeconds: SHOPPER_TOKEN_TTL_SECONDS };
+  });
+
+  // ADR-0018 task 7 — logout: DELETE the shopper's stored OAuth grant (local-first; there is no Shopify
+  // token-revocation endpoint — the browser end_session flow is the widget's concern, task 10). The
+  // shopper identifies themselves with their shopper session token; the grant to delete is derived from
+  // its verified namespaced shopperId, never a client-supplied tenant/id.
+  app.post("/auth/customer/logout", async (req, reply) => {
+    if (!CAA_ENABLED) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open */
+    }
+    const hdr = req.headers["x-shopper-token"];
+    const body = (req.body ?? {}) as { shopperToken?: unknown };
+    const shopperToken = typeof hdr === "string" ? hdr : typeof body.shopperToken === "string" ? body.shopperToken : undefined;
+    const principal = await shopperIdentity.authenticate(shopperToken);
+    if (principal.kind !== "shopper") {
+      reply.code(401);
+      return { error: "unauthenticated" };
+    }
+    const t = shopperIdTenant(principal.shopperId);
+    if (t) {
+      const { shopperId, source } = principal;
+      await logoutGrant(grantStore, t, shopperId, async () => {
+        await store.audit({ tenantId: t }, buildCaaRevokeAuditInput({ shopperId, source, tenantId: t, hmacKey: AUDIT_HMAC_SECRET ?? "" }));
+      });
+    }
+    return { ok: true };
   });
 
   app.post("/chat", async (req, reply) => {

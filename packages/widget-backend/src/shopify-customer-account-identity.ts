@@ -157,6 +157,42 @@ export async function exchangeCode(
   }
 }
 
+/** A refresh_token grant returns a new access token (and possibly a rotated refresh token); it does NOT
+ * return an id_token (identity was already established at authorization — ADR-0018 task 7). */
+export interface RefreshResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  scope?: string;
+  token_type?: string;
+}
+
+/**
+ * Exchange a refresh_token for a fresh access token (confidential client — client_secret via Basic auth).
+ * Same host-pin + https + redirect:"error" discipline as `exchangeCode`. Null on any non-2xx / malformed
+ * response (⇒ the caller reauths). Never logs the refresh_token / client_secret / tokens.
+ */
+export async function exchangeRefreshToken(
+  cfg: OidcConfig,
+  params: { refreshToken: string; clientId: string; clientSecret?: string },
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  timeoutMs = 4000,
+): Promise<RefreshResponse | null> {
+  if (!isShopifyIdentityUrl(cfg.token_endpoint)) return null;
+  const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: params.refreshToken, client_id: params.clientId });
+  const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
+  if (params.clientSecret) headers["authorization"] = "Basic " + Buffer.from(`${params.clientId}:${params.clientSecret}`).toString("base64");
+  try {
+    const res = await fetchFn(cfg.token_endpoint, { method: "POST", headers, body: body.toString(), redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const j = (await res.json()) as Partial<RefreshResponse>;
+    if (typeof j.access_token !== "string") return null;
+    return j as RefreshResponse;
+  } catch {
+    return null;
+  }
+}
+
 // --- id_token validation (RS256 via the shop's JWKS) ------------------------------------------------
 export interface Jwk {
   kid?: string;
