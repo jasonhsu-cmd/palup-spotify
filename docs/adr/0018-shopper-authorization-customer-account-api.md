@@ -129,16 +129,22 @@ prompt) whenever available. On `reauth_required` mid-chat, clear the token and r
 - **Not memory.** The stored token is identity/credential custody, **not** cross-visit shopper memory —
   drifting into durable personalization would ship an unconsented write governed by ADR-0015. Out of scope.
 
-## Open decisions (human — resolve before build)
+## Open decisions
 
-1. **Encryption-at-rest contract** for the stored access/refresh token: a narrow **encrypted-value
-   capability on `RuntimeStatePort`** vs a **dedicated customer-authorization port**. *Rec: encrypted
-   `RuntimeStatePort` unless refresh/rotation logic thickens.* No plaintext-in-KV. Clear portability
-   review first.
-2. **ADR-0015 region/consent** applicability to the durable grant (EU retention). Confirm with the
-   ADR-0015 owner — do **not** self-certify. Capped lifetime + forced re-auth help but don't settle it.
-3. **Merchant onboarding** (per-shop client): per-merchant `redirect_uri` registration + secret
-   provisioning is **manual** and a merchant can silently break it — design + budget it.
+1. **Encryption-at-rest contract** — **RESOLVED (2026-08-02):** app-layer **AES-256-GCM** envelope
+   encryption in a `GrantStore` helper (`customer-grant-store.ts`) over the **unchanged**
+   `RuntimeStatePort` — the port contract is untouched (zero ADR-0001 risk), the widget-backend encrypts
+   before `put` / decrypts after `get`, key from the `SecretsPort` (`caa_grant_encryption_key`), no
+   plaintext-in-KV. Promote to a dedicated port only if refresh/rotation logic thickens.
+2. **ADR-0015 region/consent** — **RESOLVED (2026-08-02, ADR-0015 owner): A.** The durable grant is
+   **credential custody** (an authenticated-session credential the shopper explicitly authorized via the
+   OAuth consent), **not** the durable cross-visit *memory* ADR-0015 governs — so it is **not**
+   consent-gated as memory. It **must** still honor two baseline GDPR obligations, now design
+   requirements: (a) data-subject **erasure** deletes the stored grant (`GrantStore.delete`), and
+   (b) **EU data-residency** for where the grant is stored. Capped access-token TTL + forced re-auth apply.
+3. **Merchant onboarding** (per-shop client) — **OPEN:** per-merchant `redirect_uri` registration +
+   secret provisioning is **manual** and a merchant can silently break it — design + budget it (a
+   go-live/onboarding task, not a code blocker).
 
 ## Task list (ATDD-ready)
 

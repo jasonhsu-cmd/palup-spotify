@@ -131,3 +131,25 @@ export function buildIdentityAuditInput(args: {
     reversalPath: "n/a — read-only identity",
   };
 }
+
+/**
+ * ADR-0018 task 9 — audit a Customer Account API OAuth GRANT. Unlike the read-only App-Proxy identity
+ * (above, `reversal n/a`), an OAuth grant custodies a durable credential, so it carries a REAL reversal
+ * path. Records the mechanism (`caa`) and scope; never the raw shopperId / access token / customer id.
+ * (No Shopify token-revocation endpoint exists — reversal is delete-local-grant + end-session.)
+ */
+export function buildCaaGrantAuditInput(args: {
+  shopperId: string;
+  source: "shopify" | "otp";
+  tenantId: string;
+  hmacKey: string;
+  scope?: string;
+}): AuditInput {
+  return {
+    actor: "system:identity",
+    action: "identity.shopper.oauth_granted",
+    input: { shopperRef: hashShopperRef(args.hmacKey, args.shopperId), source: args.source, tenantId: args.tenantId, mechanism: "caa", scope: args.scope },
+    decision: { verified: true, granted: true },
+    reversalPath: "revoke: delete stored grant + end session (no Shopify token-revocation endpoint)",
+  };
+}
