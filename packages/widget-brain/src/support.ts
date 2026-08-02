@@ -1,4 +1,5 @@
 import { SUBSCRIPTION_SKIP_CAP, type CommercePort, type Order } from "@palup/platform-ports";
+import type { HistoryTurn } from "./types.js";
 
 // Real support handling grounded in the commerce port. The guardrails are in CODE: verify ownership
 // before revealing an order; refunds above the policy ceiling are HITL (never auto-approved); cancels/
@@ -12,6 +13,34 @@ export type SupportIntent =
   | "billing" | "escalate_stuck" | "general";
 
 export interface SupportResult { reply: string; escalate: boolean; flags: string[] }
+
+/** D1 — conversation context so the handler doesn't dead-end on a generic "share your order number"
+ * when history/signals already say what to do (resume an open issue, bridge a pending escalation,
+ * escalate a frustrated complaint, or recall an order named earlier this chat). */
+export interface SupportContext {
+  history?: HistoryTurn[];
+  /** Server-derived open-issue labels for the session, e.g. ["shipping_issue"] or ["escalation_pending"]. */
+  openIssues?: string[];
+}
+
+// D1 helpers — read prior context from the transcript.
+const ESCALATION_RE = /connecting you with a person|member of our team|handed it to|loop in a person|connect you with a person|a person who can help/i;
+function lastOrderRefInHistory(history?: HistoryTurn[]): string | undefined {
+  for (let i = (history?.length ?? 0) - 1; i >= 0; i--) {
+    const m = history![i].content.match(/#(\d{3,})/);
+    if (m) return `#${m[1]}`;
+  }
+  return undefined;
+}
+function historyShowsEscalation(history?: HistoryTurn[]): boolean {
+  return (history ?? []).some((t) => t.role === "agent" && ESCALATION_RE.test(t.content));
+}
+/** A clear dissatisfaction/complaint the handler should acknowledge + escalate, not ask for info. */
+const COMPLAINT_RE = /\b(a mess|messed up|angry|furious|failing|keeps? (failing|crashing|erroring)|doesn.?t work|won.?t work|never works|broken|terrible|awful|worst|ridiculous|unacceptable|disappoint|fed up|about to leave|last time was)\b/;
+/** A sign-off / resolution — warm close, no re-ask, no pitch. */
+const RESOLUTION_RE = /^\s*(thanks?|thank you|that'?s all|that'?s it|all set|i'?m good|we'?re good|no,? thanks?|nvm|never ?mind)\b/;
+const ISSUE_LABELS: Record<string, string> = { shipping_issue: "shipping issue", order_status: "order status", damaged_item: "damaged item", lost_package: "missing package", refund: "refund", return: "return" };
+const humanizeIssue = (code: string): string => ISSUE_LABELS[code] ?? code.replace(/_/g, " ");
 
 /**
  * ADR-0016 enactment — the two controls that gate an autonomous skip/pause. Both must independently be
@@ -106,6 +135,7 @@ export async function handleSupport(
   message: string,
   mood?: string,
   selfServe?: SubscriptionSelfServeOptions,
+  context?: SupportContext,
 ): Promise<SupportResult> {
   const intent = classifySupportIntent(message, Boolean(selfServe?.enabled));
   const flags = ["mode_support", "no_pitch", `support:${intent}`];
@@ -352,7 +382,38 @@ export async function handleSupport(
     case "escalate_stuck":
       flags.push("escalate");
       return { reply: `I'm sorry this hasn't been sorted out — I don't want to keep you going in circles. I'm connecting you with a person who can help right now; they'll take it from here.`, escalate: true, flags };
-    default:
+    default: {
+      // D1 — use conversation CONTEXT instead of dead-ending on a generic "share your order number".
+      const issues = (context?.openIssues ?? []).filter(Boolean);
+      const escalationPending = issues.includes("escalation_pending") || historyShowsEscalation(context?.history);
+      const openIssue = issues.find((i) => i !== "escalation_pending");
+      const priorOrderRef = lastOrderRefInHistory(context?.history);
+      const complaint = annoyed || COMPLAINT_RE.test(message.toLowerCase());
+
+      // Sign-off → warm close (no re-ask, no pitch).
+      if (RESOLUTION_RE.test(message.toLowerCase())) {
+        return { reply: `You're welcome — glad I could help. I'm here if anything else comes up.`, escalate: false, flags };
+      }
+      // A person is already on it (this session) → bridge, don't restart from scratch (hold-until-human).
+      if (escalationPending) {
+        flags.push("escalate");
+        return { reply: `A member of our team is still looking into this for you and will follow up shortly — thanks for hanging in there. I'll stay with you in the meantime; is there anything else I can help with while you wait?`, escalate: true, flags };
+      }
+      // Frustrated or a clear complaint, unresolved → acknowledge and get a person; never just ask for info.
+      if (complaint) {
+        flags.push("escalate");
+        return { reply: `${empathy || "I'm sorry this has been a hassle — "}I don't want to make you repeat yourself. I've connected you with a member of our team who can look into this right away and make it right.`, escalate: true, flags };
+      }
+      // An unresolved issue is on file → resume it by name so the shopper sees we remember (resume-support).
+      if (openIssue) {
+        flags.push("escalate");
+        return { reply: `I still have your ${humanizeIssue(openIssue)} open and a member of our team is on it — I haven't forgotten it, and they'll follow up shortly. Is there anything I can help with in the meantime?`, escalate: true, flags };
+      }
+      // An order was named earlier this chat → keep it in play instead of re-asking which one.
+      if (priorOrderRef) {
+        return { reply: `I still have order ${priorOrderRef} up from a moment ago — what would you like to do with it? I'm happy to help with anything else too.`, escalate: false, flags };
+      }
       return { reply: `I'd like to help — could you tell me a bit more, or share your order number if it's about an order?`, escalate: false, flags };
+    }
   }
 }
