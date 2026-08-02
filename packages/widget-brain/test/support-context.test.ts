@@ -140,3 +140,37 @@ describe("D1b — compound issues, damage-refund empathy, cancel honoring, sign-
     expect(r.flags).toContain("no_pitch");
   });
 });
+
+// D1c (conversation-quality wave 1c-follow) — context-aware turn-2 follow-ups the single-intent handler
+// dropped: confirming a full refund per policy on the in-context order (GS-1), and arranging a
+// replacement the shopper accepts after a damaged-item offer (GS-3). Both stay honest (policy statement
+// / teammate-executed) — no money moved, no shipment claimed as done.
+describe("D1c — refund-eligibility answer + replacement acceptance", () => {
+  const returnHistory = [
+    { role: "user" as const, content: "I want to return the cleanser I bought last week, it's unopened." },
+    { role: "agent" as const, content: "I've confirmed order #1042 is on your account; it was placed 3 days ago, within our 30-day window — I can start the return and email a prepaid label. Want me to go ahead?" },
+  ];
+
+  it("a refund-eligibility question after a return in progress → confirms a FULL refund per policy on the in-context order (GS-1)", async () => {
+    const r = await call("great, do I get a full refund?", { context: { openIssues: ["returns"], history: returnHistory } });
+    expect(r.reply).toMatch(/full(y)? refund|refunded in full|fully refundable/i);
+    expect(r.reply).not.toMatch(/which order/i);
+    expect(r.reply).toMatch(/#1042|30-day|window/i); // grounded on the in-context order / policy
+  });
+  it("a bare refund question with NO prior order still asks which order (unchanged)", async () => {
+    const r = await call("do I get a refund?");
+    expect(r.reply).toMatch(/which order/i);
+  });
+
+  it("accepting a replacement after a damaged-item offer → arranges it, not a generic escalation (GS-3)", async () => {
+    const r = await call("just send a new one.", { mood: "frustrated", context: { openIssues: ["defective"] } });
+    expect(r.reply).toMatch(/replacement|send a new one|new one/i);
+    expect(r.reply).not.toMatch(/look into this|connected you with a member of our team/i); // not the generic complaint escalation
+    expect(r.escalate).toBe(true);
+    expect(r.flags).toContain("replacement_routed");
+  });
+  it("a replacement-acceptance phrase WITHOUT a damaged issue open does not fire (no false arrange)", async () => {
+    const r = await call("just send a new one.");
+    expect(r.flags).not.toContain("replacement_routed");
+  });
+});

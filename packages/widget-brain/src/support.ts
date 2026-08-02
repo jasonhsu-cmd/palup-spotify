@@ -35,6 +35,13 @@ function lastOrderRefInHistory(history?: HistoryTurn[]): string | undefined {
 function historyShowsEscalation(history?: HistoryTurn[]): boolean {
   return (history ?? []).some((t) => t.role === "agent" && ESCALATION_RE.test(t.content));
 }
+/** D1c — an earlier agent turn OFFERED a replace-or-refund for a damaged item ("...a replacement or a
+ * refund per our policy. Which would you prefer?"). Lets a later "just send a new one" be read as an
+ * acceptance of that offer rather than a fresh complaint. */
+const DAMAGED_OFFER_RE = /replacement or a refund|arrange a replacement|send (a )?new one/i;
+function historyShowsDamagedOffer(history?: HistoryTurn[]): boolean {
+  return (history ?? []).some((t) => t.role === "agent" && DAMAGED_OFFER_RE.test(t.content));
+}
 /** A clear dissatisfaction/complaint the handler should acknowledge + escalate, not ask for info. */
 const COMPLAINT_RE = /\b(a mess|messed up|angry|furious|failing|keeps? (failing|crashing|erroring)|doesn.?t work|won.?t work|never works|broken|terrible|awful|worst|ridiculous|unacceptable|disappoint|fed up|about to leave|last time was)\b/;
 /** A sign-off / resolution — warm close, no re-ask, no pitch. */
@@ -243,6 +250,19 @@ export async function handleSupport(
           flags.push("refund_hitl", "escalate");
           return { reply: `Happy to help. A refund around $${statedAmt} is above the amount I can approve on my own, so a member of our team reviews refunds that size — I've flagged this for them. Could you share the order number so they can pull it up and complete it?`, escalate: true, flags };
         }
+        // D1c (GS-1) — a follow-up ELIGIBILITY question ("do I get a full refund?") about a return already
+        // in progress this chat. Answer it from POLICY, grounded on the order named earlier — don't
+        // dead-end on "which order?". This is a policy statement (no money moved, no execution claimed):
+        // an unopened item within the window is fully refundable per policy.returns.
+        const priorRef = lastOrderRefInHistory(context?.history);
+        const isEligibilityQ = /\?/.test(message) || /^(do|will|would|is|can)\b/i.test(message.trim());
+        const returnInContext = (context?.openIssues ?? []).some((i) => /return/.test(i));
+        if (isEligibilityQ && priorRef && returnInContext) {
+          const prior = await commerce.getOrder(priorRef.replace(/\D/g, ""));
+          if (prior && prior.shopperId === shopperId && prior.placedDaysAgo <= policy.returnWindowDays) {
+            return { reply: `Yes — an unopened item within our ${policy.returnWindowDays}-day window is fully refundable, and order ${priorRef} qualifies, so you'll get a full refund once it's back with us. I'll get the prepaid return label over to you.`, escalate: false, flags };
+          }
+        }
         flags.push("escalate");
         if (damageContext) {
           return { reply: `I'm so sorry it arrived damaged — that's on us, and you don't need to send any proof. A refund for a damaged item is well within our policy, so I've flagged it for a member of our team to complete right away, and checked there's no duplicate charge on it. Could you share the order number so they can pull it up and finish the refund?`, escalate: true, flags };
@@ -449,6 +469,14 @@ export async function handleSupport(
         /\bcancel\b|\bend (it|my (subscription|plan|membership))\b/.test(message.toLowerCase()) &&
         isAffirmativeSubscriptionIntent(message);
       if (reaffirmsCancel) return cancelSubReply();
+      // D1c (GS-3) — the shopper ACCEPTS a replacement we offered for a damaged/defective item ("just
+      // send a new one", "replace it"). Confirm we're arranging it instead of re-escalating as a fresh
+      // complaint. HONEST: a teammate ships it (no execution path here) — we never claim it already went.
+      const damagedOpen = openIssuesList.some((i) => /damag|defect|broken/.test(i)) || historyShowsDamagedOffer(context?.history);
+      if (damagedOpen && /\b(send|ship)( me)?( a)? new\b|a new one|another one\b|\breplace( it| that|ment)?\b/.test(message.toLowerCase())) {
+        flags.push("replacement_routed", "escalate");
+        return { reply: `Absolutely — I'll get a replacement sent for the damaged item. I can't ship it from here myself, so I've flagged it for a member of our team to send a new one out (no charge, and no need to return the damaged one unless they ask). They'll confirm the shipment with you.`, escalate: true, flags };
+      }
       // A person is already on it (this session) → bridge, don't restart from scratch (hold-until-human).
       if (escalationPending) {
         flags.push("escalate");
