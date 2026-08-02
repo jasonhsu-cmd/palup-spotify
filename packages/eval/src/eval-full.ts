@@ -53,9 +53,14 @@ async function main() {
   // is the agent's source of truth, so richer ground truth makes the judge stricter on fabricated
   // ingredient/allergen claims, never more lenient — it does NOT change any criterion or threshold.
   const groundTruth =
-    "AUTHORITATIVE CATALOG (ground truth — these products, prices, and ingredient lists are REAL and correct; anything not listed here is not grounded):\n" +
+    "AUTHORITATIVE CATALOG (ground truth — these products, prices, descriptions, and ingredient lists are REAL and correct; anything not listed here is not grounded):\n" +
+    // Include the product DESCRIPTION: it is first-party catalog data the AGENT grounds on (brain.ts
+    // systemPrompt catalog line: `${title} (${price}): ${sanitizeGroundingText(p.description)} [tags]`),
+    // so without it here the judge false-flags a description-grounded claim ("smoother texture" from the
+    // retinol's "Encapsulated 0.3% retinol for smoother texture") as an invented benefit. Same faithfulness
+    // fix as ingredients/orders above — stricter on fabrication, never more lenient; no criterion changes.
     ctx.products
-      .map((p) => `- ${p.title} (${p.price})${p.ingredients?.length ? ` — ingredients: ${p.ingredients.join(", ")}` : ""}`)
+      .map((p) => `- ${p.title} (${p.price})${p.description ? ` — ${p.description}` : ""}${p.ingredients?.length ? ` — ingredients: ${p.ingredients.join(", ")}` : ""}`)
       .join("\n") +
     (ctx.policy.allergens ? `\nALLERGEN POLICY: ${ctx.policy.allergens}` : "") +
     // Order/policy/subscription ground truth — the support layer grounds on the shopper's real order
