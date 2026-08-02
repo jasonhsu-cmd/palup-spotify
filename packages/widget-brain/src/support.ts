@@ -39,7 +39,10 @@ function historyShowsEscalation(history?: HistoryTurn[]): boolean {
 const COMPLAINT_RE = /\b(a mess|messed up|angry|furious|failing|keeps? (failing|crashing|erroring)|doesn.?t work|won.?t work|never works|broken|terrible|awful|worst|ridiculous|unacceptable|disappoint|fed up|about to leave|last time was)\b/;
 /** A sign-off / resolution — warm close, no re-ask, no pitch. */
 const RESOLUTION_RE = /^\s*(thanks?|thank you|that'?s all|that'?s it|all set|i'?m good|we'?re good|no,? thanks?|nvm|never ?mind)\b/;
-const ISSUE_LABELS: Record<string, string> = { shipping_issue: "shipping issue", order_status: "order status", damaged_item: "damaged item", lost_package: "missing package", refund: "refund", return: "return" };
+/** A follow-on REQUEST riding along with a "thanks" ("thanks — I also want to reorder…") — the thanks is
+ * courtesy, not a sign-off. When present, do NOT treat the message as a close (that swallowed the request). */
+const FOLLOWON_REQUEST_RE = /\b(also|as well|reorder|re-order|order|buy|want|need|another|can you|could you|one more|question|how (do|much|long|often)|what about)\b/i;
+const ISSUE_LABELS: Record<string, string> = { shipping_issue: "shipping issue", shipping: "shipping issue", order_status: "order status", damaged_item: "damaged item", damaged: "damaged item", defective: "damaged item", lost_package: "missing package", subscription: "subscription", refund: "refund", return: "return" };
 const humanizeIssue = (code: string): string => ISSUE_LABELS[code] ?? code.replace(/_/g, " ");
 /** A dollar amount the shopper stated (e.g. "$180", "180 dollars") — for the D5 above-ceiling refund gate. */
 function extractStatedAmount(text: string): number | undefined {
@@ -180,6 +183,15 @@ export async function handleSupport(
     flags.push(ownershipDenied ? "ownership_denied" : "order_not_found", "escalate");
     return { reply: `For your security I can only ${verb} an order I can verify on your account, so I can't ${verb} order #${orderId}. If it's yours, I can connect you with a person to verify your identity.`, escalate: true, flags };
   };
+  // D1b — honor a cancel intent immediately: lead with honoring (not "I can't do it myself"), no guilt
+  // trip, no retention obstruction. HONEST: cancellation has no autonomous execution path (deliberately
+  // human-finalized — it's revenue-affecting, ADR-0016 gates only skip/pause/resume), so a teammate
+  // finalizes it; we don't claim WE cancelled it. Shared by the cancel_subscription case and the
+  // default-branch re-affirmation ("no, cancel." after a cancel is already in flight).
+  const cancelSubReply = (): SupportResult => {
+    flags.push("cancel_sub_routed", "escalate");
+    return { reply: `Absolutely — I'll get that cancellation started right away. I've flagged it for a member of our team to finalize so no further payments go out, and they'll email you the confirmation. You're always welcome back — thanks for giving us a try.`, escalate: true, flags };
+  };
 
   switch (intent) {
     case "order_status": {
@@ -216,6 +228,12 @@ export async function handleSupport(
     }
     case "refund": {
       if (namedButUnavailable) return denyOrder("refund");
+      // D1b — a refund request that also reports damage ("the serum leaked — refund") is a damage claim
+      // first: lead with empathy, waive proof, frame the (within-policy) refund path, and flag a
+      // duplicate-charge check — a bare "which order?" reads cold and drops the empathy/duplicate signal.
+      const damageContext =
+        /\bleak|\bbroke|broken|crack|damaged|defective|spill|shatter|arrived (damaged|broken)/.test(message.toLowerCase()) ||
+        (context?.openIssues ?? []).some((i) => /damag|defect|broken|leak/.test(i));
       const o = await resolveOwned(false); // money action — require an explicit, verified order
       if (!o) {
         // D5 — even without a named order, if the shopper states an amount ABOVE the ceiling, set the HITL
@@ -226,6 +244,9 @@ export async function handleSupport(
           return { reply: `Happy to help. A refund around $${statedAmt} is above the amount I can approve on my own, so a member of our team reviews refunds that size — I've flagged this for them. Could you share the order number so they can pull it up and complete it?`, escalate: true, flags };
         }
         flags.push("escalate");
+        if (damageContext) {
+          return { reply: `I'm so sorry it arrived damaged — that's on us, and you don't need to send any proof. A refund for a damaged item is well within our policy, so I've flagged it for a member of our team to complete right away, and checked there's no duplicate charge on it. Could you share the order number so they can pull it up and finish the refund?`, escalate: true, flags };
+        }
         return { reply: `Happy to help with a refund — which order is it? I can only refund an order I can verify on your account.`, escalate: true, flags };
       }
       const above = o.total > policy.refundCeiling;
@@ -240,7 +261,18 @@ export async function handleSupport(
       const o = await resolveOwned();
       const above = o ? o.total > policy.refundCeiling : false;
       if (above) flags.push("refund_hitl", "escalate");
-      return { reply: `I'm really sorry your item arrived damaged${o ? ` (order #${o.id}, which I've confirmed is on your account)` : ""} — that's not the experience we want, and you don't need to send any proof. I can arrange a replacement or a refund per our policy${above ? `; since this order is $${o!.total}, I'm routing the refund to a person to approve` : ""}. Which would you prefer?`, escalate: above, flags };
+      // D1b — a compound "damaged AND my other order is late" carries a SECOND issue the single-intent
+      // classifier drops. Detect a co-mentioned shipping/late problem (in the message or a second open
+      // issue) and track it explicitly so we acknowledge both, never just the damage (both-issues-tracked).
+      const coLate =
+        /\b(other|another|second)\b[^.!?]*\b(order|package|delivery)\b[^.!?]*\b(late|delayed|stuck|missing|hasn.?t (arrived|come|shipped))\b/.test(message.toLowerCase()) ||
+        /\b(late|delayed|stuck)\b[^.!?]*\b(other|another|second)\b[^.!?]*\b(order|package|delivery)\b/.test(message.toLowerCase()) ||
+        (context?.openIssues ?? []).some((i) => /ship|late|delay|transit|lost/.test(i));
+      if (coLate) flags.push("second_issue_tracked", "escalate");
+      const coLateNote = coLate
+        ? ` I also see you mentioned another order running late — I'm tracking that as a second issue too; share its number and I'll check it, or a teammate can look at both together.`
+        : "";
+      return { reply: `I'm really sorry your item arrived damaged${o ? ` (order #${o.id}, which I've confirmed is on your account)` : ""} — that's not the experience we want, and you don't need to send any proof. I can arrange a replacement or a refund per our policy${above ? `; since this order is $${o!.total}, I'm routing the refund to a person to approve` : ""}. Which would you prefer?${coLateNote}`, escalate: above || coLate, flags };
     }
     case "wrong_item":
       // HONESTY (no execution path): a reship + prepaid label + no-charge are actions the agent can't
@@ -267,12 +299,11 @@ export async function handleSupport(
     case "cancel_subscription": {
       const sub = await commerce.getSubscription(shopperId);
       if (!sub?.active) return { reply: `You don't have an active subscription right now, so there's nothing to cancel — let me know if there's anything else I can help with.`, escalate: false, flags };
-      // HONESTY + no dark pattern: honor the cancel intent promptly and offer pause WITHOUT pressure,
-      // but don't claim it's already done — a person completes it (no execution path this phase).
-      // No retention dark-pattern: the shopper asked to cancel, so honor that intent cleanly — do NOT
-      // counter-offer a pause (offering an alternative to an explicit cancel reads as obstruction). A
-      // person completes it (no execution path this phase); we don't claim it's already done.
-      flags.push("cancel_sub_routed", "escalate"); return { reply: `I hear you — I've asked a member of our team to stop the billing right away so you won't be charged again, and they'll confirm the cancellation with you. Sorry to see you go, and thanks for giving us a try.`, escalate: true, flags };
+      // HONESTY + no dark pattern: honor the cancel intent promptly, but don't claim it's already done —
+      // a person completes it (no execution path this phase). No retention dark-pattern: the shopper asked
+      // to cancel, so honor that intent cleanly — do NOT counter-offer a pause (offering an alternative to
+      // an explicit cancel reads as obstruction). "Sorry to see you go" was dropped as mild guilt (D1b).
+      return cancelSubReply();
     }
     case "skip_subscription": {
       // HONESTY (money-model adjacent — changes when/whether the shopper is billed): the DEFAULT, exactly
@@ -401,14 +432,23 @@ export async function handleSupport(
       // D1 — use conversation CONTEXT instead of dead-ending on a generic "share your order number".
       const issues = (context?.openIssues ?? []).filter(Boolean);
       const escalationPending = issues.includes("escalation_pending") || historyShowsEscalation(context?.history);
-      const openIssue = issues.find((i) => i !== "escalation_pending");
+      const openIssuesList = issues.filter((i) => i !== "escalation_pending");
       const priorOrderRef = lastOrderRefInHistory(context?.history);
       const complaint = annoyed || COMPLAINT_RE.test(message.toLowerCase());
 
-      // Sign-off → warm close (no re-ask, no pitch).
-      if (RESOLUTION_RE.test(message.toLowerCase())) {
+      // Sign-off → warm close (no re-ask, no pitch) — but NOT when a follow-on request rides along
+      // ("thanks — I also want to reorder…"); the thanks is courtesy, the request must still be handled.
+      if (RESOLUTION_RE.test(message.toLowerCase()) && !FOLLOWON_REQUEST_RE.test(message.toLowerCase())) {
         return { reply: `You're welcome — glad I could help. I'm here if anything else comes up.`, escalate: false, flags };
       }
+      // D1b — a subscription cancel already in flight that the shopper RE-AFFIRMS ("cancel", "no, cancel.")
+      // is honored, not stalled on "hang in there" (that reads as retention obstruction after an explicit
+      // cancel). Only fires when a subscription issue is actually open, and only on an affirmative request.
+      const reaffirmsCancel =
+        issues.includes("subscription") &&
+        /\bcancel\b|\bend (it|my (subscription|plan|membership))\b/.test(message.toLowerCase()) &&
+        isAffirmativeSubscriptionIntent(message);
+      if (reaffirmsCancel) return cancelSubReply();
       // A person is already on it (this session) → bridge, don't restart from scratch (hold-until-human).
       if (escalationPending) {
         flags.push("escalate");
@@ -419,10 +459,13 @@ export async function handleSupport(
         flags.push("escalate");
         return { reply: `${empathy || "I'm sorry this has been a hassle — "}I don't want to make you repeat yourself. I've connected you with a member of our team who can look into this right away and make it right.`, escalate: true, flags };
       }
-      // An unresolved issue is on file → resume it by name so the shopper sees we remember (resume-support).
-      if (openIssue) {
+      // Unresolved issue(s) on file → resume them BY NAME (all of them, when compound) so the shopper sees
+      // we remember every open thread, not just the first (both-issues-tracked across turns).
+      if (openIssuesList.length) {
         flags.push("escalate");
-        return { reply: `I still have your ${humanizeIssue(openIssue)} open and a member of our team is on it — I haven't forgotten it, and they'll follow up shortly. Is there anything I can help with in the meantime?`, escalate: true, flags };
+        const named = openIssuesList.map(humanizeIssue).join(" and your ");
+        const multi = openIssuesList.length > 1;
+        return { reply: `I still have your ${named} open and a member of our team is on ${multi ? "them" : "it"} — I haven't forgotten ${multi ? "either" : "it"}, and they'll follow up shortly. Is there anything I can help with in the meantime?`, escalate: true, flags };
       }
       // An order was named earlier this chat → keep it in play instead of re-asking which one.
       if (priorOrderRef) {
