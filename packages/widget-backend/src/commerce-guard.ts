@@ -23,7 +23,9 @@ export function withRequestPrincipal<T>(principal: Principal, fn: () => Promise<
   return als.run(principal, fn);
 }
 
-function currentPrincipal(): Principal {
+// Exported so an IDOR-safe live adapter (ADR-0018 task 8) can bind its credential lookup + query to the
+// VERIFIED request principal — never a method arg / tool output / brain input. Fail-closed by default.
+export function currentPrincipal(): Principal {
   return als.getStore() ?? { kind: "anonymous" }; // no bound principal ⇒ fail CLOSED (anonymous), never open
 }
 
