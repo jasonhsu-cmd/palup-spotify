@@ -6,6 +6,7 @@ import {
   buildAuthorizeUrl,
   discoverOidc,
   exchangeCode,
+  exchangeRefreshToken,
   fetchJwks,
   verifyIdToken,
   verifyIdTokenToPrincipal,
@@ -189,6 +190,31 @@ describe("exchangeCode", () => {
   });
   it("a response missing id_token ⇒ null", async () => {
     expect(await exchangeCode(cfg, { code: "c", codeVerifier: "v", clientId: AUD, redirectUri: "x" }, okFetch({ access_token: "at" }))).toBeNull();
+  });
+});
+
+describe("exchangeRefreshToken", () => {
+  const cfg: OidcConfig = { issuer: ISS, authorization_endpoint: `${ISS}/oauth/authorize`, token_endpoint: `${ISS}/oauth/token`, jwks_uri: `${ISS}/.well-known/jwks.json` };
+  it("confidential client ⇒ POSTs grant_type=refresh_token + Basic auth; returns new tokens (no id_token)", async () => {
+    let captured: { headers?: Record<string, string>; body?: string } | undefined;
+    const cap: FetchFn = (async (_url: unknown, o: unknown) => {
+      captured = o as { headers?: Record<string, string>; body?: string };
+      return { ok: true, status: 200, json: async () => ({ access_token: "NAT", refresh_token: "NRT", expires_in: 3600 }) };
+    }) as unknown as FetchFn;
+    expect(await exchangeRefreshToken(cfg, { refreshToken: "RT", clientId: AUD, clientSecret: "secret" }, cap)).toEqual({ access_token: "NAT", refresh_token: "NRT", expires_in: 3600 });
+    expect(captured!.headers!["authorization"]).toBe("Basic " + Buffer.from(`${AUD}:secret`).toString("base64"));
+    expect(captured!.body).toContain("grant_type=refresh_token");
+    expect(captured!.body).toContain("refresh_token=RT");
+  });
+  it("a non-shopify token endpoint (https attacker) ⇒ null, never sends the secret", async () => {
+    let called = false;
+    const spy: FetchFn = (async () => { called = true; return { ok: true, status: 200, json: async () => ({}) }; }) as unknown as FetchFn;
+    expect(await exchangeRefreshToken({ ...cfg, token_endpoint: "https://attacker.example/token" }, { refreshToken: "RT", clientId: AUD, clientSecret: "s" }, spy)).toBeNull();
+    expect(called).toBe(false);
+  });
+  it("a non-2xx / a response with no access_token ⇒ null", async () => {
+    expect(await exchangeRefreshToken(cfg, { refreshToken: "RT", clientId: AUD }, errFetch(400))).toBeNull();
+    expect(await exchangeRefreshToken(cfg, { refreshToken: "RT", clientId: AUD }, okFetch({ refresh_token: "x" }))).toBeNull();
   });
 });
 

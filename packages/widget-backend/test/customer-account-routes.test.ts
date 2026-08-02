@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { generateKeyPairSync, createSign } from "node:crypto";
-import { InMemoryRuntimeStore } from "@palup/platform-ports";
+import { InMemoryRuntimeStore, createEnvSecrets, mintShopperToken } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
-import { CAA_GRANT_KEY_SCOPE, CAA_GRANT_KEY_NAME } from "../src/customer-grant-store.js";
+import { createCustomerGrantStore, CAA_GRANT_KEY_SCOPE, CAA_GRANT_KEY_NAME } from "../src/customer-grant-store.js";
 import { CAA_APP_SCOPE, CAA_PENDING_COLLECTION } from "../src/customer-account-flow.js";
 
 // ADR-0018 tasks 4-5 route wiring. Security invariants are covered at the function level
@@ -118,5 +118,31 @@ describe("CAA round-trip (login → callback → handoff)", () => {
     expect(JSON.parse(redeem.body).token).toBeTruthy();
     // single-use — a second redeem is 404
     expect((await app.inject({ method: "POST", url: "/auth/customer/handoff", payload: { code: handoffCode } })).statusCode).toBe(404);
+  });
+});
+
+describe("CAA /auth/customer/logout (task 7)", () => {
+  it("404 when off; 401 without a shopper token", async () => {
+    expect((await (await enable({ SHOPPER_AUTH: undefined })).inject({ method: "POST", url: "/auth/customer/logout", payload: {} })).statusCode).toBe(404);
+    expect((await (await enable()).inject({ method: "POST", url: "/auth/customer/logout", payload: {} })).statusCode).toBe(401);
+  });
+
+  it("a valid shopper token ⇒ deletes that shopper's stored grant", async () => {
+    const store = new InMemoryRuntimeStore();
+    process.env.WIDGET_TOKEN_SECRET = "wsecret";
+    process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.WIDGET_EMBED_KEYS = JSON.stringify({ "acme-key": "acme" });
+    process.env.SHOPPER_AUTH = "true";
+    process.env.SHOPPER_TOKEN_SECRET = "shopper-secret";
+    process.env.SHOPIFY_STORES = JSON.stringify({ acme: SHOP });
+    process.env.PALUP_SECRETS = JSON.stringify({ [CAA_GRANT_KEY_SCOPE]: { [CAA_GRANT_KEY_NAME]: "gk" }, acme: { caa_client_id: CLIENT_ID, caa_client_secret: "acme-secret" } });
+    process.env.CAA_REDIRECT_URI = "https://widget.palup.ai/auth/customer/callback";
+    const app = await buildServer({ store, caaFetch });
+    const grants = createCustomerGrantStore(store, createEnvSecrets(process.env.PALUP_SECRETS));
+    await grants.put("acme", "shopify:acme:48291", { accessToken: "AT", grantedAt: 1 });
+    const shopperTok = mintShopperToken("shopper-secret", "shopify:acme:48291", "shopify", 3600);
+    const res = await app.inject({ method: "POST", url: "/auth/customer/logout", headers: { "x-shopper-token": shopperTok } });
+    expect(res.statusCode).toBe(200);
+    expect(await grants.get("acme", "shopify:acme:48291")).toBeNull(); // grant deleted
   });
 });

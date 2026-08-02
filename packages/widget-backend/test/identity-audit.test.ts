@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildIdentityAuditInput, buildCaaGrantAuditInput } from "../src/audit.js";
+import { buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput } from "../src/audit.js";
 
 // ADR-0017 T8: the identity-resolution audit is PII-safe — F7 keyed-HMAC ref (NOT a bare hash), no raw
 // shopperId/customer id anywhere in the record.
@@ -52,5 +52,19 @@ describe("buildCaaGrantAuditInput (ADR-0018 task 9 — grant custody, PII-safe)"
     const serialized = JSON.stringify(entry);
     expect(serialized).not.toContain(shopperId); // never the raw namespaced id
     expect(serialized).not.toContain("48291"); // never the raw numeric customer id
+  });
+});
+
+describe("buildCaaRevokeAuditInput (ADR-0018 task 7 — grant revocation, PII-safe)", () => {
+  it("emits identity.shopper.oauth_revoked with a keyed-HMAC ref; no raw id/token", () => {
+    const shopperId = "shopify:acme:48291";
+    const entry = buildCaaRevokeAuditInput({ shopperId, source: "shopify", tenantId: "acme", hmacKey: "audit-hmac-key" });
+    expect(entry.actor).toBe("system:identity");
+    expect(entry.action).toBe("identity.shopper.oauth_revoked");
+    expect((entry.decision as { revoked?: boolean }).revoked).toBe(true);
+    expect((entry.input as { mechanism: string }).mechanism).toBe("caa");
+    const serialized = JSON.stringify(entry);
+    expect(serialized).not.toContain(shopperId);
+    expect(serialized).not.toContain("48291");
   });
 });

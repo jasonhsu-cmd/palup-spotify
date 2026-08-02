@@ -153,3 +153,18 @@ export function buildCaaGrantAuditInput(args: {
     reversalPath: "revoke: delete stored grant + end session (no Shopify token-revocation endpoint)",
   };
 }
+
+/**
+ * ADR-0018 task 7 — audit a Customer Account API OAuth grant REVOCATION (logout / kill / incident sweep).
+ * The execution of the `oauth_granted` reversalPath — so trail completeness (NN#5) requires it be logged
+ * too. PII-safe keyed `shopperRef`; never the raw shopperId / token.
+ */
+export function buildCaaRevokeAuditInput(args: { shopperId: string; source: "shopify" | "otp"; tenantId: string; hmacKey: string }): AuditInput {
+  return {
+    actor: "system:identity",
+    action: "identity.shopper.oauth_revoked",
+    input: { shopperRef: hashShopperRef(args.hmacKey, args.shopperId), source: args.source, tenantId: args.tenantId, mechanism: "caa" },
+    decision: { revoked: true },
+    reversalPath: "n/a — credential deleted; the shopper re-authorizes to re-grant",
+  };
+}
