@@ -133,7 +133,12 @@ function systemPrompt(policy: Policy, ctx?: GroundingContext): string {
   const catalog = ctx.products
     .map(
       (p) =>
-        `- ${sanitizeGroundingText(p.title, 140)} (${sanitizeGroundingText(p.price, 40)}): ${sanitizeGroundingText(p.description)}${p.tags?.length ? ` [${p.tags.map((t) => sanitizeGroundingText(t, 40)).join(", ")}]` : ""}`,
+        `- ${sanitizeGroundingText(p.title, 140)} (${sanitizeGroundingText(p.price, 40)}): ${sanitizeGroundingText(p.description)}${p.tags?.length ? ` [${p.tags.map((t) => sanitizeGroundingText(t, 40)).join(", ")}]` : ""}${
+          // Ingredient list (INCI), when the merchant publishes it — bounded (count + per-item) to cap
+          // prompt bloat + the injection surface. Grounds honest "does it contain X?" answers and lets
+          // the skeptic/evidence path name the ACTUAL actives instead of marketing adjectives (D2).
+          p.ingredients?.length ? ` Ingredients: ${p.ingredients.slice(0, 30).map((i) => sanitizeGroundingText(i, 40)).join(", ")}.` : ""
+        }`,
     )
     .join("\n");
   // (d) Frame merchant data as untrusted DATA, never instructions — pairs with the field sanitization.
@@ -573,10 +578,14 @@ export function createBrain(
       if (isSupport) {
         // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
         if (commerce) {
-          const r = await handleSupport(commerce, currentShopperId, message, signals.mood, {
-            enabled: subscriptionSelfServeEnabled,
-            shopperVerified,
-          });
+          const r = await handleSupport(
+            commerce,
+            currentShopperId,
+            message,
+            signals.mood,
+            { enabled: subscriptionSelfServeEnabled, shopperVerified },
+            { history, openIssues: signals.openIssues }, // D1 — conversation context so support isn't stateless
+          );
           return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
         }
         // Fallback when no commerce port is wired: generic grounded reply.
