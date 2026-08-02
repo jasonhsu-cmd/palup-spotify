@@ -26,11 +26,20 @@ import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/stat
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
-import { buildAuditInput, buildIdentityAuditInput } from "./audit.js";
+import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 import { guardCommercePort, withRequestPrincipal } from "./commerce-guard.js";
 import { verifyShopifyAppProxyShopper, normalizeAppProxyQuery } from "./shopify-shopper-identity.js";
+import { createCustomerGrantStore } from "./customer-grant-store.js";
+import {
+  startCustomerLogin,
+  completeCustomerCallback,
+  redeemHandoff,
+  CAA_CLIENT_ID_NAME,
+  CAA_CLIENT_SECRET_NAME,
+  type CallbackResult,
+} from "./customer-account-flow.js";
 import { parseStoreDomains } from "./merchant-store.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -112,6 +121,20 @@ const { port: modelPort, name: modelName } = createModelPort();
 const { port: rawCommerce, isLive: commerceIsLive } = createCommercePort();
 const commerce = guardCommercePort(rawCommerce, commerceIsLive);
 
+// ADR-0018 task 5 — the callback landing page. Hands the one-time code to the widget via an
+// exact-origin postMessage (never the token, never "*"), then closes. The payload is base64url/enum only
+// (no injection surface); `<` is still escaped defensively before embedding in the inline script.
+function caaCallbackHtml(res: CallbackResult, widgetOrigin: string): string {
+  const esc = (s: string) => s.replace(/</g, "\\u003c");
+  const payload = esc(res.ok ? JSON.stringify({ type: "palup:caa", ok: true, handoffCode: res.handoffCode }) : JSON.stringify({ type: "palup:caa", ok: false, reason: res.reason }));
+  const msg = res.ok ? "You're signed in — you can return to the chat." : res.reason === "cancelled" ? "Sign-in cancelled. You can keep browsing." : "Sign-in didn't complete. Please try again.";
+  const origin = esc(JSON.stringify(widgetOrigin));
+  return `<!doctype html><meta charset="utf-8"><title>PalUp</title><body style="font-family:system-ui;padding:24px;color:#111"><p>${msg}</p><script>
+    try { if (window.opener && ${origin}) window.opener.postMessage(${payload}, ${origin}); } catch (e) {}
+    setTimeout(function(){ try { window.close(); } catch (e) {} }, 300);
+  </script></body>`;
+}
+
 export async function buildServer(opts?: {
   store?: RuntimeStatePort;
   modelPort?: ModelPort;
@@ -119,6 +142,9 @@ export async function buildServer(opts?: {
    * the memory subsystem is never touched while the double gate (isMemoryEnabled) is off. Prod always
    * uses the dev in-memory adapter below — a real vector-DB adapter is a later, separately-gated swap. */
   vectorPort?: VectorPort;
+  /** ADR-0018 test seam: inject the outbound fetch used by the CAA OAuth routes (discovery/token/JWKS)
+   * so route tests never hit the network. Prod uses the global fetch. */
+  caaFetch?: typeof globalThis.fetch;
 }) {
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads.
@@ -226,6 +252,28 @@ export async function buildServer(opts?: {
     const g = process.env.MERCHANT_GROUNDING_MODE;
     return g === "off" || g === "general" || g === "full" ? g : "full";
   })();
+  // ADR-0018 — Customer Account API OAuth (shopper sign-in that yields a token to read their own orders/
+  // subscriptions). Gated by the SAME SHOPPER_AUTH_ENABLED posture (so it's inert exactly when App-Proxy
+  // identity is) PLUS a configured redirect_uri PLUS a shopper-token secret to mint. Per-shop client creds
+  // (per-shop client model, ADR-0018 spike) come from the tenant-scoped SecretsPort. When off ⇒ 404 (inert).
+  const CAA_REDIRECT_URI = process.env.CAA_REDIRECT_URI;
+  const CAA_SCOPE = process.env.CAA_SCOPE || "openid email customer-account-api:full";
+  const CAA_ENABLED = SHOPPER_AUTH_ENABLED && typeof CAA_REDIRECT_URI === "string" && CAA_REDIRECT_URI.length > 0 && typeof SHOPPER_TOKEN_SECRET === "string" && SHOPPER_TOKEN_SECRET.length > 0;
+  const caaFetch = opts?.caaFetch ?? globalThis.fetch;
+  const grantStore = createCustomerGrantStore(store, secrets);
+  // Exact-origin target for the callback→widget handoff postMessage (never "*"). The widget iframe is
+  // served by THIS backend, so its origin equals the redirect_uri's origin.
+  const CAA_WIDGET_ORIGIN = (() => {
+    try {
+      return CAA_REDIRECT_URI ? new URL(CAA_REDIRECT_URI).origin : "";
+    } catch {
+      return "";
+    }
+  })();
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  // NN#4 — no new credential custody may begin/accrue for a halted tenant/agent (mirrors the /chat gate).
+  const caaKillCheck = async (tenant: string): Promise<boolean> => (await matchedKill(store, { tenantId: tenant, agentType: RUNTIME_AGENT_TYPE })) !== null;
+
   const app = Fastify({ logger: false });
 
   app.get("/health", async () => ({ ok: true, model: modelName }));
@@ -308,6 +356,118 @@ export async function buildServer(opts?: {
     });
     if (principal.kind !== "shopper") return { shopper: null }; // browsing, not logged in — not an error
     const token = mintShopperToken(SHOPPER_TOKEN_SECRET, principal.shopperId, principal.source, SHOPPER_TOKEN_TTL_SECONDS);
+    return { token, expiresInSeconds: SHOPPER_TOKEN_TTL_SECONDS };
+  });
+
+  // ADR-0018 task 4 — begin CAA OAuth. Authenticates the widget token to establish the merchant tenant
+  // (like /shopper/session), then 302s to the shop's authorize URL. 404 when the feature is off (inert).
+  app.get("/auth/customer/login", async (req, reply) => {
+    if (!CAA_ENABLED) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open: minting is cheap and the token exchange is separately bounded */
+    }
+    const authHeader = req.headers["authorization"];
+    const widgetToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+    const merchantPrincipal = await widgetIdentity.authenticate(widgetToken);
+    if (merchantPrincipal.kind !== "merchant") {
+      reply.code(401);
+      return { error: "unauthenticated" };
+    }
+    const domains = parseStoreDomains();
+    const shopDomain = Object.hasOwn(domains, merchantPrincipal.merchantId) ? domains[merchantPrincipal.merchantId] : undefined;
+    if (!shopDomain) {
+      reply.code(404);
+      return { error: "not found" }; // no store mapped for this tenant
+    }
+    const r = await startCustomerLogin(
+      { store, fetchFn: caaFetch, clientIdFor: (t) => secrets.get(t, CAA_CLIENT_ID_NAME), killCheck: caaKillCheck, redirectUri: CAA_REDIRECT_URI!, scope: CAA_SCOPE, now: nowSec },
+      { tenant: merchantPrincipal.merchantId, shopDomain },
+    );
+    if (!r) {
+      reply.code(404);
+      return { error: "not found" }; // no CAA client provisioned, or discovery failed — fail closed
+    }
+    reply.header("location", r.authorizeUrl).code(302).send();
+  });
+
+  // ADR-0018 task 5 — the OAuth callback (a top-level Shopify redirect: only code/state/error, NO widget
+  // Bearer). Returns an HTML page that hands the one-time code to the widget; never the token in the URL.
+  app.get("/auth/customer/callback", async (req, reply) => {
+    if (!CAA_ENABLED) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open */
+    }
+    const q = req.query as { code?: unknown; state?: unknown; error?: unknown };
+    const res = await completeCustomerCallback(
+      {
+        store,
+        fetchFn: caaFetch,
+        grants: grantStore,
+        clientIdFor: (t) => secrets.get(t, CAA_CLIENT_ID_NAME),
+        clientSecretFor: (t) => secrets.get(t, CAA_CLIENT_SECRET_NAME),
+        killCheck: caaKillCheck,
+        redirectUri: CAA_REDIRECT_URI!,
+        shopperTokenSecret: SHOPPER_TOKEN_SECRET!,
+        shopperTokenTtlSeconds: SHOPPER_TOKEN_TTL_SECONDS,
+        now: nowSec,
+        audit: async (e) => {
+          await store.audit({ tenantId: e.tenant }, buildCaaGrantAuditInput({ shopperId: e.shopperId, source: "shopify", tenantId: e.tenant, hmacKey: AUDIT_HMAC_SECRET ?? "", scope: e.scope }));
+        },
+      },
+      {
+        code: typeof q.code === "string" ? q.code : undefined,
+        state: typeof q.state === "string" ? q.state : undefined,
+        error: typeof q.error === "string" ? q.error : undefined,
+      },
+    );
+    reply.type("text/html");
+    return caaCallbackHtml(res, CAA_WIDGET_ORIGIN);
+  });
+
+  // ADR-0018 task 5 — redeem the one-time handoff code for the minted shopper session token.
+  app.post("/auth/customer/handoff", async (req, reply) => {
+    if (!CAA_ENABLED) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    // Rate-limit the redeem too (mirrors /shopper/session) — the code is already unguessable + single-use +
+    // 120s, but this bounds brute-force attempts under the reserved mint tenant.
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open */
+    }
+    const body = (req.body ?? {}) as { code?: unknown };
+    const token = await redeemHandoff(store, typeof body.code === "string" ? body.code : "");
+    if (!token) {
+      reply.code(404);
+      return { token: null };
+    }
     return { token, expiresInSeconds: SHOPPER_TOKEN_TTL_SECONDS };
   });
 

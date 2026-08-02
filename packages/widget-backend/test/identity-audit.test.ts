@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildIdentityAuditInput } from "../src/audit.js";
+import { buildIdentityAuditInput, buildCaaGrantAuditInput } from "../src/audit.js";
 
 // ADR-0017 T8: the identity-resolution audit is PII-safe — F7 keyed-HMAC ref (NOT a bare hash), no raw
 // shopperId/customer id anywhere in the record.
@@ -35,5 +35,22 @@ describe("buildIdentityAuditInput (T8, PII-safe, F7 keyed HMAC)", () => {
     const a = buildIdentityAuditInput({ shopperId, source: "shopify", tenantId: "acme", hmacKey: "k" });
     const b = buildIdentityAuditInput({ shopperId, source: "shopify", tenantId: "acme", hmacKey: "k" });
     expect((a.input as { shopperRef: string }).shopperRef).toBe((b.input as { shopperRef: string }).shopperRef);
+  });
+});
+
+describe("buildCaaGrantAuditInput (ADR-0018 task 9 — grant custody, PII-safe)", () => {
+  it("emits identity.shopper.oauth_granted with a keyed-HMAC ref + a REAL reversal path; no raw id/token", () => {
+    const shopperId = "shopify:acme:48291";
+    const entry = buildCaaGrantAuditInput({ shopperId, source: "shopify", tenantId: "acme", hmacKey: "audit-hmac-key", scope: "openid email" });
+    expect(entry.actor).toBe("system:identity");
+    expect(entry.action).toBe("identity.shopper.oauth_granted");
+    expect(entry.reversalPath).toContain("delete stored grant");
+    const input = entry.input as { shopperRef: string; mechanism: string; scope?: string };
+    expect(input.mechanism).toBe("caa");
+    expect(input.scope).toBe("openid email");
+    expect(typeof input.shopperRef).toBe("string");
+    const serialized = JSON.stringify(entry);
+    expect(serialized).not.toContain(shopperId); // never the raw namespaced id
+    expect(serialized).not.toContain("48291"); // never the raw numeric customer id
   });
 });
