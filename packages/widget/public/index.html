@@ -76,6 +76,7 @@
   #drawer.open{ display:flex }
   #drawer select{ font-size:12px; padding:3px 6px; border-radius:7px; border:1px solid var(--line); background:var(--panel); color:var(--fg) }
   #drawer label{ font-size:12px; color:var(--muted); display:flex; align-items:center; gap:5px }
+  #drawer #signin{ font-size:12px; padding:3px 9px; border-radius:7px; border:1px solid var(--line); background:var(--panel); color:var(--brand); cursor:pointer; font:inherit }
 
   form{ display:flex; gap:8px; padding:12px 14px; border-top:1px solid var(--line) }
   #in{ flex:1; padding:11px 14px; border:1px solid #94a3b8; border-radius:12px; background:var(--panel); color:var(--fg); font:inherit }
@@ -116,6 +117,7 @@
       <select id="cart" aria-label="Cart signal" title="cart signal"><option value="has_items">cart: has items</option><option value="empty">cart: empty</option><option value="high_value">cart: high value</option></select>
       <select id="proactivityLevel" aria-label="Proactivity level" title="proactivity"><option value="balanced">balanced</option><option value="cautious">cautious</option><option value="confident">confident</option></select>
       <label><input type="checkbox" id="showSignals" checked /> show signals</label>
+      <button type="button" id="signin" data-testid="signin-btn" title="Sign in to view your orders">Sign in to view your orders</button>
     </div>
     <form id="f">
       <input id="in" data-testid="chat-input" type="text" aria-label="Type a message to the assistant" placeholder="Ask about a product or your order…" autocomplete="off" />
@@ -162,6 +164,63 @@
     } catch { /* backend may not require it yet; /chat falls back during rollout */ }
     return widgetToken;
   }
+
+  // --- ADR-0018 task 10 — Customer Account API shopper sign-in ----------------------------------
+  // A verified shopper is needed to read their OWN orders/subscriptions. App-Proxy (server-side) is the
+  // zero-prompt path; this explicit OAuth sign-in is the fallback. The minted shopper session token lives
+  // in sessionStorage and is sent as x-shopper-token on /chat. INERT unless the backend has CAA enabled
+  // (/auth/customer/login 404s otherwise).
+  const SS_SHOPPER = "palup_shopper_token";
+  let shopperToken = null;
+  try { shopperToken = sessionStorage.getItem(SS_SHOPPER) || null; } catch {}
+  function setShopperToken(t){ shopperToken = t || null; try { t ? sessionStorage.setItem(SS_SHOPPER, t) : sessionStorage.removeItem(SS_SHOPPER); } catch {} }
+
+  // MUST be called synchronously from a click handler (a user gesture) so window.open isn't popup-blocked.
+  function startShopperSignIn(){
+    const url = "/auth/customer/login?key=" + encodeURIComponent(EMBED_KEY);
+    let w = null; try { w = window.open(url, "palup_signin", "width=480,height=760"); } catch {}
+    if (!w){
+      // Popup blocked → inline fallback: a link the shopper clicks to redirect the TOP frame instead.
+      const el = document.createElement("div"); el.className = "system"; el.setAttribute("role","status"); el.setAttribute("data-testid","signin-popup-blocked");
+      el.textContent = "Popup blocked. ";
+      const a = document.createElement("button"); a.type = "button"; a.className = "retry"; a.textContent = "Click to sign in";
+      a.onclick = () => { try { (window.top || window).location.href = url; } catch { window.location.href = url; } };
+      el.appendChild(a); msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
+    }
+  }
+  $("#signin").onclick = () => startShopperSignIn(); // gesture → synchronous window.open
+
+  // Intent-highlighted prompt (deduped); the OAuth still only opens on the shopper's click (a gesture).
+  let signInPrompted = false;
+  function promptSignIn(reason){
+    if (signInPrompted) return; signInPrompted = true;
+    const el = document.createElement("div"); el.className = "system"; el.setAttribute("role","status"); el.setAttribute("data-testid","signin-prompt");
+    el.textContent = (reason === "reauth" ? "Your session expired. " : "") + "To see your orders, ";
+    const b = document.createElement("button"); b.type = "button"; b.className = "retry"; b.textContent = "sign in";
+    b.onclick = () => { signInPrompted = false; el.remove(); startShopperSignIn(); };
+    el.appendChild(b); msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  // Receive the one-time handoff code from the callback popup (EXACT-origin checked), redeem it for the
+  // shopper token, then re-send the pending question so the answer uses the now-verified identity.
+  // INVARIANT (load-bearing for this origin check): the widget is served FROM the PalUp backend origin
+  // (top-level or an iframe from this backend) — never inlined directly into the merchant storefront DOM.
+  // That is what makes window.location.origin === the callback's post origin. Do not inline into merchant DOM.
+  window.addEventListener("message", async (ev) => {
+    if (ev.origin !== window.location.origin) return; // only our own backend/callback origin — never "*"
+    const d = ev.data; if (!d || d.type !== "palup:caa") return;
+    if (d.ok && typeof d.handoffCode === "string"){
+      try {
+        const r = await fetch("/auth/customer/handoff", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: d.handoffCode }) });
+        if (r.ok){ const j = await r.json(); if (j && j.token){ setShopperToken(j.token); signInPrompted = false;
+          add("You're signed in.", "agent");
+          if (lastSend) send(lastSend.message, true); // re-send the pending question, now verified
+        } }
+      } catch { /* handoff redeem failed — the shopper can retry sign-in */ }
+    } else {
+      add(d && d.reason === "cancelled" ? "Sign-in cancelled." : "Sign-in didn't complete. Please try again.", "agent");
+    }
+  });
 
   function setOpen(open){ widget.hidden = !open; launcher.hidden = open; launcher.setAttribute('aria-expanded', String(open)); if(open){ $('#in').focus(); } else { launcher.focus(); } }
   $("#min").onclick = () => setOpen(false);
@@ -233,6 +292,7 @@
       await ensureToken(false);
       const headers = { "content-type": "application/json" };
       if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      if (shopperToken) headers["x-shopper-token"] = shopperToken; // ADR-0018 — the verified shopper identity
       return fetch("/chat", { method:"POST", headers, body: JSON.stringify({ message, signals, sessionId, idempotencyKey, history }), signal: ctrl.signal });
     };
     try{
@@ -240,6 +300,9 @@
       if (r.status === 401){ await ensureToken(true); r = await doFetch(); } // token expired → refresh once
       if (!r.ok) throw new Error("http " + r.status);
       const d = await r.json(); add(d.reply, "agent", d); if (d.escalate) enterHandoff();
+      // The verified-shopper session expired/was rejected (e.g. a credentialed read needs re-auth) →
+      // drop the stale token and offer sign-in again. App-Proxy shoppers never see this.
+      if (d.flags && d.flags.indexOf("reauth_required") >= 0){ setShopperToken(null); promptSignIn("reauth"); }
       recordTurn(message, d.reply); // persist the completed turn so the next follow-up (and a reload) keep context
     }catch(err){ offline(); }
     finally{ clearTimeout(timer); typing(false); btn.disabled = false; }
@@ -263,6 +326,7 @@
       await ensureToken(false);
       const headers = { "content-type": "application/json" };
       if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      if (shopperToken) headers["x-shopper-token"] = shopperToken;
       // Agent-initiated: NO user bubble is added, and the transcript is not touched.
       const r = await fetch("/chat", { method:"POST", headers, body: JSON.stringify({ message: "", signals, sessionId, idempotencyKey, history: recentHistory() }) });
       if (!r.ok) return;

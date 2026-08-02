@@ -87,6 +87,18 @@ describe("CAA /auth/customer/login", () => {
     expect(loc.searchParams.get("code_challenge_method")).toBe("S256");
     expect(loc.searchParams.get("state")).toBeTruthy();
   });
+
+  it("valid embed key via ?key= ⇒ 302 (the window.open path — no Authorization header)", async () => {
+    const app = await enable();
+    const res = await app.inject({ method: "GET", url: "/auth/customer/login?key=acme-key" });
+    expect(res.statusCode).toBe(302);
+    expect(new URL(res.headers.location as string).searchParams.get("client_id")).toBe(CLIENT_ID);
+  });
+
+  it("an unknown ?key and no Bearer ⇒ 401", async () => {
+    const app = await enable();
+    expect((await app.inject({ method: "GET", url: "/auth/customer/login?key=nope" })).statusCode).toBe(401);
+  });
 });
 
 describe("CAA round-trip (login → callback → handoff)", () => {

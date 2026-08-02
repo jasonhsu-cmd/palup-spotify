@@ -40,3 +40,13 @@ test("the surface carries its AI + PalUp disclosure on load", async ({ page }) =
   await expect(powered).toBeVisible();
   await expect(powered).toContainText("Powered by PalUp");
 });
+
+// ADR-0018 task 10 — the shopper sign-in control is GESTURE-triggered: a click synchronously opens the
+// OAuth login. (CAA is off in mock mode, so the popup lands on a 404 — we assert the URL, not the page.)
+test("the sign-in control opens the Customer Account OAuth login via window.open", async ({ page, context }) => {
+  await page.goto("/");
+  await page.locator("#gear").click(); // open the demo-controls drawer where the sign-in control lives
+  const [popup] = await Promise.all([context.waitForEvent("page"), page.getByTestId("signin-btn").click()]);
+  expect(popup.url()).toContain("/auth/customer/login");
+  await popup.close();
+});

@@ -377,22 +377,33 @@ export async function buildServer(opts?: {
     } catch {
       /* fail-open: minting is cheap and the token exchange is separately bounded */
     }
-    const authHeader = req.headers["authorization"];
-    const widgetToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
-    const merchantPrincipal = await widgetIdentity.authenticate(widgetToken);
-    if (merchantPrincipal.kind !== "merchant") {
+    // Establish the merchant tenant. A window.open navigation (the widget sign-in, task 10) can't set an
+    // Authorization header, so accept the publishable embed key via ?key= (resolved through EMBED_KEYS,
+    // exactly like /widget/token) OR a Bearer widget token (fetch callers). The embed key is publishable
+    // and only NAMES the tenant — the OAuth state/PKCE + the shop's own auth protect the flow.
+    const keyParam = (req.query as { key?: string })?.key;
+    let tenant: string | undefined;
+    if (typeof keyParam === "string" && Object.hasOwn(EMBED_KEYS, keyParam)) {
+      tenant = EMBED_KEYS[keyParam];
+    } else {
+      const authHeader = req.headers["authorization"];
+      const widgetToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+      const merchantPrincipal = await widgetIdentity.authenticate(widgetToken);
+      if (merchantPrincipal.kind === "merchant") tenant = merchantPrincipal.merchantId;
+    }
+    if (!tenant) {
       reply.code(401);
       return { error: "unauthenticated" };
     }
     const domains = parseStoreDomains();
-    const shopDomain = Object.hasOwn(domains, merchantPrincipal.merchantId) ? domains[merchantPrincipal.merchantId] : undefined;
+    const shopDomain = Object.hasOwn(domains, tenant) ? domains[tenant] : undefined;
     if (!shopDomain) {
       reply.code(404);
       return { error: "not found" }; // no store mapped for this tenant
     }
     const r = await startCustomerLogin(
       { store, fetchFn: caaFetch, clientIdFor: (t) => secrets.get(t, CAA_CLIENT_ID_NAME), killCheck: caaKillCheck, redirectUri: CAA_REDIRECT_URI!, scope: CAA_SCOPE, now: nowSec },
-      { tenant: merchantPrincipal.merchantId, shopDomain },
+      { tenant, shopDomain },
     );
     if (!r) {
       reply.code(404);
