@@ -80,3 +80,63 @@ describe("D5 — above-ceiling refund with no named order → HITL + expectation
     expect(r.reply).toMatch(/which order/i);
   });
 });
+
+// D1b (conversation-quality wave 1c): compound two-issue tracking, damage-refund empathy, honoring a
+// re-affirmed cancel without stalling, and sign-off precision (a "thanks, but also…" is not a close).
+describe("D1b — compound issues, damage-refund empathy, cancel honoring, sign-off precision", () => {
+  // SUP-06 — a refund request that names damage ("the serum leaked") must empathize, note no proof
+  // needed, frame the (within-policy) refund path, and flag a duplicate-charge check — not a cold ask.
+  it("a refund for a leaked/damaged item → empathy + duplicate-check + drafted path (not a cold 'which order')", async () => {
+    const r = await call("the serum leaked — refund", { context: { openIssues: ["damaged"] } });
+    expect(r.reply).toMatch(/sorry|apolog/i); // empathize
+    expect(r.reply).toMatch(/duplicate|no .*(double|extra) charge/i); // duplicate-check
+    expect(r.reply).toMatch(/within our policy|flagged (it|this)|complete (it|the refund)/i); // within-ceiling / drafted
+    expect(r.escalate).toBe(true);
+  });
+  it("a plain refund with no damage cue is unchanged (still asks which order, no false empathy)", async () => {
+    const r = await call("I'd like a refund");
+    expect(r.reply).toMatch(/which order/i);
+  });
+
+  // SW-9 — a compound "damaged AND other order late" must track BOTH issues, not just the damage.
+  it("a compound 'damaged AND other order is late' → acknowledges BOTH issues", async () => {
+    const r = await call("my serum pump is broken AND my other order is late.");
+    expect(r.reply).toMatch(/damaged|replacement|refund/i); // issue 1
+    expect(r.reply).toMatch(/other order|another order|running late|second (issue|order)|also.*late/i); // issue 2 tracked
+    expect(r.escalate).toBe(true);
+  });
+  // SW-9 turn 2 — resuming open issues reads humanized (not "your defective open") and names both.
+  it("resuming multiple open issues reads as 'damaged item' + 'shipping issue', never 'your defective open'", async () => {
+    const r = await call("while we sort this, can I reorder the cleanser?", { context: { openIssues: ["defective", "shipping_issue"] } });
+    expect(r.reply).not.toMatch(/your defective open/i);
+    expect(r.reply).toMatch(/damaged item/i);
+    expect(r.reply).toMatch(/shipping issue/i);
+  });
+
+  // GS-2 — an explicit cancel is honored immediately, no guilt-trip.
+  it("an explicit subscription cancel honors immediately and doesn't guilt-trip", async () => {
+    const r = await call("cancel my subscription.");
+    expect(r.reply).not.toMatch(/sorry to see you go/i); // guilt phrasing removed
+    expect(r.reply).toMatch(/right away|get (that|the cancellation) started|honou?r/i);
+    expect(r.flags).toContain("cancel_sub_routed");
+  });
+  // GS-2 turn 2 — a re-affirmed cancel ("no, cancel.") is HONORED, not stalled with "hang in there".
+  it("a re-affirmed cancel ('no, cancel.') with a subscription in flight is honored, not stalled", async () => {
+    const r = await call("no, cancel.", { context: { openIssues: ["subscription"] } });
+    expect(r.escalate).toBe(true);
+    expect(r.reply).toMatch(/cancel/i);
+    expect(r.reply).not.toMatch(/hang(ing)? in there|still looking into|keep (you )?waiting/i); // no obstruction
+    expect(r.flags).toContain("cancel_sub_routed");
+  });
+
+  // SW-7 — "thanks — I also want to reorder…" is NOT a sign-off (it carries a follow-on request).
+  it("'thanks — I also want to reorder the cleanser' is NOT swallowed as a sign-off", async () => {
+    const r = await call("thanks — I also want to reorder the cleanser.");
+    expect(r.reply).not.toMatch(/glad I could help/i); // not the warm-close
+  });
+  it("a pure 'thanks, that's all' still closes warmly (unchanged)", async () => {
+    const r = await call("thanks, that's all");
+    expect(r.reply).toMatch(/you'?re welcome|glad/i);
+    expect(r.flags).toContain("no_pitch");
+  });
+});
