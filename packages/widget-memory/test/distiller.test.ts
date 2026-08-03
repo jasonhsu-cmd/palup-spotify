@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { createInMemoryVectorStore, InMemoryRuntimeStore } from "@palup/platform-ports";
-import { createStubDistiller, createModelDistiller, sanitizeFact, FACT_MAX_CHARS } from "../src/distiller.js";
+import { createStubDistiller, createModelDistiller, sanitizeFact, FACT_MAX_CHARS, type FactDistiller } from "../src/distiller.js";
 import { createMemoryService } from "../src/service.js";
 import { classifyFact } from "../src/classifier.js";
 import type { MemoryCtx } from "../src/types.js";
@@ -87,10 +87,13 @@ describe("createModelDistiller — extraction (MockModelAdapter, offline, determ
     const model = respond({ facts: [{ text: "prefers fragrance-free products" }] });
     const distiller = createModelDistiller({ model });
     const facts = await distiller.distill({ message: "I like fragrance-free stuff", reply: "Noted!" });
-    expect(facts).toEqual(["prefers fragrance-free products"]);
+    // PR-8: distill() now returns candidate OBJECTS (text + optional disposition), not bare strings —
+    // the disposition is surfaced instead of discarded. No disposition here ⇒ the key is simply absent.
+    expect(facts).toEqual([{ text: "prefers fragrance-free products" }]);
+    expect(facts[0]!.disposition).toBeUndefined();
   });
 
-  it("keeps a candidate whose disposition has valid provenance ('stated' or 'observed')", async () => {
+  it("keeps a candidate whose disposition has valid provenance ('stated' or 'observed') — PR-8: the disposition is SURFACED, not discarded", async () => {
     const model = respond({
       facts: [
         {
@@ -105,7 +108,16 @@ describe("createModelDistiller — extraction (MockModelAdapter, offline, determ
     });
     const distiller = createModelDistiller({ model });
     const facts = await distiller.distill({ message: "what actives are in this? keep it under $50", reply: "..." });
-    expect(facts).toEqual(["asked for ingredient names before buying", "wants to stay under $50"]);
+    expect(facts).toEqual([
+      {
+        text: "asked for ingredient names before buying",
+        disposition: { axis: "style", value: "researcher", provenance: "observed", confidence: 0.8, sourceQuote: "what actives are in this" },
+      },
+      {
+        text: "wants to stay under $50",
+        disposition: { axis: "budget_stated", value: "under-50", provenance: "stated", confidence: 1 },
+      },
+    ]);
   });
 
   it("REJECTS the whole candidate — not just the disposition — when provenance is 'inferred' (fairness structural)", async () => {
@@ -118,7 +130,7 @@ describe("createModelDistiller — extraction (MockModelAdapter, offline, determ
     const distiller = createModelDistiller({ model });
     const facts = await distiller.distill({ message: "m", reply: "r" });
     // The tainted candidate's TEXT is gone too, not just its disposition.
-    expect(facts).toEqual(["prefers fragrance-free products"]);
+    expect(facts).toEqual([{ text: "prefers fragrance-free products" }]);
   });
 
   it("REJECTS a candidate whose disposition provenance is any other non-stated/observed string", async () => {
@@ -317,5 +329,105 @@ describe("MemoryServiceDeps.model — threading ModelPort (a caller may hand the
       else process.env.VITEST = orig.v;
       process.env.NODE_ENV = orig.n as string;
     }
+  });
+});
+
+// PR-8 — the disposition round-trip: `createModelDistiller` no longer discards the validated
+// disposition (surfaced above); `remember()` now stores it on `FactMetadata.disposition` and `recall()`
+// returns it on `RecalledFact.disposition`, so PR-7's recall -> style path has real data to translate.
+describe("PR-8 — disposition persists through remember() and comes back on recall()", () => {
+  it("a validated disposition attached to a distilled fact round-trips on RecalledFact.disposition", async () => {
+    const model = respond({
+      facts: [
+        {
+          text: "asked for ingredient names before buying",
+          disposition: { axis: "style", value: "researcher", provenance: "observed", confidence: 0.8, sourceQuote: "what actives are in this" },
+        },
+      ],
+    });
+    const service = createMemoryService({
+      vector: createInMemoryVectorStore(),
+      audit: new InMemoryRuntimeStore(),
+      distiller: createModelDistiller({ model }),
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-disp", anonId: "g-disp-1", region: "us", consent1: "in", consent2: "unknown" };
+
+    const written = await service.remember(ctx, { message: "what actives are in this?", reply: "..." });
+    expect(written.written).toEqual(["ordinary"]);
+
+    const recalled = await service.recall(ctx);
+    expect(recalled).toHaveLength(1);
+    expect(recalled[0]!.disposition).toEqual([
+      { axis: "style", value: "researcher", provenance: "observed", confidence: 0.8, sourceQuote: "what actives are in this" },
+    ]);
+  });
+
+  it("a fact with NO disposition round-trips with disposition simply absent (not an empty array / not a spurious value)", async () => {
+    const model = respond({ facts: [{ text: "prefers fragrance-free products" }] });
+    const service = createMemoryService({
+      vector: createInMemoryVectorStore(),
+      audit: new InMemoryRuntimeStore(),
+      distiller: createModelDistiller({ model }),
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-disp", anonId: "g-disp-2", region: "us", consent1: "in", consent2: "unknown" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    const recalled = await service.recall(ctx);
+    expect(recalled).toEqual([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    expect(recalled[0]!.disposition).toBeUndefined();
+  });
+
+  it("a sourceQuote is redaction+cap sanitized the SAME as the fact text (a pasted card in the quoted span is redacted, never stored raw)", async () => {
+    const model = respond({
+      facts: [
+        {
+          text: "keeps a running budget for skincare",
+          disposition: {
+            axis: "budget_stated",
+            value: "under-50",
+            provenance: "stated",
+            confidence: 1,
+            sourceQuote: "keep it under $50, my card is 4111 1111 1111 1111 if you need it",
+          },
+        },
+      ],
+    });
+    const service = createMemoryService({
+      vector: createInMemoryVectorStore(),
+      audit: new InMemoryRuntimeStore(),
+      distiller: createModelDistiller({ model }),
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-disp", anonId: "g-disp-quote", region: "us", consent1: "in", consent2: "unknown" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    const recalled = await service.recall(ctx);
+    const quote = recalled[0]!.disposition?.[0]?.sourceQuote ?? "";
+    expect(quote).not.toContain("4111");
+    expect(quote).toContain("[redacted-card]");
+  });
+
+  it("defense-in-depth: service.ts re-validates the disposition (isValidDisposition, reject-in-full) even from a hand-rolled FactDistiller that skipped its own validation — never just createModelDistiller's own gate", async () => {
+    const distiller: FactDistiller = {
+      async distill() {
+        return [
+          {
+            text: "seems like a big spender",
+            disposition: { axis: "budget_stated", value: "high", provenance: "inferred" as never, confidence: 0.9 },
+          },
+        ];
+      },
+    };
+    const service = createMemoryService({ vector: createInMemoryVectorStore(), audit: new InMemoryRuntimeStore(), distiller, enabled: true });
+    const ctx: MemoryCtx = { tenantId: "acme-disp", anonId: "g-disp-3", region: "us", consent1: "in", consent2: "unknown" };
+
+    // Reject-in-full: the WHOLE candidate (fact text included) never reaches storage, mirroring
+    // createModelDistiller's own rule — the same fairness-structural bar applies regardless of which
+    // FactDistiller produced the candidate.
+    const written = await service.remember(ctx, { message: "m", reply: "r" });
+    expect(written.written).toEqual([]);
+    expect(await service.recall(ctx)).toEqual([]);
   });
 });

@@ -494,6 +494,26 @@ function findRecalledStyleDirective(recalled: RecalledFact[], consent: Signals["
   return undefined;
 }
 
+// PR-8 — in-session STYLE fallback. `signals.sessionDisposition` (session.ts's transient, style-only
+// carry — SessionState's own doc comment: never durable, never merged to an account) resolves to a
+// PersonaStyle via the SAME whitelisted lookup + confidence bar as a recalled disposition, so a session
+// that already observed a style earlier keeps that voice treatment on a LATER turn that doesn't
+// re-supply `personaStyle`. Deliberately NO consent check here (unlike a recalled cross-visit fact):
+// this is the CURRENT shopper's own THIS-session behavior, never persisted, so there is no separate
+// subject/consent boundary to cross (PR-8 carried condition 3 — session fallback fairness). Lowest
+// precedence in the caller's chain — only ever consulted when neither a supplied nor classified
+// personaStyle exists this turn.
+function sessionFallbackPersonaStyle(sessionDisposition: Signals["sessionDisposition"]): PersonaStyle | undefined {
+  for (const d of sessionDisposition ?? []) {
+    if (d.axis !== "style") continue;
+    if (d.confidence < RECALLED_DISPOSITION_CONFIDENCE_THRESHOLD) continue;
+    // Guarded lookup (same shape as findRecalledStyleDirective's own whitelist check) — an untrusted
+    // bare-string value never resolves through the prototype chain to something other than undefined.
+    if (Object.prototype.hasOwnProperty.call(PERSONA_STYLE_DIRECTIVE, d.value)) return d.value as PersonaStyle;
+  }
+  return undefined;
+}
+
 // Internal, agent-INITIATED instruction for a proactive exit-intent moment (§5). This is NOT a shopper
 // utterance and is never classified as one; it tells the model to make the single, honest cart-recovery
 // offer from the cart_recovery playbook, grounded in the store's own POLICY (shipping/returns). One
@@ -995,7 +1015,12 @@ export function createBrain(
         dispositionClassifierEnabled && dispositionStyleEnabled && signals.personaStyle === undefined
           ? await classifyPersonaStyle(model, message, tenantId)
           : undefined;
-      const effectivePersonaStyle = signals.personaStyle ?? classifiedPersonaStyle;
+      // PR-8 — the in-session fallback (sessionFallbackPersonaStyle) is the LOWEST-precedence source:
+      // a supplied signals.personaStyle (PR-3) or a freshly classified one (PR-5) always wins over what
+      // was merely observed earlier THIS session. Computing it here is side-effect-free either way; it
+      // is only ever OBSERVED below, behind the same dispositionStyleEnabled gate as every other source.
+      const effectivePersonaStyle =
+        signals.personaStyle ?? classifiedPersonaStyle ?? sessionFallbackPersonaStyle(signals.sessionDisposition);
       if (dispositionStyleEnabled && effectivePersonaStyle) {
         // Guard the lookup: an out-of-enum personaStyle (a mis-wired classifier / un-whitelisted intake)
         // yields undefined — skip rather than append the literal "undefined" or emit an out-of-vocab
@@ -1099,7 +1124,15 @@ export function createBrain(
       // consulted when a memory port is wired AND the server derived a subject key (`anonId`) for this
       // shopper; otherwise recall is never called (no autonomy granted, no subject to key on).
       if (memory && signals.anonId) {
-        const recalled = await memory.recall({ tenantId, anonId: signals.anonId });
+        const recalledRaw = await memory.recall({ tenantId, anonId: signals.anonId });
+        // PR-8 carried condition (PR-1 Finding 2, extended from the style translation below to the WHOLE
+        // recall/DATA surface): a recalled fact may only surface at ALL — even as caution-only DATA,
+        // even the bare `memory:recalled` flag — when THIS TURN's read-time consent for its own
+        // sensitivity tier is exactly "in". Write-time consent (already enforced once, in the memory
+        // SERVICE, before the fact was ever stored) is deliberately not sufficient on its own: consent
+        // can be withdrawn, or simply go stale, between the write and a later read. Fails closed on
+        // out/unknown/absent consent, exactly like `consentedAtReadTime`'s other caller below.
+        const recalled = recalledRaw.filter((f) => consentedAtReadTime(f.class, signals.consent));
         if (recalled.length > 0) {
           flags.push("memory:recalled");
           const lines = recalled.map((f) => `- ${sanitizeGroundingText(f.text, 300)}`).join("\n");

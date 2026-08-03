@@ -24,7 +24,9 @@ function spyVector(): VectorPort & {
 }
 
 function fixedDistiller(facts: string[]): FactDistiller {
-  return { distill: vi.fn(async () => facts) };
+  // PR-8: FactDistiller.distill() returns candidate OBJECTS ({text, disposition?}), not bare strings —
+  // none of these fixed fixtures carry a disposition.
+  return { distill: vi.fn(async () => facts.map((text) => ({ text }))) };
 }
 
 describe("createMemoryService — INERT while the double gate is off (headline property)", () => {

@@ -4,7 +4,8 @@ import { isMemoryEnabled } from "./flag.js";
 import { subjectNamespace } from "./identity.js";
 import { decideMemoryWrite } from "./consent.js";
 import { classifyFact, type FactClass } from "./classifier.js";
-import { sanitizeFact, createStubDistiller, createModelDistiller, type FactDistiller } from "./distiller.js";
+import { sanitizeFact, createStubDistiller, createModelDistiller, isValidDisposition, type FactDistiller } from "./distiller.js";
+import type { Disposition } from "./disposition.js";
 import { buildMemoryAudit } from "./audit.js";
 import { ttlForClass } from "./retention.js";
 import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact, FactMetadata } from "./types.js";
@@ -71,7 +72,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     const specialRecords: VectorRecord[] = [];
 
     for (const rawCandidate of candidates) {
-      const sanitized = sanitizeFact(rawCandidate);
+      const sanitized = sanitizeFact(rawCandidate.text);
       if (!sanitized) continue; // Inv 1: never a raw transcript / un-redacted PII
 
       const { class: factClass, remember: shouldRemember } = classify(sanitized, ctx.tenantPolicy);
@@ -80,10 +81,27 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       const mayWrite = factClass === "special" ? capability.mayWriteSpecial : capability.mayWriteOrdinary;
       if (!mayWrite) continue; // consent gate (Inv 3 / Inv 9)
 
+      // PR-8 — surface the validated disposition alongside the fact (previously discarded by the
+      // distiller). Re-validated HERE with the SAME `isValidDisposition` (reject-in-full, no "inferred"
+      // provenance) regardless of which `FactDistiller` produced it — defense-in-depth at the actual
+      // persistence boundary, not just inside `createModelDistiller`: an invalid disposition rejects the
+      // WHOLE candidate (mirrors createModelDistiller's own reject-in-full rule), not just the
+      // disposition field, so a distiller that skipped its own validation can never smuggle a tainted
+      // disposition through by attaching it to an otherwise-fine fact.
+      const rawDisposition = rawCandidate.disposition;
+      if (rawDisposition !== undefined && !isValidDisposition(rawDisposition)) continue;
+      // `sourceQuote` is a short span of the shopper's OWN words, so it gets the SAME redaction+cap
+      // treatment as the fact text itself (`sanitizeFact`) rather than being trusted as distinct from any
+      // other free text; a bad/blank quote is simply dropped (undefined), never rejects the candidate.
+      const disposition: Disposition[] | undefined = rawDisposition
+        ? [{ ...rawDisposition, sourceQuote: rawDisposition.sourceQuote ? (sanitizeFact(rawDisposition.sourceQuote) ?? undefined) : undefined }]
+        : undefined;
+
       const metadata: FactMetadata = {
         text: sanitized,
         class: factClass,
         expiresAt: new Date(now + ttlForClass(factClass)).toISOString(),
+        disposition,
       };
       const record: VectorRecord = { id: randomUUID(), text: sanitized, metadata };
       written.push(factClass);
@@ -132,7 +150,8 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       const meta = match.metadata as Partial<FactMetadata> | undefined;
       if (!meta?.text || !meta.class) continue;
       if (meta.expiresAt && new Date(meta.expiresAt).getTime() <= now) continue; // TTL-on-read (Inv 4)
-      facts.push({ text: meta.text, class: meta.class });
+      // PR-8 — surface the persisted disposition (previously never written, so never read back either).
+      facts.push({ text: meta.text, class: meta.class, disposition: meta.disposition });
     }
 
     await deps.audit.audit(

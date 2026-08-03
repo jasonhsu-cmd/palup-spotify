@@ -1,5 +1,5 @@
 import type { Brain } from "./brain.js";
-import type { Decision, HistoryTurn, Mode, Mood, ProactivityLevel, Signals } from "./types.js";
+import type { Decision, Disposition, HistoryTurn, Mode, Mood, ProactivityLevel, Signals } from "./types.js";
 import { classifySupportIntent, extractOrderId } from "./support.js";
 
 // Conversation state (§6A): the stateless brain decides per turn; the Session carries the state
@@ -48,6 +48,19 @@ export interface SessionState {
   repeatQuestionCount: number;
   /** Running tally of `rage` events this session (not a one-strike). */
   rageCount: number;
+  // ── Shopper-disposition program PR-8 (in-session fallback; consumed only in brain.ts) ──────────────
+  /**
+   * TRANSIENT, control-only, STYLE-ONLY fallback for when durable cross-visit memory is off or the
+   * shopper hasn't consented: captures THIS session's own OBSERVED `personaStyle` (never the brain's
+   * internal classifier output, which never leaves brain.decide()) so a LATER turn in the SAME session
+   * that doesn't re-supply `personaStyle` can still get the same voice treatment. Explicitly NOT a
+   * persona profile: at most one "style" entry, no free text, no cross-session persistence. Dies with
+   * the session (never written here unless/until a `personaStyle` is actually observed — so a session
+   * with no persona signal never gains this key at all), and is EXCLUDED from the guest→account
+   * `merge.ts` migration by construction: `merge.ts` only ever reads/writes durable vector-store facts,
+   * never `SessionState` — there is no code path from here into it.
+   */
+  sessionDisposition?: Disposition[];
 }
 
 export interface SessionStore {
@@ -158,6 +171,11 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
         behavioral: state.pitchDeclined
           ? [...(signals.behavioral ?? []), "pitch_declined"]
           : signals.behavioral,
+        // Shopper-disposition program PR-8 — carry the STICKY in-session style fallback forward every
+        // turn (mirrors the `behavioral` carry above). `signals.personaStyle`, if supplied THIS turn,
+        // already rides along via the `...signals` spread above and takes precedence in brain.ts; this
+        // is only ever consulted as a fallback for a LATER turn that doesn't re-supply it.
+        sessionDisposition: state.sessionDisposition,
       };
       // history threads to the brain for model context ONLY — it is deliberately NOT merged into signals
       // or state, so the persisted SessionState carries no shopper transcript (control-only).
@@ -167,6 +185,22 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
       state.mood = signals.mood;
       // §6A active_intent: the arbitrated mode of this turn (re-classified every turn, not sticky).
       state.activeIntent = d.mode;
+
+      // Shopper-disposition program PR-8 — capture THIS TURN's raw, caller-supplied `signals.personaStyle`
+      // (never the brain's own classifier output, which stays internal to brain.decide()) into the
+      // sticky, style-only session fallback. Deliberately conditional — unlike `mood` above, a turn with
+      // NO personaStyle leaves the carried value untouched (that's the whole point of a fallback: it
+      // must survive turns that don't re-supply it) AND never creates the key at all on a session that
+      // never observed one (keeps `sessionDisposition` genuinely absent, not merely empty, exactly like
+      // every other "only if observed" field on this state). At most one "style" entry — a later
+      // observation replaces the prior one, never accumulates a history.
+      if (signals.personaStyle) {
+        const otherAxes = (state.sessionDisposition ?? []).filter((disp) => disp.axis !== "style");
+        state.sessionDisposition = [
+          ...otherAxes,
+          { axis: "style", value: signals.personaStyle, provenance: "observed", confidence: 1 },
+        ];
+      }
 
       if (d.mode === "safety") state.safetyLatched = true; // INV-A: latches for the conversation.
 
