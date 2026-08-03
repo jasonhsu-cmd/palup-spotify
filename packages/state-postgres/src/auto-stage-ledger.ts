@@ -1,13 +1,19 @@
 import type { RuntimeStatePort, RuntimeStateTx } from "@palup/platform-ports";
 
 // ADR-0014 T4c — a DURABLE, per-tenant+candidate record of the auto-optimize stages that have completed,
-// on the shared RuntimeStatePort. Two jobs:
-//   • CROSS-PROCESS enforcement: the in-memory engine markers (engine.ts auto-lane) are per-process. The
-//     terminal serveAutoChampion write VERIFIES this ledger inside its write tx, so a SEPARATE process
-//     (or a future second caller) that never drove the in-memory engine is still refused unless the
-//     ledger shows both shadow AND canary complete — closing the in-memory-only gap.
-//   • RESUMABILITY: the canary stage spans real elapsed time across scheduled re-ticks; the ledger lets a
-//     fresh process know which stages are done so it never restarts a live canary or double-promotes.
+// on the shared RuntimeStatePort. It records STAGE COMPLETION + ORDER (both shadow AND canary), verified
+// by the terminal serveAutoChampion write inside its tx as a DURABLE cross-process check — one of TWO
+// conjuncted guards: serveAutoChampion also requires the calling process's engine.autoPromotable() markers
+// (guard 1), so a SEPARATE process that never drove the in-memory engine is refused by guard 1 regardless,
+// and the ledger (guard 3) is the durable backstop.
+//
+// HONEST SCOPE: `pass` here is the engine's ALREADY-DERIVED marker (the orchestrator records what
+// engine.recordShadow/recordCanary returned); the ledger does NOT itself re-derive pass from raw numbers
+// (it lacks the thresholds), and both the engine markers and this ledger trust the MEASUREMENT VALUES fed
+// in by the injected real graders (traffic + cross-family judge). The guarantee is stage order/completion,
+// NOT unforgeable measurements; an insider process fabricating measurement values is out of scope
+// (bounded by the operator-run entrypoint + the opt-in/kill/change-class gates at the write). The ledger
+// is NOT full engine-state rehydration — a fresh process still has no candidate and fails safe to human.
 // Keyed per SERVING TENANT + candidateId, so a ledger entry for one merchant/candidate is invisible to
 // another (blast-radius isolation, inv #9).
 

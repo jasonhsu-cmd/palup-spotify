@@ -16,12 +16,19 @@ import { applyCanaryVerdict } from "./canary-reaction.js";
 import { escalationRegressed, type CanaryMeasurement } from "./canary-measure.js";
 import { serveAutoChampion } from "./auto-champion-write.js";
 
-// ADR-0014 T4f — the resumable auto-optimize orchestrator. advance(tenantId, candidateId) ADVANCES AT
-// MOST ONE stage per call and persists, so the multi-tick canary (which spans real elapsed time) is
-// resumable and idempotent. It composes ALL stages in order and funnels EVERY gate miss through ONE
-// routeToHuman exit (leave the candidate awaiting_approval + audit; NEVER reject/silent-drop, NEVER
-// promote). Serving is reachable ONLY via serveAutoChampion (marker+ledger gated); the orchestrator never
-// calls engine.approve('auto-loop')→promote (the PR #125 path). Per-tenant via EngineRegistry.
+// ADR-0014 T4f — the auto-optimize orchestrator. advance(tenantId, candidateId) ADVANCES AT MOST ONE
+// stage per call, so a long-running canary (spanning real elapsed time) is driven across re-ticks. It
+// composes ALL stages in order and funnels EVERY gate miss through ONE routeToHuman exit (leave the
+// candidate awaiting_approval + audit; NEVER reject/silent-drop, NEVER promote). Serving is reachable
+// ONLY via serveAutoChampion (marker+ledger gated); the orchestrator never calls
+// engine.approve('auto-loop')→promote (the PR #125 path). Per-tenant via EngineRegistry.
+//
+// RESUME SCOPE (honest): within one process, re-ticks resume via the engine's in-memory auto markers +
+// the durable stage ledger, and double-serve is prevented (a promoted candidate's autoPromotable() is
+// false + the freq-cap stamp rate-limits). A FRESH process has no in-memory candidate, so advance() fails
+// SAFE to routeToHuman('unknown-candidate') rather than resuming — true cross-process resume needs durable
+// engine candidate state, which is enablement work. The durable ledger's job is the cross-process WRITE
+// guard (serveAutoChampion refuses without it), not full engine-state rehydration.
 //
 // SHIPS DORMANT: serveAutoChampion fails closed on the default-OFF opt-in, and Stage 0's pre-flight
 // short-circuits to routeToHuman on that same gate before any shadow/canary/serve — so running advance()
@@ -53,7 +60,7 @@ export interface OrchestratorDeps {
   /** Live canary-vs-champion measurement over the window (wraps readTrafficLog + measureCanary in prod). */
   runCanaryMeasure: (tenantId: string, canaryPolicyId: string, championPolicyId: string, window: { since: string; now: string }) => Promise<CanaryMeasurement>;
   thresholds: CanaryPowerThresholds;
-  shadowBounds: { maxRegression: number };
+  shadowBounds: { maxRegression: number; maxImprovement?: number };
   /** Escalation-recall drop tolerance for the canary counter-metric guard. */
   escalationTolerance: number;
   now: () => string;

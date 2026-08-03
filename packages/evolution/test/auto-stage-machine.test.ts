@@ -85,6 +85,20 @@ describe("engine auto-lane state machine (ADR-0014 inv #3: engine-enforced, no s
     expect(e.autoPromotable("cand").ok).toBe(false);
   });
 
+  it("shadow bound is BOTH-sided: a suspiciously large POSITIVE swing fails shadow when maxImprovement is set", async () => {
+    const e = await readied(cand({ gating: true }));
+    e.beginAutoOptimize("cand");
+    // huge positive delta (0.9) exceeds maxImprovement (0.5) ⇒ not pass, stage not advanced ⇒ route-to-human
+    e.recordShadow("cand", { n: 8, delta: 0.9, at: "t" }, { maxRegression: 0.05, maxImprovement: 0.5 });
+    expect(e.getCandidate("cand")?.auto?.shadow?.pass).toBe(false);
+    expect(e.getCandidate("cand")?.auto?.stage).toBe("eval-passed"); // not advanced
+    // a within-bounds positive delta still passes
+    const e2 = await readied(cand({ gating: true }));
+    e2.beginAutoOptimize("cand");
+    e2.recordShadow("cand", { n: 8, delta: 0.3, at: "t" }, { maxRegression: 0.05, maxImprovement: 0.5 });
+    expect(e2.getCandidate("cand")?.auto?.stage).toBe("shadowed");
+  });
+
   it("markAutoPromoted refuses unless autoPromotable, promotes to champion, and is attributed to auto-loop (never human)", async () => {
     const e = await readied(cand({ gating: true }));
     e.beginAutoOptimize("cand");

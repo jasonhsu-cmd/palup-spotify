@@ -68,7 +68,8 @@ async function main() {
       measureCanary(await readTrafficLog(store, tenantId), gradeReply, { canaryPolicyId, championPolicyId }, window),
     // CONSERVATIVE PLACEHOLDER thresholds — the real per-tenant values are OWNER-SET at enablement.
     thresholds: DEFAULT_CANARY_POWER,
-    shadowBounds: { maxRegression: 0.05 },
+    // both-sided: bound a regression AND a suspiciously large positive swing (placeholder, owner-set).
+    shadowBounds: { maxRegression: 0.05, maxImprovement: 0.5 },
     escalationTolerance: 0.1,
     now: () => new Date().toISOString(),
   };

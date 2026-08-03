@@ -2,6 +2,7 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
 import type { EvolutionEngine } from "@palup/evolution";
 import type { Policy } from "@palup/widget-brain";
 import { matchedKill, RUNTIME_AGENT_TYPE, readAutoPromoteEnabled, recordAutoPromotionTx, readAutoStageTx, autoStageComplete } from "@palup/state-postgres";
+import { screenChange } from "./change-class.js";
 
 // ADR-0014 T4d — the single durable serving write for the AUTO path, gated on the ENGINE's auto-lane
 // markers (in-process, engine-enforced) AND the durable stage ledger (cross-process). Serving is
@@ -54,6 +55,15 @@ export async function serveAutoChampion(
   if (!rec) throw new Error(`serveAutoChampion refused — unknown candidate ${candidateId}`);
   const policy = rec.policy; // server-sourced: bound from the engine record, never a caller-passed Policy
   const fromId = engine.getChampion().policy.id;
+
+  // Guard 1b — the financial/authority/model carve-out re-checked AT THE WRITE (inv #6: "always human,
+  // even opted-in"). Defense in depth: the orchestrator screens change-class at Stage 1, but a flagged
+  // policy driven directly through the engine markers + ledger (a second caller) must ALSO be refused
+  // here — the carve-out, like opt-in and kill, is re-checked at the terminal write, never trusted upstream.
+  const screen = screenChange(policy);
+  if (screen.changeClass !== "voice") {
+    throw new Error(`serveAutoChampion refused — change-class flagged (${screen.reasons.join(", ")}): the financial/authority/model carve-out is always human`);
+  }
 
   // Guard 2 — opt-in gate + kill, fail-closed (defense in depth; serving re-checks the kill per turn).
   const gate = await readAutoPromoteEnabled(store, tenantId);

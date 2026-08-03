@@ -223,10 +223,16 @@ export class EvolutionEngine {
 
   /** Record the shadow (0%) result. Advances to "shadowed" ONLY if the engine-derived pass holds (finite
    * counts + no regression beyond maxRegression). Throws unless the prior stage is eval-passed. */
-  recordShadow(id: string, raw: { n: number; delta: number; at: string }, bounds: { maxRegression: number }): CandidateRecord {
+  recordShadow(id: string, raw: { n: number; delta: number; at: string }, bounds: { maxRegression: number; maxImprovement?: number }): CandidateRecord {
     const rec = this.require(this.candidates.get(id), id);
     if (rec.auto?.stage !== "eval-passed") throw new Error(`cannot record shadow for ${id} — stage is ${rec.auto?.stage ?? "none"}, expected eval-passed`);
-    const pass = Number.isFinite(raw.n) && raw.n > 0 && Number.isFinite(raw.delta) && raw.delta >= -bounds.maxRegression;
+    // "behavioral diff within bounds" (ADR cond #5) is BOTH-sided: bound the downside regression AND, when
+    // maxImprovement is set, the upside — a suspiciously LARGE swing (even if the judge scores it higher)
+    // is exactly the kind of change a human should look at, so it fails shadow and routes to a human.
+    const pass =
+      Number.isFinite(raw.n) && raw.n > 0 && Number.isFinite(raw.delta) &&
+      raw.delta >= -bounds.maxRegression &&
+      (bounds.maxImprovement === undefined || raw.delta <= bounds.maxImprovement);
     const marker: StageMarker = { n: raw.n, delta: raw.delta, at: raw.at, pass };
     rec.auto.shadow = marker;
     if (pass) rec.auto.stage = "shadowed";
