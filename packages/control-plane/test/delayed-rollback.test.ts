@@ -12,7 +12,7 @@ import { recordKnownGood, readKnownGood } from "../src/known-good-baseline.js";
 // durable, per-tenant record beyond depth-1; the delayed rollback auto-reverts serving to it and freezes
 // the fast-lane (owner's choice: auto-revert self-heal, HITL §4).
 
-const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
 const CHAMP_METRICS: PolicyMetrics = { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: BASE_CM };
 const P = (id: string): Policy => ({ id, label: id, styleDirective: `voice-${id}`, proactivityDefault: "balanced" });
 const mkEngine = () =>

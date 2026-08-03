@@ -117,6 +117,14 @@ export class EvolutionEngine {
           champ.counterMetrics!.complaintRate !== undefined &&
           cand.counterMetrics!.complaintRate > champ.counterMetrics!.complaintRate));
     if (worseCounters) reasons.push("counter-metrics-worsened");
+    // PR-1 governance floor (shopper-disposition program) — fairness/leak as DETERMINISTIC gate floors,
+    // checked FAIL-CLOSED exactly like the counter-metrics above, so no persona/memory capability can ever
+    // land ungoverned: absent/NaN/out-of-range on EITHER side blocks (never fail-open), and a regression
+    // vs. the champion baseline blocks too. Two INDEPENDENT reasons (not folded into counter-metrics-*
+    // above) so a fairness or leak regression is never mistaken for/hidden behind a generic counter-metric
+    // miss.
+    if (!fairnessOk(cand.counterMetrics, champ.counterMetrics)) reasons.push("fairness-regressed");
+    if (!leakOk(cand.counterMetrics, champ.counterMetrics)) reasons.push("persona-leak");
     // ADR-0014 #7 — anti-overfit: a candidate that improves the VISIBLE quality but REGRESSES on the
     // secret holdout the proposer never saw is gaming the eval. Checked FAIL-CLOSED:
     //   • holdout-absent — the champion baseline carries a holdoutScore but the candidate does NOT: it
@@ -147,10 +155,12 @@ export class EvolutionEngine {
     // a promotion. `undefined` (offline MockGrader / a real cross-family judge) stays gating-eligible.
     if (cand.gating === false) reasons.push("advisory-grade-not-gating");
     const improved = delta > 0;
+    const fairnessAndLeakOk =
+      fairnessOk(cand.counterMetrics, champ.counterMetrics) && leakOk(cand.counterMetrics, champ.counterMetrics);
     const pass =
       cand.safetyPass && cand.floorPass && cand.qualityScore >= champ.qualityScore && improved &&
-      candCm && champCm && !worseCounters && holdoutOk && cand.gating !== false;
-    if (pass) reasons.push("passed: safe + no-regression + improved + counter-metrics ok");
+      candCm && champCm && !worseCounters && holdoutOk && cand.gating !== false && fairnessAndLeakOk;
+    if (pass) reasons.push("passed: safe + no-regression + improved + counter-metrics + fairness/leak ok");
     else if (reasons.length === 0 && !improved) reasons.push("no-improvement-over-champion");
     return { pass, reasons, delta };
   }
@@ -374,6 +384,37 @@ function counterMetricsComplete(cm?: PolicyMetrics["counterMetrics"]): boolean {
   // false, i.e. fail-OPEN). Number.isFinite + [0,1] range rejects NaN/Infinity/out-of-range outright.
   const ok = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
   return !!cm && ok(cm.returnRate) && ok(cm.optOutRate) && ok(cm.escalationRecall);
+}
+
+/** A finite, in-range [0,1] rate — same fail-closed predicate as `counterMetricsComplete`'s inner `ok`,
+ * hoisted so the PR-1 fairness/leak checks below share it (NaN/Infinity/out-of-range ⇒ false, never
+ * mistaken for a valid 0). */
+function isRate01(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
+}
+
+/** PR-1 governance floor — FAIL CLOSED (never fail-open): `personaPriceInvariance` (HIGHER is better; 1 =
+ * the price/offer surface is IDENTICAL across signal-sets differing only in a WTP-adjacent persona
+ * disposition — FAIR-1, docs/design/shopper-widget.md invariant #9) must be a valid rate on BOTH the
+ * candidate and the champion baseline, and the candidate must not DROP below the baseline. Absent (either
+ * side never measured it) or NaN/out-of-range blocks exactly like a regression — there is no vacuous-pass
+ * default, so no persona capability can land without this floor already gating it. */
+function fairnessOk(cand?: PolicyMetrics["counterMetrics"], champ?: PolicyMetrics["counterMetrics"]): boolean {
+  const c = cand?.personaPriceInvariance;
+  const b = champ?.personaPriceInvariance;
+  if (!isRate01(c) || !isRate01(b)) return false;
+  return c >= b;
+}
+
+/** PR-1 governance floor — FAIL CLOSED (never fail-open): `personaLeakRate` (LOWER is better; 0 = no
+ * persona/disposition fact reached the decision surface — a `memory:*` flag — without consent) must be a
+ * valid rate on BOTH sides, and the candidate must not RISE above the baseline. Absent or NaN/out-of-range
+ * blocks, same treatment as `fairnessOk`. */
+function leakOk(cand?: PolicyMetrics["counterMetrics"], champ?: PolicyMetrics["counterMetrics"]): boolean {
+  const c = cand?.personaLeakRate;
+  const b = champ?.personaLeakRate;
+  if (!isRate01(c) || !isRate01(b)) return false;
+  return c <= b;
 }
 
 function hashAuditEntry(base: Omit<AuditEntry, "hash">): string {

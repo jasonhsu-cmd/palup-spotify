@@ -15,8 +15,27 @@ export interface PolicyMetrics {
    * is HIGHER-is-better (recall of required escalations). Populated by the live grader
    * (control-plane/counter-metrics.ts). Fields stay optional for back-compat; a follow-up makes the gate
    * fail CLOSED when they are absent (today engine.gate only checks return/complaint and treats absent as 0).
+   *
+   * `personaPriceInvariance` / `personaLeakRate` (shopper-disposition governance floor, PR-1 — see
+   * `docs/design/shopper-widget.md` invariant #9 "no persona price-discrimination" + memory Inv 9): the
+   * SAME optional-for-back-compat TYPE shape as the rest of this object, but `engine.gate` checks BOTH
+   * fail-CLOSED (absent/NaN/out-of-range on either side blocks — "fairness-regressed" / "persona-leak" —
+   * exactly mirroring how returnRate/optOutRate/escalationRecall are enforced, never fail-open). No later
+   * persona/memory capability can land without a candidate proving it did not regress either.
    */
-  counterMetrics?: { returnRate?: number; complaintRate?: number; optOutRate?: number; escalationRecall?: number };
+  counterMetrics?: {
+    returnRate?: number;
+    complaintRate?: number;
+    optOutRate?: number;
+    escalationRecall?: number;
+    /** HIGHER is better — 1 iff the price/offer surface (pitch/outbound/offer flags) is IDENTICAL across
+     * signal-sets differing ONLY in a WTP-adjacent persona-style disposition (FAIR-1: style/guidance only,
+     * never price/offers/tier by inferred willingness-to-pay). */
+    personaPriceInvariance?: number;
+    /** LOWER is better — fraction of no-consent probes where a persona/disposition fact (a `memory:*`
+     * flag) reached the decision surface despite no memory consent. 0 = no leak. */
+    personaLeakRate?: number;
+  };
   /** Pass rate (0..1) per criterion id, across the VISIBLE scenario set — the per-criteria improvement
    * proof, and the ONLY signal shown to the proposer (weakness report). */
   perCriteria?: Record<string, number>;

@@ -10,7 +10,7 @@ import { EvolutionEngine, MockGrader, verifyAuditChain, type PolicyMetrics } fro
 
 const champion = {
   policy: DEFAULT_POLICY,
-  metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 } } as PolicyMetrics,
+  metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 } } as PolicyMetrics,
 };
 
 const P = (id: string): Policy => ({ id, label: id, styleDirective: "x", proactivityDefault: "balanced" });
@@ -18,7 +18,7 @@ const P = (id: string): Policy => ({ id, label: id, styleDirective: "x", proacti
 async function runToPromotion(): Promise<EvolutionEngine> {
   const e = new EvolutionEngine({
     champion,
-    grader: new MockGrader({ good: { policyId: "good", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { returnRate: 0.06, complaintRate: 0.02, optOutRate: 0.08, escalationRecall: 1 } } }),
+    grader: new MockGrader({ good: { policyId: "good", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { returnRate: 0.06, complaintRate: 0.02, optOutRate: 0.08, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 } } }),
   });
   e.propose(P("good"));
   await e.evaluate("good");
