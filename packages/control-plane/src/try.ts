@@ -11,6 +11,7 @@ import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import { createAnthropicApiAdapter, createAnthropicApiJudge, isAnthropicApiConfigured } from "@palup/judge";
 import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE, readOrchestratorState, recordAutoPromotion, rateLimitReason } from "@palup/state-postgres";
 import { ScenarioGrader } from "./scenario-grader.js";
+import { screenChange } from "./change-class.js";
 import { ModelProposer } from "./model-proposer.js";
 import { CRITERIA, rubricFor, type Scenario } from "./scenarios.js";
 
@@ -107,7 +108,7 @@ async function route(line: string): Promise<"continue" | "quit"> {
     // Without DATABASE_URL the kill store is a per-process in-memory one no operator can arm cross-process;
     // refuse to auto-promote against it (an unarmable kill registry = no kill switch — ADR-0014 #1 / NN #4).
     if (autoApprove && killStoreKind !== "postgres") throw new Error("EVOLVE_AUTO_APPROVE requires a durable, SHARED kill registry — set DATABASE_URL (ADR-0014 #1 / NN #4).");
-    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove, killCheck: () => matchedKill(runtimeStore, { tenantId: "demo", agentType: RUNTIME_AGENT_TYPE }), rateLimitCheck: async () => rateLimitReason(await readOrchestratorState(runtimeStore, "demo"), new Date().toISOString()), recordPromotion: () => recordAutoPromotion(runtimeStore, "demo"), log: (m) => console.log(m) });
+    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove, killCheck: () => matchedKill(runtimeStore, { tenantId: "demo", agentType: RUNTIME_AGENT_TYPE }), rateLimitCheck: async () => rateLimitReason(await readOrchestratorState(runtimeStore, "demo"), new Date().toISOString()), recordPromotion: () => recordAutoPromotion(runtimeStore, "demo"), changeScreen: async (p) => { const s = screenChange(p); return s.changeClass === "flagged" ? s.reasons.join(", ") : null; }, log: (m) => console.log(m) });
     await store.write("improvement-timeline", []);
     const tl = await loop.run(Number(process.env.EVOLVE_ROUNDS ?? 2));
     champion = engine.getChampion();

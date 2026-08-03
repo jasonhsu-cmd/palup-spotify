@@ -24,6 +24,11 @@ export interface AutoLoopDeps {
   rateLimitCheck?: () => Promise<string | null>;
   /** ADR-0014 #9 — stamp the frequency-cap clock on the shared registry after an auto-promotion. */
   recordPromotion?: () => Promise<void>;
+  /** ADR-0014 #6 — the SERVER-SOURCED change-class screen. Given the winning candidate's policy, returns a
+   * reason if its change reaches beyond voice (pricing/safety-override/manipulation/…) ⇒ route to a HUMAN,
+   * or null if it's a clean voice change. Injected + fail-closed: a missing/throwing screen routes to a
+   * human (never auto-promotes an unscreened change). */
+  changeScreen?: (policy: Policy) => Promise<string | null>;
   /**
    * ADR-0014 #1 / NN #4 — the SHARED three-scope run-time kill check, consulted BEFORE every AUTO
    * approval+promotion (fail-closed). Injected (not a direct state-postgres import) so this package stays
@@ -84,6 +89,23 @@ export class AutoLoop {
       return await this.d.rateLimitCheck();
     } catch {
       return "rate-limit registry unreadable"; // fail closed
+    }
+  }
+
+  /**
+   * ADR-0014 #6 — screen the candidate's change class. Returns a reason to ROUTE TO A HUMAN (the change
+   * reaches beyond voice), or null (clean voice change ⇒ fast-lane ok). FAIL-CLOSED: a missing or throwing
+   * screen routes to a human — an unscreened change never rides the auto-promote fast-lane.
+   */
+  private async screenChange(policy: Policy): Promise<string | null> {
+    if (!this.d.changeScreen) return "no change-screen wired";
+    try {
+      const r = await this.d.changeScreen(policy);
+      if (r) return r; // a reason ⇒ route to human
+      if (r === null) return null; // ONLY an explicit null is a clean voice change
+      return "change-screen-invalid"; // undefined / contract violation ⇒ fail closed (never auto-promote unscreened)
+    } catch {
+      return "change-screen unreadable";
     }
   }
 
@@ -211,6 +233,16 @@ export class AutoLoop {
         const limited = await this.checkRateLimit();
         if (limited) {
           log(`round ${round}: auto-promotion rate-limited — ${limited}; halting.`);
+          await this.persistState();
+          break;
+        }
+        // ADR-0014 #6 — a change whose styleDirective reaches beyond voice must go to a HUMAN, not the
+        // fast-lane (server-sourced screen; fail-closed). Route to review and stop, exactly like the
+        // human-approval path — the candidate stays awaiting_approval for an operator to decide.
+        const winnerPolicy = engine.getCandidate(winner.id)?.policy;
+        const flagged = winnerPolicy ? await this.screenChange(winnerPolicy) : "winner policy unavailable";
+        if (flagged) {
+          log(`round ${round}: ${winner.id} routed to HUMAN review (change-class screen: ${flagged}) — not auto-promoting.`);
           await this.persistState();
           break;
         }
