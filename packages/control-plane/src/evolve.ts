@@ -6,6 +6,7 @@ import { DEFAULT_POLICY } from "@palup/widget-brain";
 import { AutoLoop, EvolutionEngine, FileStore } from "@palup/evolution";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import { createAnthropicApiAdapter, createAnthropicApiJudge, isAnthropicApiConfigured } from "@palup/judge";
+import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
 import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
@@ -21,10 +22,15 @@ async function main() {
   const grader = new ScenarioGrader(agent, judge, SCENARIOS, log);
   const proposer = new ModelProposer(proposerModel, 2, log);
   const store = new FileStore(".palup-state");
+  // ADR-0014 #1 / NN #4 — the SHARED run-time kill registry (global > tenant > agent), on the same
+  // RuntimeStatePort serving reads. The auto-approve fast-lane consults it (fail-closed) before every
+  // promotion, so an operator kill halts self-improvement even mid-run.
+  const { store: runtimeStore } = await createRuntimeStore();
+  const RUNTIME_TENANT = "demo"; // single-tenant demo; per-tenant when multi-tenancy lands (ADR-0014)
 
   const rounds = Number(process.env.EVOLVE_ROUNDS ?? 3);
   // NN #2: promotion requires a HUMAN by default. Auto-approve is strictly opt-IN (never the default),
-  // and even then only promotes a candidate that already passed the eval gate.
+  // and even then only promotes a candidate that already passed the eval gate AND with no kill armed.
   const autoApprove = process.env.EVOLVE_AUTO_APPROVE === "true";
 
   console.log(`\n=== SELF-IMPROVEMENT LOOP (live) — ${SCENARIOS.length} scenarios, up to ${rounds} rounds ===`);
@@ -41,6 +47,7 @@ async function main() {
     candidatesPerRound: 2,
     minDelta: Number(process.env.EVOLVE_MIN_DELTA ?? 0.05),
     autoApprove,
+    killCheck: () => matchedKill(runtimeStore, { tenantId: RUNTIME_TENANT, agentType: RUNTIME_AGENT_TYPE }),
     log,
   });
   const timeline = await loop.run(rounds);
