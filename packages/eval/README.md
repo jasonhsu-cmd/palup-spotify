@@ -34,16 +34,26 @@ DIFFERENT family (proposer≠evaluator, enforced by `crossFamilyGuard`).
 
 - **Default (`pnpm eval:judge`):** a same-family **Gemini** judge — **ADVISORY only** (the guard refuses
   to gate it). Verified live: GC-1 ✅ TC-1 ✅.
-- **True cross-family (`JUDGE_FAMILY=anthropic pnpm eval:judge`):** Claude on Vertex — **gates**. The
-  adapter + auth are verified, but requires **enabling a Claude model in your project's Model Garden**
-  (not enabled in the demo project). Set `JUDGE_MODEL` / `ANTHROPIC_VERTEX_REGION` to an enabled id.
-- Requires GCP creds (the agent uses the real model); not part of the offline CI gate.
+- **True cross-family (`JUDGE_FAMILY=anthropic pnpm eval:judge`):** a **Claude** judge — **gates**.
+  There are two ways to reach Claude; the runner (`src/judge-run.ts`) auto-prefers whichever is
+  configured:
+  - **Direct Anthropic API (recommended — just a key):** set `ANTHROPIC_API_KEY`. **No GCP / Model
+    Garden needed for the judge.** Model defaults to `claude-opus-4-8`; override with `ANTHROPIC_MODEL`.
+  - **Claude on Vertex (fallback — used only when `ANTHROPIC_API_KEY` is absent):** needs a Claude
+    model **enabled in your project's Model Garden**. Set `ANTHROPIC_VERTEX_REGION` (default `us-east5`)
+    / `JUDGE_MODEL` (default `claude-sonnet-4-5@20250929`) to an enabled id.
+- **You still need GCP creds either way** (`GOOGLE_CLOUD_PROJECT` + ADC): the *agent being judged* runs
+  on real Gemini, so the harness exits if Vertex isn't configured. `ANTHROPIC_API_KEY` replaces Model
+  Garden only for the **judge**, not the whole harness. Not part of the offline CI gate.
+- **Honesty:** both Claude adapters (`anthropic-api.ts`, `anthropic-vertex.ts`) are marked
+  `⚠️ UNVERIFIED-LIVE` — wired but never run against a real key / Model-Garden access. Treat the first
+  `JUDGE_FAMILY=anthropic` run as the actual verification.
 
 ## Still needs work (tracked)
 
 | Layer | Status |
 |---|---|
-| Cross-family gating live | mechanism built + advisory verified; **gating** unverified until Claude is enabled in Model Garden |
+| Cross-family gating live | mechanism built + advisory verified; **gating** unverified live — both Claude judges (direct-API via `ANTHROPIC_API_KEY`, and Claude-on-Vertex via Model Garden) are wired but `⚠️ UNVERIFIED-LIVE` until run against a real key / access |
 | Full free-form multi-turn dialog trees | session tests + TC-1 cover the key invariants; exhaustive trees still need broader scenario coverage |
 
 Each row is a real gap, tracked — not silently "passing."
