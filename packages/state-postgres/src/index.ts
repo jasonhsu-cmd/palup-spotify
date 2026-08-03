@@ -14,6 +14,7 @@ export {
   readOrchestratorState,
   recordAutoPromotion,
   freezeAutoPromote,
+  freezeAutoPromoteTx,
   rateLimitReason,
   AUTO_PROMOTE_WINDOW_MS,
   type OrchestratorState,

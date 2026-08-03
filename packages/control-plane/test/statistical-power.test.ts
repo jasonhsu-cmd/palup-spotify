@@ -26,6 +26,12 @@ describe("statistical power gate (ADR-0014 #10: no auto-promote without power)",
     expect(windowedVerdictFor(1, 0.2, 0)).toBe("insufficient-power");
   });
 
+  it("blocks even with ENOUGH traffic when the observation window is too short (both floors matter)", () => {
+    const { minN, minWindowMs } = DEFAULT_CANARY_POWER;
+    // plenty of samples + a strong delta, but the window hasn't elapsed ⇒ still no auto-promote
+    expect(windowedVerdictFor(minN, 0.2, minWindowMs - 1)).toBe("insufficient-power");
+  });
+
   it("with power, windowedVerdictFor delegates to the raw verdict (promote / rollback / hold)", () => {
     const { minN, minWindowMs } = DEFAULT_CANARY_POWER;
     expect(windowedVerdictFor(minN, 0.2, minWindowMs)).toBe("promote");

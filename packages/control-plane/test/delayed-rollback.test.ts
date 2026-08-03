@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryRuntimeStore } from "@palup/platform-ports";
-import { readOrchestratorState } from "@palup/state-postgres";
+import { readOrchestratorState, AUTO_PROMOTE_WINDOW_MS } from "@palup/state-postgres";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { EvolutionEngine, MockGrader, type PolicyMetrics } from "@palup/evolution";
 import { promoteToServing, servingChampion, delayedRollbackToBaseline } from "../src/champion-promoter.js";
@@ -29,6 +29,8 @@ describe("delayed-signal rollback to a durable known-good baseline (ADR-0014 #10
     const A = P("known-good-A");
     await recordKnownGood(store, "acme", A, "2026-07-01T00:00:00Z");
     expect((await readKnownGood(store, "acme"))?.policy.id).toBe("known-good-A");
+    // recordKnownGood is audited (NN #5)
+    expect((await store.readAudit({ tenantId: "acme" })).map((a) => a.action)).toContain("champion.known_good");
 
     // Meanwhile serving advanced to C via the human path (engine.prevChampion becomes DEFAULT_POLICY,
     // NOT A) — so depth-1 could only revert C→DEFAULT, never back to the known-good A.
@@ -40,19 +42,28 @@ describe("delayed-signal rollback to a durable known-good baseline (ADR-0014 #10
     expect(engine.getPreviousChampion()?.policy.id).toBe(DEFAULT_POLICY.id); // depth-1 = DEFAULT, not A
 
     // Lagging harm surfaces on C → delayed rollback to the durable known-good A.
-    const restored = await delayedRollbackToBaseline(store, "acme", "lagging-return-harm", "2026-08-05T00:00:00Z");
+    const at = "2026-08-05T00:00:00Z";
+    const restored = await delayedRollbackToBaseline(store, "acme", "lagging-return-harm", at);
     expect(restored.policy.id).toBe("known-good-A");
     expect((await servingChampion(store, "acme"))?.policy.id).toBe("known-good-A"); // reverted beyond depth-1
-    // fast-lane frozen so the harmful change can't be re-promoted immediately
-    expect((await readOrchestratorState(store, "acme")).frozenUntil).toBeTruthy();
-    // audited as a delayed rollback
-    expect((await store.readAudit({ tenantId: "acme" })).map((a) => a.action)).toContain("champion.delayed_rollback");
+    // fast-lane frozen for the full drift window, committed ATOMICALLY with the revert
+    expect((await readOrchestratorState(store, "acme")).frozenUntil).toBe(new Date(Date.parse(at) + AUTO_PROMOTE_WINDOW_MS).toISOString());
+    // audited as a delayed rollback + the freeze; chain intact
+    const actions = (await store.readAudit({ tenantId: "acme" })).map((a) => a.action);
+    expect(actions).toContain("champion.delayed_rollback");
+    expect(actions).toContain("orchestrator.freeze");
     expect((await store.verifyAudit({ tenantId: "acme" })).ok).toBe(true);
+    // blast radius: the revert + freeze touched ONLY acme
+    expect(await servingChampion(store, "other-merchant")).toBeNull();
+    expect((await readOrchestratorState(store, "other-merchant")).frozenUntil).toBeUndefined();
   });
 
-  it("refuses to roll back when no known-good baseline was ever recorded (fail-closed)", async () => {
+  it("refuses to roll back when no known-good baseline was ever recorded (fail-closed, no side effects)", async () => {
     const store = new InMemoryRuntimeStore();
     await expect(delayedRollbackToBaseline(store, "acme", "harm")).rejects.toThrow(/no known-good baseline/i);
+    // the guard runs before any write ⇒ serving untouched and no freeze applied
+    expect(await servingChampion(store, "acme")).toBeNull();
+    expect((await readOrchestratorState(store, "acme")).frozenUntil).toBeUndefined();
   });
 
   it("a known-good recorded for tenant A is not visible to tenant B (blast-radius isolation)", async () => {

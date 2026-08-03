@@ -1,7 +1,7 @@
 import type { RuntimeStatePort } from "@palup/platform-ports";
 import type { Policy } from "@palup/widget-brain";
 import type { Champion, EvolutionEngine } from "@palup/evolution";
-import { matchedKill, RUNTIME_AGENT_TYPE, freezeAutoPromote, AUTO_PROMOTE_WINDOW_MS } from "@palup/state-postgres";
+import { matchedKill, RUNTIME_AGENT_TYPE, freezeAutoPromote, freezeAutoPromoteTx, AUTO_PROMOTE_WINDOW_MS } from "@palup/state-postgres";
 import { readKnownGood } from "./known-good-baseline.js";
 
 // The control-plane WRITE half of promote→serving (the READ half is widget-backend/champion.ts). A
@@ -155,7 +155,13 @@ export async function delayedRollbackToBaseline(
   if (!baseline) throw new Error(`no known-good baseline for ${tenantId} to roll back to — delayed rollback requires a recorded baseline`);
   const badId = (await servingChampion(store, tenantId))?.policy.id ?? "unknown";
   const cfg: ServingChampion = { policy: baseline.policy, promotedFrom: badId, promotedAt: at };
-  // Durable revert FIRST — serving returns to the known-good regardless of any engine state.
+  const nowMs = Date.parse(at);
+  const until = Number.isNaN(nowMs) ? at : new Date(nowMs + AUTO_PROMOTE_WINDOW_MS).toISOString();
+  // Revert serving AND freeze the fast-lane in ONE tx. Unlike rollbackServing — which can lean on the
+  // ≤1/week frequency-cap backstop if its separate freeze races — the DELAYED timeframe (days-to-weeks
+  // post-promotion) has already outrun that cap (lastPromotedAt is stale), so the freeze is the SOLE
+  // drift bound here (ADR-0014 inv #4) and must commit atomically with the revert, never in a second tx
+  // a crash could skip.
   await store.tx({ tenantId }, async (t) => {
     await t.put(CHAMPION, ACTIVE_KEY, cfg);
     await t.audit(
@@ -168,10 +174,7 @@ export async function delayedRollbackToBaseline(
       },
       at,
     );
+    await freezeAutoPromoteTx(t, tenantId, until, `delayed-rollback: ${reason}`, at);
   });
-  // Freeze the fast-lane so the harmful change can't be immediately re-promoted (mirrors rollbackServing).
-  const nowMs = Date.parse(at);
-  const until = Number.isNaN(nowMs) ? at : new Date(nowMs + AUTO_PROMOTE_WINDOW_MS).toISOString();
-  await freezeAutoPromote(store, tenantId, until, `delayed-rollback: ${reason}`, at);
   return cfg;
 }
