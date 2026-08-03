@@ -8,24 +8,29 @@ import { matchedKill, RUNTIME_AGENT_TYPE, readAutoPromoteEnabled } from "@palup/
 // (champion-promoter.promoteToServing, which REFUSES an "auto-loop" approver): this is the auto path, so
 // it is attributed to actor "auto-loop", NEVER "human".
 //
-// Three properties this primitive must hold (verified by auto-champion-write.test.ts):
-//   • ATOMIC + anchored: the champion put, the auto-loop audit entry, and the trusted head-anchor advance
-//     commit in ONE store.tx — so an audit/anchor failure rolls back the champion put (no half-write), and
-//     the persisted anchor lets verifyAudit(expectedHead) detect tail-truncation/rewrite the in-chain
-//     check alone can't (prereq #8 "externally-anchored, committed atomically with the champion write").
+// Properties this primitive holds (verified by auto-champion-write.test.ts):
+//   • ATOMIC: the champion put + the auto-loop audit entry commit in ONE store.tx — an audit failure
+//     rolls back the champion put (no half-write).
+//   • EXTERNALLY ANCHORED (prereq #8): after commit, the audit record's {seq, hash} is emitted to stdout
+//     → Cloud Logging (`AUDIT_ANCHOR …`), OUTSIDE the DB's mutable surface — the SAME mechanism the widget
+//     backend uses for shopper-turn audits (widget-backend/server.ts "#19 head-anchor"). A store-level
+//     rewrite / tail-truncation is caught by reconciling the DB chain against these external anchors,
+//     which a compromised DBA has no write path to. (An in-DB anchor row would be useless here: the audit
+//     chain is per-tenant and shared by many writers, so a champion-only in-DB {seq,hash} both goes stale
+//     the instant any other entry lands AND lives in the same trust domain it is meant to guard.)
 //   • FAIL-CLOSED dormancy defense: refuses with NO write unless the T1 opt-in gate is enabled (per-tenant
-//     opt-in AND platform override on) AND no kill is armed on the shared 3-scope registry. This is
-//     defense in depth on top of the orchestrator's own checks — the write itself never trusts the caller.
+//     opt-in AND platform override on) AND no kill is armed on the shared 3-scope registry. These run
+//     immediately BEFORE the write as defense in depth; they are NOT a substitute for the always-on kill
+//     enforcement, which is serving's per-turn matchedKill (a champion written during a kill race sits
+//     inert while killed). A cross-tenant atomic re-check is not possible from a single-tenant write tx
+//     (the kill registry lives in the __system__ partition); the definitive pre-serve re-check is the T4
+//     orchestrator's + serving's job, not this write's.
 //   • CONTAINMENT: writes a Policy only (styleDirective + proactivityDefault; guardrails live in code), to
 //     the SAME serving slot the human path and serving read use.
 //
 // Keep CHAMPION/ACTIVE_KEY in sync with widget-backend/champion.ts + control-plane/champion-promoter.ts.
 const CHAMPION = "champion";
 const ACTIVE_KEY = "active";
-// The trusted head anchor — a per-tenant {seq, hash} the audit chain is verified against. Kept in its own
-// collection so it is never confused with the serving champion.
-const ANCHOR = "audit-anchor";
-const ANCHOR_KEY = "head";
 
 export interface AutoServingChampion {
   policy: Policy;
@@ -35,27 +40,10 @@ export interface AutoServingChampion {
   approvedBy: "auto-loop";
 }
 
-export interface AuditAnchor {
-  seq: number;
-  hash: string;
-}
-
-/** The persisted trusted head anchor for this tenant's audit chain, or null if none yet. */
-export async function readAuditAnchor(store: RuntimeStatePort, tenantId: string): Promise<AuditAnchor | null> {
-  return (await store.get<AuditAnchor>({ tenantId }, ANCHOR, ANCHOR_KEY)) ?? null;
-}
-
-/** Verify the tenant's audit chain against the persisted head anchor — detects tail-truncation / rewrite
- * the in-chain recompute alone cannot (prereq #8). Falls back to a plain chain check if no anchor yet. */
-export async function verifyAutoChampionAudit(store: RuntimeStatePort, tenantId: string): Promise<{ ok: boolean; brokenAt?: number }> {
-  const anchor = await readAuditAnchor(store, tenantId);
-  return store.verifyAudit({ tenantId }, anchor ? { expectedHead: anchor } : undefined);
-}
-
 /**
  * Persist an AUTO-promoted champion to the active serving slot for `tenantId`, atomically with an
- * auto-loop audit entry and a head-anchor advance. Fails closed (no write) unless auto-promote is enabled
- * for the tenant AND no kill is armed.
+ * auto-loop audit entry, then emit the external Cloud Logging anchor. Fails closed (no write) unless
+ * auto-promote is enabled for the tenant AND no kill is armed.
  */
 export async function writeAutoChampion(
   store: RuntimeStatePort,
@@ -64,16 +52,16 @@ export async function writeAutoChampion(
   opts: { promotedFrom?: string; at?: string } = {},
 ): Promise<AutoServingChampion> {
   const at = opts.at ?? new Date().toISOString();
-  // Fail-closed guards BEFORE any write (defense in depth — the orchestrator checks these too).
+  // Fail-closed guards BEFORE any write (defense in depth — the orchestrator + serving check these too).
   const gate = await readAutoPromoteEnabled(store, tenantId);
   if (!gate.enabled) throw new Error(`auto-champion write refused — auto-promote not enabled for ${tenantId}: ${gate.reason}`);
   const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
   if (kill) throw new Error(`auto-champion write refused — kill armed (scope "${kill.scope}")`);
 
   const cfg: AutoServingChampion = { policy, promotedFrom: opts.promotedFrom, promotedAt: at, approvedBy: "auto-loop" };
-  await store.tx({ tenantId }, async (t) => {
+  const rec = await store.tx({ tenantId }, async (t) => {
     await t.put(CHAMPION, ACTIVE_KEY, cfg);
-    const rec = await t.audit(
+    return t.audit(
       {
         actor: "auto-loop", // NEVER "human" — the auto path is honestly attributed
         action: "champion.auto_promote",
@@ -83,8 +71,10 @@ export async function writeAutoChampion(
       },
       at,
     );
-    // Advance the trusted head anchor to the just-committed record, IN THE SAME TX (atomic with the write).
-    await t.put(ANCHOR, ANCHOR_KEY, { seq: rec.seq, hash: rec.hash });
   });
+  // Externally anchor the committed record (prereq #8): emit {seq, hash} to stdout → Cloud Logging, the
+  // same PII-safe head-anchor the widget backend uses. This is the trust domain a store-level rewrite
+  // cannot reach; reconciliation against these lines is what detects truncation/rewrite.
+  console.log(`AUDIT_ANCHOR ${JSON.stringify({ t: tenantId, seq: rec.seq, hash: rec.hash, at: rec.at })}`);
   return cfg;
 }
