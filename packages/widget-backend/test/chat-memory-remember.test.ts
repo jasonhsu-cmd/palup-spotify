@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryRuntimeStore, createInMemoryVectorStore } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
+import { armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
 
 // Shopper-disposition program PR-8 — persistence wiring: `remember()` is now called POST-DECISION on
@@ -152,6 +153,36 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
       expect(userContent).not.toContain("4111");
       expect(userContent).toContain("[redacted-card]");
     }
+    await app.close();
+  });
+
+  it("NN#4 — an operator kill switch halts the memory write too: a kill-switched turn distills/persists NOTHING, even with a would-be-ordinary fact", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+
+    await armKill(store, "global", "operator-halt"); // operator arms the halt on the shared store
+
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: {
+        sessionId: "mem-killed-1",
+        message: "I like fragrance-free stuff",
+        signals: { cart: "empty", anonId: VALID_ANON_ID },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().flags).toContain("kill_switch"); // the turn really was halted
+    // A memory write is an autonomous action — the kill switch must stop it, not just the reply.
+    expect(upsertSpy).not.toHaveBeenCalled();
+    // The distiller model must never even be invoked on a halted turn (no autonomous action at all).
+    expect(modelPort.calls.filter((c) => c.responseSchema !== undefined)).toHaveLength(0);
+    const log = await store.readAudit({ tenantId: "demo" });
+    expect(log.map((r) => r.action)).not.toContain("write.ordinary");
     await app.close();
   });
 

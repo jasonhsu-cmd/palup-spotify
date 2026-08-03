@@ -705,7 +705,16 @@ export async function buildServer(opts?: {
       // TTL decision is made INSIDE `remember()` (reused unchanged); this call site only decides WHETHER
       // to call it and WITH WHAT turn. Never blocks or breaks the response — a memory-service failure is
       // caught and logged, exactly like every other fail-open side effect on this path (telemetry/traffic).
-      if (memoryService && signals.anonId) {
+      //
+      // NN#4 (kill-switch completeness) — a memory write IS an autonomous, audited action, so an operator
+      // kill must halt it like everything else. Skip remember() when a kill is armed for this tenant/agent
+      // (`kill`, the same registry match that drives `killScope` in the audit below), AND when the brain
+      // returned a decision that took NO autonomous action at all (`no_autonomous_action` — kill-switch or
+      // another guardrail halt, brain.ts): there is nothing legitimately learnable from a halted turn, and
+      // the operator halt must genuinely stop the write, not just the reply. (Narrowing writes further to
+      // the clean SALES path only is a separate PR-11 human-sign-off scope decision; this guard is the
+      // code-owned guardrail, not a business-policy choice.)
+      if (memoryService && signals.anonId && !kill && !d.flags.includes("no_autonomous_action")) {
         try {
           await memoryService.remember(
             {
