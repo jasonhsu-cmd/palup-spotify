@@ -18,7 +18,7 @@ const QUAL: Record<string, { q: number; pc: Record<string, number> }> = {
 // Equal counter-metrics across champion + candidates (ADR-0014 #5) — so the gate's counter-metrics check
 // is satisfied (present + not-worse) and the promotion decision still turns on the quality delta, exactly
 // as this test intends.
-const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
 const grader: Grader = {
   async grade(p) {
     const e = QUAL[stripRound(p.id)] ?? { q: 0.4, pc: { warm: 0.4, concise: 1 } };

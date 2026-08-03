@@ -8,7 +8,7 @@ import { EngineRegistry, EvolutionEngine, MockGrader, type PolicyMetrics } from 
 // demo tenant made H3 comment-only; the registry makes it structural: exactly one engine per tenant,
 // so a proposal/promotion for tenant A can never touch tenant B's engine state.
 
-const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
 const metrics = (id: string): PolicyMetrics => ({ policyId: id, safetyPass: true, floorPass: true, qualityScore: 0.7, counterMetrics: CM });
 const mkEngine = () => new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: metrics(DEFAULT_POLICY.id) }, grader: new MockGrader({}) });
 

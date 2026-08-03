@@ -18,7 +18,7 @@ class FamilyGrader implements Grader {
 
 // Complete, equal counter-metrics (ADR-0014 #5) so this suite exercises the CROSS-FAMILY gating check,
 // not the counter-metrics fail-closed one.
-const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
 const champion = {
   policy: DEFAULT_POLICY,
   metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.5, counterMetrics: CM } as PolicyMetrics,
