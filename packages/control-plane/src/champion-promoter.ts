@@ -2,6 +2,7 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
 import type { Policy } from "@palup/widget-brain";
 import type { Champion, EvolutionEngine } from "@palup/evolution";
 import { matchedKill, RUNTIME_AGENT_TYPE, freezeAutoPromote, AUTO_PROMOTE_WINDOW_MS } from "@palup/state-postgres";
+import { readKnownGood } from "./known-good-baseline.js";
 
 // The control-plane WRITE half of promote→serving (the READ half is widget-backend/champion.ts). A
 // HUMAN-approved, gate-passed promotion is persisted to the SHARED RuntimeStatePort so EVERY serving
@@ -133,4 +134,44 @@ export async function rollbackServing(
   const until = Number.isNaN(nowMs) ? at : new Date(nowMs + AUTO_PROMOTE_WINDOW_MS).toISOString();
   await freezeAutoPromote(store, tenantId, until, `rollback: ${reason}`, at);
   return restored;
+}
+
+/**
+ * DELAYED-SIGNAL rollback (ADR-0014 #10): when lagging return/complaint harm surfaces days-to-weeks after
+ * a promotion, revert serving to the DURABLE known-good baseline (known-good-baseline.ts) — the last
+ * champion confirmed good, which may be several promotions back and therefore UNREACHABLE via the
+ * engine's depth-1 prevChampion (`rollbackServing`). Owner's decision: this is an AUTO revert (a
+ * reversible self-heal, HITL §4) — it writes serving to the baseline, freezes the fast-lane, and audits
+ * it. Store-level only (engine state is depth-1 and cannot represent the baseline). Fails closed if no
+ * baseline was ever recorded.
+ */
+export async function delayedRollbackToBaseline(
+  store: RuntimeStatePort,
+  tenantId: string,
+  reason: string,
+  at = new Date().toISOString(),
+): Promise<ServingChampion> {
+  const baseline = await readKnownGood(store, tenantId);
+  if (!baseline) throw new Error(`no known-good baseline for ${tenantId} to roll back to — delayed rollback requires a recorded baseline`);
+  const badId = (await servingChampion(store, tenantId))?.policy.id ?? "unknown";
+  const cfg: ServingChampion = { policy: baseline.policy, promotedFrom: badId, promotedAt: at };
+  // Durable revert FIRST — serving returns to the known-good regardless of any engine state.
+  await store.tx({ tenantId }, async (t) => {
+    await t.put(CHAMPION, ACTIVE_KEY, cfg);
+    await t.audit(
+      {
+        actor: "monitor",
+        action: "champion.delayed_rollback",
+        input: { tenantId, from: badId, to: baseline.policy.id, reason, baselineConfirmedAt: baseline.confirmedAt },
+        decision: `delayed rollback of serving to known-good ${baseline.policy.id} (lagging harm on ${badId})`,
+        reversalPath: "promoteToServing",
+      },
+      at,
+    );
+  });
+  // Freeze the fast-lane so the harmful change can't be immediately re-promoted (mirrors rollbackServing).
+  const nowMs = Date.parse(at);
+  const until = Number.isNaN(nowMs) ? at : new Date(nowMs + AUTO_PROMOTE_WINDOW_MS).toISOString();
+  await freezeAutoPromote(store, tenantId, until, `delayed-rollback: ${reason}`, at);
+  return cfg;
 }

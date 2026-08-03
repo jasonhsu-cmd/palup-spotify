@@ -116,3 +116,28 @@ export function verdictFor(n: number, delta: number): CanaryVerdict {
   if (delta <= -0.05) return "rollback";
   return "hold";
 }
+
+// ADR-0014 cond #6 / prereq #10 — statistical power. A canary "≥ incumbent" is only meaningful with
+// enough observations over a long-enough window; a lone favorable sample must never auto-promote. These
+// are CONSERVATIVE PLACEHOLDER defaults — the real per-tenant values are owner-set at ADR-0014
+// enablement (docs "Open questions": minDelta vs judge noise, per-tenant traffic floor). Dormant build:
+// nothing consumes these until the T4 orchestrator wires them.
+export interface CanaryPowerThresholds {
+  minN: number;
+  minWindowMs: number;
+}
+export const DEFAULT_CANARY_POWER: CanaryPowerThresholds = { minN: 100, minWindowMs: 24 * 60 * 60 * 1000 };
+
+/** Enough traffic AND enough elapsed observation to trust a canary comparison. FAIL-CLOSED on an
+ * unreadable count/elapsed (NaN ⇒ no power) — a low-traffic tenant stays on the human path. */
+export function hasStatisticalPower(n: number, elapsedMs: number, t: CanaryPowerThresholds = DEFAULT_CANARY_POWER): boolean {
+  return Number.isFinite(n) && Number.isFinite(elapsedMs) && n >= t.minN && elapsedMs >= t.minWindowMs;
+}
+
+export type WindowedVerdict = CanaryVerdict | "insufficient-power";
+/** The verdict an AUTO path may act on: without statistical power, never "promote" — return
+ * "insufficient-power" so the orchestrator routes to a human (or holds), regardless of the raw delta. */
+export function windowedVerdictFor(n: number, delta: number, elapsedMs: number, t: CanaryPowerThresholds = DEFAULT_CANARY_POWER): WindowedVerdict {
+  if (!hasStatisticalPower(n, elapsedMs, t)) return "insufficient-power";
+  return verdictFor(n, delta);
+}
