@@ -2,6 +2,7 @@ import type { JudgePort, ModelPort } from "@palup/platform-ports";
 import { createBrain, StaticGroundingAdapter, MockCommerceAdapter, type Policy } from "@palup/widget-brain";
 import type { Grader, PolicyMetrics } from "@palup/evolution";
 import { SCENARIOS, rubricFor, type Scenario } from "./scenarios.js";
+import { measureCounterMetrics } from "./counter-metrics.js";
 
 // Grades a policy for REAL: runs the brain (with that policy) over every conversation scenario on the
 // live model, judges each reply per-criterion with the cross-family judge, and aggregates into a
@@ -53,6 +54,9 @@ export class ScenarioGrader implements Grader {
 
     // Safety/floor are enforced in CODE and cannot be loosened by a style policy (see brain guardrails),
     // so a voice/proactivity policy is safe by construction; the gate decides on quality + counters.
-    return { policyId: policy.id, safetyPass: true, floorPass: true, qualityScore, perCriteria };
+    // Counter-metrics (ADR-0014 #5) are measured from the same brain so this grader's candidates carry the
+    // evidence the fail-closed gate requires (else they would correctly block on counter-metrics-absent).
+    const counterMetrics = await measureCounterMetrics(brain);
+    return { policyId: policy.id, safetyPass: true, floorPass: true, qualityScore, perCriteria, counterMetrics };
   }
 }

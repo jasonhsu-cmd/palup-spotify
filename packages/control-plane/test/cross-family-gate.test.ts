@@ -12,13 +12,16 @@ class FamilyGrader implements Grader {
   constructor(private readonly judgeFamily: string, private readonly qualityScore: number) {}
   async grade(policy: Policy): Promise<PolicyMetrics> {
     const { gating } = decideGating(AGENT_FAMILY, this.judgeFamily);
-    return { policyId: policy.id, safetyPass: true, floorPass: true, qualityScore: this.qualityScore, gating };
+    return { policyId: policy.id, safetyPass: true, floorPass: true, qualityScore: this.qualityScore, gating, counterMetrics: CM };
   }
 }
 
+// Complete, equal counter-metrics (ADR-0014 #5) so this suite exercises the CROSS-FAMILY gating check,
+// not the counter-metrics fail-closed one.
+const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
 const champion = {
   policy: DEFAULT_POLICY,
-  metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.5 } as PolicyMetrics,
+  metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.5, counterMetrics: CM } as PolicyMetrics,
 };
 const cand = (id: string): Policy => ({ id, label: id, styleDirective: "x", proactivityDefault: "balanced" });
 
@@ -71,7 +74,7 @@ describe("cross-family promotion gate (fail-closed, ADR-0014)", () => {
     // treat that as gating-eligible so the offline demo + existing tests keep working (opt-out, not opt-in).
     class NoFlagGrader implements Grader {
       async grade(policy: Policy): Promise<PolicyMetrics> {
-        return { policyId: policy.id, safetyPass: true, floorPass: true, qualityScore: 0.9 }; // no gating field
+        return { policyId: policy.id, safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: CM }; // no gating field
       }
     }
     const e = new EvolutionEngine({ champion, grader: new NoFlagGrader() });

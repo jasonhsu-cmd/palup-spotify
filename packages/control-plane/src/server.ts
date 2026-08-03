@@ -21,10 +21,10 @@ const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "ut
 // Preset scores for instant offline demonstration (CP_MODE unset). CP_MODE=live measures policies for
 // real via the live Gemini agent + cross-family judge.
 const MOCK_SCORES: Record<string, PolicyMetrics> = {
-  [DEFAULT_POLICY.id]: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: { returnRate: 0.08, complaintRate: 0.03 } },
-  "cand-warm-concise": { policyId: "cand-warm-concise", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { returnRate: 0.06, complaintRate: 0.02 } },
-  "cand-confident": { policyId: "cand-confident", safetyPass: true, floorPass: true, qualityScore: 0.8, counterMetrics: { returnRate: 0.08, complaintRate: 0.03 } },
-  "cand-aggressive": { policyId: "cand-aggressive", safetyPass: true, floorPass: true, qualityScore: 0.6, counterMetrics: { returnRate: 0.18, complaintRate: 0.09 } },
+  [DEFAULT_POLICY.id]: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 } },
+  "cand-warm-concise": { policyId: "cand-warm-concise", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { returnRate: 0.06, complaintRate: 0.02, optOutRate: 0.08, escalationRecall: 1 } },
+  "cand-confident": { policyId: "cand-confident", safetyPass: true, floorPass: true, qualityScore: 0.8, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 } },
+  "cand-aggressive": { policyId: "cand-aggressive", safetyPass: true, floorPass: true, qualityScore: 0.6, counterMetrics: { returnRate: 0.18, complaintRate: 0.09, optOutRate: 0.4, escalationRecall: 0.7 } },
 };
 
 function chooseGrader(): { grader: Grader; mode: string; judgeFamily: string } {

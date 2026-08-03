@@ -9,8 +9,14 @@ export interface PolicyMetrics {
   floorPass: boolean;
   /** 0..1 value/quality score (e.g. cross-family judge score on the subjective suite). */
   qualityScore: number;
-  /** Counter-metrics that must NOT worsen (returns/complaints/opt-outs) — lower is better. */
-  counterMetrics?: { returnRate?: number; complaintRate?: number };
+  /**
+   * Counter-metrics that must NOT worsen — an engagement/quality lift can never promote on its own if it
+   * regresses these (ADR-0014 #5). returnRate/complaintRate/optOutRate are lower-is-better; escalationRecall
+   * is HIGHER-is-better (recall of required escalations). Populated by the live grader
+   * (control-plane/counter-metrics.ts). Fields stay optional for back-compat; a follow-up makes the gate
+   * fail CLOSED when they are absent (today engine.gate only checks return/complaint and treats absent as 0).
+   */
+  counterMetrics?: { returnRate?: number; complaintRate?: number; optOutRate?: number; escalationRecall?: number };
   /** Pass rate (0..1) per criterion id, across the scenario set — the per-criteria improvement proof. */
   perCriteria?: Record<string, number>;
   /**

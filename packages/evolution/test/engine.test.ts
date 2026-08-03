@@ -2,56 +2,91 @@ import { describe, it, expect } from "vitest";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { EvolutionEngine, MockGrader, type PolicyMetrics } from "../src/index.js";
 
+// A complete counter-metrics baseline (ADR-0014 #5): both the champion AND a passing candidate must
+// carry the measured counter-metrics, or the gate fails closed. escalationRecall higher=better;
+// returnRate/complaintRate/optOutRate lower=better.
+const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+
 const champion = {
   policy: DEFAULT_POLICY,
-  metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75 } as PolicyMetrics,
+  metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: BASE_CM } as PolicyMetrics,
 };
+// A safe, improved candidate with counter-metrics no worse than the baseline — the canonical "should pass".
+const GOOD: PolicyMetrics = { policyId: "good", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: BASE_CM };
 
 const P = (id: string): Policy => ({ id, label: id, styleDirective: "x", proactivityDefault: "balanced" });
 
 function engineWith(scores: Record<string, PolicyMetrics>) {
   return new EvolutionEngine({ champion, grader: new MockGrader(scores) });
 }
+const evalOne = async (scores: Record<string, PolicyMetrics>, id: string) => {
+  const e = engineWith(scores);
+  e.propose(P(id));
+  return e.evaluate(id);
+};
 
 describe("EvolutionEngine gate", () => {
-  it("gates PASS a safe, improved candidate -> awaiting_approval", async () => {
-    const e = engineWith({ good: { policyId: "good", safetyPass: true, floorPass: true, qualityScore: 0.9 } });
-    e.propose(P("good"));
-    const rec = await e.evaluate("good");
+  it("gates PASS a safe, improved candidate with complete, not-worse counter-metrics -> awaiting_approval", async () => {
+    const rec = await evalOne({ good: GOOD }, "good");
     expect(rec.status).toBe("awaiting_approval");
     expect(rec.gate?.pass).toBe(true);
   });
 
   it("BLOCKS a candidate that regresses quality", async () => {
-    const e = engineWith({ worse: { policyId: "worse", safetyPass: true, floorPass: true, qualityScore: 0.6 } });
-    e.propose(P("worse"));
-    const rec = await e.evaluate("worse");
+    const rec = await evalOne({ worse: { ...GOOD, policyId: "worse", qualityScore: 0.6 } }, "worse");
     expect(rec.status).toBe("blocked");
     expect(rec.gate?.reasons).toContain("quality-regressed");
   });
 
   it("BLOCKS on a safety-floor failure regardless of quality (hard gate)", async () => {
-    const e = engineWith({ unsafe: { policyId: "unsafe", safetyPass: false, floorPass: true, qualityScore: 0.99 } });
-    e.propose(P("unsafe"));
-    const rec = await e.evaluate("unsafe");
+    const rec = await evalOne({ unsafe: { ...GOOD, policyId: "unsafe", safetyPass: false, qualityScore: 0.99 } }, "unsafe");
     expect(rec.status).toBe("blocked");
     expect(rec.gate?.reasons).toContain("safety-floor-failed");
   });
 
-  it("BLOCKS when counter-metrics (returns/complaints) worsen", async () => {
-    const e = engineWith({
-      pushy: { policyId: "pushy", safetyPass: true, floorPass: true, qualityScore: 0.95, counterMetrics: { returnRate: 0.2 } },
-    });
-    e.propose(P("pushy"));
-    const rec = await e.evaluate("pushy");
+  // ADR-0014 #5 — the core fail-closed property: an engagement/quality lift can NEVER promote on its own.
+  it("BLOCKS a higher-quality candidate that carries NO counter-metrics (fail-closed, never on quality alone)", async () => {
+    const rec = await evalOne({ eng: { policyId: "eng", safetyPass: true, floorPass: true, qualityScore: 0.95 } }, "eng");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("counter-metrics-absent");
+    expect(rec.gate?.pass).toBe(false);
+  });
+
+  it("BLOCKS when the return rate worsens", async () => {
+    const rec = await evalOne({ pushy: { ...GOOD, policyId: "pushy", qualityScore: 0.95, counterMetrics: { ...BASE_CM, returnRate: 0.2 } } }, "pushy");
     expect(rec.status).toBe("blocked");
     expect(rec.gate?.reasons).toContain("counter-metrics-worsened");
+  });
+
+  it("BLOCKS when opt-out risk worsens", async () => {
+    const rec = await evalOne({ c: { ...GOOD, policyId: "c", qualityScore: 0.95, counterMetrics: { ...BASE_CM, optOutRate: 0.4 } } }, "c");
+    expect(rec.gate?.reasons).toContain("counter-metrics-worsened");
+  });
+
+  it("BLOCKS when escalation recall drops (a silent support/safety regression)", async () => {
+    const rec = await evalOne({ c: { ...GOOD, policyId: "c", qualityScore: 0.95, counterMetrics: { ...BASE_CM, escalationRecall: 0.5 } } }, "c");
+    expect(rec.gate?.reasons).toContain("counter-metrics-worsened");
+  });
+
+  it("BLOCKS a candidate whose counter-metrics contain NaN / out-of-range (fail-closed, not fail-open)", async () => {
+    const rec = await evalOne({ nan: { ...GOOD, policyId: "nan", qualityScore: 0.95, counterMetrics: { ...BASE_CM, optOutRate: NaN } } }, "nan");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("counter-metrics-absent"); // NaN is not a valid rate ⇒ treated as absent
+  });
+
+  it("BLOCKS when the champion baseline has no counter-metrics (can't prove not-worse)", async () => {
+    const bareChampion = { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75 } as PolicyMetrics };
+    const e = new EvolutionEngine({ champion: bareChampion, grader: new MockGrader({ good: GOOD }) });
+    e.propose(P("good"));
+    const rec = await e.evaluate("good");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("counter-metrics-baseline-absent");
   });
 });
 
 describe("EvolutionEngine governance", () => {
   it("cannot promote without a human approval (no self-promotion)", async () => {
-    const e = engineWith({ good: { policyId: "good", safetyPass: true, floorPass: true, qualityScore: 0.9 } });
+    const e = engineWith({ good: GOOD });
     e.propose(P("good"));
     await e.evaluate("good");
     expect(() => e.promote("good")).toThrow(/needs human approval/);
@@ -61,7 +96,7 @@ describe("EvolutionEngine governance", () => {
   });
 
   it("kill switch halts approvals and promotions", async () => {
-    const e = engineWith({ good: { policyId: "good", safetyPass: true, floorPass: true, qualityScore: 0.9 } });
+    const e = engineWith({ good: GOOD });
     e.propose(P("good"));
     await e.evaluate("good");
     e.kill("test");
@@ -69,7 +104,7 @@ describe("EvolutionEngine governance", () => {
   });
 
   it("auto-rolls back on a post-promotion regression", async () => {
-    const e = engineWith({ good: { policyId: "good", safetyPass: true, floorPass: true, qualityScore: 0.9 } });
+    const e = engineWith({ good: GOOD });
     e.propose(P("good"));
     await e.evaluate("good");
     e.approve("good");
@@ -81,7 +116,7 @@ describe("EvolutionEngine governance", () => {
   });
 
   it("audits every action", async () => {
-    const e = engineWith({ good: { policyId: "good", safetyPass: true, floorPass: true, qualityScore: 0.9 } });
+    const e = engineWith({ good: GOOD });
     e.propose(P("good"));
     await e.evaluate("good");
     e.approve("good");

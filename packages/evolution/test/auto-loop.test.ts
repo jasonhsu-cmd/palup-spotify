@@ -15,10 +15,14 @@ const QUAL: Record<string, { q: number; pc: Record<string, number> }> = {
   "prop-0": { q: 0.8, pc: { warm: 1, concise: 1 } },
   "prop-1": { q: 0.6, pc: { warm: 0.7, concise: 1 } },
 };
+// Equal counter-metrics across champion + candidates (ADR-0014 #5) — so the gate's counter-metrics check
+// is satisfied (present + not-worse) and the promotion decision still turns on the quality delta, exactly
+// as this test intends.
+const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
 const grader: Grader = {
   async grade(p) {
     const e = QUAL[stripRound(p.id)] ?? { q: 0.4, pc: { warm: 0.4, concise: 1 } };
-    return { policyId: p.id, safetyPass: true, floorPass: true, qualityScore: e.q, perCriteria: e.pc };
+    return { policyId: p.id, safetyPass: true, floorPass: true, qualityScore: e.q, perCriteria: e.pc, counterMetrics: CM };
   },
 };
 const proposer: Proposer = {
@@ -57,7 +61,7 @@ describe("AutoLoop", () => {
   it("stops without promoting when no candidate beats the champion", async () => {
     const flat: Grader = {
       async grade(p) {
-        return { policyId: p.id, safetyPass: true, floorPass: true, qualityScore: 0.5, perCriteria: { warm: 0.5, concise: 1 } };
+        return { policyId: p.id, safetyPass: true, floorPass: true, qualityScore: 0.5, perCriteria: { warm: 0.5, concise: 1 }, counterMetrics: CM };
       },
     };
     const store = new MemoryStore();

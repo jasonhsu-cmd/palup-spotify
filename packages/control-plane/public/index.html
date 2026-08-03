@@ -145,7 +145,10 @@
     $("#champ-q").textContent = pct(s.champion.metrics.qualityScore);
     $("#champ-label").textContent = s.champion.policy.label;
     const cm = s.champion.metrics.counterMetrics||{};
-    $("#champ-meta").textContent = `${s.champion.policy.id} · returns ${pct(cm.returnRate||0)} · complaints ${pct(cm.complaintRate||0)} · safety ${s.champion.metrics.safetyPass?"PASS":"FAIL"}`;
+    // Show the counter-metrics we actually MEASURE pre-promotion (ADR-0014 #5). complaintRate is
+    // canary-sourced (#10) and unmeasured today → show "n/a" rather than a misleading 0%.
+    const cmPct = (v)=> typeof v === "number" ? pct(v) : "n/a";
+    $("#champ-meta").textContent = `${s.champion.policy.id} · returns ${cmPct(cm.returnRate)} · opt-out ${cmPct(cm.optOutRate)} · escalation-recall ${cmPct(cm.escalationRecall)} · complaints ${cmPct(cm.complaintRate)} · safety ${s.champion.metrics.safetyPass?"PASS":"FAIL"}`;
     $("#error").textContent = s.error || "";
     $("#cands").innerHTML = s.candidates.length ? s.candidates.map(c=>{
       const q = c.metrics ? pct(c.metrics.qualityScore) : "–";
