@@ -4,8 +4,11 @@ import { EvolutionEngine, MockGrader, type PolicyMetrics } from "../src/index.js
 
 // A complete counter-metrics baseline (ADR-0014 #5): both the champion AND a passing candidate must
 // carry the measured counter-metrics, or the gate fails closed. escalationRecall higher=better;
-// returnRate/complaintRate/optOutRate lower=better.
-const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+// returnRate/complaintRate/optOutRate lower=better. personaPriceInvariance/personaLeakRate (PR-1
+// governance floor) are the SAME fail-closed contract — personaPriceInvariance higher=better (1 = price/
+// offer surface identical across a WTP-adjacent persona pair), personaLeakRate lower=better (0 = no
+// persona/disposition fact reached the surface without consent).
+const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
 
 const champion = {
   policy: DEFAULT_POLICY,
@@ -124,6 +127,87 @@ describe("EvolutionEngine gate", () => {
     const rec = await e.evaluate("good");
     expect(rec.status).toBe("blocked");
     expect(rec.gate?.reasons).toContain("counter-metrics-baseline-absent");
+  });
+});
+
+// PR-1 governance floor (shopper-disposition program) — fairness/leak/escalation guarantees as
+// DETERMINISTIC gate floors, mirroring the counterMetricsComplete fail-closed pattern above EXACTLY, so no
+// later persona/memory capability can land ungoverned. Two independent reasons: "fairness-regressed"
+// (personaPriceInvariance) and "persona-leak" (personaLeakRate) — both fail CLOSED (absent/NaN/out-of-
+// range on either side blocks, never fail-open), and a regression vs. the champion baseline blocks too.
+describe("EvolutionEngine gate — PR-1 governance floor (fairness / leak / disposition-escalation)", () => {
+  it("BLOCKS a candidate that price-discriminates by persona (fairness floor regresses)", async () => {
+    const rec = await evalOne(
+      { pd: { ...GOOD, policyId: "pd", qualityScore: 0.95, counterMetrics: { ...BASE_CM, personaPriceInvariance: 0.5 } } },
+      "pd",
+    );
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("fairness-regressed");
+  });
+
+  it("BLOCKS a candidate that emits a persona/memory fact without consent (persona-leak floor regresses)", async () => {
+    const rec = await evalOne(
+      { leak: { ...GOOD, policyId: "leak", qualityScore: 0.95, counterMetrics: { ...BASE_CM, personaLeakRate: 0.3 } } },
+      "leak",
+    );
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("persona-leak");
+  });
+
+  it("BLOCKS a candidate that suppresses a disposition-carrying (b2b) required escalation (counter-metrics-worsened)", async () => {
+    // escalationRecall dropping because a b2b-tagged escalation probe stopped escalating is measured
+    // identically to any other escalation drop (control-plane/counter-metrics.ts ESCALATION_PROBES now
+    // include b2b-role variants) — the gate does not need to know WHY it dropped.
+    const rec = await evalOne(
+      { esc: { ...GOOD, policyId: "esc", qualityScore: 0.95, counterMetrics: { ...BASE_CM, escalationRecall: 0.7 } } },
+      "esc",
+    );
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("counter-metrics-worsened");
+  });
+
+  it("FAIL-CLOSED — personaPriceInvariance ABSENT on the candidate blocks (never fail-open)", async () => {
+    const { personaPriceInvariance, ...withoutPPI } = BASE_CM;
+    void personaPriceInvariance;
+    const rec = await evalOne({ x: { ...GOOD, policyId: "x", qualityScore: 0.95, counterMetrics: withoutPPI } }, "x");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("fairness-regressed");
+  });
+
+  it("FAIL-CLOSED — personaPriceInvariance is NaN on the candidate blocks (not a valid rate, not fail-open)", async () => {
+    const rec = await evalOne(
+      { nan: { ...GOOD, policyId: "nan", qualityScore: 0.95, counterMetrics: { ...BASE_CM, personaPriceInvariance: NaN } } },
+      "nan",
+    );
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("fairness-regressed");
+  });
+
+  it("FAIL-CLOSED — personaLeakRate ABSENT on the candidate blocks (never fail-open)", async () => {
+    const { personaLeakRate, ...withoutLeak } = BASE_CM;
+    void personaLeakRate;
+    const rec = await evalOne({ y: { ...GOOD, policyId: "y", qualityScore: 0.95, counterMetrics: withoutLeak } }, "y");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("persona-leak");
+  });
+
+  it("FAIL-CLOSED — the champion baseline lacks personaPriceInvariance/personaLeakRate (no baseline to prove not-worse)", async () => {
+    const bareChampion = {
+      policy: DEFAULT_POLICY,
+      metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 } } as PolicyMetrics,
+    };
+    const e = new EvolutionEngine({ champion: bareChampion, grader: new MockGrader({ good: GOOD }) });
+    e.propose(P("good"));
+    const rec = await e.evaluate("good");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("fairness-regressed");
+    expect(rec.gate?.reasons).toContain("persona-leak");
+  });
+
+  it("PASSES a style-only candidate that matches the baseline exactly (ships INERT — no champion-behavior change)", async () => {
+    const rec = await evalOne({ styled: { ...GOOD, policyId: "styled", qualityScore: 0.95 } }, "styled");
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
   });
 });
 

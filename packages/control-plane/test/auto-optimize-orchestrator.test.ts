@@ -15,7 +15,7 @@ import type { CanaryMeasurement } from "../src/canary-measure.js";
 const SECRET = "su";
 const NOW = "2026-08-03T00:00:00Z";
 const T: CanaryPowerThresholds = { minN: 100, minWindowMs: 86_400_000, minDelta: 0.05, maxWindowMs: 7 * 86_400_000 };
-const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
 const champMetrics: PolicyMetrics = { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.7, counterMetrics: CM };
 const PASS_CANARY: CanaryMeasurement = { n: 200, championN: 200, elapsedMs: 90_000_000, qualityDelta: 0.2, canaryQuality: 0.9, championQuality: 0.7, canaryEscalationRate: 0.1, championEscalationRate: 0.1 };
 
