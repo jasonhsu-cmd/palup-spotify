@@ -6,7 +6,7 @@ import { DEFAULT_POLICY } from "@palup/widget-brain";
 import { AutoLoop, EvolutionEngine, FileStore } from "@palup/evolution";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import { createAnthropicApiAdapter, createAnthropicApiJudge, isAnthropicApiConfigured } from "@palup/judge";
-import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
+import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE, readOrchestratorState, recordAutoPromotion, rateLimitReason } from "@palup/state-postgres";
 import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
@@ -58,6 +58,10 @@ async function main() {
     minDelta: Number(process.env.EVOLVE_MIN_DELTA ?? 0.05),
     autoApprove,
     killCheck: () => matchedKill(runtimeStore, { tenantId: RUNTIME_TENANT, agentType: RUNTIME_AGENT_TYPE }),
+    // ADR-0014 #9 — per-merchant frequency cap + freeze on the SHARED orchestrator registry (a rollback
+    // via rollbackServing writes the freeze; this run reads it), fail-closed on an unreadable clock/registry.
+    rateLimitCheck: async () => rateLimitReason(await readOrchestratorState(runtimeStore, RUNTIME_TENANT), new Date().toISOString()),
+    recordPromotion: () => recordAutoPromotion(runtimeStore, RUNTIME_TENANT),
     log,
   });
   const timeline = await loop.run(rounds);

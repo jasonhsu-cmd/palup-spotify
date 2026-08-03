@@ -16,6 +16,14 @@ export interface AutoLoopDeps {
   minDelta?: number;
   /** Demo convenience: auto-approve a gate-passing candidate. false ⇒ stop at awaiting_approval (HITL). */
   autoApprove?: boolean;
+  /** ADR-0014 #9 — the per-merchant rate-limit + freeze check on the SHARED orchestrator registry
+   * (state-postgres/orchestrator-registry.ts), consulted BEFORE every AUTO approval+promotion. Returns a
+   * halt reason (frozen after a rollback, or inside the ≤1/window frequency cap) or null (clear). Injected
+   * (this package stays decoupled from state-postgres); the composition root wires it. REQUIRED whenever
+   * autoApprove is on — a missing checker or a throwing registry HALTS (fail-closed, like killCheck). */
+  rateLimitCheck?: () => Promise<string | null>;
+  /** ADR-0014 #9 — stamp the frequency-cap clock on the shared registry after an auto-promotion. */
+  recordPromotion?: () => Promise<void>;
   /**
    * ADR-0014 #1 / NN #4 — the SHARED three-scope run-time kill check, consulted BEFORE every AUTO
    * approval+promotion (fail-closed). Injected (not a direct state-postgres import) so this package stays
@@ -59,6 +67,24 @@ export class AutoLoop {
       log: () => {},
       ...deps,
     };
+  }
+
+  /**
+   * ADR-0014 #9 — the per-merchant rate-limit + freeze check on the SHARED orchestrator registry, run
+   * before an AUTO-promotion. Returns a halt reason or null. FAIL-CLOSED (mirrors checkKill): a MISSING
+   * checker or a throwing registry HALTS — auto-promotion must never proceed without a working drift
+   * bound. (Only gates the autoApprove fast-lane; the human path stops for review anyway.)
+   */
+  private async checkRateLimit(): Promise<string | null> {
+    if (!this.d.rateLimitCheck) return "no rate-limiter wired"; // fail closed: auto-promote requires the cap
+    // The cap can't advance without a recorder — an unstamped promotion would let the cap never trip
+    // (unbounded auto-promotions). Require BOTH together (fail closed, symmetric with the check).
+    if (!this.d.recordPromotion) return "no promotion recorder wired";
+    try {
+      return await this.d.rateLimitCheck();
+    } catch {
+      return "rate-limit registry unreadable"; // fail closed
+    }
   }
 
   /**
@@ -181,6 +207,13 @@ export class AutoLoop {
           await this.persistState();
           break;
         }
+        // ADR-0014 #9 — bound silent drift: refuse if frozen (recent rollback) or inside the frequency cap.
+        const limited = await this.checkRateLimit();
+        if (limited) {
+          log(`round ${round}: auto-promotion rate-limited — ${limited}; halting.`);
+          await this.persistState();
+          break;
+        }
         engine.approve(winner.id, "auto-loop");
       } else {
         log(`round ${round}: ${winner.id} awaiting HUMAN approval (autoApprove off) — stopping for review.`);
@@ -189,6 +222,7 @@ export class AutoLoop {
       }
       const before = champ.metrics;
       const newChamp = engine.promote(winner.id);
+      await this.d.recordPromotion?.(); // ADR-0014 #9 — stamp the shared frequency-cap clock
       await this.persistState();
 
       const targeted = weaknesses.map((w) => w.criterion);

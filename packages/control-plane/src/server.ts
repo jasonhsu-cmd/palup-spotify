@@ -12,6 +12,7 @@ import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT } from "./canary-controller.js";
+import { applyCanaryVerdict } from "./canary-reaction.js";
 import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, type KillScope, type KillEntry } from "@palup/state-postgres";
 import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices, type RuntimeStatePort } from "@palup/platform-ports";
 
@@ -243,8 +244,9 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
     const tenantId = canaryTenant(b.tenantId);
     const policy = (await canaryConfig(runtimeStore, tenantId))?.policy ?? DEFAULT_CANARY;
     const result = await shadowEvaluate(runtimeStore, createVertexAdapter(), createAnthropicApiJudge(), policy);
-    let rolledBack = false;
-    if (result.verdict === "rollback") { await stopCanary(runtimeStore, tenantId); rolledBack = true; }
+    // ADR-0014 #9 — a canary "rollback" verdict stops the canary AND freezes this merchant's auto-promote
+    // fast-lane (offline-testable helper; the live shadowEvaluate above stays credential-gated).
+    const { rolledBack } = await applyCanaryVerdict(runtimeStore, tenantId, result.verdict);
     return { result, rolledBack };
   });
 
