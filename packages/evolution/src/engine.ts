@@ -127,14 +127,19 @@ export class EvolutionEngine {
     //   • holdout-regressed — comparable + same seed + candidate worse on the unseen set.
     const candH = cand.holdoutScore;
     const champH = champ.holdoutScore;
-    const holdoutAbsent = champH !== undefined && candH === undefined;
     const holdoutComparable = candH !== undefined && champH !== undefined;
-    const holdoutSeedMismatch = holdoutComparable && cand.holdoutSeed !== champ.holdoutSeed;
-    const holdoutRegressed = holdoutComparable && !holdoutSeedMismatch && candH! < champH!;
+    const holdoutAbsent = champH !== undefined && candH === undefined; // candidate dropped the check the baseline has
+    const holdoutBaselineAbsent = candH !== undefined && champH === undefined; // no baseline ⇒ can't prove no-overfit (symmetric to counter-metrics; a stale pre-feature champion never reaches here in current wiring, but fail closed for durability)
+    // A comparison is valid ONLY with both scores AND both seeds present AND equal — a missing seed is as
+    // uncomparable as a mismatched one (fail closed, never compare a bare score across unknown epochs).
+    const seedsMatch = cand.holdoutSeed !== undefined && cand.holdoutSeed === champ.holdoutSeed;
+    const holdoutSeedMismatch = holdoutComparable && !seedsMatch;
+    const holdoutRegressed = holdoutComparable && seedsMatch && candH! < champH!;
     if (holdoutAbsent) reasons.push("holdout-absent");
+    if (holdoutBaselineAbsent) reasons.push("holdout-baseline-absent");
     if (holdoutSeedMismatch) reasons.push("holdout-seed-mismatch");
     if (holdoutRegressed) reasons.push("holdout-regressed");
-    const holdoutOk = !holdoutAbsent && !holdoutSeedMismatch && !holdoutRegressed;
+    const holdoutOk = !holdoutAbsent && !holdoutBaselineAbsent && !holdoutSeedMismatch && !holdoutRegressed;
     // Fail-CLOSED cross-family gate (ADR-0014): a grade the grader marked ADVISORY (gating === false —
     // a same-family judge, e.g. Gemini grading the Gemini agent, or no cross-family judge available) can
     // NEVER pass. It may still be recorded/observed, but proposer≠evaluator is unmet so it must not gate

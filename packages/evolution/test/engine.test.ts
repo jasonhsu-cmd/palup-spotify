@@ -101,6 +101,14 @@ describe("EvolutionEngine gate", () => {
     expect(rec.gate?.reasons).toContain("holdout-absent");
   });
 
+  it("FAILS CLOSED — a candidate WITH a holdout but a champion baseline WITHOUT one blocks (no baseline to compare)", async () => {
+    const e = new EvolutionEngine({ champion, grader: new MockGrader({ ch: withHoldout({ policyId: "ch", qualityScore: 0.95 }, 0.9) }) }); // champion has no holdoutScore
+    e.propose(P("ch"));
+    const rec = await e.evaluate("ch");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("holdout-baseline-absent");
+  });
+
   it("BLOCKS a DIFFERENT-seed holdout comparison (a mid-run rotation is apples-to-oranges, not a pass)", async () => {
     const e = new EvolutionEngine({ champion: champWithHoldout(0.8, "seedA"), grader: new MockGrader({ mm: withHoldout({ policyId: "mm", qualityScore: 0.95 }, 0.99, "seedB") }) });
     e.propose(P("mm"));
