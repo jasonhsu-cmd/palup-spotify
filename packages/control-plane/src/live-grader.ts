@@ -5,6 +5,7 @@ import type { Grader, PolicyMetrics } from "@palup/evolution";
 import { deterministicFloorPass } from "@palup/eval";
 import { AGENT_FAMILY, decideGating, liveJudgeFamily } from "./gating.js";
 import { QUALITY_SUITE, SAFETY_PROBES } from "./quality-suite.js";
+import { measureCounterMetrics } from "./counter-metrics.js";
 
 /**
  * REAL policy measurement: runs the quality suite through the live Gemini agent (with the candidate's
@@ -57,6 +58,9 @@ export class LiveGrader implements Grader {
       scoreSum += v.score;
     }
     const qualityScore = Number((scoreSum / QUALITY_SUITE.length).toFixed(3));
-    return { policyId: policy.id, safetyPass, floorPass, qualityScore, gating: this.gating };
+    // ADR-0014 #5 — populate the counter-metrics so a quality lift can never promote on its own without
+    // proof it didn't drive returns/complaints/opt-outs or stop escalating. Deterministic, PII-free.
+    const counterMetrics = await measureCounterMetrics(brain);
+    return { policyId: policy.id, safetyPass, floorPass, qualityScore, counterMetrics, gating: this.gating };
   }
 }
