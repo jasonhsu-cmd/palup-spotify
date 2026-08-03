@@ -44,6 +44,19 @@ export type PitchKind =
 
 export type ProactivityLevel = "cautious" | "balanced" | "confident";
 
+// ── Persona / shopper-disposition layer (PR-0, INERT until the DISPOSITION_* flags flip) ────────────
+// First-class runtime representation of the disposition taxonomy (docs/design/shopper-widget.md §4).
+// These steer SERVICE/GUIDANCE STYLE ONLY — never price/offers/tier (FAIR-1). Inert in PR-0.
+/** The service/guidance posture that best fits the shopper. */
+export type PersonaStyle = "ready" | "researcher" | "deal_seeker" | "needs_guidance";
+/** Who the shopper is buying for. `b2b` still routes to escalate; `gift` is style-only. */
+export type PersonaRole = "for_self" | "gift" | "b2b";
+/** Concrete in-session behavioral events (server-derived; never trusted raw). */
+export type BehavioralEvent = "dwell" | "hesitation" | "repeat_question" | "pitch_declined" | "idle_then_return" | "rage";
+export type Device = "mobile" | "desktop" | "tablet";
+export type Entry = "ad" | "organic" | "direct" | "email" | "social";
+export type SessionRecency = "new" | "returning" | "cross_day";
+
 /**
  * The TUNABLE slice of agent behavior that a self-improvement candidate may vary. It shapes the sales
  * *voice* and proactivity only — the guardrails (safety escalation, injection-as-data,
@@ -88,6 +101,14 @@ export interface HistoryTurn {
 export interface RecalledFact {
   text: string;
   class?: string;
+  /**
+   * Persona-disposition layer (PR-0). OPAQUE bare-string data on the brain side — NOT imported from
+   * @palup/widget-memory (preserves the no-dep-cycle contract), but structurally compatible with that
+   * package's typed `Disposition`. The brain NEVER branches on it (Inv 10 / fairness): a later PR
+   * translates a recalled disposition through a code-owned whitelist into a benign voice directive,
+   * never trusting it raw. Inert in PR-0.
+   */
+  disposition?: Array<{ axis: string; value: string; provenance: string; confidence: number; sourceQuote?: string }>;
 }
 
 /**
@@ -173,7 +194,35 @@ export interface Signals {
    * account the support/commerce path (support.ts) verifies ownership against — never a constant.
    */
   shopperId?: string;
+  // ── Persona / shopper-disposition layer (PR-0, INERT) ──────────────────────────────────────────
+  // All optional; the wire-key NAMES match full-corpus.json so the eval corpus feeds the brain with zero
+  // corpus edits. `personaStyle`/`personaRole` are per-turn classified + TRANSIENT (never persisted;
+  // mirror `mood`). The rest are SERVER-derived + validated in deriveServingSignals, never trusted raw.
+  /** The classified service/guidance posture for this turn (transient). */
+  personaStyle?: PersonaStyle;
+  /** Who the shopper is buying for (b2b → escalate; gift → style only). */
+  personaRole?: PersonaRole;
+  /** Concrete in-session behavioral events (server-derived). */
+  behavioral?: BehavioralEvent[];
+  device?: Device;
+  entry?: Entry;
+  sessionRecency?: SessionRecency;
+  /** Relationship modifiers (server-derived from CSAT/complaint/return history) — style only, never price. */
+  csat?: number;
+  hasComplaintHistory?: boolean;
+  hasReturnHistory?: boolean;
 }
+
+/**
+ * Persona-layer flag tokens the eval harness grades against. `Decision.flags` stays `string[]`; this is
+ * the controlled VOCABULARY (grade.ts `holds()` asserts these strings). PR-0 documents them; later PRs
+ * emit them. Keeping the vocabulary typed here prevents drift between emitters and the graded corpus.
+ */
+export type PersonaFlag =
+  | "persona:researcher" | "persona:deal_seeker" | "persona:needs_guidance" | "persona:ready"
+  | "persona:role_gift" | "persona:role_self"
+  | "behavioral:dwell" | "behavioral:hesitation" | "behavioral:repeat_question" | "behavioral:declined" | "behavioral:idle_return" | "behavioral:rage"
+  | "disposition:one_strike" | "safety:regulated_claim" | "memory:style_applied";
 
 export interface Decision {
   mode: Mode;

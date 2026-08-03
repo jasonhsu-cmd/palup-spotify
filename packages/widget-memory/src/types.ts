@@ -1,5 +1,6 @@
 import type { MemoryConsent, Region } from "./consent.js";
 import type { FactClass, TenantSensitivityPolicy } from "./classifier.js";
+import type { Disposition } from "./disposition.js";
 
 // Public request/response shapes for the memory service (T7). Kept in their own module so both
 // service.ts and index.ts can depend on them without a cycle.
@@ -30,6 +31,9 @@ export interface MemoryTurn {
 export interface RecalledFact {
   text: string;
   class: FactClass;
+  /** Persona-disposition layer (PR-0, inert): durable style/preference signals extracted with the fact.
+   * Consent-gated + fairness-structural (no inferred provenance). */
+  disposition?: Disposition[];
 }
 
 /** The shape every stored fact's `VectorRecord.metadata` carries (service.ts `remember`/`recall`; also
@@ -40,6 +44,8 @@ export interface FactMetadata {
   text: string;
   class: FactClass;
   expiresAt: string; // ISO-8601
+  /** Persona-disposition layer (PR-0, inert): dispositions stored alongside the fact (fairness-structural). */
+  disposition?: Disposition[];
 }
 
 export interface MemoryService {
