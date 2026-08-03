@@ -24,7 +24,7 @@ const grounding = new StaticGroundingAdapter();
 const commerce = new MockCommerceAdapter();
 const store = new FileStore(".palup-state");
 
-let champion: Champion = { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0 } };
+let champion: Champion = { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0, counterMetrics: { returnRate: 0.1, complaintRate: 0.05, optOutRate: 0.15, escalationRecall: 1 } } };
 let brain = createBrain(agent, grounding, champion.policy, commerce, "shopper-demo");
 const myScenarios: Scenario[] = [];
 
@@ -85,7 +85,7 @@ async function route(line: string): Promise<"continue" | "quit"> {
     return "continue";
   }
   if (c === "/reset") {
-    champion = { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0 } };
+    champion = { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0, counterMetrics: { returnRate: 0.1, complaintRate: 0.05, optOutRate: 0.15, escalationRecall: 1 } } };
     brain = createBrain(agent, grounding, champion.policy, commerce, "shopper-demo");
     myScenarios.length = 0;
     console.log(`\nreset to baseline champion + cleared your scenarios.\n`);

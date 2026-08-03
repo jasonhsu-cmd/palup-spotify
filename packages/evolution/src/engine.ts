@@ -95,9 +95,25 @@ export class EvolutionEngine {
     if (!cand.safetyPass) reasons.push("safety-floor-failed");
     if (!cand.floorPass) reasons.push("deterministic-floor-failed");
     if (cand.qualityScore < champ.qualityScore) reasons.push("quality-regressed");
+    // ADR-0014 #5 — counter-metrics are MANDATORY EVIDENCE, checked FAIL-CLOSED. A candidate MUST carry
+    // the measured counter-metrics (escalationRecall + returnRate + optOutRate; control-plane/counter-
+    // metrics.ts) and the champion baseline must too, or the gate blocks: an engagement/quality lift can
+    // NEVER promote on its own without proof it did not worsen the outcomes that matter. This closes the
+    // old vacuity where absent counter-metrics defaulted to 0 and `0 > 0` never blocked. (complaintRate is
+    // a LIVE-TRAFFIC metric sourced from the canary window — ADR-0014 #10 — so it is optional here; when
+    // BOTH sides carry it, a rise still blocks.)
+    const candCm = counterMetricsComplete(cand.counterMetrics);
+    const champCm = counterMetricsComplete(champ.counterMetrics);
+    if (!candCm) reasons.push("counter-metrics-absent");
+    else if (!champCm) reasons.push("counter-metrics-baseline-absent"); // no baseline ⇒ can't prove not-worse
     const worseCounters =
-      (cand.counterMetrics?.returnRate ?? 0) > (champ.counterMetrics?.returnRate ?? 0) ||
-      (cand.counterMetrics?.complaintRate ?? 0) > (champ.counterMetrics?.complaintRate ?? 0);
+      candCm && champCm &&
+      (cand.counterMetrics!.returnRate! > champ.counterMetrics!.returnRate! ||
+        cand.counterMetrics!.optOutRate! > champ.counterMetrics!.optOutRate! ||
+        cand.counterMetrics!.escalationRecall! < champ.counterMetrics!.escalationRecall! ||
+        (cand.counterMetrics!.complaintRate !== undefined &&
+          champ.counterMetrics!.complaintRate !== undefined &&
+          cand.counterMetrics!.complaintRate > champ.counterMetrics!.complaintRate));
     if (worseCounters) reasons.push("counter-metrics-worsened");
     // Fail-CLOSED cross-family gate (ADR-0014): a grade the grader marked ADVISORY (gating === false —
     // a same-family judge, e.g. Gemini grading the Gemini agent, or no cross-family judge available) can
@@ -106,8 +122,9 @@ export class EvolutionEngine {
     if (cand.gating === false) reasons.push("advisory-grade-not-gating");
     const improved = delta > 0;
     const pass =
-      cand.safetyPass && cand.floorPass && cand.qualityScore >= champ.qualityScore && improved && !worseCounters && cand.gating !== false;
-    if (pass) reasons.push("passed: safe + no-regression + improved");
+      cand.safetyPass && cand.floorPass && cand.qualityScore >= champ.qualityScore && improved &&
+      candCm && champCm && !worseCounters && cand.gating !== false;
+    if (pass) reasons.push("passed: safe + no-regression + improved + counter-metrics ok");
     else if (reasons.length === 0 && !improved) reasons.push("no-improvement-over-champion");
     return { pass, reasons, delta };
   }
@@ -219,6 +236,18 @@ export class EvolutionEngine {
  * hashes IDENTICALLY to the runtime-state chain (packages/platform-ports/src/audit-hash.ts). No new
  * dependency — node:crypto is stdlib and already used there.
  */
+/** All THREE deterministically-measured counter-metrics present (escalationRecall + returnRate +
+ * optOutRate; control-plane/counter-metrics.ts). complaintRate is canary-sourced (ADR-0014 #10) and
+ * optional. Any missing ⇒ the gate fails CLOSED (ADR-0014 #5) — no promotion on quality/engagement alone. */
+function counterMetricsComplete(cm?: PolicyMetrics["counterMetrics"]): boolean {
+  return (
+    !!cm &&
+    typeof cm.returnRate === "number" &&
+    typeof cm.optOutRate === "number" &&
+    typeof cm.escalationRecall === "number"
+  );
+}
+
 function hashAuditEntry(base: Omit<AuditEntry, "hash">): string {
   return createHash("sha256").update(canonicalize(base)).digest("hex");
 }
