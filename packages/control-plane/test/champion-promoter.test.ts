@@ -12,7 +12,7 @@ import { promoteToServing, rollbackServing, servingChampion } from "../src/champ
 
 // Complete counter-metrics on both baseline + candidate (ADR-0014 #5 fail-closed gate) so the candidate
 // passes the gate and this suite can exercise the promote→serving bridge (its actual subject).
-const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
 const CHAMP_METRICS: PolicyMetrics = { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: BASE_CM };
 const P = (id: string): Policy => ({ id, label: id, styleDirective: `voice-${id}`, proactivityDefault: "balanced" });
 const mkEngine = () =>

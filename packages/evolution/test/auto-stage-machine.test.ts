@@ -9,7 +9,7 @@ import { EvolutionEngine, MockGrader, type PolicyMetrics } from "../src/index.js
 // and ONLY on an engine-DERIVED pass (never a caller boolean). autoPromotable is the read-only predicate
 // the durable serving write consults; markAutoPromoted (actor auto-loop) is after-commit bookkeeping.
 
-const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
 const champMetrics: PolicyMetrics = { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.7, counterMetrics: CM };
 const cand = (over: Partial<PolicyMetrics>): PolicyMetrics => ({ policyId: "cand", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { ...CM, returnRate: 0.06 }, ...over });
 const P = (id: string): Policy => ({ id, label: id, styleDirective: `voice-${id}`, proactivityDefault: "balanced" });

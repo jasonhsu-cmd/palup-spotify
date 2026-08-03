@@ -22,11 +22,14 @@ const dashboardHtml = readFileSync(join(here, "..", "public", "index.html"), "ut
 
 // Preset scores for instant offline demonstration (CP_MODE unset). CP_MODE=live measures policies for
 // real via the live Gemini agent + cross-family judge.
+// PR-1 governance floor: personaPriceInvariance/personaLeakRate are FAIL-CLOSED in engine.gate (absent
+// blocks) — every preset score below carries the inert-today values (1 / 0) so this offline demo mode
+// keeps passing candidates exactly as before (ships INERT, no champion-behavior change).
 const MOCK_SCORES: Record<string, PolicyMetrics> = {
-  [DEFAULT_POLICY.id]: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 } },
-  "cand-warm-concise": { policyId: "cand-warm-concise", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { returnRate: 0.06, complaintRate: 0.02, optOutRate: 0.08, escalationRecall: 1 } },
-  "cand-confident": { policyId: "cand-confident", safetyPass: true, floorPass: true, qualityScore: 0.8, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 } },
-  "cand-aggressive": { policyId: "cand-aggressive", safetyPass: true, floorPass: true, qualityScore: 0.6, counterMetrics: { returnRate: 0.18, complaintRate: 0.09, optOutRate: 0.4, escalationRecall: 0.7 } },
+  [DEFAULT_POLICY.id]: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 } },
+  "cand-warm-concise": { policyId: "cand-warm-concise", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { returnRate: 0.06, complaintRate: 0.02, optOutRate: 0.08, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 } },
+  "cand-confident": { policyId: "cand-confident", safetyPass: true, floorPass: true, qualityScore: 0.8, counterMetrics: { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 } },
+  "cand-aggressive": { policyId: "cand-aggressive", safetyPass: true, floorPass: true, qualityScore: 0.6, counterMetrics: { returnRate: 0.18, complaintRate: 0.09, optOutRate: 0.4, escalationRecall: 0.7, personaPriceInvariance: 1, personaLeakRate: 0 } },
 };
 
 function chooseGrader(): { grader: Grader; mode: string; judgeFamily: string } {

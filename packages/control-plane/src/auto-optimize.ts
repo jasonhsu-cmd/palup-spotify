@@ -45,7 +45,10 @@ async function main() {
   // and any in-process operator surface share this ONE registry so a routed candidate is visible/actionable.
   const engines = new EngineRegistry((tenantId) => {
     void tenantId;
-    return new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0, counterMetrics: { returnRate: 0.1, complaintRate: 0.05, optOutRate: 0.15, escalationRecall: 1 } } }, grader });
+    // PR-1 governance floor: personaPriceInvariance/personaLeakRate are FAIL-CLOSED in engine.gate (absent
+    // blocks) — seed the bootstrap champion with the inert-today values (1 / 0) so this entrypoint keeps
+    // gating exactly as before (ships INERT, no champion-behavior change).
+    return new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0, counterMetrics: { returnRate: 0.1, complaintRate: 0.05, optOutRate: 0.15, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 } } }, grader });
   });
 
   // Re-grade a reply on a sales-quality rubric via the cross-family judge (for the live canary measurement).
