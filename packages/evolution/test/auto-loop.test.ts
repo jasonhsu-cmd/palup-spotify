@@ -104,6 +104,13 @@ describe("AutoLoop", () => {
     expect(engine.getChampion().policy.id).toBe("champion-v0");
   });
 
+  it("FAILS CLOSED when the checker resolves to undefined (contract violation) — only an explicit null is 'clear'", async () => {
+    const { engine, loop } = autoLoopWith((async () => undefined) as unknown as () => Promise<{ scope: string } | null>);
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
   it("stops at awaiting_approval when autoApprove is off (HITL preserved)", async () => {
     const store = new MemoryStore();
     const cm = await grader.grade(champion);
