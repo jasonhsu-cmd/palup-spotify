@@ -75,7 +75,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
     await app.close();
   });
 
-  it("consent gate honored: a special-category candidate is classified + gated INSIDE remember() and never written (Consent 2 is hardcoded 'unknown' — PR-11 blocker, still unresolved)", async () => {
+  it("consent gate honored: a special-category candidate is classified + gated INSIDE remember() and never written (no /consent record for this subject → Consent 2 fail-closes to 'unknown' — PR-11a wires the lookup; full consent UX/CMP is still a later PR)", async () => {
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -93,7 +93,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
     });
 
     expect(res.statusCode).toBe(200);
-    expect(upsertSpy).not.toHaveBeenCalled(); // Consent 2 required, and it's hardcoded "unknown" -> denied
+    expect(upsertSpy).not.toHaveBeenCalled(); // Consent 2 required; no /consent record exists for this subject -> fail-closed "unknown" -> denied
     const log = await store.readAudit({ tenantId: "demo" });
     expect(log.map((r) => r.action)).not.toContain("write.special");
     expect(log.map((r) => r.action)).not.toContain("write.ordinary");

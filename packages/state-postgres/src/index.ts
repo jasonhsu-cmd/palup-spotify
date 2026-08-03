@@ -42,3 +42,10 @@ export {
   type AutoPromoteGateResult,
   type SetOptInOpts,
 } from "./autopromote-optin.js";
+export {
+  recordConsent,
+  lookupConsent,
+  type ConsentRecord,
+  type RecordConsentInput,
+  type LookupConsentInput,
+} from "./runtime-consent-store.js";

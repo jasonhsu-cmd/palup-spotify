@@ -96,4 +96,29 @@ describe("deriveServingSignals — client signals are untrusted", () => {
       expect(out.shopperId).toBeUndefined(); // the id is gated on `verified` too — never keys ownership unverified
     });
   });
+
+  // PR-11a (ADR-0015 T12) — ctx.consent is the server's OWN consent-store lookup result, threaded in by
+  // the caller (server.ts, BEFORE this function runs). This closes the old hardcode: memoryOrdinary/
+  // memorySpecial now reflect ctx.consent when the caller supplies it, and still fail closed to
+  // "unknown"/"unknown" when it doesn't (byte-identical default to before this field existed).
+  describe("PR-11a: ctx.consent (server-looked-up memory consent)", () => {
+    it("no ctx.consent supplied ⇒ still fails closed to unknown/unknown (unchanged default)", () => {
+      const out = deriveServingSignals(undefined, ctx);
+      expect(out.consent).toEqual({ email: "unknown", sms: "unknown", memoryOrdinary: "unknown", memorySpecial: "unknown" });
+    });
+
+    it("ctx.consent is threaded straight into signals.consent.memoryOrdinary/memorySpecial", () => {
+      const out = deriveServingSignals(undefined, { ...ctx, consent: { memoryOrdinary: "in", memorySpecial: "out" } });
+      expect(out.consent).toEqual({ email: "unknown", sms: "unknown", memoryOrdinary: "in", memorySpecial: "out" });
+    });
+
+    it("the client's OWN signals.consent is still ignored — only ctx.consent (server lookup) is consulted", () => {
+      const out = deriveServingSignals(
+        { consent: { memoryOrdinary: "in", memorySpecial: "in" } } as Signals,
+        { ...ctx, consent: { memoryOrdinary: "out", memorySpecial: "unknown" } },
+      );
+      // The server's ctx.consent ("out"/"unknown") wins — NOT the client's claimed "in"/"in".
+      expect(out.consent).toEqual({ email: "unknown", sms: "unknown", memoryOrdinary: "out", memorySpecial: "unknown" });
+    });
+  });
 });
