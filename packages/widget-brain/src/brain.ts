@@ -324,8 +324,9 @@ const PITCH_PLAYBOOK: Record<PitchKind, string> = {
 };
 
 // ── Persona-style directives (PR-3, flag DISPOSITION_STYLE) ──────────────────────────────────────
-// Shopper-disposition program: consume a SUPPLIED signals.personaStyle (no classifier yet — that's
-// PR-5) into a benign, code-owned, closed-enum-keyed STYLE directive appended to systemExtra on the
+// Shopper-disposition program: consume signals.personaStyle — either SUPPLIED by the caller (PR-3,
+// always wins) or auto-detected by classifyPersonaStyle below (PR-5, flag DISPOSITION_CLASSIFIER) —
+// into a benign, code-owned, closed-enum-keyed STYLE directive appended to systemExtra on the
 // clean sales path. This shapes SERVICE/GUIDANCE VOICE ONLY (docs/design/shopper-widget.md §4 Persona;
 // FAIR-1 / memory Inv 9) — it is NEVER threaded into selectPitch, so pitch eligibility, price, outbound,
 // and the INV-E proactivity budget stay byte-identical across every PersonaStyle. Each directive is
@@ -342,6 +343,92 @@ const PERSONA_STYLE_DIRECTIVE: Record<PersonaStyle, string> = {
   ready:
     "\nPERSONA STYLE - ready to buy: Be efficient. Confirm what they want and help them move to checkout - add no extra pitch, upsell, or friction.",
 };
+
+// ── Persona-style MODEL CLASSIFIER (PR-5, flag DISPOSITION_CLASSIFIER) ────────────────────────────
+// Phase-1 auto-detection of `signals.personaStyle` via the model port (docs/design/shopper-widget.md
+// §4 Persona; shopper-disposition plan PR-5). Only ever consulted when the caller did NOT already
+// supply `signals.personaStyle` — PR-3's deterministic, caller-supplied value ALWAYS wins over the
+// classifier (see the call site in decide()). This is a genuinely SEPARATE, small `model.complete` call
+// rather than folded into the reply-generation call below: the fixed, code-owned
+// PERSONA_STYLE_DIRECTIVE text must be validated (whitelisted) BEFORE it is ever allowed to shape a
+// prompt (the review bar carried from PR-3), so classify-THEN-generate is the shape that keeps that
+// guarantee intact — a single folded call would have to hand the model all four candidate directives
+// before we know which (if any) to trust, which weakens the whitelist-before-directive contract without
+// actually saving a round trip once you account for the fallback a folded design would still need on a
+// malformed response. `model.complete`'s response TEXT is used for ONE thing only — parse + validate
+// against the closed `PersonaStyle` enum below — and is NEVER concatenated into `systemExtra` or any
+// later prompt; only the fixed `PERSONA_STYLE_DIRECTIVE[...]` string (identical to PR-3) ever is.
+//
+// FAIL-SAFE by construction: a network error, a throw, a timeout (any rejected promise — the caller's
+// `ModelPort` adapter is responsible for its own timeout policy; we just treat any rejection uniformly),
+// unparseable JSON, or a label outside the closed enum all resolve to `undefined` here — which the call
+// site treats identically to "no personaStyle supplied": no directive is appended, no `persona:*` flag
+// is set, and the sales reply is still generated normally by the UNCHANGED, unrelated `model.complete`
+// call further down. The classifier can never withhold or block a reply — it can only ever ADD a
+// directive when its own output passes the whitelist.
+const PERSONA_CLASSIFIER_SYSTEM_PROMPT =
+  'Classify the shopper\'s message into EXACTLY ONE service/guidance style: "ready" (ready to buy, wants ' +
+  'an efficient close), "researcher" (wants ingredient/evidence detail, precise and skeptical of hype), ' +
+  '"deal_seeker" (focused on discounts, promos, or best value), or "needs_guidance" (unsure what they ' +
+  "want yet, would benefit from a discovery question). Output ONLY this JSON shape, nothing else - no " +
+  'prose, no markdown fences: {"personaStyle":"ready|researcher|deal_seeker|needs_guidance"}';
+
+/** Pulls the first JSON object out of the classifier's response text, tolerating a markdown code fence
+ * (mirrors judge/model-judge.ts's + widget-memory/distiller.ts's own `extractJson`). Throws on anything
+ * that isn't extractable JSON - the caller fails closed (undefined persona) rather than ever treating
+ * model prose as a classification. */
+function extractPersonaClassifierJson(text: string): { personaStyle?: unknown } {
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const raw = fence?.[1] ?? text;
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("persona classifier: no JSON object in response");
+  return JSON.parse(raw.slice(start, end + 1)) as { personaStyle?: unknown };
+}
+
+/**
+ * Classifies ONE shopper message into a `PersonaStyle`, or `undefined` on ANY failure (fail-safe). Never
+ * throws. Never returns a value outside the closed enum. Never lets the model's own free-text label
+ * reach anything but this narrow parse+whitelist check.
+ */
+async function classifyPersonaStyle(model: ModelPort, message: string, tenantId: string): Promise<PersonaStyle | undefined> {
+  let responseText: string;
+  try {
+    const res = await model.complete({
+      messages: [
+        { role: "system", content: PERSONA_CLASSIFIER_SYSTEM_PROMPT },
+        { role: "user", content: message },
+      ],
+      temperature: 0,
+      tenantId,
+      responseSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          personaStyle: { type: "string", enum: Object.keys(PERSONA_STYLE_DIRECTIVE) },
+        },
+        required: ["personaStyle"],
+      },
+    });
+    responseText = res.text;
+  } catch {
+    return undefined; // fail-safe — a model/network error or timeout never blocks the reply
+  }
+  let parsed: { personaStyle?: unknown };
+  try {
+    parsed = extractPersonaClassifierJson(responseText);
+  } catch {
+    return undefined; // fail-safe — unparseable output is never treated as a classification
+  }
+  const label = parsed.personaStyle;
+  // WHITELIST — the SAME guarded-lookup shape PR-3 built (`const directive = PERSONA_STYLE_DIRECTIVE[x];
+  // if (directive) ...`): only a value that is an actual PERSONA_STYLE_DIRECTIVE key is trusted. A
+  // garbage/out-of-enum/mistyped label is discarded HERE, before it can ever reach systemExtra or a
+  // persona:* flag - the model's raw free-text label is never itself used for anything past this check.
+  return typeof label === "string" && Object.prototype.hasOwnProperty.call(PERSONA_STYLE_DIRECTIVE, label)
+    ? (label as PersonaStyle)
+    : undefined;
+}
 
 // Internal, agent-INITIATED instruction for a proactive exit-intent moment (§5). This is NOT a shopper
 // utterance and is never classified as one; it tells the model to make the single, honest cart-recovery
@@ -433,6 +520,21 @@ export function createBrain(
   // Inv 10). Cross-turn bookkeeping (arming the pitch_declined one-strike, running counters) lives in
   // session.ts's SessionState; this brain only ever consumes THIS turn's signals.behavioral.
   dispositionBehavioralEnabled = false,
+  // Shopper-disposition program PR-5 — the DISPOSITION_CLASSIFIER posture flag (operator/deploy-time,
+  // threaded exactly like the disposition flags above; never hardcoded on, never read from process.env
+  // inside this package). Default OFF ⇒ every existing call site keeps working UNCHANGED and
+  // byte-identical: `classifyPersonaStyle` is simply never invoked. Even when ON, it only ever runs when
+  // `dispositionStyleEnabled` is ALSO on (otherwise nothing would ever consume its output, so calling it
+  // would just be a wasted model round-trip) AND the caller didn't already supply `signals.personaStyle`
+  // (PR-3's deterministic value always wins). Structurally incapable of doing anything but feeding the
+  // SAME PR-3 guarded-lookup/systemExtra path — it can never reach selectPitch/pitch/price/outbound
+  // (FAIR-1, Inv 10), and it runs at the EXACT clean-sales-path position the PR-3 lookup already
+  // occupied, i.e. strictly AFTER every guardrail rung (kill/injection/safety/identity/giveaway/support/
+  // honest-uncertainty/b2b/proactive-exit-intent) has already returned — see
+  // brain-persona-classifier.test.ts's precedence assertions. Fail-safe: any throw/timeout/malformed/
+  // out-of-enum classifier result is indistinguishable from "no personaStyle supplied" — the sales reply
+  // is always still generated, by the unrelated, unchanged final `model.complete` call.
+  dispositionClassifierEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -810,18 +912,34 @@ export function createBrain(
         systemExtra +=
           "\nSKEPTIC POLICY: The shopper is skeptical about efficacy. Back every claim with SPECIFIC facts from the CATALOG (named actives/ingredients, what the product is formulated for, how to use it) — never vague hype. Be honest about what it can and can't do and that results vary. Disclose that you are an AI assistant.";
       }
-      // Shopper-disposition program PR-3 (flag DISPOSITION_STYLE) — a SUPPLIED signals.personaStyle (no
-      // classifier yet, PR-5) adds ONE closed-enum-keyed, code-owned voice directive to systemExtra.
-      // Flag OFF (default) ⇒ this block never runs, so behavior is byte-identical to before this PR.
-      // Deliberately does NOT touch `pitch`/selectPitch/outbound below (FAIR-1, Inv 10) — the eligibility
-      // caps, price/offer surface, and INV-E budget stay identical across every persona style.
-      if (dispositionStyleEnabled && signals.personaStyle) {
-        // Guard the lookup: an out-of-enum personaStyle (a future mis-wired classifier / un-whitelisted
-        // intake) yields undefined — skip rather than append the literal "undefined" or emit an
-        // out-of-vocab flag. Defense in depth on top of the closed PersonaStyle enum + deriveServingSignals.
-        const directive = PERSONA_STYLE_DIRECTIVE[signals.personaStyle];
+      // Shopper-disposition program PR-3 (flag DISPOSITION_STYLE) — a SUPPLIED signals.personaStyle adds
+      // ONE closed-enum-keyed, code-owned voice directive to systemExtra. Flag OFF (default) ⇒ this
+      // block never runs, so behavior is byte-identical to before PR-3. Deliberately does NOT touch
+      // `pitch`/selectPitch/outbound below (FAIR-1, Inv 10) — the eligibility caps, price/offer surface,
+      // and INV-E budget stay identical across every persona style.
+      //
+      // PR-5 (flag DISPOSITION_CLASSIFIER) — when the caller did NOT already supply signals.personaStyle
+      // (PR-3's deterministic value always wins) and both disposition flags are on, auto-detect it via
+      // classifyPersonaStyle. This call sits at the EXACT clean-sales-path position the lookup below
+      // already occupied — strictly AFTER every guardrail rung has already returned (kill/injection/
+      // safety/identity/giveaway/support/honest-uncertainty/b2b/proactive-exit-intent all short-circuit
+      // above), so it is structurally unreachable from any of them (brain-persona-classifier.test.ts).
+      // Fail-safe: classifyPersonaStyle resolves to undefined on any throw/timeout/malformed/out-of-enum
+      // result, which is indistinguishable here from "no personaStyle supplied" — the sales reply below
+      // is generated exactly the same either way, by the separate, unchanged final `model.complete` call.
+      const classifiedPersonaStyle =
+        dispositionClassifierEnabled && dispositionStyleEnabled && signals.personaStyle === undefined
+          ? await classifyPersonaStyle(model, message, tenantId)
+          : undefined;
+      const effectivePersonaStyle = signals.personaStyle ?? classifiedPersonaStyle;
+      if (dispositionStyleEnabled && effectivePersonaStyle) {
+        // Guard the lookup: an out-of-enum personaStyle (a mis-wired classifier / un-whitelisted intake)
+        // yields undefined — skip rather than append the literal "undefined" or emit an out-of-vocab
+        // flag. Defense in depth on top of the closed PersonaStyle enum + deriveServingSignals +
+        // classifyPersonaStyle's own whitelist.
+        const directive = PERSONA_STYLE_DIRECTIVE[effectivePersonaStyle];
         if (directive) {
-          flags.push(`persona:${signals.personaStyle}`);
+          flags.push(`persona:${effectivePersonaStyle}`);
           systemExtra += directive;
         }
       }
