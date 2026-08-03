@@ -1,5 +1,6 @@
 export { EvolutionEngine, verifyAuditChain } from "./engine.js";
 export type { EngineOptions } from "./engine.js";
+export { EngineRegistry } from "./engine-registry.js";
 export { MockGrader } from "./mock-grader.js";
 export { SEED_CANDIDATES, seedCandidates } from "./proposer.js";
 export { AutoLoop } from "./auto-loop.js";

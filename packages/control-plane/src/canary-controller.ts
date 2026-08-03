@@ -12,10 +12,9 @@ import { CRITERIA } from "./scenarios.js";
 
 const CANARY = "canary"; // KV collection (rollout config), keyed per SERVING tenant
 const CONFIG_KEY = "config";
-// Traffic (shopper messages/replies) lives in the SERVING tenant's own partition. NOTE: the shadow /
-// stats reads below still target a single demo tenant — per-tenant shadow-grading is the separate,
-// deferred enablement work; THIS fix only isolates the canary CONFIG so start/stop can't go cross-tenant.
-const SERVING = { tenantId: "demo" };
+// Traffic (shopper messages/replies) lives in the SERVING tenant's own partition. The shadow/stats
+// reads below take the tenantId and read ONLY that merchant's traffic (ADR-0014 #4 blast-radius): a
+// shadow-eval or stats read for one merchant can never see another's conversations.
 const TRAFFIC = "traffic"; // append stream
 const GENERAL = ["warm", "needs-first", "grounded", "concise", "no-pressure"]; // general sales-quality rubric
 
@@ -33,8 +32,8 @@ export const DEFAULT_CANARY: Policy = {
   proactivityDefault: "balanced",
 };
 
-export async function readTrafficLog(store: RuntimeStatePort): Promise<Interaction[]> {
-  return store.readStream<Interaction>(SERVING, TRAFFIC);
+export async function readTrafficLog(store: RuntimeStatePort, tenantId: string): Promise<Interaction[]> {
+  return store.readStream<Interaction>({ tenantId }, TRAFFIC);
 }
 export async function canaryConfig(store: RuntimeStatePort, tenantId: string): Promise<CanaryConfig | null> {
   return (await store.get<CanaryConfig>({ tenantId }, CANARY, CONFIG_KEY)) ?? null;
@@ -65,10 +64,10 @@ export async function stopCanary(store: RuntimeStatePort, tenantId: string): Pro
   return cfg;
 }
 
-/** Per-policy live counts + escalation rate from the real traffic log. */
-export async function canaryStats(store: RuntimeStatePort): Promise<Record<string, { count: number; escalationRate: number }>> {
+/** Per-policy live counts + escalation rate from THIS tenant's real traffic log. */
+export async function canaryStats(store: RuntimeStatePort, tenantId: string): Promise<Record<string, { count: number; escalationRate: number }>> {
   const by: Record<string, { count: number; esc: number }> = {};
-  for (const e of await readTrafficLog(store)) {
+  for (const e of await readTrafficLog(store, tenantId)) {
     const b = (by[e.servedBy] ??= { count: 0, esc: 0 });
     b.count++;
     if (e.escalate) b.esc++;
@@ -82,8 +81,8 @@ export async function canaryStats(store: RuntimeStatePort): Promise<Record<strin
  * reply on general sales-quality criteria; compare. This is a real signal from real conversations —
  * no synthetic corpus.
  */
-export async function shadowEvaluate(store: RuntimeStatePort, model: ModelPort, judge: JudgePort, canaryPolicy: Policy, sampleN = 8) {
-  const champ = (await readTrafficLog(store)).filter((e) => e.servedBy === DEFAULT_POLICY.id && e.message.trim().length > 2);
+export async function shadowEvaluate(store: RuntimeStatePort, model: ModelPort, judge: JudgePort, tenantId: string, canaryPolicy: Policy, sampleN = 8) {
+  const champ = (await readTrafficLog(store, tenantId)).filter((e) => e.servedBy === DEFAULT_POLICY.id && e.message.trim().length > 2);
   const sample = champ.slice(-sampleN);
   const grounding = new StaticGroundingAdapter();
   const canaryBrain = createBrain(model, grounding, canaryPolicy, new MockCommerceAdapter(), "shopper-demo");

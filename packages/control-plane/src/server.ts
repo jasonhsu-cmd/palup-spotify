@@ -227,7 +227,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   const canaryTenant = (v: unknown): string => (typeof v === "string" && v ? v : "demo");
   app.get("/api/canary", async (req) => {
     const tenantId = canaryTenant((req.query as { tenantId?: unknown })?.tenantId);
-    return { config: await canaryConfig(runtimeStore, tenantId), stats: await canaryStats(runtimeStore) };
+    return { config: await canaryConfig(runtimeStore, tenantId), stats: await canaryStats(runtimeStore, tenantId) };
   });
   app.post("/api/canary/start", async (req) => {
     const b = (req.body ?? {}) as { pct?: number; tenantId?: unknown };
@@ -243,7 +243,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
     const b = (req.body ?? {}) as { tenantId?: unknown };
     const tenantId = canaryTenant(b.tenantId);
     const policy = (await canaryConfig(runtimeStore, tenantId))?.policy ?? DEFAULT_CANARY;
-    const result = await shadowEvaluate(runtimeStore, createVertexAdapter(), createAnthropicApiJudge(), policy);
+    const result = await shadowEvaluate(runtimeStore, createVertexAdapter(), createAnthropicApiJudge(), tenantId, policy);
     // ADR-0014 #9 — a canary "rollback" verdict stops the canary AND freezes this merchant's auto-promote
     // fast-lane (offline-testable helper; the live shadowEvaluate above stays credential-gated).
     const { rolledBack } = await applyCanaryVerdict(runtimeStore, tenantId, result.verdict);
