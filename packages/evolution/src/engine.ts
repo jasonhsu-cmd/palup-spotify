@@ -9,6 +9,7 @@ import type {
   Grader,
   PolicyMetrics,
   PromotionEvent,
+  StageMarker,
 } from "./types.js";
 
 export interface EngineOptions {
@@ -197,6 +198,88 @@ export class EvolutionEngine {
       delta: rec.gate?.delta ?? 0,
     });
     this.log("engine", "promote", id, { from: this.prevChampion.policy.id, to: rec.policy.id });
+    return this.champion;
+  }
+
+  // ─── ADR-0014 T4 auto-optimize lane (engine-ENFORCED stage completion, inv #3) ────────────────────
+  // These methods make "no skippable stage" a property of the ENGINE, not the orchestrator loop: each
+  // advances only from the correct prior stage and only on an engine-DERIVED pass, and the durable
+  // serving write (serveAutoChampion) refuses unless autoPromotable() re-derives ok. This forecloses the
+  // PR #125 failure class (self-approval reaching the 100% slot skipping shadow/canary) at the engine.
+
+  /** Enter the auto-optimize lane. The ONLY entry, and the single place that demands a POSITIVE
+   * cross-family gating grade (gating===true) — engine.gate() passes gating===undefined (the offline
+   * MockGrader opt-out), which must NEVER auto-promote to shoppers. */
+  beginAutoOptimize(id: string): CandidateRecord {
+    if (this.killed) throw new Error("kill switch is ON — auto-optimize halted");
+    const rec = this.require(this.candidates.get(id), id);
+    if (rec.status !== "awaiting_approval") throw new Error(`cannot begin auto-optimize for ${id} in status ${rec.status} (needs a gate pass)`);
+    if (rec.gate?.pass !== true) throw new Error(`cannot begin auto-optimize for ${id} — gate did not pass`);
+    if (rec.metrics?.gating !== true) throw new Error(`cannot begin auto-optimize for ${id} — requires a POSITIVE cross-family gating grade (gating===true), got ${String(rec.metrics?.gating)}`);
+    rec.auto = { stage: "eval-passed", gating: true };
+    this.log("engine", "auto_begin", id, { gating: true });
+    return rec;
+  }
+
+  /** Record the shadow (0%) result. Advances to "shadowed" ONLY if the engine-derived pass holds (finite
+   * counts + no regression beyond maxRegression). Throws unless the prior stage is eval-passed. */
+  recordShadow(id: string, raw: { n: number; delta: number; at: string }, bounds: { maxRegression: number }): CandidateRecord {
+    const rec = this.require(this.candidates.get(id), id);
+    if (rec.auto?.stage !== "eval-passed") throw new Error(`cannot record shadow for ${id} — stage is ${rec.auto?.stage ?? "none"}, expected eval-passed`);
+    const pass = Number.isFinite(raw.n) && raw.n > 0 && Number.isFinite(raw.delta) && raw.delta >= -bounds.maxRegression;
+    const marker: StageMarker = { n: raw.n, delta: raw.delta, at: raw.at, pass };
+    rec.auto.shadow = marker;
+    if (pass) rec.auto.stage = "shadowed";
+    this.log("engine", "auto_shadow", id, { n: raw.n, delta: raw.delta, pass });
+    return rec;
+  }
+
+  /** Record the canary (1-5%) result. Advances to "canaried" ONLY if the engine-derived pass holds
+   * (statistical power AND delta≥minDelta — the SAME arithmetic as control-plane windowedVerdictFor,
+   * thresholds INJECTED so the engine never imports control-plane). Throws unless shadow passed. */
+  recordCanary(id: string, raw: { n: number; delta: number; elapsedMs: number; at: string }, power: { minN: number; minWindowMs: number; minDelta: number }): CandidateRecord {
+    const rec = this.require(this.candidates.get(id), id);
+    if (rec.auto?.stage !== "shadowed" || rec.auto.shadow?.pass !== true) throw new Error(`cannot record canary for ${id} — requires a passing shadow (stage ${rec.auto?.stage ?? "none"})`);
+    const pass = Number.isFinite(raw.n) && Number.isFinite(raw.elapsedMs) && raw.n >= power.minN && raw.elapsedMs >= power.minWindowMs && raw.delta >= power.minDelta;
+    const marker: StageMarker = { n: raw.n, delta: raw.delta, elapsedMs: raw.elapsedMs, at: raw.at, pass };
+    rec.auto.canary = marker;
+    if (pass) rec.auto.stage = "canaried";
+    this.log("engine", "auto_canary", id, { n: raw.n, delta: raw.delta, elapsedMs: raw.elapsedMs, pass });
+    return rec;
+  }
+
+  /** READ-ONLY: may this candidate be auto-promoted to serving? Re-derived from the INDIVIDUAL markers
+   * (not merely the stage label), so serveAutoChampion can consult it as its first guard. `reasons`
+   * enumerates every miss so the orchestrator routes to a human with a specific cause. */
+  autoPromotable(id: string): { ok: boolean; reasons: string[] } {
+    const reasons: string[] = [];
+    const rec = this.candidates.get(id);
+    if (!rec) return { ok: false, reasons: ["unknown-candidate"] };
+    if (this.killed) reasons.push("kill-switch-on");
+    if (rec.status !== "awaiting_approval") reasons.push(`status-${rec.status}`);
+    if (rec.gate?.pass !== true) reasons.push("gate-not-passed");
+    if (rec.metrics?.gating !== true) reasons.push("not-positively-gating");
+    if (rec.auto?.gating !== true) reasons.push("auto-not-begun");
+    if (rec.auto?.shadow?.pass !== true) reasons.push("shadow-not-passed");
+    if (rec.auto?.canary?.pass !== true) reasons.push("canary-not-passed");
+    if (rec.auto?.stage !== "canaried") reasons.push(`auto-stage-${rec.auto?.stage ?? "none"}`);
+    return { ok: reasons.length === 0, reasons };
+  }
+
+  /** After-commit bookkeeping for an auto-promotion (mirror of promote(), attributed to "auto-loop", never
+   * "human"). Called by serveAutoChampion ONLY after the durable serving write commits. Re-asserts
+   * autoPromotable + the kill switch (fail-closed). */
+  markAutoPromoted(id: string): Champion {
+    if (this.killed) throw new Error("kill switch is ON — auto-promotion halted");
+    const check = this.autoPromotable(id);
+    if (!check.ok) throw new Error(`cannot mark ${id} auto-promoted: ${check.reasons.join(", ")}`);
+    const rec = this.require(this.candidates.get(id), id);
+    this.prevChampion = this.champion;
+    this.champion = { policy: rec.policy, metrics: rec.metrics! };
+    rec.status = "promoted";
+    rec.auto!.stage = "promoted";
+    this.history.push({ seq: this.next(), fromPolicyId: this.prevChampion.policy.id, toPolicyId: rec.policy.id, delta: rec.gate?.delta ?? 0 });
+    this.log("auto-loop", "auto_promote", id, { from: this.prevChampion.policy.id, to: rec.policy.id });
     return this.champion;
   }
 
