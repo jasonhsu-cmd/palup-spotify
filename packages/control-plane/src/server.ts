@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyRequest, type FastifyReply } from "fastify";
 import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
@@ -225,7 +225,24 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // (query/body `tenantId`, default the demo tenant), and start/stop/read touch ONLY that tenant's
   // config — never a cross-tenant __system__ bucket. Mirrors the /api/telemetry tenant coercion.
   const canaryTenant = (v: unknown): string => (typeof v === "string" && v ? v : "demo");
-  app.get("/api/canary", async (req) => {
+  // Security review B1 — the canary READ returns a caller-named tenant's stats/config; the global hook
+  // leaves GET open, so this route self-authenticates `operator:read` (mirrors /api/telemetry), else an
+  // anonymous caller could read ANY merchant's canary data via ?tenantId=<victim>. The POST paths
+  // (start/stop/shadow) are already operator:mutate-gated by the onRequest hook and stay platform-
+  // operator-scoped (the shared OPERATOR_TOKEN — no per-tenant authz yet; acceptable while this is the
+  // PalUp operator/admin plane, NOT merchant-facing).
+  const requireOperatorRead = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
+    const auth = req.headers["authorization"];
+    const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+    const principal = await operatorIdentity.authenticate(token);
+    if (!operatorIdentity.authorize(principal, "operator:read")) {
+      await reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
+      return false;
+    }
+    return true;
+  };
+  app.get("/api/canary", async (req, reply) => {
+    if (!(await requireOperatorRead(req, reply))) return;
     const tenantId = canaryTenant((req.query as { tenantId?: unknown })?.tenantId);
     return { config: await canaryConfig(runtimeStore, tenantId), stats: await canaryStats(runtimeStore, tenantId) };
   });

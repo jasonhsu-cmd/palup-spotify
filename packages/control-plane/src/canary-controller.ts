@@ -32,8 +32,12 @@ export const DEFAULT_CANARY: Policy = {
   proactivityDefault: "balanced",
 };
 
+// Bound the read (security review N3): the most recent N interactions, so a stats/shadow read can never
+// load an unbounded tenant stream into memory (mirrors /api/telemetry's limit: 10_000). Shadow already
+// slices to sampleN; stats over the most-recent window is the intended signal.
+export const TRAFFIC_READ_LIMIT = 10_000;
 export async function readTrafficLog(store: RuntimeStatePort, tenantId: string): Promise<Interaction[]> {
-  return store.readStream<Interaction>({ tenantId }, TRAFFIC);
+  return store.readStream<Interaction>({ tenantId }, TRAFFIC, { limit: TRAFFIC_READ_LIMIT });
 }
 export async function canaryConfig(store: RuntimeStatePort, tenantId: string): Promise<CanaryConfig | null> {
   return (await store.get<CanaryConfig>({ tenantId }, CANARY, CONFIG_KEY)) ?? null;

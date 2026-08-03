@@ -34,5 +34,6 @@ describe("EngineRegistry — per-tenant engine binding (one engine per tenant, b
   it("requires a non-empty tenantId (fail-closed — no ambient/default tenant)", () => {
     const reg = new EngineRegistry(() => mkEngine());
     expect(() => reg.engineFor("")).toThrow(/tenantId/i);
+    expect(() => reg.engineFor("   ")).toThrow(/tenantId/i); // whitespace-only rejected too (match the store's requireTenant)
   });
 });

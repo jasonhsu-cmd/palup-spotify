@@ -19,7 +19,9 @@ export class EngineRegistry {
 
   /** The engine governing `tenantId`, created on first access and stable thereafter. */
   engineFor(tenantId: string): EvolutionEngine {
-    if (!tenantId) throw new Error("engineFor requires a non-empty tenantId (no ambient/default tenant)");
+    // Reject empty AND whitespace-only ids, matching the store's requireTenant isolation invariant, so a
+    // phantom "   " tenant or an "a" vs "a " normalization mismatch can't create a stray engine.
+    if (!tenantId || !tenantId.trim()) throw new Error("engineFor requires a non-empty tenantId (no ambient/default tenant)");
     let engine = this.engines.get(tenantId);
     if (!engine) {
       engine = this.factory(tenantId);
