@@ -1,7 +1,7 @@
 import type { RuntimeStatePort } from "@palup/platform-ports";
 import type { Policy } from "@palup/widget-brain";
 import type { Champion, EvolutionEngine } from "@palup/evolution";
-import { matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
+import { matchedKill, RUNTIME_AGENT_TYPE, freezeAutoPromote, AUTO_PROMOTE_WINDOW_MS } from "@palup/state-postgres";
 
 // The control-plane WRITE half of promote→serving (the READ half is widget-backend/champion.ts). A
 // HUMAN-approved, gate-passed promotion is persisted to the SHARED RuntimeStatePort so EVERY serving
@@ -125,5 +125,12 @@ export async function rollbackServing(
       at,
     );
   });
-  return engine.rollback(reason); // advance the engine AFTER the durable revert
+  const restored = engine.rollback(reason); // advance the engine AFTER the durable revert
+  // ADR-0014 #9 — a monitored regression FREEZES the auto-promote fast-lane so the same/similar change
+  // can't be immediately re-promoted (the next auto-loop run reads this on the shared registry). Best-
+  // effort on top of the revert: the per-merchant frequency cap still bounds drift even if this races.
+  const nowMs = Date.parse(at);
+  const until = Number.isNaN(nowMs) ? at : new Date(nowMs + AUTO_PROMOTE_WINDOW_MS).toISOString();
+  await freezeAutoPromote(store, tenantId, until, `rollback: ${reason}`, at);
+  return restored;
 }

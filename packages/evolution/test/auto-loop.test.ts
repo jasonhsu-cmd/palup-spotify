@@ -39,7 +39,7 @@ describe("AutoLoop", () => {
     const store = new MemoryStore();
     const cm = await grader.grade(champion);
     const engine = new EvolutionEngine({ champion: { policy: champion, metrics: cm }, grader });
-    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => "T", autoApprove: true, minDelta: 0.05, candidatesPerRound: 2, killCheck: async () => null });
+    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => "T", autoApprove: true, minDelta: 0.05, candidatesPerRound: 2, killCheck: async () => null, rateLimitCheck: async () => null, recordPromotion: async () => {} });
 
     const tl = await loop.run(3);
 
@@ -109,6 +109,50 @@ describe("AutoLoop", () => {
     const tl = await loop.run(3);
     expect(tl.some((e) => e.event === "promoted")).toBe(false);
     expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
+  // ADR-0014 #9 — the auto-loop consults an injected rate-limit/freeze check (wired to the shared
+  // orchestrator registry) before every auto-promotion, and stamps the frequency-cap clock after.
+  const CM_METRICS = { policyId: "champion-v0", safetyPass: true, floorPass: true, qualityScore: 0.5, perCriteria: { warm: 0.5, concise: 1 }, counterMetrics: CM };
+  const rlLoop = (rateLimitCheck?: () => Promise<string | null>, recordPromotion?: () => Promise<void>) => {
+    const engine = new EvolutionEngine({ champion: { policy: champion, metrics: { ...CM_METRICS } }, grader });
+    const loop = new AutoLoop({ engine, grader, proposer, store: new MemoryStore(), now: () => "T", autoApprove: true, killCheck: async () => null, rateLimitCheck, recordPromotion });
+    return { engine, loop };
+  };
+
+  it("promotes when the rate-limit check is clear, and stamps the frequency-cap clock", async () => {
+    let recorded = 0;
+    const { loop } = rlLoop(async () => null, async () => { recorded++; });
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(true);
+    expect(recorded).toBeGreaterThanOrEqual(1); // recordPromotion fired on the promotion
+  });
+
+  it("HALTS auto-promotion when the rate-limit check returns a reason (frozen or inside the frequency cap)", async () => {
+    const { engine, loop } = rlLoop(async () => "frequency cap — ≤1/week", async () => {});
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
+  it("FAILS CLOSED when NO rate-limit checker is wired (autoApprove requires the drift bound)", async () => {
+    const { engine, loop } = rlLoop(undefined, async () => {});
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
+  it("FAILS CLOSED when NO promotion recorder is wired (an unstamped cap never trips)", async () => {
+    const { engine, loop } = rlLoop(async () => null, undefined); // checker clear, but no recorder
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
+  it("FAILS CLOSED when the rate-limit registry is unreadable (checker throws)", async () => {
+    const { loop } = rlLoop(async () => { throw new Error("registry down"); }, async () => {});
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
   });
 
   it("stops at awaiting_approval when autoApprove is off (HITL preserved)", async () => {

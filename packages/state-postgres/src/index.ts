@@ -10,3 +10,11 @@ export {
   type KillScope,
   type KillEntry,
 } from "./runtime-kill-registry.js";
+export {
+  readOrchestratorState,
+  recordAutoPromotion,
+  freezeAutoPromote,
+  rateLimitReason,
+  AUTO_PROMOTE_WINDOW_MS,
+  type OrchestratorState,
+} from "./orchestrator-registry.js";

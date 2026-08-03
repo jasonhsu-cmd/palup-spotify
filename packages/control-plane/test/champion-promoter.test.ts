@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryRuntimeStore, type RuntimeStatePort } from "@palup/platform-ports";
-import { armKill } from "@palup/state-postgres";
+import { armKill, readOrchestratorState, rateLimitReason } from "@palup/state-postgres";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { EvolutionEngine, MockGrader, type PolicyMetrics } from "@palup/evolution";
 import { promoteToServing, rollbackServing, servingChampion } from "../src/champion-promoter.js";
@@ -90,6 +90,21 @@ describe("promote→serving bridge (ADR-0003: only a human-approved promotion re
     await rollbackServing(engine, store, "demo", "quality-regression");
     expect((await servingChampion(store, "demo"))?.policy.id).toBe(DEFAULT_POLICY.id);
     expect((await store.readAudit({ tenantId: "demo" })).map((a) => a.action)).toContain("champion.rollback");
+  });
+
+  // ADR-0014 #9 — end-to-end: a REAL rollback (not a direct freeze call) freezes the auto-promote
+  // fast-lane on the shared orchestrator registry, which the next auto-loop run reads via rateLimitReason.
+  it("a rollback FREEZES the auto-promote fast-lane (rollbackServing → orchestrator registry → rate-limit halts)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const engine = mkEngine();
+    await readyCandidate(engine);
+    engine.approve("cand");
+    await promoteToServing(engine, "cand", store, "demo");
+    await rollbackServing(engine, store, "demo", "quality-regression", "2026-08-01T00:00:00Z");
+    const st = await readOrchestratorState(store, "demo");
+    expect(st.frozenUntil).toBeTruthy(); // the rollback wrote a freeze
+    expect(rateLimitReason(st, "2026-08-02T00:00:00Z")).toMatch(/frozen/i); // +1 day: fast-lane still frozen
+    expect(await readOrchestratorState(store, "other-merchant")).toEqual({}); // per-merchant: another tenant is not frozen
   });
 
   it("a store fault during rollback leaves prevChampion intact so a retry recovers (auto-rollback survives)", async () => {
