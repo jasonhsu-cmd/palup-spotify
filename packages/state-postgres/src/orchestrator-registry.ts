@@ -1,4 +1,4 @@
-import type { RuntimeStatePort } from "@palup/platform-ports";
+import type { RuntimeStatePort, RuntimeStateTx } from "@palup/platform-ports";
 
 // ADR-0014 #9 — the SHARED, per-tenant auto-promote orchestrator state (frequency cap + freeze), on the
 // same RuntimeStatePort the serving / rollback paths use. Both the auto-loop (records promotions, reads
@@ -37,11 +37,19 @@ export async function recordAutoPromotion(store: RuntimeStatePort, tenantId: str
  * similar change can't be immediately re-promoted (ADR-0014 #9 "freeze on rollback").
  */
 export async function freezeAutoPromote(store: RuntimeStatePort, tenantId: string, until: string, reason: string, at = new Date().toISOString()): Promise<void> {
-  await store.tx({ tenantId }, async (t) => {
-    const st = (await t.get<OrchestratorState>(ORCH, STATE_KEY)) ?? {};
-    await t.put(ORCH, STATE_KEY, { ...st, frozenUntil: until });
-    await t.audit({ actor: "monitor", action: "orchestrator.freeze", input: { tenantId, until, reason }, decision: `froze auto-promotion until ${until}`, reversalPath: "n/a" }, at);
-  });
+  await store.tx({ tenantId }, (t) => freezeAutoPromoteTx(t, tenantId, until, reason, at));
+}
+
+/**
+ * The freeze write on an EXISTING tx handle, so a caller can commit its own mutation (e.g. a serving
+ * revert) AND the freeze atomically in one tx. The delayed-signal rollback relies on this: by the
+ * days-to-weeks delayed timeframe the ≤1/week frequency-cap backstop has already elapsed (lastPromotedAt
+ * is stale), so the freeze is the sole drift bound and must not be lost to a crash between two txs.
+ */
+export async function freezeAutoPromoteTx(t: RuntimeStateTx, tenantId: string, until: string, reason: string, at: string): Promise<void> {
+  const st = (await t.get<OrchestratorState>(ORCH, STATE_KEY)) ?? {};
+  await t.put(ORCH, STATE_KEY, { ...st, frozenUntil: until });
+  await t.audit({ actor: "monitor", action: "orchestrator.freeze", input: { tenantId, until, reason }, decision: `froze auto-promotion until ${until}`, reversalPath: "n/a" }, at);
 }
 
 /**
