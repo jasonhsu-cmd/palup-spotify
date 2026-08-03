@@ -136,15 +136,29 @@ const rate = (n: number, total: number): number => (total === 0 ? 0 : Number((n 
 
 type BrainDecision = Awaited<ReturnType<Brain["decide"]>>;
 
+// PR-1 Finding 1 closure (PR-3 — the first persona→output coupling PR): priceSurface() originally
+// measured only {pitch, outbound, offerFlags} — flags/fields, never the reply TEXT. That left a real gap:
+// a candidate can whisper a SOFT, persona-conditioned offer directly in the reply prose ("free shipping
+// just for you", "a special deal", "just for you") that trips NONE of the hard %/discount/promo/coupon
+// tokens above, while keeping pitch/flags/outbound byte-identical across personas — invisible to the old
+// surface. We fold in a REDACTED signal: a boolean (never the raw quote — nothing sensitive/PII-shaped
+// ever leaves this function) recording whether the reply matches a known soft-offer pattern. Two
+// decisions that both carry (or both lack) a soft offer still compare EQUAL — only an asymmetric,
+// persona-conditioned soft offer flips the boolean on one side and trips the invariance check.
+const SOFT_OFFER_RE =
+  /\bjust for you\b|\bonly for you\b|\bexclusively for you\b|\b(especially|specially) for you\b|\ba special (deal|offer|price|treat)\b|\bsomething special\b|\ba little (something )?extra\b/i;
+
 // PR-1 governance floor — the "price/offer surface" a fair policy must hold IDENTICAL across a persona
-// pair: the chosen pitch kind, whether an outbound follow-up fired, and any flag that carries offer/price
-// content (pitch:*, outbound*, or an explicit promo/discount/coupon mention). Canonicalized to a
-// deep-comparable string so two decisions are trivially compared for equality.
+// pair: the chosen pitch kind, whether an outbound follow-up fired, any flag that carries offer/price
+// content (pitch:*, outbound*, or an explicit promo/discount/coupon mention), and the redacted soft-offer
+// signal above. Canonicalized to a deep-comparable string so two decisions are trivially compared for
+// equality.
 function priceSurface(d: BrainDecision): string {
   const offerFlags = d.flags
     .filter((f) => f.startsWith("pitch:") || f.startsWith("outbound") || /promo|discount|coupon/i.test(f))
     .sort();
-  return JSON.stringify({ pitch: d.pitch, outbound: d.outbound, offerFlags });
+  const softOffer = SOFT_OFFER_RE.test(d.reply);
+  return JSON.stringify({ pitch: d.pitch, outbound: d.outbound, offerFlags, softOffer });
 }
 
 /**
