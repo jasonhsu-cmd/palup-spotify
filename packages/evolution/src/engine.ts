@@ -121,8 +121,12 @@ export class EvolutionEngine {
     rec.status = "approved";
     // NN #5 audit fidelity: record the TRUE actor. An automated (opt-in) auto-loop approval must not
     // masquerade as a human in the immutable log — attribute it to "auto-loop" so it's auditable as
-    // a non-human approval.
+    // a non-human approval. Persist it on the record too, so a downstream promote→serving path can
+    // POSITIVELY verify the approval was human ("approved" alone is autonomy-agnostic) rather than
+    // trusting a caller-supplied approver string.
     const automated = approver === "auto-loop";
+    rec.approvedBy = approver;
+    rec.automated = automated;
     this.log(automated ? "auto-loop" : "human", "approve", id, { approver, automated });
     return rec;
   }
@@ -193,6 +197,17 @@ export class EvolutionEngine {
 
   getChampion(): Champion {
     return this.champion;
+  }
+  /** The candidate record for `id`, or undefined. Lets a promote→serving bridge inspect the approval
+   * (approvedBy/automated) WITHOUT mutating engine state, so it can verify human approval + write the
+   * durable serving store BEFORE advancing the engine. */
+  getCandidate(id: string): CandidateRecord | undefined {
+    return this.candidates.get(id);
+  }
+  /** The previous champion (the rollback target), or null. Read-only — lets a bridge persist the
+   * rollback to serving BEFORE calling rollback(), so a store fault can't strand prevChampion=null. */
+  getPreviousChampion(): Champion | null {
+    return this.prevChampion;
   }
   isKilled(): boolean {
     return this.killed;
