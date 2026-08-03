@@ -3,6 +3,7 @@ import type {
   Decision,
   HistoryTurn,
   MemoryRecallPort,
+  PersonaStyle,
   PitchKind,
   Policy,
   SafetyClass,
@@ -322,6 +323,26 @@ const PITCH_PLAYBOOK: Record<PitchKind, string> = {
   none: "",
 };
 
+// ── Persona-style directives (PR-3, flag DISPOSITION_STYLE) ──────────────────────────────────────
+// Shopper-disposition program: consume a SUPPLIED signals.personaStyle (no classifier yet — that's
+// PR-5) into a benign, code-owned, closed-enum-keyed STYLE directive appended to systemExtra on the
+// clean sales path. This shapes SERVICE/GUIDANCE VOICE ONLY (docs/design/shopper-widget.md §4 Persona;
+// FAIR-1 / memory Inv 9) — it is NEVER threaded into selectPitch, so pitch eligibility, price, outbound,
+// and the INV-E proactivity budget stay byte-identical across every PersonaStyle. Each directive is
+// deliberately free of ANY price/offer/tier language: deal_seeker may surface an ALREADY-GROUNDED
+// merchant-approved promo honestly, never invent one — the reply-integrity backstop (discountGuardrail)
+// still independently blocks any invented/injected discount regardless of persona.
+const PERSONA_STYLE_DIRECTIVE: Record<PersonaStyle, string> = {
+  researcher:
+    "\nPERSONA STYLE - researcher: Name the actual active ingredients/concentrations and honest limits from the CATALOG - no hype, no vague marketing adjectives. Be precise and evidence-based, and disclose that you are an AI assistant.",
+  needs_guidance:
+    "\nPERSONA STYLE - needs guidance: Lead with ONE short, focused discovery question about their need before recommending anything. Don't overwhelm them with options or over-steer the conversation.",
+  deal_seeker:
+    "\nPERSONA STYLE - deal seeker: If a merchant-approved promo is already present in the grounded CATALOG/POLICY context, you may surface it honestly and exactly as written. NEVER invent, imply, or promise a discount, coupon, or promo that isn't explicitly grounded there, and never withhold one the shopper genuinely qualifies for.",
+  ready:
+    "\nPERSONA STYLE - ready to buy: Be efficient. Confirm what they want and help them move to checkout - add no extra pitch, upsell, or friction.",
+};
+
 // Internal, agent-INITIATED instruction for a proactive exit-intent moment (§5). This is NOT a shopper
 // utterance and is never classified as one; it tells the model to make the single, honest cart-recovery
 // offer from the cart_recovery playbook, grounded in the store's own POLICY (shipping/returns). One
@@ -396,6 +417,13 @@ export function createBrain(
   // own gate requires this flag AND a server-verified shopper AND an affirmative request before it ever
   // calls a subscription-action port method).
   subscriptionSelfServeEnabled = false,
+  // Shopper-disposition program PR-3 — the DISPOSITION_STYLE posture flag (operator/deploy-time,
+  // threaded exactly like every other posture flag above; never hardcoded on, never read from
+  // process.env inside this package). Default OFF ⇒ every existing call site keeps working UNCHANGED
+  // and byte-identical: a supplied signals.personaStyle is simply never consumed. Even when ON, this
+  // flag can only ever ADD a benign PERSONA_STYLE_DIRECTIVE to systemExtra on the clean sales path — it
+  // is structurally incapable of reaching selectPitch/pitch/outbound/price (FAIR-1, Inv 10).
+  dispositionStyleEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -761,6 +789,15 @@ export function createBrain(
         flags.push("skeptic_evidence");
         systemExtra +=
           "\nSKEPTIC POLICY: The shopper is skeptical about efficacy. Back every claim with SPECIFIC facts from the CATALOG (named actives/ingredients, what the product is formulated for, how to use it) — never vague hype. Be honest about what it can and can't do and that results vary. Disclose that you are an AI assistant.";
+      }
+      // Shopper-disposition program PR-3 (flag DISPOSITION_STYLE) — a SUPPLIED signals.personaStyle (no
+      // classifier yet, PR-5) adds ONE closed-enum-keyed, code-owned voice directive to systemExtra.
+      // Flag OFF (default) ⇒ this block never runs, so behavior is byte-identical to before this PR.
+      // Deliberately does NOT touch `pitch`/selectPitch/outbound below (FAIR-1, Inv 10) — the eligibility
+      // caps, price/offer surface, and INV-E budget stay identical across every persona style.
+      if (dispositionStyleEnabled && signals.personaStyle) {
+        flags.push(`persona:${signals.personaStyle}`);
+        systemExtra += PERSONA_STYLE_DIRECTIVE[signals.personaStyle];
       }
       // Stated budget / gift — recommend within budget and never push over it (within-budget / in-budget).
       // Require explicit budget INTENT, not a bare "$N" — "is the $18 cleanser any good?" is not a

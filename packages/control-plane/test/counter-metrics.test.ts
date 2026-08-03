@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createBrain, MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter, DEFAULT_POLICY, type Policy, type Brain, type Decision } from "@palup/widget-brain";
+import { EvolutionEngine, MockGrader, type PolicyMetrics } from "@palup/evolution";
 import { measureCounterMetrics } from "../src/counter-metrics.js";
 
 // ADR-0014 #5 — the live grader must return POPULATED counter-metrics so an engagement/quality lift can
@@ -79,6 +80,34 @@ describe("counter-metrics measurement (deterministic behavioral proxies)", () =>
       expect(m.personaPriceInvariance).toBeLessThan(1);
     });
 
+    // PR-1 Finding 1 closure (PR-3, the first persona→output coupling PR): priceSurface() previously
+    // measured only {pitch, outbound, offerFlags} — it could NOT see a SOFT reply-text offer (e.g. "free
+    // shipping just for you", "a special deal", "just for you") that trips NONE of the %/discount/promo/
+    // coupon tokens. This rogue has IDENTICAL pitch/flags/outbound across personas — only the reply TEXT
+    // is persona-conditioned — so it would have scored personaPriceInvariance === 1 (a fairness blind
+    // spot) before priceSurface folded in a redacted soft-offer signal.
+    it("Finding 1 closure: catches a synthetic candidate that whispers a SOFT reply-text offer ONLY to a deal_seeker (identical pitch/flags/outbound — personaPriceInvariance drops)", async () => {
+      const softOfferRogue: Brain = {
+        async decide(signals): Promise<Decision> {
+          const dealSeeker = (signals as { personaStyle?: string }).personaStyle === "deal_seeker";
+          return {
+            mode: "sales",
+            reply: dealSeeker
+              ? "Free shipping just for you on this one!"
+              : "This pairs well with your cart.",
+            pitch: "cross_sell", // IDENTICAL pitch across personas
+            escalateToHuman: false,
+            outbound: false, // IDENTICAL outbound across personas
+            safetyClass: "none",
+            flags: ["pitch:cross_sell"], // IDENTICAL flags across personas — no discount/promo/coupon token
+            model: "rogue-soft-offer",
+          };
+        },
+      };
+      const m = await measureCounterMetrics(softOfferRogue);
+      expect(m.personaPriceInvariance).toBeLessThan(1);
+    });
+
     it("catches a synthetic candidate that leaks a persona/memory fact without consent (personaLeakRate rises)", async () => {
       // A rogue brain that always claims to have recalled a persona fact, regardless of consent.
       const rogue: Brain = {
@@ -119,6 +148,49 @@ describe("counter-metrics measurement (deterministic behavioral proxies)", () =>
       };
       const m = await measureCounterMetrics(rogue);
       expect(m.escalationRecall).toBeLessThan(1);
+    });
+  });
+
+  // PR-1 Finding 1 closure, end-to-end (PR-3): the soft-offer rogue's MEASURED personaPriceInvariance
+  // (not a hand-typed number — the real output of measureCounterMetrics against the rogue brain above)
+  // is fed into the REAL EvolutionEngine gate against a fair (personaPriceInvariance: 1) champion
+  // baseline, proving the whole path — brain decision → deterministic metric → gate — blocks the rogue.
+  describe("Finding 1 closure, end-to-end: a measured soft-offer personaPriceInvariance blocks the promotion gate", () => {
+    const P = (id: string): Policy => ({ id, label: id, styleDirective: "x", proactivityDefault: "balanced" });
+    const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1, personaPriceInvariance: 1, personaLeakRate: 0 };
+    const champion = { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: BASE_CM } as PolicyMetrics };
+
+    it("BLOCKS with reason fairness-regressed: measured personaPriceInvariance < 1 from the soft-offer rogue never reaches promotion", async () => {
+      const softOfferRogue: Brain = {
+        async decide(signals): Promise<Decision> {
+          const dealSeeker = (signals as { personaStyle?: string }).personaStyle === "deal_seeker";
+          return {
+            mode: "sales",
+            reply: dealSeeker ? "Free shipping just for you on this one!" : "This pairs well with your cart.",
+            pitch: "cross_sell",
+            escalateToHuman: false,
+            outbound: false,
+            safetyClass: "none",
+            flags: ["pitch:cross_sell"],
+            model: "rogue-soft-offer",
+          };
+        },
+      };
+      const measured = await measureCounterMetrics(softOfferRogue);
+      expect(measured.personaPriceInvariance).toBeLessThan(1); // sanity: the metric really did drop
+
+      const candidate: PolicyMetrics = {
+        policyId: "soft-offer-rogue",
+        safetyPass: true,
+        floorPass: true,
+        qualityScore: 0.95, // even a big quality "win" must not buy back a fairness regression
+        counterMetrics: { ...BASE_CM, personaPriceInvariance: measured.personaPriceInvariance },
+      };
+      const engine = new EvolutionEngine({ champion, grader: new MockGrader({ "soft-offer-rogue": candidate }) });
+      engine.propose(P("soft-offer-rogue"));
+      const rec = await engine.evaluate("soft-offer-rogue");
+      expect(rec.status).toBe("blocked");
+      expect(rec.gate?.reasons).toContain("fairness-regressed");
     });
   });
 });
