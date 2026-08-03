@@ -796,8 +796,14 @@ export function createBrain(
       // Deliberately does NOT touch `pitch`/selectPitch/outbound below (FAIR-1, Inv 10) — the eligibility
       // caps, price/offer surface, and INV-E budget stay identical across every persona style.
       if (dispositionStyleEnabled && signals.personaStyle) {
-        flags.push(`persona:${signals.personaStyle}`);
-        systemExtra += PERSONA_STYLE_DIRECTIVE[signals.personaStyle];
+        // Guard the lookup: an out-of-enum personaStyle (a future mis-wired classifier / un-whitelisted
+        // intake) yields undefined — skip rather than append the literal "undefined" or emit an
+        // out-of-vocab flag. Defense in depth on top of the closed PersonaStyle enum + deriveServingSignals.
+        const directive = PERSONA_STYLE_DIRECTIVE[signals.personaStyle];
+        if (directive) {
+          flags.push(`persona:${signals.personaStyle}`);
+          systemExtra += directive;
+        }
       }
       // Stated budget / gift — recommend within budget and never push over it (within-budget / in-budget).
       // Require explicit budget INTENT, not a bare "$N" — "is the $18 cleanser any good?" is not a

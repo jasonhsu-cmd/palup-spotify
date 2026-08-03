@@ -84,6 +84,14 @@ describe("PR-3 — persona-style directives (flag DISPOSITION_STYLE)", () => {
     expect(PRICE_LANGUAGE.test(personaLine(spy))).toBe(false);
   });
 
+  it("an OUT-OF-ENUM personaStyle is skipped — no 'undefined' directive, no out-of-vocab persona flag (guarded lookup)", async () => {
+    const { brain, spy } = spyBrain(true);
+    const d = await brain.decide({ cart: "has_items", personaStyle: "bogus_style" as never }, "tell me about the serum");
+    expect(sys(spy)).not.toMatch(/PERSONA STYLE/); // no directive appended (lookup was undefined → skipped)
+    expect(sys(spy)).not.toMatch(/undefined/); // never appends the literal "undefined"
+    expect(d.flags.some((f) => f.startsWith("persona:"))).toBe(false); // no persona:bogus_style flag
+  });
+
   it("flag OFF (default) — a supplied personaStyle is NEVER consumed: no PERSONA STYLE text, no persona:* flag (ships inert)", async () => {
     const { brain, spy } = spyBrain(false);
     const d = await brain.decide({ cart: "has_items", personaStyle: "deal_seeker" }, "tell me about the serum");
