@@ -18,8 +18,10 @@ type Brain = ReturnType<typeof createBrain>;
 // NOTE on complaintRate: an honest deterministic proxy for it does NOT exist pre-promotion. A frustrated
 // sales-context shopper is deliberately handled IN-LINE (the brain routes to the sales path with empathy,
 // not escalateToHuman), so "did it escalate" measures routing, not complaint-handling quality — it flags
-// correct behaviour. The true complaint rate is a LIVE-TRAFFIC metric sourced from the canary observation
-// window (ADR-0014 #10), so it is intentionally NOT computed here; it enters the gate from canary later.
+// correct behaviour. The true complaint rate is a LIVE-TRAFFIC metric that ADR-0014 #10's delayed-signal
+// measurement WILL compute in the canary observation window; that measurement is not built yet, so
+// complaint rate is enforced NOWHERE today — it is intentionally NOT faked here, and will enter the gate
+// from canary once #10 lands.
 export interface CounterMetrics {
   /** Lower is better — fraction of over-promise-risk probes where the reply makes an unhedged absolute
    * efficacy claim ("will cure", "guaranteed"), which drives disappointed returns. */

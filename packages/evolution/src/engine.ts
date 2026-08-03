@@ -100,8 +100,9 @@ export class EvolutionEngine {
     // metrics.ts) and the champion baseline must too, or the gate blocks: an engagement/quality lift can
     // NEVER promote on its own without proof it did not worsen the outcomes that matter. This closes the
     // old vacuity where absent counter-metrics defaulted to 0 and `0 > 0` never blocked. (complaintRate is
-    // a LIVE-TRAFFIC metric sourced from the canary window — ADR-0014 #10 — so it is optional here; when
-    // BOTH sides carry it, a rise still blocks.)
+    // a LIVE-TRAFFIC metric that ADR-0014 #10's delayed-signal measurement WILL compute in the canary
+    // window — that is not built yet, so complaintRate is enforced nowhere today; it is optional here, and
+    // when BOTH sides do carry it a rise still blocks.)
     const candCm = counterMetricsComplete(cand.counterMetrics);
     const champCm = counterMetricsComplete(champ.counterMetrics);
     if (!candCm) reasons.push("counter-metrics-absent");
@@ -240,12 +241,11 @@ export class EvolutionEngine {
  * optOutRate; control-plane/counter-metrics.ts). complaintRate is canary-sourced (ADR-0014 #10) and
  * optional. Any missing ⇒ the gate fails CLOSED (ADR-0014 #5) — no promotion on quality/engagement alone. */
 function counterMetricsComplete(cm?: PolicyMetrics["counterMetrics"]): boolean {
-  return (
-    !!cm &&
-    typeof cm.returnRate === "number" &&
-    typeof cm.optOutRate === "number" &&
-    typeof cm.escalationRecall === "number"
-  );
+  // Fail CLOSED: require a real, in-range rate — NOT just typeof "number" (typeof NaN/±Infinity is
+  // "number", and a NaN would slip through as "complete" AND "not worse" since every NaN comparison is
+  // false, i.e. fail-OPEN). Number.isFinite + [0,1] range rejects NaN/Infinity/out-of-range outright.
+  const ok = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
+  return !!cm && ok(cm.returnRate) && ok(cm.optOutRate) && ok(cm.escalationRecall);
 }
 
 function hashAuditEntry(base: Omit<AuditEntry, "hash">): string {

@@ -68,6 +68,12 @@ describe("EvolutionEngine gate", () => {
     expect(rec.gate?.reasons).toContain("counter-metrics-worsened");
   });
 
+  it("BLOCKS a candidate whose counter-metrics contain NaN / out-of-range (fail-closed, not fail-open)", async () => {
+    const rec = await evalOne({ nan: { ...GOOD, policyId: "nan", qualityScore: 0.95, counterMetrics: { ...BASE_CM, optOutRate: NaN } } }, "nan");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("counter-metrics-absent"); // NaN is not a valid rate ⇒ treated as absent
+  });
+
   it("BLOCKS when the champion baseline has no counter-metrics (can't prove not-worse)", async () => {
     const bareChampion = { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75 } as PolicyMetrics };
     const e = new EvolutionEngine({ champion: bareChampion, grader: new MockGrader({ good: GOOD }) });
