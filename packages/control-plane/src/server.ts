@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { DEFAULT_POLICY } from "@palup/widget-brain";
-import { AutoLoop, EvolutionEngine, FileStore, MockGrader, seedCandidates, type Grader, type PolicyMetrics } from "@palup/evolution";
+import { AutoLoop, EvolutionEngine, EngineRegistry, FileStore, MockGrader, seedCandidates, type Grader, type PolicyMetrics } from "@palup/evolution";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import { createAnthropicApiAdapter, createAnthropicApiJudge, isAnthropicApiConfigured } from "@palup/judge";
 import { LiveGrader } from "./live-grader.js";
@@ -13,6 +13,7 @@ import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT } from "./canary-controller.js";
 import { applyCanaryVerdict } from "./canary-reaction.js";
+import { promoteToServing } from "./champion-promoter.js";
 import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, type KillScope, type KillEntry } from "@palup/state-postgres";
 import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices, type RuntimeStatePort } from "@palup/platform-ports";
 
@@ -42,7 +43,13 @@ function chooseGrader(): { grader: Grader; mode: string; judgeFamily: string } {
 export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   const { grader, mode, judgeFamily } = chooseGrader();
   const championMetrics = await grader.grade(DEFAULT_POLICY);
-  const engine = new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader });
+  // T4g — per-tenant engine binding via the shared EngineRegistry (a routed candidate lives on the
+  // tenant's engine; an in-process orchestrator shares this same registry). The demo server operates the
+  // single "demo" tenant; all existing routes use engineFor(PROMOTE_TENANT), so their behavior is
+  // unchanged. (Cross-PROCESS candidate/approval visibility needs durable engine state — enablement work.)
+  const PROMOTE_TENANT = "demo";
+  const engines = new EngineRegistry(() => new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader }));
+  const engine = engines.engineFor(PROMOTE_TENANT);
 
   // Shared run-time state store for operator actions on the LIVE plane (run-time kill switch). Prod
   // points this at the same Cloud SQL as the widget backend (DATABASE_URL) so a kill propagates. Tests
@@ -154,7 +161,16 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   });
   app.post("/api/approve/:id", async (req) => act(async () => { await assertRuntimeNotKilled(); engine.approve((req.params as { id: string }).id, "operator"); }));
   app.post("/api/reject/:id", async (req) => act(() => engine.reject((req.params as { id: string }).id, "operator")));
-  app.post("/api/promote/:id", async (req) => act(async () => { await assertRuntimeNotKilled(); engine.promote((req.params as { id: string }).id); }));
+  app.post("/api/promote/:id", async (req) =>
+    act(async () => {
+      await assertRuntimeNotKilled();
+      // T4g — write the DURABLE serving slot (was in-memory engine.promote ONLY, which never reached
+      // shoppers). promoteToServing verifies the human approval, fails closed on the shared kill registry,
+      // persists CHAMPION/active (put + audit atomically), THEN advances the engine — the human path made
+      // end-to-end, and what makes the orchestrator's route-to-human actionable.
+      await promoteToServing(engine, (req.params as { id: string }).id, runtimeStore, PROMOTE_TENANT);
+    }),
+  );
   // BUILD-TIME plane kill: halts candidate approvals/promotions in the evolution pipeline.
   app.post("/api/kill", async () => act(() => engine.kill("operator")));
   app.post("/api/unkill", async () => act(() => engine.unkill()));
