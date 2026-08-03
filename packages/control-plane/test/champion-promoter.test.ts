@@ -3,7 +3,7 @@ import { InMemoryRuntimeStore, type RuntimeStatePort } from "@palup/platform-por
 import { armKill, readOrchestratorState, rateLimitReason } from "@palup/state-postgres";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { EvolutionEngine, MockGrader, type PolicyMetrics } from "@palup/evolution";
-import { promoteToServing, rollbackServing, servingChampion } from "../src/champion-promoter.js";
+import { promoteToServing, rollbackServing, servingChampion, serveAutoChampion } from "../src/champion-promoter.js";
 
 // promote→serving (ADR-0003): a HUMAN-APPROVED, gate-passed promotion — and NOTHING else — reaches
 // serving, and the transition survives a store fault. engine.promote is NOT the whole gate: the bridge
@@ -119,6 +119,25 @@ describe("promote→serving bridge (ADR-0003: only a human-approved promotion re
     expect(engine.getPreviousChampion()?.policy.id).toBe(DEFAULT_POLICY.id);
     await rollbackServing(engine, store, "demo", "regression-retry"); // retry on a healthy store recovers
     expect((await servingChampion(store, "demo"))?.policy.id).toBe(DEFAULT_POLICY.id);
+  });
+
+  // ADR-0014 #4 — the AUTO-promote serving write (the auto-loop's guardrails gated it upstream).
+  it("serveAutoChampion writes the auto-promoted champion to serving + audits it as 'auto-loop'", async () => {
+    const store = new InMemoryRuntimeStore();
+    await serveAutoChampion(store, "demo", { policy: P("auto-cand"), metrics: CHAMP_METRICS });
+    const served = await servingChampion(store, "demo");
+    expect(served?.policy.id).toBe("auto-cand");
+    expect(served?.approvedBy).toBe("auto-loop");
+    const audit = await store.readAudit({ tenantId: "demo" });
+    expect(audit.map((a) => a.action)).toContain("champion.auto_promote");
+    expect((await store.verifyAudit({ tenantId: "demo" })).ok).toBe(true);
+  });
+
+  it("serveAutoChampion FAILS CLOSED on an armed kill (no serving write)", async () => {
+    const store = new InMemoryRuntimeStore();
+    await armKill(store, "global", "halt");
+    await expect(serveAutoChampion(store, "demo", { policy: P("x"), metrics: CHAMP_METRICS })).rejects.toThrow(/kill switch/i);
+    expect(await servingChampion(store, "demo")).toBeNull();
   });
 
   it("a promotion for tenant A never becomes tenant B's serving champion (blast-radius isolation)", async () => {

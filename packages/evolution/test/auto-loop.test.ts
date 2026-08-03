@@ -156,6 +156,28 @@ describe("AutoLoop", () => {
     expect(tl.some((e) => e.event === "promoted")).toBe(true);
   });
 
+  // ADR-0014 #4 — wire promote→serving: a guardrail-gated auto-promotion reaches serving.
+  const serveLoop = (serveChampion: (c: { policy: Policy }) => Promise<void>) => {
+    const engine = new EvolutionEngine({ champion: { policy: champion, metrics: { ...CM_METRICS } }, grader });
+    const loop = new AutoLoop({ engine, grader, proposer, store: new MemoryStore(), now: () => "T", autoApprove: true, killCheck: async () => null, rateLimitCheck: async () => null, recordPromotion: async () => {}, changeScreen: async () => null, serveChampion: serveChampion as never });
+    return { engine, loop };
+  };
+
+  it("writes the auto-promoted champion to SERVING (serveChampion called with the winner)", async () => {
+    const served: string[] = [];
+    const { loop } = serveLoop(async (c) => { served.push(c.policy.id); });
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(true);
+    expect(served.some((id) => id.startsWith("prop-0"))).toBe(true); // the promoted champion reached serving
+  });
+
+  it("SERVE-FIRST: if the serving write FAILS, the engine is NOT advanced (no divergence)", async () => {
+    const { engine, loop } = serveLoop(async () => { throw new Error("serving store down"); });
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false); // serving failed ⇒ no promotion
+    expect(engine.getChampion().policy.id).toBe("champion-v0"); // engine on the prior champion
+  });
+
   it("promotes when the rate-limit check is clear, and stamps the frequency-cap clock", async () => {
     let recorded = 0;
     const { loop } = rlLoop(async () => null, async () => { recorded++; });

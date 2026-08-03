@@ -1,7 +1,7 @@
 import type { Policy } from "@palup/widget-brain";
 import type { StorePort } from "@palup/platform-ports";
 import { EvolutionEngine } from "./engine.js";
-import type { Grader, ImprovementEntry, PolicyMetrics, Proposer, Weakness } from "./types.js";
+import type { Champion, Grader, ImprovementEntry, PolicyMetrics, Proposer, Weakness } from "./types.js";
 
 export interface AutoLoopDeps {
   engine: EvolutionEngine;
@@ -29,6 +29,12 @@ export interface AutoLoopDeps {
    * or null if it's a clean voice change. Injected + fail-closed: a missing/throwing screen routes to a
    * human (never auto-promotes an unscreened change). */
   changeScreen?: (policy: Policy) => Promise<string | null>;
+  /** ADR-0014 #4 — write the guardrail-gated auto-promoted champion to SERVING (the RuntimeStatePort the
+   * shopper widget reads), so an auto-promotion actually reaches shoppers. Called SERVE-FIRST (before the
+   * engine advances): a serving/kill failure throws and leaves both the engine and serving on the prior
+   * champion (no divergence). Optional — when absent the auto-promotion stays in-memory (legacy behavior);
+   * the composition root wires it. */
+  serveChampion?: (champion: Champion) => Promise<void>;
   /**
    * ADR-0014 #1 / NN #4 — the SHARED three-scope run-time kill check, consulted BEFORE every AUTO
    * approval+promotion (fail-closed). Injected (not a direct state-postgres import) so this package stays
@@ -253,6 +259,19 @@ export class AutoLoop {
         break;
       }
       const before = champ.metrics;
+      // ADR-0014 #4 — wire promote→serving: the guardrail-gated auto-promotion now REACHES shoppers. Write
+      // serving FIRST (mirrors promoteToServing: a serving/kill failure leaves BOTH the engine and serving
+      // on the prior champion — no divergence), then advance the engine.
+      const winnerPolicy = engine.getCandidate(winner.id)!.policy;
+      if (this.d.serveChampion) {
+        try {
+          await this.d.serveChampion({ policy: winnerPolicy, metrics: winner.metrics });
+        } catch (e) {
+          log(`round ${round}: serving write failed (${(e as Error).message}) — engine NOT advanced; halting.`);
+          await this.persistState();
+          break;
+        }
+      }
       const newChamp = engine.promote(winner.id);
       await this.d.recordPromotion?.(); // ADR-0014 #9 — stamp the shared frequency-cap clock
       await this.persistState();

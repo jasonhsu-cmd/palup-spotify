@@ -9,6 +9,7 @@ import { createAnthropicApiAdapter, createAnthropicApiJudge, isAnthropicApiConfi
 import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE, readOrchestratorState, recordAutoPromotion, rateLimitReason } from "@palup/state-postgres";
 import { ScenarioGrader } from "./scenario-grader.js";
 import { screenChange } from "./change-class.js";
+import { serveAutoChampion } from "./champion-promoter.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 
@@ -66,6 +67,9 @@ async function main() {
     // ADR-0014 #6 — server-sourced change-class screen: a candidate whose directive reaches beyond voice
     // routes to a human, never the fast-lane.
     changeScreen: async (p) => { const s = screenChange(p); return s.changeClass === "flagged" ? s.reasons.join(", ") : null; },
+    // ADR-0014 #4 — the guardrail-gated auto-promotion is written to serving (RuntimeStatePort) so it
+    // actually reaches shoppers; re-checks the shared kill registry, attributed to "auto-loop".
+    serveChampion: (champion) => serveAutoChampion(runtimeStore, RUNTIME_TENANT, champion),
     log,
   });
   const timeline = await loop.run(rounds);

@@ -95,6 +95,33 @@ export async function promoteToServing(
 }
 
 /**
+ * ADR-0014 #4 — write a guardrail-gated AUTO-promoted champion to serving. The auto-loop enforces every
+ * auto-promote gate (kill / cross-family / floor / counter-metrics / holdout / cap+freeze / change-class)
+ * BEFORE it calls this, so there is no human-approval check here — but we RE-CHECK the shared kill
+ * registry (fail-closed, defense-in-depth against a kill armed mid-run) and write the serving champion +
+ * audit atomically, attributed to "auto-loop" (never masquerading as a human, NN #5). Called serve-first
+ * by the auto-loop, so a kill here leaves the engine unadvanced too.
+ */
+export async function serveAutoChampion(store: RuntimeStatePort, tenantId: string, champion: Champion, at = new Date().toISOString()): Promise<void> {
+  const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
+  if (kill) throw new Error(`kill switch armed (${kill.scope}) — auto-promotion to serving halted`);
+  const fromId = (await servingChampion(store, tenantId))?.policy.id ?? "default";
+  await store.tx({ tenantId }, async (t) => {
+    await t.put(CHAMPION, ACTIVE_KEY, { policy: champion.policy, promotedFrom: fromId, promotedAt: at, approvedBy: "auto-loop" });
+    await t.audit(
+      {
+        actor: "auto-loop",
+        action: "champion.auto_promote",
+        input: { tenantId, from: fromId, to: champion.policy.id },
+        decision: `auto-promoted ${champion.policy.id} to serving (guardrail-gated)`,
+        reversalPath: "rollbackServing",
+      },
+      at,
+    );
+  });
+}
+
+/**
  * Roll the serving champion back to the previous one — the serving half of the monitor's auto-rollback
  * (ADR-0003). Persists the restored champion to serving BEFORE calling engine.rollback(), so a store
  * fault leaves prevChampion intact (a retry can recover) instead of stranding it null while serving
