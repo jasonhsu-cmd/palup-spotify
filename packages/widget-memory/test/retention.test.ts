@@ -2,14 +2,15 @@ import { describe, it, expect } from "vitest";
 import { createInMemoryVectorStore, InMemoryRuntimeStore } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
 import { subjectNamespace } from "../src/identity.js";
-import { ORDINARY_TTL_DAYS, SPECIAL_TTL_DAYS, ttlForClass, sweepExpired } from "../src/retention.js";
+import { ORDINARY_TTL_DAYS, SPECIAL_TTL_DAYS, ttlForClass, sweepExpired, RENEW_MIN_GAP_MS } from "../src/retention.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
-// ADR-0015 Inv 4 (retention TTL, enforced not aspirational) + Inv 9 (special-category facts get a
-// SHORTER TTL than ordinary). TTL-on-write is service.ts's `remember` (already stamps
-// `metadata.expiresAt`); TTL-on-read is service.ts's `recall` (already drops expired facts); this test
-// file proves both hold end-to-end, plus the periodic `sweepExpired` that reclaims storage.
+// ADR-0015 Inv 4 (retention TTL, enforced not aspirational, sliding from last activity) + Inv 9 (per the
+// 2026-08-04 amendment, TTL_special ≤ TTL_ordinary — both 30d). TTL-on-write is service.ts's `remember`
+// (stamps `metadata.expiresAt`); TTL-on-read is service.ts's `recall` (drops expired facts AND slides the
+// survivors forward, consent-gated + throttled + audited); this file proves both hold end-to-end, plus the
+// periodic `sweepExpired` that reclaims storage.
 
 function noopDistiller(): FactDistiller {
   return { async distill() { return []; } };
@@ -119,6 +120,43 @@ describe("retention — sliding TTL on return (legal 2026: the 30d window resets
     const facts = await svc(vector, runtimeStore).recall({ tenantId: "acme", anonId: "slide-expired", region: "us", consent1: "in", consent2: "unknown" });
     expect(facts).toEqual([]); // not returned
     expect(await expiryOf(vector, ns)).toBe(past); // and its expiry was NOT slid forward
+  });
+
+  it("emits a ttl_renew audit when it slides a fact forward — the retention extension is never silent (Inv 6)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const ns = subjectNamespace("acme", "slide-audit");
+    await vector.upsert(ns, [{ id: "f1", text: "prefers fragrance-free", metadata: { text: "prefers fragrance-free", class: "ordinary", expiresAt: soon } }]);
+
+    await svc(vector, runtimeStore).recall({ tenantId: "acme", anonId: "slide-audit", region: "us", consent1: "in", consent2: "unknown" });
+    const actions = (await runtimeStore.readAudit({ tenantId: "acme" })).map((r) => r.action);
+    expect(actions).toContain("ttl_renew"); // the write is audited...
+    expect(actions).toContain("recall"); // ...distinct from the read audit
+
+    // a WITHDRAWN-consent recall extends nothing, so it emits NO ttl_renew.
+    const v2 = createInMemoryVectorStore();
+    const rs2 = new InMemoryRuntimeStore();
+    await v2.upsert(ns, [{ id: "f1", text: "prefers fragrance-free", metadata: { text: "prefers fragrance-free", class: "ordinary", expiresAt: soon } }]);
+    await svc(v2, rs2).recall({ tenantId: "acme", anonId: "slide-audit", region: "us", consent1: "out", consent2: "unknown" });
+    expect((await rs2.readAudit({ tenantId: "acme" })).map((r) => r.action)).not.toContain("ttl_renew");
+  });
+
+  it("throttled: a second recall within RENEW_MIN_GAP does not re-stamp again or emit a second ttl_renew", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const ns = subjectNamespace("acme", "slide-throttle");
+    await vector.upsert(ns, [{ id: "f1", text: "prefers fragrance-free", metadata: { text: "prefers fragrance-free", class: "ordinary", expiresAt: soon } }]);
+    const ctx: MemoryCtx = { tenantId: "acme", anonId: "slide-throttle", region: "us", consent1: "in", consent2: "unknown" };
+
+    let clockMs = now.getTime();
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller: noopDistiller(), enabled: true, clock: () => new Date(clockMs) });
+    await service.recall(ctx); // first return → slides forward
+    const afterFirst = await expiryOf(vector, ns);
+
+    clockMs += RENEW_MIN_GAP_MS / 2; // a few hours later, well inside the throttle window
+    await service.recall(ctx);
+    expect(await expiryOf(vector, ns)).toBe(afterFirst); // NOT re-stamped again
+    expect((await runtimeStore.readAudit({ tenantId: "acme" })).filter((r) => r.action === "ttl_renew")).toHaveLength(1); // only the first
   });
 });
 

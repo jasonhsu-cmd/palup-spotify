@@ -17,7 +17,8 @@ export type MemoryAction =
   | "erase.subject"
   | "erase.tenant"
   | "merge"
-  | "ttl_sweep";
+  | "ttl_sweep"
+  | "ttl_renew";
 
 const ACTOR = "agent:shopper-memory";
 
@@ -31,6 +32,8 @@ const REVERSAL_PATHS: Record<MemoryAction, string> = {
   "erase.tenant": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
   merge: "irreversible: the pre-merge anon-id namespace is DELETED on merge; the migrated facts live under the account namespace, from which the account's own erasure/withdrawal applies",
   ttl_sweep: "n/a — expiry is policy-driven; a fresh consent grant starts a new TTL",
+  "ttl_renew":
+    "shopper may withdraw (manage-memory / forget-me) — a withdrawn fact is never renewed again and ages out on its current expiry; erasure purges it immediately",
 };
 
 /** Opaque, one-way reference to a subject — NEVER the raw anonId/account id, so the immutable,

@@ -7,7 +7,7 @@ import { classifyFact, type FactClass } from "./classifier.js";
 import { sanitizeFact, createStubDistiller, createModelDistiller, isValidDisposition, type FactDistiller } from "./distiller.js";
 import type { Disposition } from "./disposition.js";
 import { buildMemoryAudit } from "./audit.js";
-import { ttlForClass } from "./retention.js";
+import { ttlForClass, RENEW_MIN_GAP_MS } from "./retention.js";
 import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact, FactMetadata } from "./types.js";
 
 // ADR-0015 PR A (T7): wires flag -> consent -> classifier -> distiller -> VectorPort + audit. The
@@ -146,12 +146,38 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     const matches = await deps.vector.query(namespace, { text: "", k: RECALL_LIMIT });
 
     const facts: RecalledFact[] = [];
+    const renewed: VectorRecord[] = []; // sliding-retention re-stamps (ADR-0015 Inv 4 amendment, 2026-08-04)
     for (const match of matches) {
       const meta = match.metadata as Partial<FactMetadata> | undefined;
       if (!meta?.text || !meta.class) continue;
-      if (meta.expiresAt && new Date(meta.expiresAt).getTime() <= now) continue; // TTL-on-read (Inv 4)
+      const expiresMs = meta.expiresAt ? new Date(meta.expiresAt).getTime() : undefined;
+      if (expiresMs !== undefined && expiresMs <= now) continue; // TTL-on-read (Inv 4): expired ⇒ not served, never renewed
       // PR-8 — surface the persisted disposition (previously never written, so never read back either).
       facts.push({ text: meta.text, class: meta.class, disposition: meta.disposition });
+
+      // Sliding retention (ADR-0015 Inv 4: "expire … since last activity"; amendment 2026-08-04). The shopper
+      // has RETURNED (this recall), so re-stamp the 30-day window from `now` for facts we may still lawfully
+      // hold. Consent-gated per tier EXACTLY like the brain's read-time gate (special⇒consent2, ordinary⇒
+      // consent1; only literal "in" renews), so a WITHDRAWN/absent-consent fact is NEVER extended — it keeps
+      // its expiry and ages out (or is erased). Throttled to at most once per RENEW_MIN_GAP since the last
+      // stamp (a same-session burst neither churns the store nor floods the audit log), and only ever FORWARD.
+      const consentIn = meta.class === "special" ? ctx.consent2 === "in" : ctx.consent1 === "in";
+      const lastStampedMs = expiresMs !== undefined ? expiresMs - ttlForClass(meta.class) : now;
+      if (consentIn && now - lastStampedMs >= RENEW_MIN_GAP_MS) {
+        renewed.push({ id: match.id, text: meta.text, metadata: { ...(meta as FactMetadata), expiresAt: new Date(now + ttlForClass(meta.class)).toISOString() } });
+      }
+    }
+
+    // The retention-EXTENDING write is not silent (ADR-0015 Inv 6): it carries its OWN `ttl_renew` audit
+    // (count of facts slid forward), distinct from the read's `recall` audit — whose reversalPath therefore
+    // stays truthfully "read-only". So the immutable log shows exactly when, and how many, facts had their
+    // retention extended, and by which subject.
+    if (renewed.length > 0) {
+      await deps.vector.upsert(namespace, renewed);
+      await deps.audit.audit(
+        { tenantId: ctx.tenantId },
+        buildMemoryAudit({ action: "ttl_renew", tenantId: ctx.tenantId, anonId: ctx.anonId, count: renewed.length }),
+      );
     }
 
     await deps.audit.audit(
