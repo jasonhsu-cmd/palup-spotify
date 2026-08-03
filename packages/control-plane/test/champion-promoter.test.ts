@@ -10,12 +10,15 @@ import { promoteToServing, rollbackServing, servingChampion } from "../src/champ
 // independently verifies the approval was HUMAN (not "auto-loop"), fails closed on the shared kill
 // registry, and writes the durable serving store BEFORE advancing the engine.
 
-const CHAMP_METRICS: PolicyMetrics = { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75 };
+// Complete counter-metrics on both baseline + candidate (ADR-0014 #5 fail-closed gate) so the candidate
+// passes the gate and this suite can exercise the promote→serving bridge (its actual subject).
+const BASE_CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const CHAMP_METRICS: PolicyMetrics = { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75, counterMetrics: BASE_CM };
 const P = (id: string): Policy => ({ id, label: id, styleDirective: `voice-${id}`, proactivityDefault: "balanced" });
 const mkEngine = () =>
   new EvolutionEngine({
     champion: { policy: DEFAULT_POLICY, metrics: CHAMP_METRICS },
-    grader: new MockGrader({ cand: { policyId: "cand", safetyPass: true, floorPass: true, qualityScore: 0.9 } }),
+    grader: new MockGrader({ cand: { policyId: "cand", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { ...BASE_CM, returnRate: 0.06, optOutRate: 0.08 } } }),
   });
 const readyCandidate = async (engine: EvolutionEngine) => {
   engine.propose(P("cand"));
