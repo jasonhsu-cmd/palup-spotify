@@ -40,6 +40,7 @@ export { canonicalize, hashAuditBase } from "./audit-hash.js";
 export type { IdentityPort, Principal } from "./identity-port.js";
 export { authorize, buildShopifyShopperId, shopperIdTenant } from "./identity-port.js";
 export { createOperatorTokenIdentity } from "./operator-identity.js";
+export { mintStepUp, verifyStepUp, STEPUP_MAX_AGE_MS, type StepUpClaims, type StepUpResult } from "./step-up.js";
 export { createWidgetTokenIdentity, mintWidgetToken } from "./widget-token-identity.js";
 export { createShopperTokenIdentity, mintShopperToken } from "./shopper-token-identity.js";
 export { redactPII, createRedactingModelPort } from "./redaction.js";
