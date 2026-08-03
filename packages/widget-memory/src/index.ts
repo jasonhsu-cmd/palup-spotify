@@ -12,6 +12,8 @@ export { decideMemoryWrite } from "./consent.js";
 export type { FactClass, FactClassification, TenantSensitivityPolicy } from "./classifier.js";
 export { classifyFact } from "./classifier.js";
 
+export type { Disposition, DispositionAxis } from "./disposition.js";
+
 export type { FactDistiller } from "./distiller.js";
 export { createStubDistiller, sanitizeFact, FACT_MAX_CHARS } from "./distiller.js";
 
