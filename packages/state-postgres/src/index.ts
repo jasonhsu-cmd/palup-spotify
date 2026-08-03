@@ -13,12 +13,21 @@ export {
 export {
   readOrchestratorState,
   recordAutoPromotion,
+  recordAutoPromotionTx,
   freezeAutoPromote,
   freezeAutoPromoteTx,
   rateLimitReason,
   AUTO_PROMOTE_WINDOW_MS,
   type OrchestratorState,
 } from "./orchestrator-registry.js";
+export {
+  readAutoStage,
+  readAutoStageTx,
+  autoStageComplete,
+  recordAutoStage,
+  type AutoStageLedger,
+  type AutoStageMark,
+} from "./auto-stage-ledger.js";
 export {
   autoPromoteGate,
   readTenantOptIn,

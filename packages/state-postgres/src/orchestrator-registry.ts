@@ -24,11 +24,16 @@ export async function readOrchestratorState(store: RuntimeStatePort, tenantId: s
 
 /** Stamp the frequency-cap clock on an auto-promotion (audited, NN #5). Atomic put + audit. */
 export async function recordAutoPromotion(store: RuntimeStatePort, tenantId: string, at = new Date().toISOString()): Promise<void> {
-  await store.tx({ tenantId }, async (t) => {
-    const st = (await t.get<OrchestratorState>(ORCH, STATE_KEY)) ?? {};
-    await t.put(ORCH, STATE_KEY, { ...st, lastPromotedAt: at });
-    await t.audit({ actor: "auto-loop", action: "orchestrator.promoted", input: { tenantId }, decision: "stamped the frequency-cap clock", reversalPath: "n/a" }, at);
-  });
+  await store.tx({ tenantId }, (t) => recordAutoPromotionTx(t, tenantId, at));
+}
+
+/** The frequency-cap stamp on an EXISTING tx handle — so the terminal serveAutoChampion write can commit
+ * the champion put + audit + this stamp ATOMICALLY (a half-write that stamped but didn't serve, or served
+ * but didn't stamp, could permit an immediate re-promote). Mirrors freezeAutoPromoteTx. */
+export async function recordAutoPromotionTx(t: RuntimeStateTx, tenantId: string, at: string): Promise<void> {
+  const st = (await t.get<OrchestratorState>(ORCH, STATE_KEY)) ?? {};
+  await t.put(ORCH, STATE_KEY, { ...st, lastPromotedAt: at });
+  await t.audit({ actor: "auto-loop", action: "orchestrator.promoted", input: { tenantId }, decision: "stamped the frequency-cap clock", reversalPath: "n/a" }, at);
 }
 
 /**
