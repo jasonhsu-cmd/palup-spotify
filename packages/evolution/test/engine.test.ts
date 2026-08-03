@@ -75,9 +75,11 @@ describe("EvolutionEngine gate", () => {
   });
 
   // ADR-0014 #7 — anti-overfit: improving the visible set but regressing the SECRET holdout is gaming.
-  it("BLOCKS a candidate that improves visible quality but REGRESSES the secret holdout (anti-overfit)", async () => {
-    const champ = { policy: DEFAULT_POLICY, metrics: { ...champion.metrics, holdoutScore: 0.8 } };
-    const e = new EvolutionEngine({ champion: champ, grader: new MockGrader({ overfit: { ...GOOD, policyId: "overfit", qualityScore: 0.95, holdoutScore: 0.6 } }) });
+  const withHoldout = (m: Partial<PolicyMetrics>, score: number, seed = "s1"): PolicyMetrics => ({ ...GOOD, ...m, holdoutScore: score, holdoutSeed: seed } as PolicyMetrics);
+  const champWithHoldout = (score: number, seed = "s1") => ({ policy: DEFAULT_POLICY, metrics: { ...champion.metrics, holdoutScore: score, holdoutSeed: seed } });
+
+  it("BLOCKS a candidate that improves visible quality but REGRESSES the same-seed holdout (anti-overfit)", async () => {
+    const e = new EvolutionEngine({ champion: champWithHoldout(0.8), grader: new MockGrader({ overfit: withHoldout({ policyId: "overfit", qualityScore: 0.95 }, 0.6) }) });
     e.propose(P("overfit"));
     const rec = await e.evaluate("overfit");
     expect(rec.status).toBe("blocked");
@@ -85,11 +87,26 @@ describe("EvolutionEngine gate", () => {
   });
 
   it("PASSES a candidate that improves BOTH visible quality and the holdout (genuine improvement)", async () => {
-    const champ = { policy: DEFAULT_POLICY, metrics: { ...champion.metrics, holdoutScore: 0.8 } };
-    const e = new EvolutionEngine({ champion: champ, grader: new MockGrader({ gen: { ...GOOD, policyId: "gen", qualityScore: 0.9, holdoutScore: 0.85 } }) });
+    const e = new EvolutionEngine({ champion: champWithHoldout(0.8), grader: new MockGrader({ gen: withHoldout({ policyId: "gen", qualityScore: 0.9 }, 0.85) }) });
     e.propose(P("gen"));
     const rec = await e.evaluate("gen");
     expect(rec.gate?.pass).toBe(true);
+  });
+
+  it("FAILS CLOSED — a champion with a holdout but a candidate WITHOUT one blocks (can't drop the holdout to dodge the gate)", async () => {
+    const e = new EvolutionEngine({ champion: champWithHoldout(0.8), grader: new MockGrader({ noh: { ...GOOD, policyId: "noh", qualityScore: 0.95 } }) }); // no holdoutScore
+    e.propose(P("noh"));
+    const rec = await e.evaluate("noh");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("holdout-absent");
+  });
+
+  it("BLOCKS a DIFFERENT-seed holdout comparison (a mid-run rotation is apples-to-oranges, not a pass)", async () => {
+    const e = new EvolutionEngine({ champion: champWithHoldout(0.8, "seedA"), grader: new MockGrader({ mm: withHoldout({ policyId: "mm", qualityScore: 0.95 }, 0.99, "seedB") }) });
+    e.propose(P("mm"));
+    const rec = await e.evaluate("mm");
+    expect(rec.status).toBe("blocked"); // even though 0.99 > 0.8, the seeds differ → not comparable
+    expect(rec.gate?.reasons).toContain("holdout-seed-mismatch");
   });
 
   it("BLOCKS when the champion baseline has no counter-metrics (can't prove not-worse)", async () => {

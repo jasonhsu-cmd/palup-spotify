@@ -26,7 +26,8 @@ export class ScenarioGrader implements Grader {
     // to the proposer via the weakness report) and a SECRET holdout (drives holdoutScore, the gate's
     // anti-overfit check the proposer never sees). Same total grading cost — the scenarios are partitioned,
     // not duplicated.
-    const { visible, holdout } = partitionScenarios(this.scenarios, holdoutSeed());
+    const seed = holdoutSeed();
+    const { visible, holdout } = partitionScenarios(this.scenarios, seed);
     const vis = await this.gradeSet(brain, visible);
     const hold = await this.gradeSet(brain, holdout);
     this.log(`    graded ${policy.id}: q=${vis.score.toFixed(3)} (visible ${visible.length}) · holdout=${hold.score.toFixed(3)} (${holdout.length})`);
@@ -43,6 +44,7 @@ export class ScenarioGrader implements Grader {
       qualityScore: vis.score,
       perCriteria: vis.perCriteria, // VISIBLE only — the holdout criteria are never surfaced to the proposer
       holdoutScore: holdout.length ? hold.score : undefined,
+      holdoutSeed: holdout.length ? seed : undefined, // stamp the epoch so the gate compares like-for-like
       counterMetrics,
     };
   }
