@@ -70,7 +70,10 @@ export class AutoLoop {
   private async checkKill(): Promise<{ scope: string } | null> {
     if (!this.d.killCheck) return { scope: "no-kill-checker" }; // fail closed: auto-promote requires a checker
     try {
-      return await this.d.killCheck();
+      const r = await this.d.killCheck();
+      if (r) return r; // armed { scope }
+      if (r === null) return null; // ONLY an explicit null is "clear"
+      return { scope: "kill-check-invalid" }; // undefined / contract violation ⇒ fail closed (never proceed)
     } catch {
       return { scope: "kill-registry-unreadable" }; // fail closed: an unreadable registry halts
     }
