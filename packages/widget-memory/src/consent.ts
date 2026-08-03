@@ -40,9 +40,11 @@ export interface WriteCapability {
  * scope B) — a shopper opted OUT of ordinary memory can still consent to special-category memory alone,
  * and vice versa.
  *
- * UNVERIFIED-with-legal: applying the EU-style fail-closed rule to Consent 2 even in the US (rather than
- * the US ordinary opt-out regime) is a conservative default pending legal review of emerging US state
- * health-privacy law (the ADR's own "Still open" note) — confirm with legal before this ships live.
+ * LEGAL-APPROVED (2026): applying the EU-style fail-closed rule to Consent 2 even in the US (rather than
+ * the US ordinary opt-out regime) is the ratified default — special-category / health-data memory ALWAYS
+ * requires explicit `consent2 === "in"`, in every region including the US, given emerging US state
+ * health-privacy law. Ordinary-fact memory keeps the US opt-out regime; only special-category is
+ * fail-closed everywhere.
  */
 export function decideMemoryWrite(i: ConsentInputs): WriteCapability {
   const isUs = i.region === "us";

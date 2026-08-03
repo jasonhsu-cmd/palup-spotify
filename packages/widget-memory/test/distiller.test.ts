@@ -266,7 +266,7 @@ describe("createModelDistiller — wired into createMemoryService (reuse, not re
     expect(spy).toHaveBeenCalledWith("prefers fragrance-free products", undefined);
   });
 
-  it("per-class TTL (ttlForClass, reused unchanged) still governs model-sourced facts", async () => {
+  it("ttlForClass (reused unchanged) still stamps + governs model-sourced facts — both expire at the shared 30d", async () => {
     const model = respond({ facts: [{ text: "prefers fragrance-free" }, { text: "allergic to tree nuts" }] });
     let nowMs = new Date("2026-01-01T00:00:00Z").getTime();
     const service = createMemoryService({
@@ -279,10 +279,14 @@ describe("createModelDistiller — wired into createMemoryService (reuse, not re
     const ctx: MemoryCtx = { tenantId: "acme-md-ttl", anonId: "g6", region: "us", consent1: "in", consent2: "in" };
     await service.remember(ctx, { message: "m", reply: "r" });
 
-    nowMs += 20 * 24 * 60 * 60 * 1000; // past SPECIAL_TTL_DAYS (14), before ORDINARY_TTL_DAYS (60)
+    // legal 2026: ordinary and special share the 30d window. At day 35 with NO intervening recall (nothing
+    // slides the TTL), both model-sourced facts have expired on read — proving ttlForClass still stamps and
+    // governs model-sourced writes just as it does distiller-sourced ones.
+    nowMs += 35 * 24 * 60 * 60 * 1000;
     const texts = (await service.recall(ctx)).map((f) => f.text);
-    expect(texts).toContain("prefers fragrance-free"); // ordinary still live
-    expect(texts).not.toContain("allergic to tree nuts"); // special expired
+    expect(texts).not.toContain("prefers fragrance-free");
+    expect(texts).not.toContain("allergic to tree nuts");
+    expect(texts).toEqual([]);
   });
 });
 

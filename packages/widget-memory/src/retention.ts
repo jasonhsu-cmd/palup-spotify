@@ -5,29 +5,33 @@ import type { FactClass } from "./classifier.js";
 import type { FactMetadata } from "./types.js";
 
 // ADR-0015 Invariant 4 (retention TTL, "expiry is enforced, not aspirational") + Invariant 9 (special-
-// category facts get stricter handling, including "a shorter TTL than the 60-day default"). This module
-// is the single source of truth for the TTL day-counts: service.ts's `remember` (TTL-on-write, stamps
-// `metadata.expiresAt`) and `recall` (TTL-on-read, drops an expired fact even though it is still
-// physically stored) both key off `ttlForClass` here, so the two can never drift apart. `sweepExpired`
+// category facts get stricter handling). LEGAL-APPROVED (2026): both classes retain for 30 days as a
+// SLIDING window — measured from the shopper's LAST activity, not first capture (service.ts `recall`
+// re-stamps a still-consented fact's expiry to `now + ttl` on a return visit). This module is the single
+// source of truth for the TTL day-counts: service.ts's `remember` (TTL-on-write, stamps
+// `metadata.expiresAt`), `recall` (TTL-on-read drops an expired fact + slides the survivors forward), and
+// `sweepExpired` all key off `ttlForClass` here, so they can never drift apart. `sweepExpired`
 // is the periodic reclamation half — it actually deletes what TTL-on-read merely hides — mirroring
 // RuntimeStatePort's own `sweepExpired` (expiry enforced on read; sweeping reclaims storage).
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Default guest/ordinary-fact retention (ADR-0015 Inv 4). The ADR marks the exact figure "Still open —
- * resolve before Accepted"; 60 days is the ADR's own suggested placeholder pending legal review.
- * UNVERIFIED-with-legal. */
-export const ORDINARY_TTL_DAYS = 60;
+/** Guest/ordinary-fact retention (ADR-0015 Inv 4). LEGAL-APPROVED (2026): 30 days, applied as a SLIDING
+ * window measured from the shopper's LAST activity — a return visit re-stamps the fact's expiry to
+ * `now + ttl` (service.ts `recall`), so it is 30d of inactivity, not 30d from first capture, that expires it. */
+export const ORDINARY_TTL_DAYS = 30;
 
-/** Shorter retention for special-category (Art. 9) facts (ADR-0015 Inv 9: "stricter handling ... a
- * shorter TTL than the 60-day default"). The ADR's "Still open" note suggests 7-14 days; 14 is used here
- * pending legal sign-off. UNVERIFIED-with-legal. */
-export const SPECIAL_TTL_DAYS = 14;
+/** Special-category (Art. 9) retention (ADR-0015 Inv 9: stricter handling). LEGAL-APPROVED (2026): 30
+ * days — the SAME window as ordinary (Inv 9 preserved as TTL_special ≤ TTL_ordinary, i.e. NEVER longer),
+ * with special-category's extra strictness enforced by the mandatory Consent 2 gate (consent.ts), not by
+ * a shorter retention. Also slides from last activity. */
+export const SPECIAL_TTL_DAYS = 30;
 
 /**
  * The TTL for a fact of the given sensitivity class, in MILLISECONDS — add to a clock reading (`now +
- * ttlForClass(c)`) to get an `expiresAt` instant. Special-category facts always resolve to the shorter
- * duration (never longer than, never equal to, ordinary — Inv 9).
+ * ttlForClass(c)`) to get an `expiresAt` instant. Per the 2026 legal ruling ordinary and special-category
+ * retention are equal (30d); Inv 9's retention constraint holds as TTL_special ≤ TTL_ordinary (never
+ * longer), special's extra strictness being the Consent-2 gate rather than a shorter TTL.
  */
 export function ttlForClass(factClass: FactClass): number {
   const days = factClass === "special" ? SPECIAL_TTL_DAYS : ORDINARY_TTL_DAYS;

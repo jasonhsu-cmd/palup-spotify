@@ -203,8 +203,10 @@ describe("createMemoryService — the enabled override is a TEST SEAM, not a pro
   });
 });
 
-describe("createMemoryService — per-class TTL (Inv 4)", () => {
-  it("special (14d) expires on read before ordinary (60d)", async () => {
+describe("createMemoryService — per-class TTL (Inv 4; legal 2026: ordinary and special share the 30d window)", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it("BOTH classes expire together on read after the shared 30d window (no intervening recall to slide them)", async () => {
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
     const distiller = fixedDistiller(["prefers fragrance-free", "allergic to tree nuts"]);
@@ -216,11 +218,32 @@ describe("createMemoryService — per-class TTL (Inv 4)", () => {
     expect(w.written).toContain("ordinary");
     expect(w.written).toContain("special");
 
-    // day 20: past SPECIAL_TTL_DAYS (14) but before ORDINARY_TTL_DAYS (60) — proves per-class TTL AND
-    // TTL-on-read (fails if the expiry filter or the per-class expiresAt write is broken).
-    nowMs += 20 * 24 * 60 * 60 * 1000;
+    // day 35 with NO intervening recall (so nothing slid the window): both are past the shared 30d TTL.
+    nowMs += 35 * DAY;
     const texts = (await service.recall(ctx)).map((f) => f.text);
-    expect(texts).toContain("prefers fragrance-free"); // ordinary still live
-    expect(texts).not.toContain("allergic to tree nuts"); // special expired
+    expect(texts).not.toContain("prefers fragrance-free"); // ordinary expired at 30d
+    expect(texts).not.toContain("allergic to tree nuts"); // special expired at the SAME 30d (no longer earlier)
+    expect(texts).toEqual([]);
+  });
+
+  it("a return visit before expiry slides BOTH classes forward, so they survive past their original 30d", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const distiller = fixedDistiller(["prefers fragrance-free", "allergic to tree nuts"]);
+    let nowMs = new Date("2026-01-01T00:00:00Z").getTime();
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, clock: () => new Date(nowMs) });
+    const ctx: MemoryCtx = { tenantId: "acme-ttl", anonId: "guest-ttl2", region: "us", consent1: "in", consent2: "in" };
+
+    await service.remember(ctx, { message: "...", reply: "..." });
+
+    // day 25 return → both consented facts slide to day 25 + 30 = day 55.
+    nowMs += 25 * DAY;
+    expect((await service.recall(ctx)).length).toBe(2);
+
+    // day 45 — past the ORIGINAL 30d expiry, but the day-25 return pushed both to day 55, so both survive.
+    nowMs += 20 * DAY;
+    const texts = (await service.recall(ctx)).map((f) => f.text);
+    expect(texts).toContain("prefers fragrance-free");
+    expect(texts).toContain("allergic to tree nuts");
   });
 });
