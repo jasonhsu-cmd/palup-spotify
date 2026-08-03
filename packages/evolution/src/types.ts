@@ -86,12 +86,36 @@ export interface GateResult {
   delta: number;
 }
 
+/**
+ * A measured stage marker in the ADR-0014 auto-optimize lane. `pass` is ENGINE-derived from the raw
+ * numbers (never a caller-supplied boolean), so a buggy or malicious orchestrator cannot fabricate a
+ * passing stage.
+ */
+export interface StageMarker {
+  n: number;
+  delta: number;
+  elapsedMs?: number;
+  at: string;
+  pass: boolean;
+}
+
+/** The ordered auto-optimize lane stages (ADR-0014 inv #3, engine-enforced). */
+export type AutoStage = "eval-passed" | "shadowed" | "canaried" | "promoted";
+
 export interface CandidateRecord {
   policy: Policy;
   status: CandidateStatus;
   metrics?: PolicyMetrics;
   gate?: GateResult;
   seq: number;
+  /**
+   * ADR-0014 T4 auto-optimize lane (engine-enforced stage completion). ABSENT on the human lifecycle —
+   * no human-path method reads it, so the human path is byte-for-byte unchanged. `gating: true` records
+   * that beginAutoOptimize verified a POSITIVE cross-family gating grade (the delta over engine.gate,
+   * which passes gating===undefined). The stage advances ONLY in order and ONLY on an engine-derived
+   * pass; the durable serving write refuses unless autoPromotable() re-derives ok from these markers.
+   */
+  auto?: { stage: AutoStage; gating: true; shadow?: StageMarker; canary?: StageMarker };
   /** Who approved this candidate (set by engine.approve) — the audit-of-record actor for any downstream
    * promotion. A serving-promotion path must bind its audit to THIS, never a caller-supplied string. */
   approvedBy?: string;

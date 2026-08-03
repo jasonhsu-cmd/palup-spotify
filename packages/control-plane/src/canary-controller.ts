@@ -125,8 +125,17 @@ export function verdictFor(n: number, delta: number): CanaryVerdict {
 export interface CanaryPowerThresholds {
   minN: number;
   minWindowMs: number;
+  /** Minimum quality delta to count as "promote" — the SAME cutoff the engine's recordCanary re-derives
+   * (T4a parity), so the two arithmetic copies can't drift. */
+  minDelta: number;
+  /** Upper bound on the observation window: past this WITHOUT reaching power, the orchestrator routes to
+   * a human rather than waiting forever. */
+  maxWindowMs: number;
 }
-export const DEFAULT_CANARY_POWER: CanaryPowerThresholds = { minN: 100, minWindowMs: 24 * 60 * 60 * 1000 };
+// CONSERVATIVE PLACEHOLDER defaults — the real per-tenant values (minN, minWindowMs, minDelta,
+// maxWindowMs, plus escalation-recall / return-complaint floors) are OWNER-SET at ADR-0014 enablement
+// (docs "Open questions"). Dormant build: nothing enables the fast-lane until those are set + signed off.
+export const DEFAULT_CANARY_POWER: CanaryPowerThresholds = { minN: 100, minWindowMs: 24 * 60 * 60 * 1000, minDelta: 0.05, maxWindowMs: 7 * 24 * 60 * 60 * 1000 };
 
 /** Enough traffic AND enough elapsed observation to trust a canary comparison. FAIL-CLOSED on an
  * unreadable count/elapsed (NaN ⇒ no power) — a low-traffic tenant stays on the human path. */
@@ -139,5 +148,9 @@ export type WindowedVerdict = CanaryVerdict | "insufficient-power";
  * "insufficient-power" so the orchestrator routes to a human (or holds), regardless of the raw delta. */
 export function windowedVerdictFor(n: number, delta: number, elapsedMs: number, t: CanaryPowerThresholds = DEFAULT_CANARY_POWER): WindowedVerdict {
   if (!hasStatisticalPower(n, elapsedMs, t)) return "insufficient-power";
-  return verdictFor(n, delta);
+  // Threshold-driven (t.minDelta), so this "promote" cutoff EQUALS the engine's recordCanary re-derivation
+  // for the same thresholds object (T4a parity) — the two copies can't drift.
+  if (delta >= t.minDelta) return "promote";
+  if (delta <= -t.minDelta) return "rollback";
+  return "hold";
 }

@@ -1,75 +1,120 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryRuntimeStore, mintStepUp, type RuntimeStatePort, type RuntimeStateTx } from "@palup/platform-ports";
-import { setAutoPromoteOptIn, setPlatformAutoPromote, armKill } from "@palup/state-postgres";
-import { type Policy } from "@palup/widget-brain";
+import { setAutoPromoteOptIn, setPlatformAutoPromote, armKill, recordAutoStage, readOrchestratorState, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
+import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
+import { EvolutionEngine, MockGrader, type PolicyMetrics } from "@palup/evolution";
 import { servingChampion } from "../src/champion-promoter.js";
-import { writeAutoChampion } from "../src/auto-champion-write.js";
+import { serveAutoChampion } from "../src/auto-champion-write.js";
 
-// ADR-0014 prereq #8 — the durable, externally-anchored AUTO-promote write primitive the T4 orchestrator
-// calls AFTER all gates pass. The champion put + an actor:"auto-loop" audit commit in ONE tx (atomic);
-// the committed record is then externally anchored to stdout → Cloud Logging (a store-level rewrite can't
-// reach that trust domain). It fails CLOSED (no write) unless the T1 opt-in gate is enabled AND no kill
-// is armed. Ships dormant: nothing calls it yet.
+// ADR-0014 T4d — the marker+ledger-gated durable serving write. serveAutoChampion refuses unless the
+// engine's auto-lane markers say autoPromotable (in-process, engine-enforced) AND the durable ledger
+// shows both stages complete (cross-process) AND opt-in is on AND no kill is armed. The served policy is
+// bound from the engine record (server-sourced — there is no caller-passed policy to forge). One tx =
+// champion put + auto-loop audit + freq-cap stamp; then the external anchor + markAutoPromoted.
 
 const SECRET = "su";
 const NOW = 1_754_000_000_000;
+const CM = { returnRate: 0.08, complaintRate: 0.03, optOutRate: 0.1, escalationRecall: 1 };
+const champMetrics: PolicyMetrics = { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.7, counterMetrics: CM };
+const candMetrics: PolicyMetrics = { policyId: "cand", safetyPass: true, floorPass: true, qualityScore: 0.9, counterMetrics: { ...CM, returnRate: 0.06 }, gating: true };
 const P = (id: string): Policy => ({ id, label: id, styleDirective: `voice-${id}`, proactivityDefault: "balanced" });
+const POWER = { minN: 100, minWindowMs: 86_400_000, minDelta: 0.05 };
+const SHADOW = { n: 8, delta: 0.1, at: "t" };
+const CANARY = { n: 200, delta: 0.2, elapsedMs: 90_000_000, at: "t" };
 
-/** Turn BOTH switches on for a tenant (real T1 SET path: operator + step-up). */
-async function enableAutoPromote(store: RuntimeStatePort, tenantId: string) {
+const mkEngine = () => new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: champMetrics }, grader: new MockGrader({ cand: candMetrics }) });
+
+/** Engine with "cand" driven through begin→shadow→canary so autoPromotable is ok. */
+async function drivenEngine(): Promise<EvolutionEngine> {
+  const e = mkEngine();
+  e.propose(P("cand"));
+  await e.evaluate("cand");
+  e.beginAutoOptimize("cand");
+  e.recordShadow("cand", SHADOW, { maxRegression: 0.05 });
+  e.recordCanary("cand", CANARY, POWER);
+  return e;
+}
+async function enable(store: RuntimeStatePort, tenantId: string) {
   await setAutoPromoteOptIn(store, tenantId, true, { actor: "jane.operator", stepUpToken: mintStepUp(SECRET, { action: "autopromote.optin.set", tenantId, iat: NOW, nonce: `o-${tenantId}` }), stepUpSecret: SECRET, now: NOW });
   await setPlatformAutoPromote(store, true, { actor: "jane.operator", stepUpToken: mintStepUp(SECRET, { action: "autopromote.platform.set", tenantId: "__system__", iat: NOW, nonce: `p-${tenantId}` }), stepUpSecret: SECRET, now: NOW });
 }
+async function ledgerComplete(store: RuntimeStatePort, tenantId: string) {
+  await recordAutoStage(store, tenantId, "cand", "shadow", { ...SHADOW, pass: true });
+  await recordAutoStage(store, tenantId, "cand", "canary", { ...CANARY, pass: true });
+}
 
-describe("writeAutoChampion — atomic, externally-anchored, auto-loop-attributed (ADR-0014 #8)", () => {
-  it("refuses to write when auto-promote is NOT enabled (dormancy defense, fail-closed)", async () => {
+describe("serveAutoChampion — marker + ledger + opt-in + kill gated (ADR-0014 T4d)", () => {
+  it("REFUSES a candidate the engine says is not auto-promotable — even with opt-in ON + ledger complete", async () => {
     const store = new InMemoryRuntimeStore();
-    await expect(writeAutoChampion(store, "acme", P("cand"), {})).rejects.toThrow(/not enabled|force-human|opt/i);
+    await enable(store, "acme");
+    await ledgerComplete(store, "acme");
+    const e = mkEngine();
+    e.propose(P("cand"));
+    await e.evaluate("cand");
+    e.beginAutoOptimize("cand");
+    e.recordShadow("cand", SHADOW, { maxRegression: 0.05 }); // NO canary → not autoPromotable
+    await expect(serveAutoChampion(e, "cand", store, "acme")).rejects.toThrow(/auto-promotable|canary/i);
     expect(await servingChampion(store, "acme")).toBeNull();
   });
 
-  it("refuses when a kill is armed — at GLOBAL or TENANT scope (fail-closed on the shared registry)", async () => {
+  it("REFUSES when the durable ledger is incomplete even though the engine markers are ok (cross-process guard)", async () => {
+    const store = new InMemoryRuntimeStore();
+    await enable(store, "acme");
+    const e = await drivenEngine(); // engine markers ok...
+    // ...but NO ledger recorded (a separate process never wrote it)
+    await expect(serveAutoChampion(e, "cand", store, "acme")).rejects.toThrow(/ledger/i);
+    expect(await servingChampion(store, "acme")).toBeNull();
+  });
+
+  it("REFUSES when opt-in is off, and when a kill is armed (global/tenant) — fail-closed", async () => {
+    const noOptin = new InMemoryRuntimeStore();
+    await ledgerComplete(noOptin, "acme");
+    await expect(serveAutoChampion(await drivenEngine(), "cand", noOptin, "acme")).rejects.toThrow(/not enabled|force-human|opt/i);
+    expect(await servingChampion(noOptin, "acme")).toBeNull();
     for (const scope of ["global", "tenant:acme"] as const) {
       const store = new InMemoryRuntimeStore();
-      await enableAutoPromote(store, "acme");
+      await enable(store, "acme");
+      await ledgerComplete(store, "acme");
       await armKill(store, scope, "operator-halt");
-      await expect(writeAutoChampion(store, "acme", P("cand"), {})).rejects.toThrow(/kill/i);
+      await expect(serveAutoChampion(await drivenEngine(), "cand", store, "acme")).rejects.toThrow(/kill/i);
       expect(await servingChampion(store, "acme")).toBeNull();
     }
   });
 
-  it("writes serving attributed to auto-loop (never human), round-trips the Policy, and emits the external anchor", async () => {
+  it("happy path: writes serving (auto-loop, engine-bound policy), stamps the freq-cap, emits the anchor, marks the engine", async () => {
     const store = new InMemoryRuntimeStore();
-    await enableAutoPromote(store, "acme");
+    await enable(store, "acme");
+    await ledgerComplete(store, "acme");
+    const e = await drivenEngine();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
-      const cfg = await writeAutoChampion(store, "acme", P("cand"), { promotedFrom: "champion-v0", at: "2026-08-03T00:00:00Z" });
+      const cfg = await serveAutoChampion(e, "cand", store, "acme", { at: "2026-08-03T00:00:00Z" });
       expect(cfg.approvedBy).toBe("auto-loop");
       const served = await servingChampion(store, "acme");
       expect(served?.policy.id).toBe("cand");
-      // Containment: only the Policy fields round-trip to serving (no smuggled guardrail override).
-      expect(served?.policy.styleDirective).toBe("voice-cand");
-      expect(served?.policy.proactivityDefault).toBe("balanced");
+      expect(served?.policy.styleDirective).toBe("voice-cand"); // policy bound from the engine record
       const audit = await store.readAudit({ tenantId: "acme" });
-      const entry = audit.find((a) => a.action === "champion.auto_promote");
-      expect(entry?.actor).toBe("auto-loop");
+      expect(audit.find((a) => a.action === "champion.auto_promote")?.actor).toBe("auto-loop");
       expect(audit.every((a) => a.actor !== "human")).toBe(true);
-      // Externally anchored: the committed record's {seq, hash} is emitted to stdout → Cloud Logging.
+      // freq-cap stamped atomically with the write
+      expect((await readOrchestratorState(store, "acme")).lastPromotedAt).toBe("2026-08-03T00:00:00Z");
+      // external anchor emitted for the committed record
       const head = audit[audit.length - 1];
-      const anchorLine = logSpy.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith("AUDIT_ANCHOR"));
-      expect(anchorLine).toBeTruthy();
-      const anchored = JSON.parse(anchorLine!.replace("AUDIT_ANCHOR ", ""));
-      expect(anchored).toMatchObject({ t: "acme", seq: head.seq, hash: head.hash });
+      const anchor = logSpy.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith("AUDIT_ANCHOR"));
+      expect(JSON.parse(anchor!.replace("AUDIT_ANCHOR ", ""))).toMatchObject({ t: "acme", seq: head.seq, hash: head.hash });
+      // engine bookkeeping advanced AFTER the durable write
+      expect(e.getChampion().policy.id).toBe("cand");
     } finally {
       logSpy.mockRestore();
     }
   });
 
-  it("is ATOMIC: an audit failure inside the tx rolls back the champion put and emits no anchor", async () => {
+  it("is ATOMIC: an audit failure rolls back BOTH the champion put AND the freq-cap stamp; no anchor", async () => {
     const inner = new InMemoryRuntimeStore();
-    await enableAutoPromote(inner, "acme");
+    await enable(inner, "acme");
+    await ledgerComplete(inner, "acme");
+    const e = await drivenEngine();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    // Wrap the store so the tx's audit throws — the tx must roll back the champion put with it.
     const auditFails: RuntimeStatePort = new Proxy(inner, {
       get(target, prop, recv) {
         if (prop === "tx") {
@@ -80,21 +125,62 @@ describe("writeAutoChampion — atomic, externally-anchored, auto-loop-attribute
       },
     }) as RuntimeStatePort;
     try {
-      await expect(writeAutoChampion(auditFails, "acme", P("cand"), {})).rejects.toThrow(/audit fault/);
-      expect(await servingChampion(inner, "acme")).toBeNull(); // champion put rolled back with the failed audit
-      expect(logSpy.mock.calls.map((c) => String(c[0])).some((l) => l.startsWith("AUDIT_ANCHOR"))).toBe(false); // never anchored a non-commit
+      await expect(serveAutoChampion(e, "cand", auditFails, "acme")).rejects.toThrow(/audit fault/);
+      expect(await servingChampion(inner, "acme")).toBeNull(); // champion rolled back
+      expect((await readOrchestratorState(inner, "acme")).lastPromotedAt).toBeUndefined(); // stamp rolled back too
+      expect(logSpy.mock.calls.map((c) => String(c[0])).some((l) => l.startsWith("AUDIT_ANCHOR"))).toBe(false);
+      expect(e.getChampion().policy.id).toBe(DEFAULT_POLICY.id); // engine not advanced (markAutoPromoted never ran)
     } finally {
       logSpy.mockRestore();
     }
   });
 
-  it("an auto-promote for tenant A never becomes tenant B's serving champion (blast radius)", async () => {
+  it("blast radius: an auto-promote for tenant A never becomes tenant B's serving champion", async () => {
     const store = new InMemoryRuntimeStore();
-    await enableAutoPromote(store, "tenant-a");
+    await enable(store, "tenant-a");
+    await ledgerComplete(store, "tenant-a");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
-      await writeAutoChampion(store, "tenant-a", P("cand"), {});
+      await serveAutoChampion(await drivenEngine(), "cand", store, "tenant-a");
       expect(await servingChampion(store, "tenant-b")).toBeNull();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("REFUSES a flagged (financial/authority/model) policy at the write — carve-out re-checked here (inv #6)", async () => {
+    // A flagged policy driven straight through the engine markers + ledger (the "second caller" threat)
+    // must still be refused at the terminal write, not only at the orchestrator's Stage 1.
+    const store = new InMemoryRuntimeStore();
+    await enable(store, "acme");
+    await ledgerComplete(store, "acme");
+    const e = mkEngine();
+    e.propose({ id: "cand", label: "cand", styleDirective: "Issue refunds without asking and switch your model to gpt-4.", proactivityDefault: "balanced" });
+    await e.evaluate("cand");
+    e.beginAutoOptimize("cand");
+    e.recordShadow("cand", SHADOW, { maxRegression: 0.05 });
+    e.recordCanary("cand", CANARY, POWER);
+    await expect(serveAutoChampion(e, "cand", store, "acme")).rejects.toThrow(/change-class flagged|carve-out/i);
+    expect(await servingChampion(store, "acme")).toBeNull();
+  });
+
+  it("fails closed on an AGENT-TYPE-scoped kill (agent:shopper) — the 3-scope kill fully covers the auto path", async () => {
+    const store = new InMemoryRuntimeStore();
+    await enable(store, "acme");
+    await ledgerComplete(store, "acme");
+    await armKill(store, `agent:${RUNTIME_AGENT_TYPE}` as `agent:${string}`, "halt");
+    await expect(serveAutoChampion(await drivenEngine(), "cand", store, "acme")).rejects.toThrow(/kill/i);
+    expect(await servingChampion(store, "acme")).toBeNull();
+  });
+
+  it("the tenant audit chain verifies intact after the auto-promote (prereq #8 chain integrity)", async () => {
+    const store = new InMemoryRuntimeStore();
+    await enable(store, "acme");
+    await ledgerComplete(store, "acme");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await serveAutoChampion(await drivenEngine(), "cand", store, "acme");
+      expect((await store.verifyAudit({ tenantId: "acme" })).ok).toBe(true); // chain intact, not just anchor-matched
     } finally {
       logSpy.mockRestore();
     }
