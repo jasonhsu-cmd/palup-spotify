@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { InMemoryRuntimeStore } from "@palup/platform-ports";
-import { mintStepUp } from "@palup/platform-ports";
+import { mintStepUp, STEPUP_MAX_AGE_MS } from "@palup/platform-ports";
 import { RUNTIME_AGENT_TYPE } from "../src/runtime-kill-registry.js";
 import {
   autoPromoteGate,
@@ -63,5 +63,24 @@ describe("autopromote opt-in (ADR-0014: default OFF, platform override wins, ste
     const store = new InMemoryRuntimeStore();
     await setAutoPromoteOptIn(store, "acme", true, op("acme", "reuse"));
     await expect(setAutoPromoteOptIn(store, "acme", false, op("acme", "reuse"))).rejects.toThrow(/used|replay/i);
+  });
+
+  it("keeps the single-use nonce alive for the FULL window the assertion can still verify (no early-expiry replay)", async () => {
+    vi.useFakeTimers();
+    try {
+      const base = NOW;
+      vi.setSystemTime(base);
+      const store = new InMemoryRuntimeStore();
+      // Assertion dated slightly in the future (within clock skew), so its own freshness outlasts a
+      // nonce TTL measured from usedAt — the exact gap the security review flagged.
+      const token = mintStepUp(SECRET, { action: STEPUP_ACTION, tenantId: "acme", iat: base + 29_000, nonce: "skew1" });
+      await setAutoPromoteOptIn(store, "acme", true, { actor: "jane.operator", stepUpToken: token, stepUpSecret: SECRET }); // uses faked Date.now()
+      // Past maxAge-from-usedAt (the OLD TTL would have dropped the nonce here) but still inside the
+      // assertion's freshness (iat + maxAge) — so without a longer nonce TTL the replay would slip through.
+      vi.setSystemTime(base + STEPUP_MAX_AGE_MS + 5_000);
+      await expect(setAutoPromoteOptIn(store, "acme", false, { actor: "jane.operator", stepUpToken: token, stepUpSecret: SECRET })).rejects.toThrow(/used|replay/i);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

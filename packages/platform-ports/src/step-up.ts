@@ -19,8 +19,11 @@ import { hmacSign, b64url, b64urlDecode, constantTimeEqual } from "./token-codec
 const TYP = "autopromote-stepup";
 /** Max assertion age. A step-up must be minted immediately before the action it authorizes. */
 export const STEPUP_MAX_AGE_MS = 5 * 60_000;
-/** Allowed clock skew for a future-dated `iat` (a small negative age), to tolerate minor clock drift. */
-const CLOCK_SKEW_MS = 30_000;
+/** Allowed clock skew for a future-dated `iat` (a small negative age), to tolerate minor clock drift.
+ * Exported so the single-use nonce record can be kept alive for the FULL window an assertion could
+ * still verify — from `iat - skew` (used early) through `iat + maxAge` — i.e. `maxAge + skew` after
+ * first use; otherwise the nonce (the replay backstop) can expire before the assertion does. */
+export const STEPUP_CLOCK_SKEW_MS = 30_000;
 
 export interface StepUpClaims {
   /** The exact action this assertion authorizes, e.g. "autopromote.optin.set". */
@@ -72,7 +75,7 @@ export function verifyStepUp(
   if (typeof claims.iat !== "number" || !Number.isFinite(claims.iat)) return { ok: false, reason: "missing/invalid iat" };
   const age = expected.now - claims.iat;
   if (age > (expected.maxAgeMs ?? STEPUP_MAX_AGE_MS)) return { ok: false, reason: "step-up assertion expired" };
-  if (age < -CLOCK_SKEW_MS) return { ok: false, reason: "step-up assertion issued in the future" };
+  if (age < -STEPUP_CLOCK_SKEW_MS) return { ok: false, reason: "step-up assertion issued in the future" };
   if (typeof claims.nonce !== "string" || !claims.nonce) return { ok: false, reason: "missing nonce" };
   return { ok: true, nonce: claims.nonce };
 }

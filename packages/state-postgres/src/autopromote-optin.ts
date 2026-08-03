@@ -1,5 +1,5 @@
 import type { RuntimeStatePort, RuntimeStateCtx } from "@palup/platform-ports";
-import { verifyStepUp, STEPUP_MAX_AGE_MS } from "@palup/platform-ports";
+import { verifyStepUp, STEPUP_MAX_AGE_MS, STEPUP_CLOCK_SKEW_MS } from "@palup/platform-ports";
 import { RUNTIME_AGENT_TYPE } from "./runtime-kill-registry.js";
 
 // ADR-0014 cond #1/#2 + prereq #6 — the two switches that gate the auto-optimize fast-lane, BOTH default
@@ -88,7 +88,9 @@ async function setFlag(
   await store.tx(ctx, async (t) => {
     // Single-use: refuse a replayed step-up (same nonce) inside the freshness window.
     if (await t.get(NONCE_COLLECTION, v.nonce)) throw new Error("step-up assertion already used (replay blocked)");
-    await t.put(NONCE_COLLECTION, v.nonce, { usedAt: at }, { ttlSeconds: Math.ceil(STEPUP_MAX_AGE_MS / 1000) });
+    // Keep the nonce for the FULL window the assertion could still verify (maxAge + skew from usedAt),
+    // so the replay backstop never expires before the assertion does (security review, LOW).
+    await t.put(NONCE_COLLECTION, v.nonce, { usedAt: at }, { ttlSeconds: Math.ceil((STEPUP_MAX_AGE_MS + STEPUP_CLOCK_SKEW_MS) / 1000) });
     await t.put(COLLECTION, key, { enabled });
     await t.audit(
       {

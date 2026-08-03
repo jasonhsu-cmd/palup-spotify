@@ -244,10 +244,10 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // single-use, and audited. An agent can never reach this: the actor is the authenticated operator and
   // setAutoPromoteOptIn refuses a non-human actor. Ships dormant — the platform override defaults
   // force-human, so flipping one merchant's opt-in still does not enable the fast-lane on its own.
-  app.post("/api/autopromote/optin", async (req) => {
+  app.post("/api/autopromote/optin", async (req, reply) => {
     const b = (req.body ?? {}) as { tenantId?: unknown; enabled?: unknown };
     const tenantId = typeof b.tenantId === "string" && b.tenantId ? b.tenantId : undefined;
-    if (!tenantId) return { error: "tenantId required" };
+    if (!tenantId) return reply.code(400).send({ error: "tenantId required" });
     const hdr = req.headers["x-stepup-assertion"];
     const stepUpToken = typeof hdr === "string" ? hdr : undefined;
     try {
@@ -258,7 +258,9 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       });
       return { ok: true, tenantId, enabled: b.enabled === true };
     } catch (e) {
-      return { error: (e as Error).message };
+      // Operator IS authenticated (onRequest hook) but the sensitive SET failed its step-up / actor
+      // check → 403, not a 200-with-error. Message carries no secret.
+      return reply.code(403).send({ error: (e as Error).message });
     }
   });
   // Shadow-grade the canary on real logged traffic (live model + judge). Auto-rolls-back on regression.

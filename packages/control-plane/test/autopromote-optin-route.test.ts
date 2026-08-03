@@ -23,8 +23,10 @@ describe("POST /api/autopromote/optin — operator + step-up gated (ADR-0014 pre
       // no operator token → 401 from the onRequest mutate gate
       expect((await app.inject({ method: "POST", url: "/api/autopromote/optin", payload: { tenantId: "acme", enabled: true } })).statusCode).toBe(401);
 
-      // operator token but NO step-up assertion → refused, nothing written
+      // operator token but NO step-up assertion → 403 (authenticated, but not authorized for this
+      // sensitive SET without re-auth), nothing written
       const noStep = await app.inject({ method: "POST", url: "/api/autopromote/optin", headers: { authorization: "Bearer op" }, payload: { tenantId: "acme", enabled: true } });
+      expect(noStep.statusCode).toBe(403);
       expect(noStep.json().error).toMatch(/step-up/i);
       expect(await readTenantOptIn(store, "acme")).toBe(false);
 
