@@ -16,6 +16,14 @@ export interface AutoLoopDeps {
   minDelta?: number;
   /** Demo convenience: auto-approve a gate-passing candidate. false ⇒ stop at awaiting_approval (HITL). */
   autoApprove?: boolean;
+  /**
+   * ADR-0014 #1 / NN #4 — the SHARED three-scope run-time kill check, consulted BEFORE every AUTO
+   * approval+promotion (fail-closed). Injected (not a direct state-postgres import) so this package stays
+   * decoupled; the composition root wires it to `() => matchedKill(runtimeStore, {tenantId, agentType})`.
+   * Returns the armed scope (⇒ halt) or null (⇒ clear). REQUIRED whenever autoApprove is on — a missing
+   * checker or a throwing/unreadable registry HALTS auto-promotion (never proceeds unguarded).
+   */
+  killCheck?: () => Promise<{ scope: string } | null>;
   log?: (m: string) => void;
 }
 
@@ -42,7 +50,7 @@ function weakest(metrics: PolicyMetrics, k = 3): Weakness[] {
  * Governance is unchanged: the gate + (optionally) a human approval still guard every promotion.
  */
 export class AutoLoop {
-  private readonly d: Required<Omit<AutoLoopDeps, "log">> & { log: (m: string) => void };
+  private readonly d: Required<Omit<AutoLoopDeps, "log" | "killCheck">> & { log: (m: string) => void; killCheck?: AutoLoopDeps["killCheck"] };
   constructor(deps: AutoLoopDeps) {
     this.d = {
       candidatesPerRound: 2,
@@ -51,6 +59,21 @@ export class AutoLoop {
       log: () => {},
       ...deps,
     };
+  }
+
+  /**
+   * Fail-CLOSED shared-kill check for the AUTO-promote path (ADR-0014 #1). Returns the armed scope (halt)
+   * or null (clear). A MISSING checker or a throwing/unreadable registry is treated as ARMED — an auto
+   * promotion must never proceed without a working kill check. (The human path stops for review anyway,
+   * so this only gates the autoApprove fast-lane.)
+   */
+  private async checkKill(): Promise<{ scope: string } | null> {
+    if (!this.d.killCheck) return { scope: "no-kill-checker" }; // fail closed: auto-promote requires a checker
+    try {
+      return await this.d.killCheck();
+    } catch {
+      return { scope: "kill-registry-unreadable" }; // fail closed: an unreadable registry halts
+    }
   }
 
   private async persistState(): Promise<void> {
@@ -144,8 +167,19 @@ export class AutoLoop {
       }
 
       // Governance: human approval (auto in demo mode), then promote.
-      if (this.d.autoApprove) engine.approve(winner.id, "auto-loop");
-      else {
+      if (this.d.autoApprove) {
+        // ADR-0014 #1 / NN #4 — fail CLOSED on the SHARED run-time kill registry before an AUTO
+        // approval+promotion (in addition to the engine's own kill flag, checked inside approve/promote).
+        // An armed kill at ANY scope (global > tenant > agent), a missing checker, or an unreadable
+        // registry all HALT the loop — auto-promotion never proceeds unguarded.
+        const kill = await this.checkKill();
+        if (kill) {
+          log(`round ${round}: kill switch armed (${kill.scope}) — halting auto-promotion (no approval/promote).`);
+          await this.persistState();
+          break;
+        }
+        engine.approve(winner.id, "auto-loop");
+      } else {
         log(`round ${round}: ${winner.id} awaiting HUMAN approval (autoApprove off) — stopping for review.`);
         await this.persistState();
         break;

@@ -39,7 +39,7 @@ describe("AutoLoop", () => {
     const store = new MemoryStore();
     const cm = await grader.grade(champion);
     const engine = new EvolutionEngine({ champion: { policy: champion, metrics: cm }, grader });
-    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => "T", autoApprove: true, minDelta: 0.05, candidatesPerRound: 2 });
+    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => "T", autoApprove: true, minDelta: 0.05, candidatesPerRound: 2, killCheck: async () => null });
 
     const tl = await loop.run(3);
 
@@ -72,6 +72,35 @@ describe("AutoLoop", () => {
     const tl = await loop.run(2);
     expect(tl.some((e) => e.event === "promoted")).toBe(false);
     expect(tl.some((e) => e.event === "no_improvement")).toBe(true);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
+  // ADR-0014 #1 / NN #4 — the auto-promote fast-lane fails CLOSED on the shared kill registry.
+  const autoLoopWith = (killCheck?: () => Promise<{ scope: string } | null>) => {
+    const store = new MemoryStore();
+    const engine = new EvolutionEngine({ champion: { policy: champion, metrics: { policyId: "champion-v0", safetyPass: true, floorPass: true, qualityScore: 0.5, perCriteria: { warm: 0.5, concise: 1 }, counterMetrics: CM } }, grader });
+    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => "T", autoApprove: true, killCheck });
+    return { engine, loop };
+  };
+
+  it("HALTS auto-promotion when the shared kill switch is armed (no approval/promote)", async () => {
+    const { engine, loop } = autoLoopWith(async () => ({ scope: "global" }));
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0"); // unchanged — the kill halted it
+  });
+
+  it("FAILS CLOSED when autoApprove is on but NO kill checker is wired (never auto-promote unguarded)", async () => {
+    const { engine, loop } = autoLoopWith(undefined); // autoApprove on, killCheck missing
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
+  it("FAILS CLOSED when the kill registry is unreadable (checker throws) — halts, no promote", async () => {
+    const { engine, loop } = autoLoopWith(async () => { throw new Error("registry down"); });
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
     expect(engine.getChampion().policy.id).toBe("champion-v0");
   });
 

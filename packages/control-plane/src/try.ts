@@ -9,6 +9,7 @@ import { DEFAULT_POLICY, createBrain, StaticGroundingAdapter, MockCommerceAdapte
 import { AutoLoop, EvolutionEngine, FileStore, type Champion, type ImprovementEntry } from "@palup/evolution";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import { createAnthropicApiAdapter, createAnthropicApiJudge, isAnthropicApiConfigured } from "@palup/judge";
+import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
 import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { CRITERIA, rubricFor, type Scenario } from "./scenarios.js";
@@ -100,7 +101,9 @@ async function route(line: string): Promise<"continue" | "quit"> {
     const engine = new EvolutionEngine({ champion: { policy: champion.policy, metrics }, grader });
     // Local demo, but still governed: human-gate by default so it demonstrates the real pipeline
     // (opt in with EVOLVE_AUTO_APPROVE=true to watch an auto-promote). NN #2: no default auto-promotion.
-    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: process.env.EVOLVE_AUTO_APPROVE === "true", log: (m) => console.log(m) });
+    // ADR-0014 #1 / NN #4 — the auto-approve fast-lane fails closed on the SHARED run-time kill registry.
+    const { store: runtimeStore } = await createRuntimeStore();
+    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => new Date().toISOString(), candidatesPerRound: 2, minDelta: 0.05, autoApprove: process.env.EVOLVE_AUTO_APPROVE === "true", killCheck: () => matchedKill(runtimeStore, { tenantId: "demo", agentType: RUNTIME_AGENT_TYPE }), log: (m) => console.log(m) });
     await store.write("improvement-timeline", []);
     const tl = await loop.run(Number(process.env.EVOLVE_ROUNDS ?? 2));
     champion = engine.getChampion();
