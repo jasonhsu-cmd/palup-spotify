@@ -39,7 +39,7 @@ describe("AutoLoop", () => {
     const store = new MemoryStore();
     const cm = await grader.grade(champion);
     const engine = new EvolutionEngine({ champion: { policy: champion, metrics: cm }, grader });
-    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => "T", autoApprove: true, minDelta: 0.05, candidatesPerRound: 2, killCheck: async () => null, rateLimitCheck: async () => null, recordPromotion: async () => {} });
+    const loop = new AutoLoop({ engine, grader, proposer, store, now: () => "T", autoApprove: true, minDelta: 0.05, candidatesPerRound: 2, killCheck: async () => null, rateLimitCheck: async () => null, recordPromotion: async () => {}, changeScreen: async () => null });
 
     const tl = await loop.run(3);
 
@@ -116,9 +116,45 @@ describe("AutoLoop", () => {
   const CM_METRICS = { policyId: "champion-v0", safetyPass: true, floorPass: true, qualityScore: 0.5, perCriteria: { warm: 0.5, concise: 1 }, counterMetrics: CM };
   const rlLoop = (rateLimitCheck?: () => Promise<string | null>, recordPromotion?: () => Promise<void>) => {
     const engine = new EvolutionEngine({ champion: { policy: champion, metrics: { ...CM_METRICS } }, grader });
-    const loop = new AutoLoop({ engine, grader, proposer, store: new MemoryStore(), now: () => "T", autoApprove: true, killCheck: async () => null, rateLimitCheck, recordPromotion });
+    const loop = new AutoLoop({ engine, grader, proposer, store: new MemoryStore(), now: () => "T", autoApprove: true, killCheck: async () => null, rateLimitCheck, recordPromotion, changeScreen: async () => null });
     return { engine, loop };
   };
+  // ADR-0014 #6 — the change-class screen: a flagged (out-of-voice) change routes to a human, never the
+  // fast-lane; a missing screen fails closed to human review.
+  const csLoop = (changeScreen: ((policy: Policy) => Promise<string | null>) | undefined) => {
+    const engine = new EvolutionEngine({ champion: { policy: champion, metrics: { ...CM_METRICS } }, grader });
+    const loop = new AutoLoop({ engine, grader, proposer, store: new MemoryStore(), now: () => "T", autoApprove: true, killCheck: async () => null, rateLimitCheck: async () => null, recordPromotion: async () => {}, changeScreen });
+    return { engine, loop };
+  };
+
+  it("routes a FLAGGED change to a HUMAN (no auto-promotion; candidate stays awaiting_approval for review)", async () => {
+    const { engine, loop } = csLoop(async () => "pricing/discount");
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+    // route-to-human, NOT hard-block: the candidate is left for an operator to approve+promote.
+    expect(engine.getCandidates().some((c) => c.status === "awaiting_approval")).toBe(true);
+  });
+
+  it("FAILS CLOSED when NO change-screen is wired (autoApprove requires it)", async () => {
+    const { engine, loop } = csLoop(undefined);
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
+  it("FAILS CLOSED when the screen resolves undefined (contract violation) — only explicit null is clean", async () => {
+    const { engine, loop } = csLoop((async () => undefined) as unknown as (p: Policy) => Promise<string | null>);
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(false);
+    expect(engine.getChampion().policy.id).toBe("champion-v0");
+  });
+
+  it("promotes a clean VOICE change (screen returns null)", async () => {
+    const { loop } = csLoop(async () => null);
+    const tl = await loop.run(3);
+    expect(tl.some((e) => e.event === "promoted")).toBe(true);
+  });
 
   it("promotes when the rate-limit check is clear, and stamps the frequency-cap clock", async () => {
     let recorded = 0;
