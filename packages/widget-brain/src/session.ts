@@ -36,6 +36,18 @@ export interface SessionState {
   browsingContext?: string;
   /** INV-D — the resume offer was already made once; never repeat it. */
   resumeOffered: boolean;
+  // ── Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL, consumed only in brain.ts) ──────
+  // CROSS-TURN CONTROL COUNTERS ONLY — explicitly NOT a persona profile: no observed axes/values, no
+  // free text, nothing keyed to a persistent shopper identity. Transient, dies with the session like
+  // every other field above. Maintained here UNCONDITIONALLY (session.ts has no flag of its own); the
+  // flag-gated consumer lives entirely in brain.ts, so with the flag OFF these are tracked but inert.
+  /** Armed by a `behavioral: ["pitch_declined"]` event; disarmed the moment brain.ts actually suppresses
+   * the next proactive pitch because of it (a true ONE-STRIKE, not a standing brake). */
+  pitchDeclined: boolean;
+  /** Running tally of `repeat_question` events this session (not a one-strike). */
+  repeatQuestionCount: number;
+  /** Running tally of `rage` events this session (not a one-strike). */
+  rageCount: number;
 }
 
 export interface SessionStore {
@@ -89,8 +101,28 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
   const level = opts.level ?? "balanced";
   const restored = opts.sessionId && opts.store ? await opts.store.load(opts.sessionId) : undefined;
   const state: SessionState = restored
-    ? { escalationPending: false, resumeOffered: false, ...restored, openIssues: [...restored.openIssues] }
-    : { safetyLatched: false, openIssues: [], pitchesUsed: 0, escalationPending: false, resumeOffered: false };
+    ? {
+        escalationPending: false,
+        resumeOffered: false,
+        ...restored,
+        openIssues: [...restored.openIssues],
+        // PR-4 fields listed AFTER the spread (not before, unlike escalationPending/resumeOffered above)
+        // so a pre-PR-4 persisted record — which predates these fields and so lacks them — still
+        // backfills a safe default via `??`, without TS flagging a dead "specified more than once" write.
+        pitchDeclined: restored.pitchDeclined ?? false,
+        repeatQuestionCount: restored.repeatQuestionCount ?? 0,
+        rageCount: restored.rageCount ?? 0,
+      }
+    : {
+        safetyLatched: false,
+        openIssues: [],
+        pitchesUsed: 0,
+        escalationPending: false,
+        resumeOffered: false,
+        pitchDeclined: false,
+        repeatQuestionCount: 0,
+        rageCount: 0,
+      };
 
   const autoPersist = opts.autoPersist ?? true;
   const persist = async () => {
@@ -118,6 +150,14 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
         proactivityLevel: signals.proactivityLevel ?? level,
         safetyLatched: state.safetyLatched || Boolean(signals.safetyLatched),
         openIssues: [...state.openIssues, ...(signals.openIssues ?? [])],
+        // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL, consumed only in brain.ts) —
+        // carry the ARMED one-strike across turns: a pitch_declined from turns ago must still reach the
+        // brain on the shopper's NEXT proactive turn, long after this turn's own signals.behavioral (if
+        // any) has moved on. Merge, don't replace, so a genuinely new event this turn is preserved
+        // alongside the carried one. Harmless when the brain's flag is off (never consumed).
+        behavioral: state.pitchDeclined
+          ? [...(signals.behavioral ?? []), "pitch_declined"]
+          : signals.behavioral,
       };
       // history threads to the brain for model context ONLY — it is deliberately NOT merged into signals
       // or state, so the persisted SessionState carries no shopper transcript (control-only).
@@ -168,6 +208,21 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
           state.pitchesUsed += 1;
         }
       }
+
+      // Shopper-disposition program PR-4 — cross-turn CONTROL COUNTERS (not a persona profile; transient,
+      // dies with the session like every other field on SessionState). Maintained from THIS turn's RAW
+      // signals.behavioral (never the merged/carried array above, which would double-count the carry).
+      // Session.ts has no DISPOSITION_BEHAVIORAL flag of its own — brain.ts is the sole gate that ever
+      // turns these into an observable decision change, so this bookkeeping runs unconditionally.
+      for (const ev of signals.behavioral ?? []) {
+        if (ev === "pitch_declined") state.pitchDeclined = true; // arm the one-strike
+        else if (ev === "repeat_question") state.repeatQuestionCount += 1;
+        else if (ev === "rage") state.rageCount += 1;
+      }
+      // True one-strike: disarm the moment brain.ts actually consumed it to suppress a proactive pitch
+      // (only happens on the flag-ON path — "disposition:one_strike" is never emitted with the flag off,
+      // so a declined shopper simply stays armed, harmlessly, until the flag is enabled).
+      if (d.flags.includes("disposition:one_strike")) state.pitchDeclined = false;
 
       await persist();
       return d;
