@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import type { RuntimeStatePort, VectorPort, VectorRecord } from "@palup/platform-ports";
+import type { RuntimeStatePort, VectorPort, VectorRecord, ModelPort } from "@palup/platform-ports";
 import { isMemoryEnabled } from "./flag.js";
 import { subjectNamespace } from "./identity.js";
 import { decideMemoryWrite } from "./consent.js";
 import { classifyFact, type FactClass } from "./classifier.js";
-import { sanitizeFact, type FactDistiller } from "./distiller.js";
+import { sanitizeFact, createStubDistiller, createModelDistiller, type FactDistiller } from "./distiller.js";
 import { buildMemoryAudit } from "./audit.js";
 import { ttlForClass } from "./retention.js";
 import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact, FactMetadata } from "./types.js";
@@ -27,7 +27,16 @@ export interface MemoryServiceDeps {
   vector: VectorPort;
   /** The RuntimeStatePort's audit surface (ADR-0015 Inv 6) — reused as-is, no new audit mechanism. */
   audit: RuntimeStatePort;
-  distiller: FactDistiller;
+  /** The extractor to use. Optional: if omitted, one is derived from `model` (a governed, model-backed
+   * `createModelDistiller` — ADR-0015 Inv 11, PR-6) or, failing that, `createStubDistiller()` (the
+   * offline passthrough placeholder). Supplying `distiller` directly always wins over `model`. */
+  distiller?: FactDistiller;
+  /** `ModelPort` backing a real extractor when `distiller` isn't supplied directly (ADR-0001: feature
+   * code never touches a provider SDK). Threaded here so a caller can hand the service a model instead
+   * of constructing `createModelDistiller` itself. Still fully inert: unreachable while the flag.ts
+   * double gate is off — `remember()` returns before `distiller.distill()` (hence `model.complete()`)
+   * ever runs. */
+  model?: ModelPort;
   /** Override for tests; defaults to the real `classifyFact`. */
   classifier?: typeof classifyFact;
   /** Override for deterministic TTL tests; defaults to `() => new Date()`. */
@@ -41,6 +50,7 @@ export interface MemoryServiceDeps {
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   const classify = deps.classifier ?? classifyFact;
   const clock = deps.clock ?? (() => new Date());
+  const distiller = deps.distiller ?? (deps.model ? createModelDistiller({ model: deps.model }) : createStubDistiller());
   // The `deps.enabled` override is a test seam so the live path can be exercised without flipping
   // MEMORY_ADR_ACCEPTED. It is honored ONLY under a test runner; in production the double gate
   // (isMemoryEnabled) is authoritative, so a config value can never turn this package on (NN#1 — this
@@ -52,7 +62,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     if (!enabled) return { written: [] }; // INERT — no vector call, no audit, nothing touched
 
     const capability = decideMemoryWrite({ region: ctx.region, consent1: ctx.consent1, consent2: ctx.consent2 });
-    const candidates = await deps.distiller.distill(turn);
+    const candidates = await distiller.distill(turn);
     const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
     const now = clock().getTime();
 

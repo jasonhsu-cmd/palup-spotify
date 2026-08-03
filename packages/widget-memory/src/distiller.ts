@@ -1,4 +1,6 @@
 import { redactPII } from "@palup/platform-ports";
+import type { ModelPort } from "@palup/platform-ports";
+import type { DispositionAxis } from "./disposition.js";
 
 // ADR-0015 Inv 1: distilled facts only — never persist the raw transcript; every stored fact passes
 // the redaction guardrail and a length cap. `FactDistiller` is the governed extraction step (Inv 11:
@@ -61,6 +63,174 @@ export function createStubDistiller(): FactDistiller {
     async distill(turn) {
       const candidate = sanitizeFact(turn.message);
       return candidate ? [candidate] : [];
+    },
+  };
+}
+
+// PR-6 — the real, model-backed `FactDistiller` (ADR-0015 Inv 11: extraction is a GOVERNED behavior,
+// with its own eval + review; this module IS that review boundary). It stays fully inert exactly like
+// the stub above: nothing here writes anywhere, and (per service.ts) it is never even CALLED while the
+// flag.ts double gate is off. Everything downstream of the candidate strings this returns — redaction/
+// length-capping (`sanitizeFact`), sensitivity classification (`classifyFact`), consent-gating
+// (`decideMemoryWrite`), and TTL (`ttlForClass`) — is the EXISTING service.ts pipeline, reused
+// UNCHANGED; this module does not reimplement any of it.
+//
+// The model is asked for a small JSON array of `{ text, disposition? }` candidates. `disposition` is
+// OPTIONAL per candidate — most facts are plain preferences with no disposition attached. When one IS
+// attached, the response schema constrains `provenance` to the enum `"stated" | "observed"` (no
+// "inferred" member — mirrors disposition.ts's own narrow-only union), and the prompt explicitly
+// forbids demographic, psychographic, and willingness-to-pay/budget-inference extraction. Because model
+// JSON output is never type-checked, this module ALSO re-validates every candidate's disposition shape
+// at runtime and REJECTS THE WHOLE CANDIDATE (text included, not just the disposition) if its
+// disposition doesn't have a valid axis/value/confidence, or a provenance that isn't exactly "stated" or
+// "observed" — a candidate carrying a suspect disposition is not trusted at all, fairness-structural.
+
+/** Dependencies for `createModelDistiller` — a `ModelPort`, never a provider SDK (ADR-0001). */
+export interface ModelDistillerDeps {
+  model: ModelPort;
+}
+
+const DISPOSITION_AXES: readonly DispositionAxis[] = ["role", "style", "communication", "budget_stated"];
+
+// Structured-outputs schema (mirrors judge/model-judge.ts's pattern): adapters that support
+// `responseSchema` (e.g. Anthropic `output_config.format`) enforce this shape at the provider; adapters
+// that don't simply ignore it, so the runtime revalidation below is load-bearing either way.
+const DISTILL_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    facts: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          text: { type: "string" },
+          disposition: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              axis: { type: "string", enum: DISPOSITION_AXES as unknown as string[] },
+              value: { type: "string" },
+              // NO "inferred" member — fairness structural (disposition.ts).
+              provenance: { type: "string", enum: ["stated", "observed"] },
+              confidence: { type: "number" },
+              sourceQuote: { type: "string" },
+            },
+            required: ["axis", "value", "provenance", "confidence"],
+          },
+        },
+        required: ["text"],
+      },
+    },
+  },
+  required: ["facts"],
+} as const;
+
+const DISTILL_SYSTEM_PROMPT = `You extract short, durable SHOPPER PREFERENCE/STYLE facts from ONE
+conversation turn, for consent-gated memory. Follow these rules exactly:
+
+1. Extract 0-N short facts (one short sentence each) — NEVER the full transcript, NEVER a summary of
+   the whole conversation.
+2. NEVER extract demographic facts (age, gender, race/ethnicity, income, occupation, location) or
+   psychographic facts (personality traits, values, lifestyle profiling). These are always out of
+   scope, no matter how confident you are.
+3. NEVER infer, guess, or estimate a shopper's willingness-to-pay, budget, or price sensitivity. Only a
+   budget the shopper EXPLICITLY stated in their own words (e.g. "keep it under $50") may be recorded,
+   and only with provenance "stated" — never estimate one from tone, product choice, or anything else.
+4. A fact MAY optionally carry a "disposition" — a durable style/preference signal — but ONLY when you
+   can honestly attach a provenance:
+   - "stated": the shopper said this directly, in their own words.
+   - "observed": a concrete, literal behavior in THIS turn (e.g. asked for ingredient names, asked
+     "what's on sale").
+   NEVER attach any other provenance value, and NEVER attach a disposition guessed/inferred from tone,
+   wording style, or an unstated assumption. When in doubt, omit "disposition" entirely.
+5. Output ONLY this JSON shape, nothing else — no prose, no markdown fences:
+   {"facts":[{"text":"<short fact>","disposition":{"axis":"role|style|communication|budget_stated","value":"<short controlled value>","provenance":"stated|observed","confidence":0..1,"sourceQuote":"<short span>"}}]}
+   Omit "disposition" entirely on any fact that doesn't clearly meet rule 4.`;
+
+interface RawDisposition {
+  axis?: unknown;
+  value?: unknown;
+  provenance?: unknown;
+  confidence?: unknown;
+  sourceQuote?: unknown;
+}
+
+interface RawCandidate {
+  text?: unknown;
+  disposition?: RawDisposition;
+}
+
+interface RawDistillResponse {
+  facts?: RawCandidate[];
+}
+
+/** True iff `d` is a well-formed disposition candidate: a known axis, a non-empty value, a confidence
+ * in [0,1], and — the fairness-structural check — a provenance that is EXACTLY "stated" or "observed".
+ * Anything else (a hallucinated "inferred", a typo, a missing field) fails closed. */
+function isValidDisposition(d: RawDisposition): boolean {
+  if (typeof d.axis !== "string" || !DISPOSITION_AXES.includes(d.axis as DispositionAxis)) return false;
+  if (typeof d.value !== "string" || !d.value.trim()) return false;
+  if (d.provenance !== "stated" && d.provenance !== "observed") return false;
+  if (typeof d.confidence !== "number" || Number.isNaN(d.confidence) || d.confidence < 0 || d.confidence > 1) return false;
+  return true;
+}
+
+/** Pulls the first JSON object out of the model's response text, tolerating a markdown code fence
+ * (mirrors judge/model-judge.ts's `extractJson`). Throws on anything that isn't extractable JSON — the
+ * caller fails closed to `[]` rather than ever passing raw model prose through as a "fact". */
+function extractDistillJson(text: string): RawDistillResponse {
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const raw = fence?.[1] ?? text;
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("distiller: no JSON object in model response");
+  return JSON.parse(raw.slice(start, end + 1)) as RawDistillResponse;
+}
+
+/**
+ * A governed, model-backed `FactDistiller` (ADR-0015 Inv 11). Calls `deps.model.complete` with the
+ * forbidding prompt above and `responseSchema`, at `temperature: 0` for reproducibility. Returns ONLY
+ * the `text` of candidates that either have no `disposition` at all, or a disposition that passes
+ * `isValidDisposition` — anything else (bad JSON, a model error, an invalid disposition) is dropped,
+ * failing closed to an empty/partial list rather than ever throwing or passing through unsafe content.
+ * The returned strings still flow through the SAME `sanitizeFact` -> `classifyFact` ->
+ * `decideMemoryWrite` -> `ttlForClass` pipeline in service.ts as `createStubDistiller`'s output — none
+ * of those gates are reimplemented here.
+ */
+export function createModelDistiller(deps: ModelDistillerDeps): FactDistiller {
+  return {
+    async distill(turn) {
+      let responseText: string;
+      try {
+        const res = await deps.model.complete({
+          messages: [
+            { role: "system", content: DISTILL_SYSTEM_PROMPT },
+            { role: "user", content: `SHOPPER: ${turn.message}\nAGENT REPLY: ${turn.reply}` },
+          ],
+          temperature: 0,
+          responseSchema: DISTILL_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
+        });
+        responseText = res.text;
+      } catch {
+        return []; // fail closed — a model/network error never becomes a stored fact
+      }
+
+      let parsed: RawDistillResponse;
+      try {
+        parsed = extractDistillJson(responseText);
+      } catch {
+        return []; // fail closed — unparseable model output never becomes a stored fact
+      }
+
+      const facts: string[] = [];
+      for (const candidate of parsed.facts ?? []) {
+        if (typeof candidate?.text !== "string" || !candidate.text.trim()) continue;
+        if (candidate.disposition !== undefined && !isValidDisposition(candidate.disposition)) continue; // reject the WHOLE candidate
+        facts.push(candidate.text);
+      }
+      return facts;
     },
   };
 }
