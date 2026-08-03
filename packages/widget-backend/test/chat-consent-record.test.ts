@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { InMemoryRuntimeStore, createInMemoryVectorStore } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
-import { lookupConsent } from "@palup/state-postgres";
+import { lookupConsent, armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
 
 // PR-11a — server-side consent-record plumbing, end-to-end: the /consent capture endpoint + the
@@ -287,6 +287,54 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
       });
       const log = await store.readAudit({ tenantId: "demo" });
       expect(log.map((r) => r.action)).toContain("consent.record");
+      await app.close();
+    });
+  });
+
+  // Review fixes (adversarial pass on PR-11a): /consent is a public, audit-writing endpoint, so it must
+  // carry the SAME guards its sibling write endpoints do — a per-IP/per-tenant rate limit (else it floods
+  // the immutable audit log) and the operator kill switch (NN#4: a governed audited write must be haltable).
+  describe("PR-11a review fixes — /consent write-endpoint guards", () => {
+    it("NN#4 — an operator kill switch halts the /consent write: 503, records nothing, no audit entry", async () => {
+      const store = new InMemoryRuntimeStore();
+      await armKill(store, "global", "operator-halt"); // operator halts the shopper agent for this scope
+      const app = await buildServer({ store });
+      const res = await app.inject({
+        method: "POST",
+        url: "/consent",
+        payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "in" },
+      });
+      expect(res.statusCode).toBe(503);
+      // The halted write never reached the store — consent stays at the fail-closed default...
+      expect(await lookupConsent(store, { tenantId: "demo", anonId: VALID_ANON_ID })).toEqual({
+        memoryOrdinary: "unknown",
+        memorySpecial: "unknown",
+      });
+      // ...and nothing was appended to the immutable audit log on its behalf.
+      const log = await store.readAudit({ tenantId: "demo" });
+      expect(log.map((r) => r.action)).not.toContain("consent.record");
+      await app.close();
+    });
+
+    it("is rate-limited per IP like the mint endpoints — a same-IP flood past the per-IP cap gets 429", async () => {
+      const store = new InMemoryRuntimeStore();
+      const app = await buildServer({ store });
+      const call = () =>
+        app.inject({
+          method: "POST",
+          url: "/consent",
+          payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "out" },
+        });
+      // RL_IP defaults to 60/window; the 61st same-IP call must be throttled. Loop a little past it.
+      let got429 = false;
+      for (let i = 0; i < 65; i++) {
+        const r = await call();
+        if (r.statusCode === 429) {
+          got429 = true;
+          break;
+        }
+      }
+      expect(got429).toBe(true);
       await app.close();
     });
   });

@@ -563,6 +563,21 @@ export async function buildServer(opts?: {
   // subject key they hold — never an arbitrary/forged one. `recordConsent` (runtime-consent-store.ts)
   // audits the write atomically inside its own transaction — no separate audit call needed here.
   app.post("/consent", async (req, reply) => {
+    // Rate-limit this public (unauthenticated during the rollout window) audit-writing endpoint the SAME
+    // way the mint endpoints do — per IP, under the reserved mint bucket — so it can't be flooded to grow
+    // the immutable, non-trimmable audit log (denial-of-wallet / audit-flood anti-forensics). recordConsent
+    // below is an atomic KV-put + audit-append; every sibling write path here is IP-capped, and /consent
+    // must not regress that baseline. Fail-open on the RL check, exactly like the mint endpoints.
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open: mirrors the mint endpoints; recordConsent also fails under real store distress */
+    }
     const body = (req.body ?? {}) as {
       anonId?: unknown;
       memoryOrdinary?: unknown;
@@ -582,6 +597,22 @@ export async function buildServer(opts?: {
       return { error: "unauthenticated" };
     }
     const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
+    // Per-tenant ceiling — backstop against a distributed-IP flood inside one tenant. Reuses /chat's cap.
+    try {
+      if (!(await underLimit(store, { tenantId }, "consent", RL_TENANT, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open, as above */
+    }
+    // NN#4 — the operator kill switch outranks everything: while this tenant/agent is halted, refuse the
+    // audited consent write (parity with the CAA routes' killCheck and /chat's kill handling). Recording
+    // memory consent is a governed, audited write; the operator halt must be able to stop it too.
+    if (await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) {
+      reply.code(503);
+      return { error: "paused" };
+    }
 
     const anonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
     const isTriStateConsent = (v: unknown): v is Consent => v === "in" || v === "out" || v === "unknown";
@@ -709,7 +740,13 @@ export async function buildServer(opts?: {
       // keeps deriveServingSignals itself unaware of any store). No valid anonId ⇒ nothing to key a
       // lookup on (mirrors the remember() "no subject key" guard below) ⇒ consentRecord stays undefined
       // ⇒ deriveServingSignals's own `ctx.consent?.… ?? "unknown"` fail-closed default applies.
-      const consentAnonId = validateAnonId(typeof body.signals?.anonId === "string" ? body.signals.anonId : undefined);
+      // Only reach the consent store when memory is actually live (memoryService constructed). While the
+      // double gate is off, the looked-up value is consumed by NOBODY (its sole consumers — remember() and
+      // the brain recall path — are gated on the same off memoryService/memoryPort), so the read is pure
+      // overhead; skipping it keeps the inert /chat path byte-identical to pre-PR-11a (consentRecord stays
+      // undefined ⇒ deriveServingSignals's own `ctx.consent?.… ?? "unknown"` default, i.e. the old hardcode).
+      const consentAnonId =
+        memoryService && typeof body.signals?.anonId === "string" ? validateAnonId(body.signals.anonId) : undefined;
       const consentRecord = consentAnonId ? await lookupConsent(store, { tenantId, anonId: consentAnonId }) : undefined;
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
