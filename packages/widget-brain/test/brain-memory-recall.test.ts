@@ -60,7 +60,7 @@ describe("T11 governance — memory recall on the shopper brain (Inv 10: additiv
     expect(memory.recall).not.toHaveBeenCalled();
   });
 
-  it("ADDITIVE CAUTION ON THE CLEAN PATH: a recalled fact is threaded as a fenced, caution-only DATA block", async () => {
+  it("ADDITIVE CAUTION ON THE CLEAN PATH: a CONSENTED recalled fact is threaded as a fenced, caution-only DATA block", async () => {
     const spy = vi.fn<ModelPort["complete"]>(async () => ({
       text: "The Hydra Serum is a great pick for dry skin.",
       model: "spy",
@@ -68,8 +68,12 @@ describe("T11 governance — memory recall on the shopper brain (Inv 10: additiv
     const memory = recallReturning([{ text: "tree-nut allergy (from a prior visit)", class: "special" }]);
     const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
 
+    // PR-8 carried condition (PR-1 Finding 2 extended to the whole recall path): a special-class fact
+    // needs THIS TURN's memorySpecial consent to surface at all, even as caution-only DATA — see the
+    // "PR-8 — read-time consent gates the WHOLE recall surface" describe block below for the no-consent
+    // case this test previously (incorrectly) exercised.
     const d = await brain.decide(
-      { ...TENANT_SIGNALS, cart: "empty", proactivityLevel: "balanced" } as never,
+      { ...TENANT_SIGNALS, cart: "empty", proactivityLevel: "balanced", consent: { memorySpecial: "in" } } as never,
       "what do you recommend for dry skin?",
     );
 
@@ -122,5 +126,104 @@ describe("T11 governance — memory recall on the shopper brain (Inv 10: additiv
 
     expect(memory.recall).not.toHaveBeenCalled();
     expect(d.flags).not.toContain("memory:recalled");
+  });
+});
+
+// PR-8 carried condition (PR-1 Finding 2, extended from the style translation — brain-memory-style.test.ts
+// — to the WHOLE recall/DATA surface): the pre-existing recall block fired `memory:recalled` AND injected
+// the REMEMBERED CONTEXT text on `memory && anonId` alone, with NO read-time consent check at all. That
+// meant a withdrawn/never-granted-consent shopper was still recalled, and a champion emitting
+// `memory:recalled` unconditionally would fail a leak floor once recall is wired into a graded brain. This
+// suite proves the SAME fail-closed `consentedAtReadTime` gate PR-7 already gave the style translation now
+// also gates `memory:recalled` / the REMEMBERED CONTEXT block itself.
+describe("PR-8 — read-time consent gates the WHOLE recall surface (memory:recalled + REMEMBERED CONTEXT), not just the style translation", () => {
+  it("an ORDINARY recalled fact with NO consent object at all never surfaces — no memory:recalled, no REMEMBERED CONTEXT", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide({ ...TENANT_SIGNALS, cart: "empty" } as never, "what do you recommend for dry skin?");
+
+    expect(memory.recall).toHaveBeenCalled(); // recall is still CALLED — the gate is on what's DONE with the result
+    expect(d.flags).not.toContain("memory:recalled");
+    const req = spy.mock.calls[0]![0] as ModelRequest;
+    const sys = req.messages.find((m) => m.role === "system")?.content ?? "";
+    expect(sys).not.toContain("REMEMBERED CONTEXT");
+  });
+
+  it("consent OUT for the ordinary tier → still no memory:recalled / REMEMBERED CONTEXT", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", consent: { memoryOrdinary: "out" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).not.toContain("memory:recalled");
+  });
+
+  it("consent WITHDRAWN (unknown) for the ordinary tier → still no memory:recalled — a withdrawn-consent shopper is never recalled", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", consent: { memoryOrdinary: "unknown" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).not.toContain("memory:recalled");
+  });
+
+  it("a SPECIAL recalled fact needs memorySpecial specifically — memoryOrdinary alone is not enough", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "tree-nut allergy", class: "special" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", consent: { memoryOrdinary: "in" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).not.toContain("memory:recalled");
+  });
+
+  it("consented recall of an ORDINARY fact DOES surface — the gate isn't fail-open OR fail-closed always-off", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", consent: { memoryOrdinary: "in" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).toContain("memory:recalled");
+    const req = spy.mock.calls[0]![0] as ModelRequest;
+    const sys = req.messages.find((m) => m.role === "system")?.content ?? "";
+    expect(sys).toContain("=== REMEMBERED CONTEXT");
+    expect(sys).toContain("prefers fragrance-free products");
+  });
+
+  it("MIXED recall: only the consented fact surfaces — a not-consented fact is silently filtered, not just its style", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([
+      { text: "prefers fragrance-free products", class: "ordinary" },
+      { text: "tree-nut allergy", class: "special" },
+    ]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", consent: { memoryOrdinary: "in", memorySpecial: "unknown" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).toContain("memory:recalled");
+    const req = spy.mock.calls[0]![0] as ModelRequest;
+    const sys = req.messages.find((m) => m.role === "system")?.content ?? "";
+    expect(sys).toContain("prefers fragrance-free products");
+    expect(sys).not.toContain("tree-nut allergy");
   });
 });

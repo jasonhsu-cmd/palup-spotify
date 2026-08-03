@@ -90,6 +90,22 @@ export interface HistoryTurn {
 }
 
 /**
+ * Persona-disposition layer (PR-0), brain-side shape. OPAQUE bare-string data — NOT imported from
+ * @palup/widget-memory (preserves the no-dep-cycle contract), but structurally compatible with that
+ * package's own narrower-typed `Disposition` (axis is a closed enum there; a bare string here because
+ * the brain must never branch on it — Inv 10 / fairness). Named here (PR-8) so both `RecalledFact`
+ * (durable, cross-visit) and `SessionState.sessionDisposition` / `Signals.sessionDisposition` (transient,
+ * in-session fallback) share one shape without either side trusting it as anything but opaque data.
+ */
+export interface Disposition {
+  axis: string;
+  value: string;
+  provenance: string;
+  confidence: number;
+  sourceQuote?: string;
+}
+
+/**
  * A single durable, cross-visit fact recalled about a shopper (ADR-0015 T11). Defined HERE — NOT
  * imported from @palup/widget-memory — so this package never depends on that one (no dep cycle;
  * widget-memory already depends on widget-brain for the shared Consent/region vocabulary). The shape is
@@ -108,7 +124,7 @@ export interface RecalledFact {
    * translates a recalled disposition through a code-owned whitelist into a benign voice directive,
    * never trusting it raw. Inert in PR-0.
    */
-  disposition?: Array<{ axis: string; value: string; provenance: string; confidence: number; sourceQuote?: string }>;
+  disposition?: Disposition[];
 }
 
 /**
@@ -211,6 +227,16 @@ export interface Signals {
   csat?: number;
   hasComplaintHistory?: boolean;
   hasReturnHistory?: boolean;
+  /**
+   * Shopper-disposition program PR-8 — carried forward from `SessionState.sessionDisposition` at
+   * session.ts's existing merge point (mirrors `behavioral`'s carry). The in-session STYLE fallback for
+   * when durable cross-visit memory is off or unconsented: an "observed" style disposition captured
+   * earlier THIS session, still available on a later turn that doesn't re-supply `personaStyle`. Opaque
+   * bare-string data, exactly like `RecalledFact.disposition` — the brain only ever turns it into a
+   * voice directive via the SAME whitelisted lookup, never trusts it for anything else (never
+   * price/pitch/outbound). Dies with the session; never durable, never merged to an account.
+   */
+  sessionDisposition?: Disposition[];
 }
 
 /**

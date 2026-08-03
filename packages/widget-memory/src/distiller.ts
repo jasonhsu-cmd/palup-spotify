@@ -1,6 +1,6 @@
 import { redactPII } from "@palup/platform-ports";
 import type { ModelPort } from "@palup/platform-ports";
-import type { DispositionAxis } from "./disposition.js";
+import type { Disposition, DispositionAxis } from "./disposition.js";
 
 // ADR-0015 Inv 1: distilled facts only — never persist the raw transcript; every stored fact passes
 // the redaction guardrail and a length cap. `FactDistiller` is the governed extraction step (Inv 11:
@@ -9,10 +9,19 @@ import type { DispositionAxis } from "./disposition.js";
 // deterministic, model-free placeholder that only exists to exercise the pipeline end-to-end in this
 // inert slice; it never calls a `ModelPort`.
 
-/** Extracts 0-N short candidate facts from one conversational turn. Real implementations call the
- * model port (governed, own eval); `createStubDistiller` below never does. */
+/** One distilled candidate: the fact text, plus an OPTIONAL validated disposition (PR-8 — the
+ * previously-discarded `disposition` a real distiller extracts alongside a fact, now surfaced so
+ * `service.ts` can store it on `FactMetadata.disposition` / return it on `RecalledFact.disposition`). */
+export interface DistilledCandidate {
+  text: string;
+  disposition?: Disposition;
+}
+
+/** Extracts 0-N short candidate facts (each optionally carrying a validated disposition) from one
+ * conversational turn. Real implementations call the model port (governed, own eval);
+ * `createStubDistiller` below never does. */
 export interface FactDistiller {
-  distill(turn: { message: string; reply: string }): Promise<string[]>;
+  distill(turn: { message: string; reply: string }): Promise<DistilledCandidate[]>;
 }
 
 /** The hard cap on a stored fact's length (ADR-0015 Inv 1: "short, minimal preference/observation
@@ -62,7 +71,7 @@ export function createStubDistiller(): FactDistiller {
   return {
     async distill(turn) {
       const candidate = sanitizeFact(turn.message);
-      return candidate ? [candidate] : [];
+      return candidate ? [{ text: candidate }] : [];
     },
   };
 }
@@ -168,8 +177,10 @@ interface RawDistillResponse {
 
 /** True iff `d` is a well-formed disposition candidate: a known axis, a non-empty value, a confidence
  * in [0,1], and — the fairness-structural check — a provenance that is EXACTLY "stated" or "observed".
- * Anything else (a hallucinated "inferred", a typo, a missing field) fails closed. */
-function isValidDisposition(d: RawDisposition): boolean {
+ * Anything else (a hallucinated "inferred", a typo, a missing field) fails closed. Exported (PR-8) so
+ * `service.ts` can re-apply the SAME reject-in-full check at the actual persistence boundary — defense
+ * in depth for ANY `FactDistiller` a caller supplies, not just this module's own `createModelDistiller`. */
+export function isValidDisposition(d: RawDisposition): boolean {
   if (typeof d.axis !== "string" || !DISPOSITION_AXES.includes(d.axis as DispositionAxis)) return false;
   if (typeof d.value !== "string" || !d.value.trim()) return false;
   if (d.provenance !== "stated" && d.provenance !== "observed") return false;
@@ -224,11 +235,27 @@ export function createModelDistiller(deps: ModelDistillerDeps): FactDistiller {
         return []; // fail closed — unparseable model output never becomes a stored fact
       }
 
-      const facts: string[] = [];
+      const facts: DistilledCandidate[] = [];
       for (const candidate of parsed.facts ?? []) {
         if (typeof candidate?.text !== "string" || !candidate.text.trim()) continue;
-        if (candidate.disposition !== undefined && !isValidDisposition(candidate.disposition)) continue; // reject the WHOLE candidate
-        facts.push(candidate.text);
+        const rawDisposition = candidate.disposition;
+        if (rawDisposition !== undefined && !isValidDisposition(rawDisposition)) continue; // reject the WHOLE candidate
+        // PR-8 — surface the validated disposition instead of discarding it (previously only `text` was
+        // returned). By this point `isValidDisposition` has already confirmed axis/value/provenance/
+        // confidence are well-formed, so this is a safe, explicit narrowing (never a blind cast of
+        // unchecked model JSON) into widget-memory's own typed `Disposition`.
+        facts.push({
+          text: candidate.text,
+          disposition: rawDisposition
+            ? {
+                axis: rawDisposition.axis as DispositionAxis,
+                value: rawDisposition.value as string,
+                provenance: rawDisposition.provenance as "stated" | "observed",
+                confidence: rawDisposition.confidence as number,
+                sourceQuote: typeof rawDisposition.sourceQuote === "string" ? rawDisposition.sourceQuote : undefined,
+              }
+            : undefined,
+        });
       }
       return facts;
     },

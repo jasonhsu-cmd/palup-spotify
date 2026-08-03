@@ -11,7 +11,8 @@ import type { FactDistiller } from "../src/distiller.js";
 // fact untouched (Consent 2 is independent of Consent 1 — Inv 9).
 
 function fixedDistiller(facts: string[]): FactDistiller {
-  return { async distill() { return facts; } };
+  // PR-8: FactDistiller.distill() returns candidate OBJECTS ({text, disposition?}), not bare strings.
+  return { async distill() { return facts.map((text) => ({ text })); } };
 }
 
 describe("erasure — eraseSubject (Inv 5: full, audited right-to-erasure)", () => {

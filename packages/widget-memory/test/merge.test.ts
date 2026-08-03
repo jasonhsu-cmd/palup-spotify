@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createInMemoryVectorStore, InMemoryRuntimeStore } from "@palup/platform-ports";
+import { createBrain, createSession, MockModelAdapter } from "@palup/widget-brain";
 import { createMemoryService } from "../src/service.js";
 import { mergeGuestIntoAccount } from "../src/merge.js";
 import { subjectNamespace } from "../src/identity.js";
@@ -11,7 +12,8 @@ import type { FactDistiller } from "../src/distiller.js";
 // migrate ONLY when Consent 2 is separately granted for the account, otherwise dropped.
 
 function fixedDistiller(facts: string[]): FactDistiller {
-  return { async distill() { return facts; } };
+  // PR-8: FactDistiller.distill() returns candidate OBJECTS ({text, disposition?}), not bare strings.
+  return { async distill() { return facts.map((text) => ({ text })); } };
 }
 
 describe("merge — mergeGuestIntoAccount", () => {
@@ -129,5 +131,48 @@ describe("merge — mergeGuestIntoAccount", () => {
 
     const log = await runtimeStore.readAudit({ tenantId: "acme" });
     expect(log.map((r) => r.action)).toContain("merge");
+  });
+
+  // Shopper-disposition program PR-8 — `SessionState.sessionDisposition` (widget-brain's TRANSIENT,
+  // in-session style fallback) is EXCLUDED from this migration by construction: `mergeGuestIntoAccount`
+  // only ever reads/writes DURABLE vector-store facts via `MergeCtx` (tenantId/anonId/accountId/consent2)
+  // — there is no parameter, and no code path, through which a `SessionState` (let alone its
+  // `sessionDisposition` field) could reach it. This proves that structurally, not just by omission: a
+  // guest session that accumulated an in-session style disposition still migrates ONLY its durable facts.
+  it("SessionState.sessionDisposition (widget-brain, transient) never migrates — merge only ever moves durable vector-store facts, never session state", async () => {
+    // A guest session that observes a personaStyle this session (widget-brain, entirely independent of
+    // widget-memory) — proves sessionDisposition is populated on the SESSION side of this scenario.
+    const brain = createBrain(new MockModelAdapter(), undefined, undefined, undefined, "shopper-demo", undefined, false, true);
+    const session = await createSession(brain);
+    await session.send("what actives are in this?", { personaStyle: "researcher", cart: "empty" });
+    expect(session.state.sessionDisposition).toEqual([{ axis: "style", value: "researcher", provenance: "observed", confidence: 1 }]);
+
+    // Meanwhile, a DURABLE ordinary fact was separately remembered for the SAME conceptual guest —
+    // merge.ts only ever knows about THIS, never the SessionState/sessionDisposition above (no shared
+    // reference, no import, no parameter connects them).
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: fixedDistiller(["prefers fragrance-free"]),
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-session-disp", region: "us", consent1: "in", consent2: "unknown" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    const result = await mergeGuestIntoAccount(
+      { vector, audit: runtimeStore },
+      // Note: MergeCtx has NO field for sessionDisposition/SessionState at all — passing one is not even
+      // expressible; this is the "reject-in-full" type-level version of the exclusion.
+      { tenantId: "acme", anonId: "guest-session-disp", accountId: "acct-6", consent2: "unknown" },
+    );
+    expect(result.merged).toBe(1); // only the durable fact migrated
+
+    const acctCtx: MemoryCtx = { tenantId: "acme", anonId: "acct:acct-6", region: "us", consent1: "in", consent2: "unknown" };
+    const migrated = await service.recall(acctCtx);
+    expect(migrated).toEqual([{ text: "prefers fragrance-free", class: "ordinary" }]);
+    // No trace of the session-side style disposition anywhere in the migrated account data.
+    expect(JSON.stringify(migrated)).not.toContain("researcher");
   });
 });

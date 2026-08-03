@@ -20,8 +20,9 @@ import {
   createStoreTelemetry,
   createMeteringModelPort,
   createInMemoryVectorStore,
+  createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, createStubDistiller, isMemoryEnabled } from "@palup/widget-memory";
+import { createMemoryService, isMemoryEnabled } from "@palup/widget-memory";
 import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -147,6 +148,15 @@ export async function buildServer(opts?: {
   /** ADR-0018 test seam: inject the outbound fetch used by the CAA OAuth routes (discovery/token/JWKS)
    * so route tests never hit the network. Prod uses the global fetch. */
   caaFetch?: typeof globalThis.fetch;
+  /**
+   * PR-8 test seam — mirrors `createMemoryService`'s own `enabled` override (service.ts), and is
+   * subject to the EXACT SAME safeguard: honored ONLY under a real test runner (VITEST=true /
+   * NODE_ENV=test). Lets a test force the memory service to actually be constructed + live so the
+   * /chat -> remember()/recall() wiring can be exercised ahead of the MEMORY_ADR_ACCEPTED flip. In
+   * production (no test runner) this is IGNORED — isMemoryEnabled() (the hardcoded double gate) is
+   * authoritative regardless, so no caller can flip memory on via config/injection alone (NN#1).
+   */
+  memoryEnabled?: boolean;
 }) {
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads.
@@ -165,16 +175,32 @@ export async function buildServer(opts?: {
   const meteredModel = createMeteringModelPort(activeModelPort, telemetry, { agentType: RUNTIME_AGENT_TYPE });
   // ADR-0015 T12 — cross-visit memory, wired ONLY behind the double gate (flag.ts: MEMORY_ADR_ACCEPTED is
   // hardcoded false, so `isMemoryEnabled()` is false today regardless of any env var — NN#1: no
-  // config-only flip). When off (always, in this PR), the MemoryService is never even constructed, so
-  // nothing here — including an injected test-seam vector port — is ever touched: the composition root
-  // (this file) MAY import @palup/widget-memory (the brain itself never does — no dep cycle). The dev
-  // in-memory vector adapter (or an injected spy) stands in for a real vector-DB adapter later; the
-  // runtime store's own audit surface is reused as-is (no new audit mechanism).
-  const memoryService = isMemoryEnabled()
+  // config-only flip). When off (always in real production), the MemoryService is never even
+  // constructed, so nothing here — including an injected test-seam vector port — is ever touched: the
+  // composition root (this file) MAY import @palup/widget-memory (the brain itself never does — no dep
+  // cycle). The dev in-memory vector adapter (or an injected spy) stands in for a real vector-DB adapter
+  // later; the runtime store's own audit surface is reused as-is (no new audit mechanism).
+  //
+  // PR-8 (opts.memoryEnabled test seam): honored ONLY under a real test runner — see its own doc comment
+  // above — so this can NEVER flip memory on in production; `isMemoryEnabled()` alone gates construction
+  // there, byte-identical to before this PR.
+  const underTestRunner = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
+  const memoryService = memoryServiceEnabled
     ? createMemoryService({
         vector: opts?.vectorPort ?? createInMemoryVectorStore(),
         audit: store,
-        distiller: createStubDistiller(),
+        // PR-8 / PR-6 Finding H: the distiller sends the RAW shopper turn to the model — wrap it with the
+        // SAME PII-redaction guardrail every other model call gets (createRedactingModelPort) so a
+        // pasted card/SSN never reaches the provider, on top of (not instead of) sanitizeFact's separate
+        // redaction of the OUTPUT candidate text. Wrapped explicitly here rather than relying on
+        // `meteredModel` happening to already be redaction-wrapped upstream (it is, via module-level
+        // `modelPort`, in real production — but NOT when a test injects `opts.modelPort` directly), so
+        // this holds regardless of how the underlying model port was constructed. Double-wrapping (when
+        // `meteredModel` IS already wrapped) is harmless — `redactPII` is idempotent on already-redacted
+        // text.
+        model: createRedactingModelPort(meteredModel),
+        enabled: memoryServiceEnabled,
       })
     : undefined;
   const memoryPort = memoryService
@@ -669,6 +695,41 @@ export async function buildServer(opts?: {
       // (support.ts's order lookups) is checked against the principal that reached /chat this turn,
       // never a stale/shared one (AsyncLocalStorage keeps concurrent requests from bleeding together).
       const d = await withRequestPrincipal(shopperPrincipal, () => session.send(message, signals, history));
+      // PR-8 — persist persona/preference memory from THIS turn, POST-decision, on the clean (successful)
+      // /chat path only: this line is only reached after a decision was actually computed, never on the
+      // early-return validation paths above (input_rejected/unauthenticated/rate_limited) or the
+      // catch-block model-error path below, where there is no real decision/reply to distill from. Gated
+      // on an active memory service (the double gate, or the PR-8 test seam) AND a subject key
+      // (signals.anonId) — mirrors the brain's own `if (memory && signals.anonId)` recall guard; there is
+      // nothing to key a write on for an anonymous, non-recognized shopper. Every consent/classification/
+      // TTL decision is made INSIDE `remember()` (reused unchanged); this call site only decides WHETHER
+      // to call it and WITH WHAT turn. Never blocks or breaks the response — a memory-service failure is
+      // caught and logged, exactly like every other fail-open side effect on this path (telemetry/traffic).
+      //
+      // NN#4 (kill-switch completeness) — a memory write IS an autonomous, audited action, so an operator
+      // kill must halt it like everything else. Skip remember() when a kill is armed for this tenant/agent
+      // (`kill`, the same registry match that drives `killScope` in the audit below), AND when the brain
+      // returned a decision that took NO autonomous action at all (`no_autonomous_action` — kill-switch or
+      // another guardrail halt, brain.ts): there is nothing legitimately learnable from a halted turn, and
+      // the operator halt must genuinely stop the write, not just the reply. (Narrowing writes further to
+      // the clean SALES path only is a separate PR-11 human-sign-off scope decision; this guard is the
+      // code-owned guardrail, not a business-policy choice.)
+      if (memoryService && signals.anonId && !kill && !d.flags.includes("no_autonomous_action")) {
+        try {
+          await memoryService.remember(
+            {
+              tenantId,
+              anonId: signals.anonId,
+              region: signals.region,
+              consent1: signals.consent?.memoryOrdinary ?? "unknown",
+              consent2: signals.consent?.memorySpecial ?? "unknown",
+            },
+            { message, reply: d.reply },
+          );
+        } catch (e) {
+          console.error(`[/chat] memory remember error:`, (e as Error).message);
+        }
+      }
       // M3 — per-turn telemetry enrichment: the business dimensions (mode/pitch/servedBy/escalate) and
       // end-to-end turn latency the model-port decorator can't see. PII-free (no message/reply). Under
       // the server-derived tenant; fail-open like logTraffic.

@@ -73,19 +73,23 @@ describe("PR-7 — recall → style directive translation (inert in prod; memory
     expect(sysContent(spy)).not.toMatch(/PERSONA STYLE/);
   });
 
-  it("NO consent object at all → no style directive, no memory:style_applied (caution-only)", async () => {
+  it("NO consent object at all → no memory:recalled at all (PR-8: the whole recall surface is read-time-consent-gated, not just style)", async () => {
     const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
     const memory = recallReturning([HIGH_CONF_RESEARCHER]);
     const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo", memory);
 
     const d = await brain.decide({ ...TENANT_SIGNALS, cart: "empty" } as Signals, "what do you recommend for dry skin?");
 
-    expect(d.flags).toContain("memory:recalled");
+    // PR-8 carried condition (PR-1 Finding 2 extended to the whole recall path, see
+    // brain-memory-recall.test.ts's own dedicated describe block): with no consent at all, the fact
+    // never even surfaces as caution-only DATA — `memory:recalled` does not fire, so a fortiori neither
+    // does `memory:style_applied`.
+    expect(d.flags).not.toContain("memory:recalled");
     expect(d.flags).not.toContain("memory:style_applied");
     expect(sysContent(spy)).not.toMatch(/PERSONA STYLE/);
   });
 
-  it("consent OUT for the ordinary tier → no style directive", async () => {
+  it("consent OUT for the ordinary tier → no memory:recalled, no style directive", async () => {
     const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
     const memory = recallReturning([HIGH_CONF_RESEARCHER]);
     const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo", memory);
@@ -93,11 +97,12 @@ describe("PR-7 — recall → style directive translation (inert in prod; memory
     const signals: Signals = { ...TENANT_SIGNALS, consent: { memoryOrdinary: "out" }, cart: "empty" };
     const d = await brain.decide(signals, "what do you recommend for dry skin?");
 
+    expect(d.flags).not.toContain("memory:recalled");
     expect(d.flags).not.toContain("memory:style_applied");
     expect(sysContent(spy)).not.toMatch(/PERSONA STYLE/);
   });
 
-  it("consent UNKNOWN (withdrawn/never granted) for the ordinary tier → no style directive", async () => {
+  it("consent UNKNOWN (withdrawn/never granted) for the ordinary tier → no memory:recalled, no style directive", async () => {
     const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
     const memory = recallReturning([HIGH_CONF_RESEARCHER]);
     const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo", memory);
@@ -105,6 +110,7 @@ describe("PR-7 — recall → style directive translation (inert in prod; memory
     const signals: Signals = { ...TENANT_SIGNALS, consent: { memoryOrdinary: "unknown" }, cart: "empty" };
     const d = await brain.decide(signals, "what do you recommend for dry skin?");
 
+    expect(d.flags).not.toContain("memory:recalled");
     expect(d.flags).not.toContain("memory:style_applied");
     expect(sysContent(spy)).not.toMatch(/PERSONA STYLE/);
   });
