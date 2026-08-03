@@ -6,6 +6,7 @@ import { deterministicFloorPass } from "@palup/eval";
 import { AGENT_FAMILY, decideGating, liveJudgeFamily } from "./gating.js";
 import { QUALITY_SUITE, SAFETY_PROBES } from "./quality-suite.js";
 import { measureCounterMetrics } from "./counter-metrics.js";
+import { partitionScenarios, holdoutSeed } from "./holdout.js";
 
 /**
  * REAL policy measurement: runs the quality suite through the live Gemini agent (with the candidate's
@@ -47,20 +48,29 @@ export class LiveGrader implements Grader {
     // that degrades a floor invariant fails here no matter how high the judge scores its quality.
     const floorPass = await deterministicFloorPass(brain);
 
-    let scoreSum = 0;
-    for (const q of QUALITY_SUITE) {
-      const d = await brain.decide(q.signals as never, q.message);
-      const v = await this.judge.grade({
-        rubric: `${q.rubric}\n\n${groundTruth}`,
-        transcript: `Shopper: ${q.message}\nAssistant: ${d.reply}`,
-        criteria: q.criteria,
-      });
-      scoreSum += v.score;
-    }
-    const qualityScore = Number((scoreSum / QUALITY_SUITE.length).toFixed(3));
+    // ADR-0014 #7 — the LIVE ship-path grade must carry the holdout too (else the anti-overfit gate is
+    // dormant on the path that reaches shoppers). Partition QUALITY_SUITE into the VISIBLE set (→
+    // qualityScore) and the SECRET holdout (→ holdoutScore); live mode REQUIRES the rotation secret.
+    const seed = holdoutSeed(true);
+    const { visible, holdout } = partitionScenarios(QUALITY_SUITE, seed);
+    const scoreSet = async (cases: typeof QUALITY_SUITE): Promise<number> => {
+      let sum = 0;
+      for (const q of cases) {
+        const d = await brain.decide(q.signals as never, q.message);
+        const v = await this.judge.grade({
+          rubric: `${q.rubric}\n\n${groundTruth}`,
+          transcript: `Shopper: ${q.message}\nAssistant: ${d.reply}`,
+          criteria: q.criteria,
+        });
+        sum += v.score;
+      }
+      return cases.length ? Number((sum / cases.length).toFixed(3)) : 0;
+    };
+    const qualityScore = await scoreSet(visible);
+    const holdoutScore = holdout.length ? await scoreSet(holdout) : undefined;
     // ADR-0014 #5 — populate the counter-metrics so a quality lift can never promote on its own without
     // proof it didn't drive returns/complaints/opt-outs or stop escalating. Deterministic, PII-free.
     const counterMetrics = await measureCounterMetrics(brain);
-    return { policyId: policy.id, safetyPass, floorPass, qualityScore, counterMetrics, gating: this.gating };
+    return { policyId: policy.id, safetyPass, floorPass, qualityScore, holdoutScore, holdoutSeed: holdout.length ? seed : undefined, counterMetrics, gating: this.gating };
   }
 }

@@ -116,6 +116,30 @@ export class EvolutionEngine {
           champ.counterMetrics!.complaintRate !== undefined &&
           cand.counterMetrics!.complaintRate > champ.counterMetrics!.complaintRate));
     if (worseCounters) reasons.push("counter-metrics-worsened");
+    // ADR-0014 #7 — anti-overfit: a candidate that improves the VISIBLE quality but REGRESSES on the
+    // secret holdout the proposer never saw is gaming the eval. Checked FAIL-CLOSED:
+    //   • holdout-absent — the champion baseline carries a holdoutScore but the candidate does NOT: it
+    //     skipped the anti-overfit check the baseline was held to (a candidate can't drop its holdout to
+    //     dodge the gate). (A champion with no holdout ⇒ nothing to compare, the pre-feature bootstrap.)
+    //   • holdout-seed-mismatch — both carry a score but under DIFFERENT rotation seeds (a mid-run
+    //     rotation scores them over different sets): not comparable, so we refuse rather than compare
+    //     apples-to-oranges (re-grade the champion under the current seed to clear it).
+    //   • holdout-regressed — comparable + same seed + candidate worse on the unseen set.
+    const candH = cand.holdoutScore;
+    const champH = champ.holdoutScore;
+    const holdoutComparable = candH !== undefined && champH !== undefined;
+    const holdoutAbsent = champH !== undefined && candH === undefined; // candidate dropped the check the baseline has
+    const holdoutBaselineAbsent = candH !== undefined && champH === undefined; // no baseline ⇒ can't prove no-overfit (symmetric to counter-metrics; a stale pre-feature champion never reaches here in current wiring, but fail closed for durability)
+    // A comparison is valid ONLY with both scores AND both seeds present AND equal — a missing seed is as
+    // uncomparable as a mismatched one (fail closed, never compare a bare score across unknown epochs).
+    const seedsMatch = cand.holdoutSeed !== undefined && cand.holdoutSeed === champ.holdoutSeed;
+    const holdoutSeedMismatch = holdoutComparable && !seedsMatch;
+    const holdoutRegressed = holdoutComparable && seedsMatch && candH! < champH!;
+    if (holdoutAbsent) reasons.push("holdout-absent");
+    if (holdoutBaselineAbsent) reasons.push("holdout-baseline-absent");
+    if (holdoutSeedMismatch) reasons.push("holdout-seed-mismatch");
+    if (holdoutRegressed) reasons.push("holdout-regressed");
+    const holdoutOk = !holdoutAbsent && !holdoutBaselineAbsent && !holdoutSeedMismatch && !holdoutRegressed;
     // Fail-CLOSED cross-family gate (ADR-0014): a grade the grader marked ADVISORY (gating === false —
     // a same-family judge, e.g. Gemini grading the Gemini agent, or no cross-family judge available) can
     // NEVER pass. It may still be recorded/observed, but proposer≠evaluator is unmet so it must not gate
@@ -124,7 +148,7 @@ export class EvolutionEngine {
     const improved = delta > 0;
     const pass =
       cand.safetyPass && cand.floorPass && cand.qualityScore >= champ.qualityScore && improved &&
-      candCm && champCm && !worseCounters && cand.gating !== false;
+      candCm && champCm && !worseCounters && holdoutOk && cand.gating !== false;
     if (pass) reasons.push("passed: safe + no-regression + improved + counter-metrics ok");
     else if (reasons.length === 0 && !improved) reasons.push("no-improvement-over-champion");
     return { pass, reasons, delta };

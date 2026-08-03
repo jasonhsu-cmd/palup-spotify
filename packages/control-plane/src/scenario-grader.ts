@@ -3,6 +3,9 @@ import { createBrain, StaticGroundingAdapter, MockCommerceAdapter, type Policy }
 import type { Grader, PolicyMetrics } from "@palup/evolution";
 import { SCENARIOS, rubricFor, type Scenario } from "./scenarios.js";
 import { measureCounterMetrics } from "./counter-metrics.js";
+import { partitionScenarios, holdoutSeed } from "./holdout.js";
+
+type Brain = ReturnType<typeof createBrain>;
 
 // Grades a policy for REAL: runs the brain (with that policy) over every conversation scenario on the
 // live model, judges each reply per-criterion with the cross-family judge, and aggregates into a
@@ -19,9 +22,37 @@ export class ScenarioGrader implements Grader {
 
   async grade(policy: Policy): Promise<PolicyMetrics> {
     const brain = createBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo");
+    // ADR-0014 #7 — split into the VISIBLE set (drives qualityScore + perCriteria, the ONLY signal shown
+    // to the proposer via the weakness report) and a SECRET holdout (drives holdoutScore, the gate's
+    // anti-overfit check the proposer never sees). Same total grading cost — the scenarios are partitioned,
+    // not duplicated.
+    const seed = holdoutSeed();
+    const { visible, holdout } = partitionScenarios(this.scenarios, seed);
+    const vis = await this.gradeSet(brain, visible);
+    const hold = await this.gradeSet(brain, holdout);
+    this.log(`    graded ${policy.id}: q=${vis.score.toFixed(3)} (visible ${visible.length}) · holdout=${hold.score.toFixed(3)} (${holdout.length})`);
 
+    // Safety/floor are enforced in CODE and cannot be loosened by a style policy (see brain guardrails),
+    // so a voice/proactivity policy is safe by construction; the gate decides on quality + counters + holdout.
+    // Counter-metrics (ADR-0014 #5) are measured from the same brain so this grader's candidates carry the
+    // evidence the fail-closed gate requires (else they would correctly block on counter-metrics-absent).
+    const counterMetrics = await measureCounterMetrics(brain);
+    return {
+      policyId: policy.id,
+      safetyPass: true,
+      floorPass: true,
+      qualityScore: vis.score,
+      perCriteria: vis.perCriteria, // VISIBLE only — the holdout criteria are never surfaced to the proposer
+      holdoutScore: holdout.length ? hold.score : undefined,
+      holdoutSeed: holdout.length ? seed : undefined, // stamp the epoch so the gate compares like-for-like
+      counterMetrics,
+    };
+  }
+
+  /** Grade one scenario set → { per-criterion pass rate, mean score }. Used for the visible + holdout sets. */
+  private async gradeSet(brain: Brain, scenarios: Scenario[]): Promise<{ perCriteria: Record<string, number>; score: number }> {
     const perScenario = await Promise.all(
-      this.scenarios.map(async (s) => {
+      scenarios.map(async (s) => {
         const d = await brain.decide((s.signals ?? {}) as never, s.message);
         const transcript = `Shopper: ${s.message}\nAssistant: ${d.reply}`;
         const verdict = await this.judge.grade({
@@ -32,8 +63,6 @@ export class ScenarioGrader implements Grader {
         return verdict.results.map((r) => ({ criterion: r.id, pass: r.pass }));
       }),
     );
-
-    // Aggregate per-criterion pass rate across every scenario that tests it.
     const tally: Record<string, { pass: number; total: number }> = {};
     for (const results of perScenario)
       for (const r of results) {
@@ -49,14 +78,6 @@ export class ScenarioGrader implements Grader {
       pass += t.pass;
       total += t.total;
     }
-    const qualityScore = total ? pass / total : 0;
-    this.log(`    graded ${policy.id}: q=${qualityScore.toFixed(3)} (${pass}/${total})`);
-
-    // Safety/floor are enforced in CODE and cannot be loosened by a style policy (see brain guardrails),
-    // so a voice/proactivity policy is safe by construction; the gate decides on quality + counters.
-    // Counter-metrics (ADR-0014 #5) are measured from the same brain so this grader's candidates carry the
-    // evidence the fail-closed gate requires (else they would correctly block on counter-metrics-absent).
-    const counterMetrics = await measureCounterMetrics(brain);
-    return { policyId: policy.id, safetyPass: true, floorPass: true, qualityScore, perCriteria, counterMetrics };
+    return { perCriteria, score: total ? Number((pass / total).toFixed(3)) : 0 };
   }
 }
