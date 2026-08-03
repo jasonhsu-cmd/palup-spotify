@@ -74,6 +74,24 @@ describe("EvolutionEngine gate", () => {
     expect(rec.gate?.reasons).toContain("counter-metrics-absent"); // NaN is not a valid rate ⇒ treated as absent
   });
 
+  // ADR-0014 #7 — anti-overfit: improving the visible set but regressing the SECRET holdout is gaming.
+  it("BLOCKS a candidate that improves visible quality but REGRESSES the secret holdout (anti-overfit)", async () => {
+    const champ = { policy: DEFAULT_POLICY, metrics: { ...champion.metrics, holdoutScore: 0.8 } };
+    const e = new EvolutionEngine({ champion: champ, grader: new MockGrader({ overfit: { ...GOOD, policyId: "overfit", qualityScore: 0.95, holdoutScore: 0.6 } }) });
+    e.propose(P("overfit"));
+    const rec = await e.evaluate("overfit");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("holdout-regressed");
+  });
+
+  it("PASSES a candidate that improves BOTH visible quality and the holdout (genuine improvement)", async () => {
+    const champ = { policy: DEFAULT_POLICY, metrics: { ...champion.metrics, holdoutScore: 0.8 } };
+    const e = new EvolutionEngine({ champion: champ, grader: new MockGrader({ gen: { ...GOOD, policyId: "gen", qualityScore: 0.9, holdoutScore: 0.85 } }) });
+    e.propose(P("gen"));
+    const rec = await e.evaluate("gen");
+    expect(rec.gate?.pass).toBe(true);
+  });
+
   it("BLOCKS when the champion baseline has no counter-metrics (can't prove not-worse)", async () => {
     const bareChampion = { policy: DEFAULT_POLICY, metrics: { policyId: DEFAULT_POLICY.id, safetyPass: true, floorPass: true, qualityScore: 0.75 } as PolicyMetrics };
     const e = new EvolutionEngine({ champion: bareChampion, grader: new MockGrader({ good: GOOD }) });

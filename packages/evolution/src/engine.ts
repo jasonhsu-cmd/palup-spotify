@@ -116,6 +116,13 @@ export class EvolutionEngine {
           champ.counterMetrics!.complaintRate !== undefined &&
           cand.counterMetrics!.complaintRate > champ.counterMetrics!.complaintRate));
     if (worseCounters) reasons.push("counter-metrics-worsened");
+    // ADR-0014 #7 — anti-overfit: a candidate that improves the VISIBLE quality but REGRESSES on the
+    // secret holdout the proposer never saw is gaming the eval. Block it when both sides carry a
+    // holdoutScore (the live/scenario grader always does; absent on offline MockGrader fixtures ⇒ no
+    // holdout check, like complaintRate). A candidate can't "buy" a promotion by tuning to the visible set.
+    const holdoutRegressed =
+      cand.holdoutScore !== undefined && champ.holdoutScore !== undefined && cand.holdoutScore < champ.holdoutScore;
+    if (holdoutRegressed) reasons.push("holdout-regressed");
     // Fail-CLOSED cross-family gate (ADR-0014): a grade the grader marked ADVISORY (gating === false —
     // a same-family judge, e.g. Gemini grading the Gemini agent, or no cross-family judge available) can
     // NEVER pass. It may still be recorded/observed, but proposer≠evaluator is unmet so it must not gate
@@ -124,7 +131,7 @@ export class EvolutionEngine {
     const improved = delta > 0;
     const pass =
       cand.safetyPass && cand.floorPass && cand.qualityScore >= champ.qualityScore && improved &&
-      candCm && champCm && !worseCounters && cand.gating !== false;
+      candCm && champCm && !worseCounters && !holdoutRegressed && cand.gating !== false;
     if (pass) reasons.push("passed: safe + no-regression + improved + counter-metrics ok");
     else if (reasons.length === 0 && !improved) reasons.push("no-improvement-over-champion");
     return { pass, reasons, delta };

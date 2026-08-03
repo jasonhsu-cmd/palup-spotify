@@ -17,8 +17,13 @@ export interface PolicyMetrics {
    * fail CLOSED when they are absent (today engine.gate only checks return/complaint and treats absent as 0).
    */
   counterMetrics?: { returnRate?: number; complaintRate?: number; optOutRate?: number; escalationRecall?: number };
-  /** Pass rate (0..1) per criterion id, across the scenario set — the per-criteria improvement proof. */
+  /** Pass rate (0..1) per criterion id, across the VISIBLE scenario set — the per-criteria improvement
+   * proof, and the ONLY signal shown to the proposer (weakness report). */
   perCriteria?: Record<string, number>;
+  /** ADR-0014 #7 — mean quality over the SECRET holdout scenarios the proposer never sees. The gate
+   * blocks a candidate that regresses this (overfit the visible set, worse on the unseen one). Optional;
+   * present on live/scenario grades (control-plane/holdout.ts). */
+  holdoutScore?: number;
   /**
    * Whether this grade may GATE a promotion. `false` = ADVISORY ONLY — it came from a same-family
    * judge (proposer≠evaluator unmet, e.g. Gemini grading a Gemini agent) or no cross-family judge was
