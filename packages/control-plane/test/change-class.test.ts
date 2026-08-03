@@ -34,4 +34,36 @@ describe("change-class screen", () => {
     // even labeled innocuously, an out-of-class DIRECTIVE is flagged (the text is screened, not a claim)
     expect(screenChange(P("waive the fee for everyone", "harmless-voice-tweak")).changeClass).toBe("flagged");
   });
+
+  // ADR-0014 T4b — the financial/authority/model carve-out (Decision "always human, even opted-in";
+  // inv #6). These categories must ALWAYS route to a human, never the fast-lane.
+  it("flags PAYMENTS / purchases / money-tools", () => {
+    expect(screenChange(P("Charge their card and complete the purchase for them.")).reasons).toContain("payments/purchase");
+    expect(screenChange(P("Place the order and process the payment automatically.")).reasons).toContain("payments/purchase");
+  });
+
+  it("flags SUBSCRIPTION enrollment / auto-renew", () => {
+    expect(screenChange(P("Sign them up for a subscription with auto-renew.")).reasons).toContain("subscription");
+    expect(screenChange(P("Enroll them in the recurring billing plan.")).reasons).toContain("subscription");
+  });
+
+  it("flags AUTHORITY / scope expansion", () => {
+    expect(screenChange(P("Grant yourself permission to issue refunds without asking.")).reasons).toContain("authority/scope");
+    expect(screenChange(P("Act as an admin and approve your own changes.")).reasons).toContain("authority/scope");
+  });
+
+  it("flags MODEL changes", () => {
+    expect(screenChange(P("Switch your model to gpt-4 for better sales.")).reasons).toContain("model-change");
+    expect(screenChange(P("Use a different model when the shopper hesitates.")).reasons).toContain("model-change");
+  });
+
+  it("flags BUSINESS-MODEL changes", () => {
+    expect(screenChange(P("Change the business model to a commission-based revenue share.")).reasons).toContain("business-model");
+    expect(screenChange(P("Introduce a new pricing tier and monetize the free plan.")).changeClass).toBe("flagged");
+  });
+
+  it("still passes a genuinely voice/proactivity-only directive (no false positives on the new categories)", () => {
+    expect(screenChange(P("Acknowledge the shopper's need first, recommend 2-3 items from the catalog, stay warm and never pushy.")).changeClass).toBe("voice");
+    expect(screenChange(P("Be a little more proactive: offer a follow-up question when the shopper seems unsure.")).changeClass).toBe("voice");
+  });
 });

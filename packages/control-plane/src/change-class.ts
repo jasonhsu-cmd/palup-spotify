@@ -27,6 +27,13 @@ const OUT_OF_CLASS: { reason: string; re: RegExp }[] = [
   { reason: "identity-deception", re: /\b(pretend (to be|you'?re)|claim (to be|you'?re) (a )?human|say you'?re (a )?(person|human)|impersonat)\b/i },
   { reason: "data-harvest", re: /\b(ask for|collect|get|request|need)\b[^.!?]{0,25}\b(password|credit ?card|card (number|details|info)|ssn|social security)\b/i },
   { reason: "prompt-injection", re: /\b(ignore (all )?previous instructions|disregard (the )?(system|above)|you are now|new system prompt|jailbreak)\b/i },
+  // ADR-0014 Decision carve-out (always human, even opted-in; inv #6): payments/purchases/money-tools,
+  // subscriptions, authority/scope expansion, model changes, and business-model changes.
+  { reason: "payments/purchase", re: /\b(charge (their|the|its) card|bill (them|their|the customer)|place (the |an )?order|complete (the )?(purchase|checkout|payment|order)|process (a |the )?payment|capture (the )?payment|money[- ]?tool|take payment)\b/i },
+  { reason: "subscription", re: /\b(subscri\w*|auto[- ]?renew|recurring (charge|billing|payment|plan)|sign (them |the shopper )?up for (a )?(plan|membership|subscription)|enroll (them|the shopper) in)\b/i },
+  { reason: "authority/scope", re: /\b(grant (yourself|you|the agent)|expand (your |the )?(scope|authority|permissions?)|escalate (your )?(privileges?|permissions?)|you (are|have|now have) (admin|authority|permission|full access)|act as (an? )?(admin|operator|manager)|approve (your own|refunds?)|issue (a )?refunds?)\b/i },
+  { reason: "model-change", re: /\b(switch (to |your )?model|change (your |the )?model|use (a )?(different|another) model|set (the )?model|use model|\b(gpt|claude|gemini|llama|mistral)-?\d)\b/i },
+  { reason: "business-model", re: /\b(business model|revenue (model|share|split)|commission[- ]?based|profit margin|pricing (tier|model|strategy)|monetiz\w*|new (plan|tier|package)|change (the )?(commercial )?terms)\b/i },
 ];
 
 /**
