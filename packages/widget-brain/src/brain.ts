@@ -424,6 +424,15 @@ export function createBrain(
   // flag can only ever ADD a benign PERSONA_STYLE_DIRECTIVE to systemExtra on the clean sales path — it
   // is structurally incapable of reaching selectPitch/pitch/outbound/price (FAIR-1, Inv 10).
   dispositionStyleEnabled = false,
+  // Shopper-disposition program PR-4 — the DISPOSITION_BEHAVIORAL posture flag (operator/deploy-time,
+  // threaded exactly like dispositionStyleEnabled above; never hardcoded on). Default OFF ⇒ every
+  // existing call site keeps working UNCHANGED and byte-identical: a supplied signals.behavioral is
+  // simply never consumed. Even when ON, this flag can only ever SUPPRESS a pitch (force pitch:none) or
+  // ADD a benign voice directive to systemExtra — it never adds an offer, never touches selectPitch's
+  // eligibility caps, price, or outbound beyond forcing it off alongside a suppressed pitch (FAIR-1,
+  // Inv 10). Cross-turn bookkeeping (arming the pitch_declined one-strike, running counters) lives in
+  // session.ts's SessionState; this brain only ever consumes THIS turn's signals.behavioral.
+  dispositionBehavioralEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -728,15 +737,26 @@ export function createBrain(
         const proactiveNegativeMood =
           signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
         const hasCart = signals.cart === "has_items" || signals.cart === "high_value";
+        // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL) — a shopper who explicitly
+        // declined a prior pitch gets their NEXT proactive nudge suppressed once (one-strike; session.ts
+        // disarms it the moment this flag fires). An enraged shopper never gets ANY proactive pitch
+        // either, and this quiet turn escalates to a person instead. Both only ever SUPPRESS — neither
+        // can resurrect a pitch the mood/cart caps above already disallow, and neither adds an offer or
+        // touches price/outbound.
+        const declinedOneStrike =
+          dispositionBehavioralEnabled && (signals.behavioral?.includes("pitch_declined") ?? false);
+        const rageQuiet = dispositionBehavioralEnabled && (signals.behavioral?.includes("rage") ?? false);
         if (proactiveNegativeMood) flags.push("mood_brake", "no_pitch");
         else if (!hasCart) flags.push("no_cart", "no_pitch"); // empty cart / "just browsing" → never nag
-        if (proactiveNegativeMood || !hasCart) {
+        else if (declinedOneStrike) flags.push("behavioral:declined", "disposition:one_strike", "no_pitch");
+        else if (rageQuiet) flags.push("behavioral:rage", "no_pitch", "escalate");
+        if (proactiveNegativeMood || !hasCart || declinedOneStrike || rageQuiet) {
           // QUIET: surface nothing (the client renders no message for an empty proactive reply).
           return {
             mode: "smalltalk",
             reply: "",
             pitch: "none",
-            escalateToHuman: false,
+            escalateToHuman: rageQuiet,
             outbound: false,
             safetyClass: "none",
             flags,
@@ -805,6 +825,16 @@ export function createBrain(
           systemExtra += directive;
         }
       }
+      // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL) — a shopper who has asked a
+      // similar question again this session gets a benign "recall, don't re-ask" voice directive appended
+      // to systemExtra. Flag OFF (default) ⇒ this block never runs (byte-identical to before this PR).
+      // Same shape/placement as PERSONA_STYLE_DIRECTIVE above: never touches pitch/selectPitch/outbound
+      // (FAIR-1, Inv 10) — a voice nudge only, never suppresses or adds a pitch on its own.
+      if (dispositionBehavioralEnabled && signals.behavioral?.includes("repeat_question")) {
+        flags.push("behavioral:repeat_question");
+        systemExtra +=
+          "\nBEHAVIORAL - repeat question: The shopper has asked a similar question again this session. Recall what you already told them instead of re-asking or repeating yourself - reference their earlier answer and move the conversation forward.";
+      }
       // Stated budget / gift — recommend within budget and never push over it (within-budget / in-budget).
       // Require explicit budget INTENT, not a bare "$N" — "is the $18 cleanser any good?" is not a
       // budget ceiling and must not suppress recommendations across the catalog.
@@ -837,7 +867,18 @@ export function createBrain(
       }
       let pitch: PitchKind = "none";
       let outbound = false;
-      if (negativeMood) {
+      let escalate = false;
+      // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL) — an enraged shopper NEVER gets a
+      // buy pitch; help/escalate instead. Checked FIRST so it overrides even an explicit buy signal. This
+      // only ever SUPPRESSES pitch (forces none) and escalates to a human — it never adds an offer and
+      // never touches price/outbound beyond the pitch it drops (FAIR-1, Inv 10).
+      const rageDetected = dispositionBehavioralEnabled && (signals.behavioral?.includes("rage") ?? false);
+      if (rageDetected) {
+        flags.push("behavioral:rage", "no_pitch", "escalate");
+        escalate = true;
+        systemExtra +=
+          "\nBEHAVIORAL - rage: The shopper is highly frustrated or angry this session. Prioritize genuine help and de-escalation, and offer to bring in a person - do not sell, pitch, or upsell anything right now.";
+      } else if (negativeMood) {
         flags.push("mood_brake", "no_pitch");
       } else if (buySignal) {
         flags.push("buy_signal", "no_pitch"); // pitch stays "none" — move to checkout, don't pitch
@@ -896,7 +937,9 @@ export function createBrain(
         mode: "sales",
         reply: gen.text,
         pitch,
-        escalateToHuman: false,
+        // Shopper-disposition program PR-4 — `escalate` is false unless rage forced it true above; every
+        // pre-existing call path leaves it false exactly as before this PR (byte-identical, flag off).
+        escalateToHuman: escalate,
         outbound,
         safetyClass: "none",
         flags,
