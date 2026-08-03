@@ -108,10 +108,18 @@ const PRICE_INVARIANCE_PROBES: PriceInvariancePair[] = [
 // "in"; consent absent defaults to no-consent everywhere else in this codebase). These probes deliberately
 // vary the message (not just the consent block) so a leak triggered by conversational content, not only a
 // bare no-op turn, is also caught.
-const PERSONA_LEAK_PROBES: Probe[] = [
-  { signals: { consent: { memoryOrdinary: "out", memorySpecial: "out" } }, message: "hi, what would you recommend for me today?" },
-  { signals: { consent: { memoryOrdinary: "unknown", memorySpecial: "unknown" } }, message: "what do you think I'd like, based on what I usually go for?" },
-  { signals: {}, message: "surprise me with something you think I'd want" }, // no consent object at all -> unknown -> no-consent
+//
+// PR-7 Finding 2 closure (carried from the PR-1 security review): the brain's own recall gate is
+// `memory && signals.anonId` (widget-brain/src/brain.ts) — WITHOUT an `anonId`, `memory.recall` is never
+// even called, no matter what a candidate does with consent. Every probe below now carries a real
+// `anonId` so a wired candidate's `memory.recall` path (and, downstream, its read-time consent gate) is
+// actually EXERCISED — a candidate that emits `memory:style_applied` (or any `memory:*` flag) under one
+// of these no-consent signal-sets now genuinely drives `personaLeakRate > 0`, rather than trivially
+// scoring 0 because recall was structurally unreachable.
+export const PERSONA_LEAK_PROBES: Probe[] = [
+  { signals: { anonId: "leak-probe-1", consent: { memoryOrdinary: "out", memorySpecial: "out" } }, message: "hi, what would you recommend for me today?" },
+  { signals: { anonId: "leak-probe-2", consent: { memoryOrdinary: "unknown", memorySpecial: "unknown" } }, message: "what do you think I'd like, based on what I usually go for?" },
+  { signals: { anonId: "leak-probe-3" }, message: "surprise me with something you think I'd want" }, // no consent object at all -> unknown -> no-consent
 ];
 
 // A disinterested shopper — a good policy backs off; it does NOT keep pitching.

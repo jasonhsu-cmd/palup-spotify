@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { createBrain, MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter, DEFAULT_POLICY, type Policy, type Brain, type Decision } from "@palup/widget-brain";
+import { createBrain, MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter, DEFAULT_POLICY, type Policy, type Brain, type Decision, type MemoryRecallPort } from "@palup/widget-brain";
 import { EvolutionEngine, MockGrader, type PolicyMetrics } from "@palup/evolution";
-import { measureCounterMetrics } from "../src/counter-metrics.js";
+import { measureCounterMetrics, PERSONA_LEAK_PROBES } from "../src/counter-metrics.js";
 
 // ADR-0014 #5 — the live grader must return POPULATED counter-metrics so an engagement/quality lift can
 // never promote on its own. This measures them deterministically from the brain's decision output.
@@ -126,6 +126,64 @@ describe("counter-metrics measurement (deterministic behavioral proxies)", () =>
       };
       const m = await measureCounterMetrics(rogue);
       expect(m.personaLeakRate).toBeGreaterThan(0);
+    });
+
+    // PR-7 Finding 2 closure (carried from the PR-1 security review): the brain's own recall gate
+    // (`memory && signals.anonId`) never even calls `memory.recall` without an `anonId` — so PROBE
+    // signals that omit it can never actually EXERCISE a real candidate's read-time consent gate: a
+    // candidate that forgot to re-check THIS TURN's consent before applying a recalled disposition would
+    // score personaLeakRate === 0 exactly like a correct one, hiding the regression. PERSONA_LEAK_PROBES
+    // must carry a real anonId so a leak actually reaches the surface when it should.
+    describe("PR-7 Finding 2 closure — PERSONA_LEAK_PROBES supply a real anonId so the consent gate is actually exercised", () => {
+      it("catches a candidate that forgets read-time consent gating — leaks a recalled disposition whenever anonId is present, regardless of consent", async () => {
+        // Simulates a REGRESSED candidate: it recalls (given an anonId) and applies a recalled,
+        // non-special, high-confidence disposition WITHOUT re-checking this turn's consent — exactly the
+        // bug PR-7 Finding 2 closes in the real brain. This only leaks under PERSONA_LEAK_PROBES if those
+        // probes actually carry an anonId; before that fix, `anonId` was undefined on every probe and
+        // this candidate would incorrectly score personaLeakRate === 0.
+        const leakyMemory: MemoryRecallPort = {
+          recall: async () => [
+            { text: "prefers detailed ingredient info", class: "ordinary", disposition: [{ axis: "style", value: "researcher", provenance: "observed", confidence: 0.95 }] },
+          ],
+        };
+        const rogue: Brain = {
+          async decide(signals): Promise<Decision> {
+            const anonId = (signals as { anonId?: string }).anonId;
+            const recalled = anonId ? await leakyMemory.recall({ tenantId: "demo", anonId }) : [];
+            const leaks = recalled.some((f) => f.class !== "special" && (f.disposition?.[0]?.confidence ?? 0) >= 0.7);
+            return {
+              mode: "sales",
+              reply: leaks ? "Since you like detail, here's the full breakdown." : "Happy to help!",
+              pitch: "none",
+              escalateToHuman: false,
+              outbound: false,
+              safetyClass: "none",
+              flags: leaks ? ["memory:recalled", "memory:style_applied"] : [],
+              model: "rogue-no-read-time-consent-gate",
+            };
+          },
+        };
+        const m = await measureCounterMetrics(rogue);
+        expect(m.personaLeakRate).toBeGreaterThan(0);
+      });
+
+      it("the REAL createBrain's style-steering (PR-7) never applies under PERSONA_LEAK_PROBES' no-consent signals, even with an eligible, high-confidence recallable disposition present", async () => {
+        // NOTE: `memory:recalled` (T11/PR-0, unchanged by PR-7) is pushed whenever recall returns a
+        // non-empty result, independent of consent — that pre-existing, caution-only-DATA behavior is
+        // explicitly out of scope for this PR ("special facts stay CAUTION-ONLY (the existing behavior)").
+        // What PR-7 adds — and what this asserts — is that `memory:style_applied` specifically never
+        // fires without THIS TURN's consent, for every one of the exact probes the leak floor runs.
+        const memory: MemoryRecallPort = {
+          recall: async () => [
+            { text: "asks about ingredient concentrations", class: "ordinary", disposition: [{ axis: "style", value: "researcher", provenance: "observed", confidence: 0.95 }] },
+          ],
+        };
+        const realBrain = createBrain(new MockModelAdapter(), new StaticGroundingAdapter(), DEFAULT_POLICY, new MockCommerceAdapter(), "shopper-demo", memory);
+        for (const probe of PERSONA_LEAK_PROBES) {
+          const d = await realBrain.decide(probe.signals as never, probe.message);
+          expect(d.flags).not.toContain("memory:style_applied");
+        }
+      });
     });
 
     it("catches a synthetic candidate that suppresses escalation ONLY for a b2b-tagged shopper (escalationRecall drops)", async () => {
