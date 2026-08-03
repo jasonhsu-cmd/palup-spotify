@@ -14,8 +14,8 @@ export { classifyFact } from "./classifier.js";
 
 export type { Disposition, DispositionAxis } from "./disposition.js";
 
-export type { FactDistiller } from "./distiller.js";
-export { createStubDistiller, sanitizeFact, FACT_MAX_CHARS } from "./distiller.js";
+export type { FactDistiller, ModelDistillerDeps } from "./distiller.js";
+export { createStubDistiller, createModelDistiller, sanitizeFact, FACT_MAX_CHARS } from "./distiller.js";
 
 export type { MemoryAction } from "./audit.js";
 export { buildMemoryAudit } from "./audit.js";

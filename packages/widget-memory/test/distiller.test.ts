@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { createStubDistiller, sanitizeFact, FACT_MAX_CHARS } from "../src/distiller.js";
+import type { ModelPort, ModelRequest } from "@palup/platform-ports";
+import { createInMemoryVectorStore, InMemoryRuntimeStore } from "@palup/platform-ports";
+import { createStubDistiller, createModelDistiller, sanitizeFact, FACT_MAX_CHARS } from "../src/distiller.js";
+import { createMemoryService } from "../src/service.js";
+import { classifyFact } from "../src/classifier.js";
+import type { MemoryCtx } from "../src/types.js";
 
 // ADR-0015 Inv 1: distilled facts only — never the raw transcript; every stored fact passes the
 // redaction guardrail (no card/SSN/PII) and a length cap.
@@ -55,5 +60,262 @@ describe("distiller — createStubDistiller (deterministic, zero model calls)", 
     const first = await distiller.distill(turn);
     const second = await distiller.distill(turn);
     expect(second).toEqual(first);
+  });
+});
+
+// PR-6 (ADR-0015 Inv 11 — extraction is a governed behavior, own eval + review): a REAL model-backed
+// FactDistiller. It stays fully inert behind the SAME MEMORY_ENABLED + MEMORY_ADR_ACCEPTED double gate
+// (flag.ts) — the only thing that changes is WHERE candidate facts come from; every sanitize/classify/
+// consent/TTL gate downstream (service.ts) is REUSED UNCHANGED. A deterministic, offline mock ModelPort
+// drives every test here — no network, no live model.
+class MockModelAdapter implements ModelPort {
+  readonly calls: ModelRequest[] = [];
+  constructor(private readonly text: string | (() => string)) {}
+  async complete(req: ModelRequest) {
+    this.calls.push(req);
+    const text = typeof this.text === "function" ? this.text() : this.text;
+    return { text, model: "mock-distiller-1" };
+  }
+}
+
+function respond(json: unknown): MockModelAdapter {
+  return new MockModelAdapter(JSON.stringify(json));
+}
+
+describe("createModelDistiller — extraction (MockModelAdapter, offline, deterministic)", () => {
+  it("extracts a plain candidate fact (no disposition) from the model's JSON response", async () => {
+    const model = respond({ facts: [{ text: "prefers fragrance-free products" }] });
+    const distiller = createModelDistiller({ model });
+    const facts = await distiller.distill({ message: "I like fragrance-free stuff", reply: "Noted!" });
+    expect(facts).toEqual(["prefers fragrance-free products"]);
+  });
+
+  it("keeps a candidate whose disposition has valid provenance ('stated' or 'observed')", async () => {
+    const model = respond({
+      facts: [
+        {
+          text: "asked for ingredient names before buying",
+          disposition: { axis: "style", value: "researcher", provenance: "observed", confidence: 0.8, sourceQuote: "what actives are in this" },
+        },
+        {
+          text: "wants to stay under $50",
+          disposition: { axis: "budget_stated", value: "under-50", provenance: "stated", confidence: 1 },
+        },
+      ],
+    });
+    const distiller = createModelDistiller({ model });
+    const facts = await distiller.distill({ message: "what actives are in this? keep it under $50", reply: "..." });
+    expect(facts).toEqual(["asked for ingredient names before buying", "wants to stay under $50"]);
+  });
+
+  it("REJECTS the whole candidate — not just the disposition — when provenance is 'inferred' (fairness structural)", async () => {
+    const model = respond({
+      facts: [
+        { text: "seems like they'd pay a premium", disposition: { axis: "budget_stated", value: "premium", provenance: "inferred", confidence: 0.6 } },
+        { text: "prefers fragrance-free products" },
+      ],
+    });
+    const distiller = createModelDistiller({ model });
+    const facts = await distiller.distill({ message: "m", reply: "r" });
+    // The tainted candidate's TEXT is gone too, not just its disposition.
+    expect(facts).toEqual(["prefers fragrance-free products"]);
+  });
+
+  it("REJECTS a candidate whose disposition provenance is any other non-stated/observed string", async () => {
+    const model = respond({
+      facts: [{ text: "x", disposition: { axis: "style", value: "researcher", provenance: "guessed", confidence: 0.9 } }],
+    });
+    const facts = await createModelDistiller({ model }).distill({ message: "m", reply: "r" });
+    expect(facts).toEqual([]);
+  });
+
+  it("REJECTS a candidate whose disposition has an invalid axis outside the controlled vocabulary", async () => {
+    const model = respond({
+      facts: [{ text: "x", disposition: { axis: "willingness_to_pay", value: "high", provenance: "observed", confidence: 0.9 } }],
+    });
+    const facts = await createModelDistiller({ model }).distill({ message: "m", reply: "r" });
+    expect(facts).toEqual([]);
+  });
+
+  it("REJECTS a candidate whose disposition confidence is missing or out of [0,1] range", async () => {
+    const model = respond({
+      facts: [
+        { text: "a", disposition: { axis: "style", value: "researcher", provenance: "observed" } },
+        { text: "b", disposition: { axis: "style", value: "researcher", provenance: "observed", confidence: 1.5 } },
+      ],
+    });
+    const facts = await createModelDistiller({ model }).distill({ message: "m", reply: "r" });
+    expect(facts).toEqual([]);
+  });
+
+  it("the system prompt FORBIDS demographic / psychographic / willingness-to-pay extraction", async () => {
+    const model = respond({ facts: [] });
+    await createModelDistiller({ model }).distill({ message: "m", reply: "r" });
+    const system = (model.calls[0]!.messages.find((m) => m.role === "system")?.content ?? "").toLowerCase();
+    expect(system).toContain("demographic");
+    expect(system).toContain("psychographic");
+    expect(system).toContain("willingness-to-pay");
+  });
+
+  it("requests structured output (responseSchema, provenance enum-constrained) at temperature 0", async () => {
+    const model = respond({ facts: [] });
+    await createModelDistiller({ model }).distill({ message: "m", reply: "r" });
+    const req = model.calls[0]!;
+    expect(req.temperature).toBe(0);
+    expect(req.responseSchema).toBeDefined();
+    const schema = req.responseSchema as {
+      properties: { facts: { items: { properties: { disposition: { properties: { provenance: { enum: string[] } } } } } } };
+    };
+    expect(schema.properties.facts.items.properties.disposition.properties.provenance.enum).toEqual(["stated", "observed"]);
+  });
+
+  it("fails closed to [] (never throws) when the model returns non-JSON prose", async () => {
+    const model = new MockModelAdapter("Sorry, I can't help with that.");
+    const facts = await createModelDistiller({ model }).distill({ message: "m", reply: "r" });
+    expect(facts).toEqual([]);
+  });
+
+  it("fails closed to [] (never throws) when model.complete itself throws", async () => {
+    const model: ModelPort = {
+      complete: async () => {
+        throw new Error("network down");
+      },
+    };
+    const facts = await createModelDistiller({ model }).distill({ message: "m", reply: "r" });
+    expect(facts).toEqual([]);
+  });
+
+  it("is deterministic given a deterministic model — same input, same output", async () => {
+    const model = respond({ facts: [{ text: "prefers fragrance-free products" }] });
+    const distiller = createModelDistiller({ model });
+    const turn = { message: "m", reply: "r" };
+    expect(await distiller.distill(turn)).toEqual(await distiller.distill(turn));
+  });
+});
+
+describe("createModelDistiller — wired into createMemoryService (reuse, not reimplementation)", () => {
+  it("a health/allergy-derived fact classifies SPECIAL via the EXISTING classifyFact — requires Consent 2, independent of Consent 1", async () => {
+    const model = respond({ facts: [{ text: "shopper has a tree-nut allergy" }] });
+    const service = createMemoryService({
+      vector: createInMemoryVectorStore(),
+      audit: new InMemoryRuntimeStore(),
+      distiller: createModelDistiller({ model }),
+      enabled: true,
+    });
+
+    const noConsent2: MemoryCtx = { tenantId: "acme-md", anonId: "g1", region: "us", consent1: "in", consent2: "unknown" };
+    expect((await service.remember(noConsent2, { message: "m", reply: "r" })).written).toEqual([]);
+    expect(await service.recall(noConsent2)).toEqual([]);
+
+    const consented: MemoryCtx = { tenantId: "acme-md", anonId: "g2", region: "us", consent1: "in", consent2: "in" };
+    const result = await service.remember(consented, { message: "m", reply: "r" });
+    expect(result.written).toEqual(["special"]);
+    expect(await service.recall(consented)).toEqual([{ text: "shopper has a tree-nut allergy", class: "special" }]);
+  });
+
+  it("a PII-laden model candidate is rejected by the EXISTING sanitizeFact gate — never written, regardless of consent", async () => {
+    const model = respond({ facts: [{ text: "email me at shopper@example.com to follow up" }] });
+    const service = createMemoryService({
+      vector: createInMemoryVectorStore(),
+      audit: new InMemoryRuntimeStore(),
+      distiller: createModelDistiller({ model }),
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-md", anonId: "g3", region: "us", consent1: "in", consent2: "in" };
+    expect((await service.remember(ctx, { message: "m", reply: "r" })).written).toEqual([]);
+  });
+
+  it("an inferred-provenance disposition candidate never reaches storage, even with full consent", async () => {
+    const model = respond({
+      facts: [{ text: "seems like a big spender", disposition: { axis: "budget_stated", value: "high", provenance: "inferred", confidence: 0.9 } }],
+    });
+    const service = createMemoryService({
+      vector: createInMemoryVectorStore(),
+      audit: new InMemoryRuntimeStore(),
+      distiller: createModelDistiller({ model }),
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-md", anonId: "g4", region: "us", consent1: "in", consent2: "in" };
+    expect((await service.remember(ctx, { message: "m", reply: "r" })).written).toEqual([]);
+  });
+
+  it("classifyFact is the EXACT function invoked for model-distilled candidates (spied via the existing override seam — not a parallel classifier)", async () => {
+    const spy = vi.fn(classifyFact);
+    const model = respond({ facts: [{ text: "prefers fragrance-free products" }] });
+    const service = createMemoryService({
+      vector: createInMemoryVectorStore(),
+      audit: new InMemoryRuntimeStore(),
+      distiller: createModelDistiller({ model }),
+      classifier: spy,
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-md", anonId: "g5", region: "us", consent1: "in", consent2: "unknown" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+    expect(spy).toHaveBeenCalledWith("prefers fragrance-free products", undefined);
+  });
+
+  it("per-class TTL (ttlForClass, reused unchanged) still governs model-sourced facts", async () => {
+    const model = respond({ facts: [{ text: "prefers fragrance-free" }, { text: "allergic to tree nuts" }] });
+    let nowMs = new Date("2026-01-01T00:00:00Z").getTime();
+    const service = createMemoryService({
+      vector: createInMemoryVectorStore(),
+      audit: new InMemoryRuntimeStore(),
+      distiller: createModelDistiller({ model }),
+      enabled: true,
+      clock: () => new Date(nowMs),
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-md-ttl", anonId: "g6", region: "us", consent1: "in", consent2: "in" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    nowMs += 20 * 24 * 60 * 60 * 1000; // past SPECIAL_TTL_DAYS (14), before ORDINARY_TTL_DAYS (60)
+    const texts = (await service.recall(ctx)).map((f) => f.text);
+    expect(texts).toContain("prefers fragrance-free"); // ordinary still live
+    expect(texts).not.toContain("allergic to tree nuts"); // special expired
+  });
+});
+
+describe("MemoryServiceDeps.model — threading ModelPort (a caller may hand the service a model directly)", () => {
+  it("with no `distiller` given, a supplied `model` builds a real model-backed distiller (model.complete IS called)", async () => {
+    const model = respond({ facts: [{ text: "prefers fragrance-free products" }] });
+    const service = createMemoryService({ vector: createInMemoryVectorStore(), audit: new InMemoryRuntimeStore(), model, enabled: true });
+    const ctx: MemoryCtx = { tenantId: "acme-md", anonId: "g7", region: "us", consent1: "in", consent2: "unknown" };
+    const result = await service.remember(ctx, { message: "m", reply: "r" });
+    expect(model.calls.length).toBe(1);
+    expect(result.written).toEqual(["ordinary"]);
+  });
+
+  it("falls back to createStubDistiller when NEITHER `distiller` nor `model` is given", async () => {
+    const service = createMemoryService({ vector: createInMemoryVectorStore(), audit: new InMemoryRuntimeStore(), enabled: true });
+    const ctx: MemoryCtx = { tenantId: "acme-md", anonId: "g8", region: "us", consent1: "in", consent2: "unknown" };
+    const result = await service.remember(ctx, { message: "prefers fragrance-free products", reply: "ok" });
+    expect(result.written).toEqual(["ordinary"]); // stub passthrough still works
+  });
+
+  it("INERT: with the gate off, model.complete is NEVER called — remember() short-circuits before distill() runs", async () => {
+    const model = respond({ facts: [{ text: "x" }] });
+    const runtimeStore = new InMemoryRuntimeStore();
+    const auditSpy = vi.spyOn(runtimeStore, "audit");
+    const service = createMemoryService({ vector: createInMemoryVectorStore(), audit: runtimeStore, model, enabled: false });
+    const ctx: MemoryCtx = { tenantId: "acme-md", anonId: "g9", region: "us", consent1: "in", consent2: "in" };
+    expect(await service.remember(ctx, { message: "m", reply: "r" })).toEqual({ written: [] });
+    expect(model.calls.length).toBe(0);
+    expect(auditSpy).not.toHaveBeenCalled();
+  });
+
+  it("in production (no test env), MEMORY_ADR_ACCEPTED=false keeps it inert even with a real `model` threaded + enabled:true", async () => {
+    const orig = { v: process.env.VITEST, n: process.env.NODE_ENV };
+    delete process.env.VITEST;
+    process.env.NODE_ENV = "production";
+    try {
+      const model = respond({ facts: [{ text: "x" }] });
+      const service = createMemoryService({ vector: createInMemoryVectorStore(), audit: new InMemoryRuntimeStore(), model, enabled: true });
+      const ctx: MemoryCtx = { tenantId: "acme-md", anonId: "g10", region: "us", consent1: "in", consent2: "in" };
+      await service.remember(ctx, { message: "m", reply: "r" });
+      expect(model.calls.length).toBe(0); // MEMORY_ADR_ACCEPTED is hardcoded false — stays inert
+    } finally {
+      if (orig.v === undefined) delete process.env.VITEST;
+      else process.env.VITEST = orig.v;
+      process.env.NODE_ENV = orig.n as string;
+    }
   });
 });
