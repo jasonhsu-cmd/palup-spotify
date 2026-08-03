@@ -103,6 +103,9 @@ importers:
       '@palup/platform-ports':
         specifier: workspace:*
         version: link:../platform-ports
+      '@palup/widget-brain':
+        specifier: workspace:*
+        version: link:../widget-brain
       pg:
         specifier: ^8.13.0
         version: 8.22.0

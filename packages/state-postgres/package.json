@@ -6,6 +6,7 @@
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
     "@palup/platform-ports": "workspace:*",
+    "@palup/widget-brain": "workspace:*",
     "pg": "^8.13.0"
   },
   "devDependencies": {

@@ -7,6 +7,7 @@ import {
   createSession,
   type Policy,
   type Signals,
+  type Consent,
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY, normalizeHistory } from "@palup/widget-brain";
 import type { RuntimeStatePort, ModelPort, VectorPort, Principal } from "@palup/platform-ports";
@@ -22,8 +23,8 @@ import {
   createInMemoryVectorStore,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled } from "@palup/widget-memory";
-import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
+import { createMemoryService, isMemoryEnabled, validateAnonId } from "@palup/widget-memory";
+import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -553,6 +554,46 @@ export async function buildServer(opts?: {
     return { ok: true };
   });
 
+  // PR-11a (ADR-0015 T12) — the server-side consent-record CAPTURE point: the future in-chat consent-UX
+  // PR (PR-11) calls this to record the shopper's OWN memory-consent choice for THEIR OWN subject. The
+  // (tenantId, anonId) pair is derived the EXACT same server-trusted way `/chat` derives it — tenantId
+  // from the verified widget token (falling back to RUNTIME_TENANT during the same rollout window /chat
+  // uses), NEVER a client-supplied tenant; anonId must pass the SAME `validateAnonId` charset/length
+  // bound `/chat`'s `signals.anonId` does, so a shopper can only ever record consent for a well-formed
+  // subject key they hold — never an arbitrary/forged one. `recordConsent` (runtime-consent-store.ts)
+  // audits the write atomically inside its own transaction — no separate audit call needed here.
+  app.post("/consent", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      anonId?: unknown;
+      memoryOrdinary?: unknown;
+      memorySpecial?: unknown;
+      widgetToken?: string;
+    };
+    const authHeader = req.headers["authorization"];
+    const widgetToken =
+      typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7)
+        : typeof body.widgetToken === "string"
+          ? body.widgetToken
+          : undefined;
+    const principal = await widgetIdentity.authenticate(widgetToken);
+    if (principal.kind !== "merchant" && WIDGET_AUTH_REQUIRED) {
+      reply.code(401);
+      return { error: "unauthenticated" };
+    }
+    const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
+
+    const anonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
+    const isTriStateConsent = (v: unknown): v is Consent => v === "in" || v === "out" || v === "unknown";
+    if (!anonId || !isTriStateConsent(body.memoryOrdinary) || !isTriStateConsent(body.memorySpecial)) {
+      reply.code(400);
+      return { error: "invalid anonId or consent value" };
+    }
+
+    await recordConsent(store, { tenantId, anonId, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial });
+    return { ok: true };
+  });
+
   app.post("/chat", async (req, reply) => {
     const body = (req.body ?? {}) as {
       message?: string;
@@ -654,12 +695,22 @@ export async function buildServer(opts?: {
       //   • relationship — grants VIP/subscriber treatment ⇒ SERVER-derived. Anonymous until an identified
       //     customer + history exist (M2 customer identity), never client-claimed.
       //   • consent      — legally load-bearing (TCPA/CAN-SPAM, gates outbound) ⇒ conservative default
-      //     (unknown = no consent); a real consent store is a later, identified-customer subsystem.
+      //     (unknown = no consent) for email/sms (still no CMP for those); the two MEMORY consent tiers
+      //     (memoryOrdinary/memorySpecial) are now server-looked-up below (PR-11a) — still NEVER the
+      //     client's own `signals.consent`.
       //   • groundingMode/region — merchant policy + data-residency ⇒ server config, not the shopper.
       //   • proactivityLevel — an autonomy lever ⇒ omitted so the brain uses the merchant policy default.
       //   • openIssues / safetyLatched — sourced ONLY from persisted session state, never client-injected.
       //   • kill — armed state comes from the operator registry (server); the shopper can neither arm nor bypass it.
       const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
+      // PR-11a (ADR-0015 T12) — look up this subject's server-recorded memory-consent BEFORE deriving
+      // signals, using the SAME validated anonId deriveServingSignals will itself derive from
+      // body.signals.anonId (validateAnonId is pure/idempotent, so validating it here too is safe and
+      // keeps deriveServingSignals itself unaware of any store). No valid anonId ⇒ nothing to key a
+      // lookup on (mirrors the remember() "no subject key" guard below) ⇒ consentRecord stays undefined
+      // ⇒ deriveServingSignals's own `ctx.consent?.… ?? "unknown"` fail-closed default applies.
+      const consentAnonId = validateAnonId(typeof body.signals?.anonId === "string" ? body.signals.anonId : undefined);
+      const consentRecord = consentAnonId ? await lookupConsent(store, { tenantId, anonId: consentAnonId }) : undefined;
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
         kill: Boolean(kill),
@@ -670,6 +721,7 @@ export async function buildServer(opts?: {
         // token, or the F1 re-binding check above failed).
         shopperId: shopperPrincipal.kind === "shopper" ? shopperPrincipal.shopperId : undefined,
         shopperVerified: shopperPrincipal.kind === "shopper" ? shopperPrincipal.verified : undefined,
+        consent: consentRecord,
       });
 
       // Canary split: a sticky fraction of THIS tenant's sessions is served by that tenant's canary

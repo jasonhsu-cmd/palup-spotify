@@ -1,4 +1,4 @@
-import type { Signals } from "@palup/widget-brain";
+import type { Signals, Consent } from "@palup/widget-brain";
 import { validateAnonId } from "@palup/widget-memory";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
@@ -33,6 +33,15 @@ export interface ServingSignalContext {
    */
   shopperId?: string;
   shopperVerified?: boolean;
+  /**
+   * PR-11a (ADR-0015 T12) — the server-looked-up memory-consent record for THIS subject (from the
+   * consent store, `@palup/state-postgres`'s runtime-consent-store.ts), or undefined when there is no
+   * valid subject key to look one up for (no/invalid anonId — mirrors every other "nothing to key on"
+   * guard in this file). This is the ONLY source `deriveServingSignals` consults for
+   * memoryOrdinary/memorySpecial — the client's own `signals.consent` stays ignored, exactly as before
+   * this field existed. Absent ⇒ fail-closed "unknown"/"unknown" (byte-identical to the old hardcode).
+   */
+  consent?: { memoryOrdinary: Consent; memorySpecial: Consent };
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -62,12 +71,15 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     consent: {
       email: "unknown",
       sms: "unknown",
-      // ADR-0015 T12: the two cross-visit MEMORY consent tiers. Hardcoded "unknown" here — real
-      // consent (a CMP / server-side consent record) is a later, separately-gated subsystem, exactly
-      // like email/sms above. NEVER taken from the client's `signals.consent` (a shopper can't
-      // self-assert their own memory consent any more than they can self-assert VIP status).
-      memoryOrdinary: "unknown",
-      memorySpecial: "unknown",
+      // ADR-0015 T12 / PR-11a: the two cross-visit MEMORY consent tiers, now sourced from the server's
+      // OWN consent-store lookup (ctx.consent — populated by server.ts's `lookupConsent` call BEFORE
+      // this function runs), never the client's `signals.consent` (a shopper can't self-assert their
+      // own memory consent any more than they can self-assert VIP status). No record for this subject
+      // (ctx.consent undefined, or an absent field on it) ⇒ fail-closed "unknown" — byte-identical to
+      // the old hardcode. email/sms stay hardcoded "unknown" — a real CMP for those is still out of
+      // scope (unchanged from before this PR).
+      memoryOrdinary: ctx.consent?.memoryOrdinary ?? "unknown",
+      memorySpecial: ctx.consent?.memorySpecial ?? "unknown",
     },
     groundingMode: ctx.groundingMode,
     region: ctx.region,
