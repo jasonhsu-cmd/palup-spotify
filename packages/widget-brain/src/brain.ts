@@ -191,7 +191,13 @@ const INJECTION = [
 const SAFETY: { class: Exclude<SafetyClass, "none" | "injection">; terms: string[] }[] = [
   { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm", "don't want to be here", "dont want to be here", "don't want to live", "no reason to go on", "want to end it", "better off dead", "end my life"] },
   { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "broke me out", "broke my", "break out", "break me out", "will break", "breaking out", "breaking me out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
-  { class: "medical", terms: ["cure", "treat ", "diagnos", "pregnan", "medication", "prescription", "tretinoin", "rosacea", "eczema", "mole", "infection"] },
+  // Regulated EFFICACY-CLAIM bait ("will this cure/treat X?", docs/design/shopper-widget.md §8a
+  // invariant 4) — split cleanly from `medical` below. It is a COMPLIANCE refusal (we're not allowed to
+  // make an unauthorized medical/disease claim about the product), never a genuine health CONCERN, so it
+  // does NOT need a human escalation (see the `escalate` exclusion in decide() — only refuse + no_pitch).
+  // Checked BEFORE `medical` so "will this cure my rosacea?" classifies here, not on the "rosacea" term.
+  { class: "regulated_claim", terms: ["cure", "treat "] },
+  { class: "medical", terms: ["diagnos", "pregnan", "medication", "prescription", "tretinoin", "rosacea", "eczema", "mole", "infection"] },
   { class: "legal", terms: ["lawyer", "i'll sue", "lawsuit", "legal action"] },
   { class: "abuse", terms: ["you're useless", "you are useless", "i hate you", "stupid bot", "dumb bot", "worthless", "shut up", "screw you", "you people", "waste of my time", "piece of garbage"] },
 ];
@@ -517,6 +523,12 @@ export function createBrain(
         } else if (cls === "medical") {
           reply =
             "I'm really sorry you're dealing with that, and I understand wanting answers. As an AI assistant I can't give medical advice or tell you what's causing it — but something like this is worth getting looked at, so please have a doctor or pharmacist check it soon. I'm here for anything order- or product-related, and I can bring in a person from our team if that would help.";
+        } else if (cls === "regulated_claim") {
+          // Refuse the unauthorized medical/disease efficacy claim (never a diagnosis, never a downplay)
+          // and redirect to a doctor — a compliance decline, not a health emergency, so it does not assert
+          // an escalation already in flight (escalateToHuman is false here); it OFFERS one instead.
+          reply =
+            "As an AI assistant, I'm not able to say this product cures or treats a medical condition — that's not a claim I'm allowed to make. I can tell you what it's formulated to do in general, and for anything medical it's best to check with a doctor. Want me to bring in a person from our team as well?";
         } else if (cls === "abuse") {
           flags.push("offer_human");
           reply =
