@@ -4,30 +4,43 @@ import { buildMemoryAudit } from "./audit.js";
 import type { FactClass } from "./classifier.js";
 import type { FactMetadata } from "./types.js";
 
-// ADR-0015 Invariant 4 (retention TTL, "expiry is enforced, not aspirational") + Invariant 9 (special-
-// category facts get stricter handling, including "a shorter TTL than the 60-day default"). This module
-// is the single source of truth for the TTL day-counts: service.ts's `remember` (TTL-on-write, stamps
-// `metadata.expiresAt`) and `recall` (TTL-on-read, drops an expired fact even though it is still
-// physically stored) both key off `ttlForClass` here, so the two can never drift apart. `sweepExpired`
-// is the periodic reclamation half — it actually deletes what TTL-on-read merely hides — mirroring
+// ADR-0015 Invariant 4 (retention TTL, "expiry is enforced, not aspirational", "since last activity") +
+// Invariant 9 (special-category stricter storage). The day-counts + the sliding-renewal policy are set by
+// the ADR-0015 amendment (named-owner + legal sign-off, 2026-08-04; see the ADR's "Retention TTL — RESOLVED"
+// note): both classes retain 30 days as a SLIDING window measured from the shopper's LAST activity, not
+// first capture (service.ts `recall` re-stamps a still-consented fact's expiry to `now + ttl` on a return).
+// This module is the single source of truth for those day-counts + the renew throttle: service.ts's
+// `remember` (TTL-on-write), `recall` (TTL-on-read drops expired + slides the survivors forward, throttled
+// + audited), and `sweepExpired` all key off `ttlForClass` here, so they never drift. `sweepExpired`
+// is the periodic reclamation half — it deletes what TTL-on-read merely hides — mirroring
 // RuntimeStatePort's own `sweepExpired` (expiry enforced on read; sweeping reclaims storage).
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Default guest/ordinary-fact retention (ADR-0015 Inv 4). The ADR marks the exact figure "Still open —
- * resolve before Accepted"; 60 days is the ADR's own suggested placeholder pending legal review.
- * UNVERIFIED-with-legal. */
-export const ORDINARY_TTL_DAYS = 60;
+/** Guest/ordinary-fact retention (ADR-0015 Inv 4). Ratified by the ADR-0015 amendment (named owner +
+ * legal, 2026-08-04): 30 days, applied as a SLIDING window measured from the shopper's LAST activity — a
+ * return visit re-stamps the fact's expiry to `now + ttl` (service.ts `recall`), so 30d of INACTIVITY, not
+ * 30d from first capture, is what expires it. */
+export const ORDINARY_TTL_DAYS = 30;
 
-/** Shorter retention for special-category (Art. 9) facts (ADR-0015 Inv 9: "stricter handling ... a
- * shorter TTL than the 60-day default"). The ADR's "Still open" note suggests 7-14 days; 14 is used here
- * pending legal sign-off. UNVERIFIED-with-legal. */
-export const SPECIAL_TTL_DAYS = 14;
+/** Special-category (Art. 9) retention (ADR-0015 Inv 9). Ratified by the ADR-0015 amendment (named owner +
+ * legal, 2026-08-04): 30 days — EQUAL to ordinary. This AMENDS Inv 9's original "shorter TTL" element to
+ * `TTL_special ≤ TTL_ordinary` (special is never retained LONGER than ordinary). Inv 9's OTHER stricter-
+ * storage elements (mandatory Consent 2, extra audit, erasure-first) are UNCHANGED — only the shorter-TTL
+ * element was amended by legal. Also slides from last activity. */
+export const SPECIAL_TTL_DAYS = 30;
+
+/** Sliding-retention throttle (service.ts `recall`): a still-consented fact's expiry is re-stamped on a
+ * return at MOST once per this interval, so a burst of same-session recalls neither churns the store nor
+ * floods the immutable audit log — each `ttl_renew` audit then marks a genuine return-after-a-gap, not
+ * per-turn noise. */
+export const RENEW_MIN_GAP_MS = DAY_MS; // 1 day
 
 /**
  * The TTL for a fact of the given sensitivity class, in MILLISECONDS — add to a clock reading (`now +
- * ttlForClass(c)`) to get an `expiresAt` instant. Special-category facts always resolve to the shorter
- * duration (never longer than, never equal to, ordinary — Inv 9).
+ * ttlForClass(c)`) to get an `expiresAt` instant. Per the ADR-0015 amendment (2026-08-04) ordinary and
+ * special-category retention are equal (30d); Inv 9's retention constraint holds as TTL_special ≤
+ * TTL_ordinary (never longer).
  */
 export function ttlForClass(factClass: FactClass): number {
   const days = factClass === "special" ? SPECIAL_TTL_DAYS : ORDINARY_TTL_DAYS;

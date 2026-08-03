@@ -6,6 +6,16 @@
   consent/notice UX + retention/erasure subsystem exist. The **in-session** multi-turn memory already
   shipped (PR #76) is unaffected — that holds no server-side transcript; this ADR is the *durable,
   cross-visit* half.
+- **Amendment (2026-08-04 — named owner + legal, retention):** resolves the retention "Still open" items
+  below. Ordinary **and** special-category facts both retain **30 days**, as a **sliding window** measured
+  from last activity — a return re-stamps the fact's expiry to `now + TTL` (throttled to ≤ once/day; each
+  extension audited via the `ttl_renew` action). Invariant 9's original **"shorter TTL"** element is amended
+  to **`TTL_special ≤ TTL_ordinary`** (special retained no LONGER than ordinary); Inv 9's other stricter-
+  storage elements (mandatory Consent 2, extra audit, erasure-first) are unchanged. The US **Consent-2
+  fail-closed** default is confirmed (special-category always needs explicit `consent2 = "in"`, every
+  region). This amendment resolves the *retention* opens only; the overall **Status stays Proposed** until
+  the full `Accepted` + `MEMORY_ADR_ACCEPTED` go-live flip (named-owner + `security-reviewer` + legal,
+  human-only). Implemented INERT in `packages/widget-memory` (`retention.ts`/`service.ts`/`consent.ts`).
 - **Decisions recorded (owner, this revision):** (a) **scope = B** — special-category (health/allergy)
   facts *may* be remembered, but **only behind a separate, explicit Article-9 health-data consent**;
   **not** non-sensitive-only, and **not** accounts-only (a consented guest may also have one remembered);
@@ -58,8 +68,9 @@ Every candidate fact is classified *before* any write:
   (**Consent 1**), per the tier + region rules above.
 - **Special-category facts** — health / allergy / medical and anything GDPR Art. 9 covers. Remembered
   **only behind a separate, explicit health-data consent (Consent 2)**, with **stricter handling**:
-  encrypted at rest, a **shorter TTL** than the 60-day default, extra audit, and erasure-first on
-  withdrawal. Available in **both tiers** — a *consented* anonymous guest may have one remembered; it is
+  encrypted at rest, a **TTL no longer than ordinary** (amended 2026-08-04: both 30 days), extra audit, and
+  erasure-first on withdrawal. Available in **both tiers** — a *consented* anonymous guest may have one
+  remembered; it is
   **not** restricted to accounts.
 
 Two rules keep this safe:
@@ -118,8 +129,10 @@ Flow invariants:
 3. **EU-consent-gated, fail-closed** — `region ∈ {eu, unknown}` → require explicit consent before any
    write; `region = us` → notice + store + honor opt-out. The consent decision is **server-derived**
    (region + consent signals), never client-forced.
-4. **Retention TTL** — guest facts expire (default **60 days** since last activity); account facts follow
-   the account lifecycle. Expiry is enforced, not aspirational.
+4. **Retention TTL** — guest facts expire (default **30 days** since last activity — a **sliding window**:
+   each return re-stamps the fact's expiry to `now + TTL`, throttled to ≤ once/day and audited via
+   `ttl_renew`; amended 2026-08-04); account facts follow the account lifecycle. Expiry is enforced, not
+   aspirational.
 5. **Right-to-erasure** — a data-rights delete erases the shopper's namespace/id via the vector port
    (`deleteById` / `deleteNamespace`); the guest→account merge and every erasure are **audited** on the
    immutable log.
@@ -130,7 +143,9 @@ Flow invariants:
    merchants, not derived from device fingerprints, resettable by the shopper (clearing it forgets them).
 9. **Special-category facts need separate explicit consent** — no Art-9 (health/allergy/medical) fact is
    ever written under the ordinary memory consent or account ToS; it requires **Consent 2** and stricter
-   storage (encryption, shorter TTL, extra audit, erasure-first). Enforced fail-closed.
+   storage (encryption, extra audit, erasure-first). Enforced fail-closed. **[Amended 2026-08-04]** the
+   original "shorter TTL" element is amended to **`TTL_special ≤ TTL_ordinary`** (special retained no
+   LONGER than ordinary); legal set both classes to 30 days — see the amendment note under Status.
 10. **Memory never lowers a guardrail** — a remembered sensitive fact may only *increase* caution
     (proactive avoidance / flag); it never lets the agent assert safety, skip the safety branch, or
     bypass escalation. The reactive safety answer is memory-independent and consent-free.
@@ -184,9 +199,10 @@ Flow invariants:
 - **Memory scope** — ✅ **B**: special-category facts remembered only behind explicit Consent 2.
 
 **Still open (resolve before Accepted):**
-- **Sensitive-fact TTL** — how much shorter than the 60-day default should special-category facts live
-  (e.g. 7–14 days, or session-life + a short grace)? Set with legal.
-- **Default retention (ordinary)** — 60 days for guest facts? Per-merchant configurable?
+- **Sensitive-fact TTL** — ✅ **RESOLVED 2026-08-04** (amendment, with legal): special-category retention =
+  **30 days**, EQUAL to ordinary (Inv 9 amended to `TTL_special ≤ TTL_ordinary`, no longer strictly shorter).
+- **Default retention (ordinary)** — ✅ **RESOLVED 2026-08-04**: **30 days**, sliding from last activity
+  (per-merchant configurability deferred).
 - **Merchant control** — a per-store disable toggle **and** who authors/reviews the per-industry
   sensitivity policy (Invariant 11) — merchant-proposed, PalUp-reviewed?
 - **Guest-id lifetime / reset** — surface the "manage what I remember / forget me" control (also the
@@ -201,7 +217,8 @@ Flow invariants:
   per-industry sensitivity map carries this to other verticals without changing the guardrails.
 - (−) EU shoppers get **no** cross-visit memory without consent (by design) — the agent must degrade
   gracefully to anonymous behavior there.
-- (−) The **health tier is the heaviest slice**: special-category data means encryption, a shorter TTL,
-  the explicit Consent-2 UX, legal instruments (privacy notice + DPA that cover health data), and a
+- (−) The **health tier is the heaviest slice**: special-category data means encryption, a TTL no longer
+  than ordinary (amended 2026-08-04: both 30 days), the explicit Consent-2 UX, legal instruments (privacy
+  notice + DPA that cover health data), and a
   reviewed per-industry sensitivity policy **plus its eval**. This ADR is inert until those land + the
   `security-reviewer` and legal/privacy sign-offs are recorded.
