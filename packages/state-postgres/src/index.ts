@@ -19,3 +19,17 @@ export {
   AUTO_PROMOTE_WINDOW_MS,
   type OrchestratorState,
 } from "./orchestrator-registry.js";
+export {
+  autoPromoteGate,
+  readTenantOptIn,
+  readPlatformEnabled,
+  readAutoPromoteEnabled,
+  setAutoPromoteOptIn,
+  setPlatformAutoPromote,
+  PLATFORM_TENANT,
+  STEPUP_ACTION,
+  PLATFORM_STEPUP_ACTION,
+  type AutoPromoteGateInput,
+  type AutoPromoteGateResult,
+  type SetOptInOpts,
+} from "./autopromote-optin.js";

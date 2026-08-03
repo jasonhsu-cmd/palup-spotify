@@ -13,7 +13,7 @@ import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT } from "./canary-controller.js";
 import { applyCanaryVerdict } from "./canary-reaction.js";
-import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, type KillScope, type KillEntry } from "@palup/state-postgres";
+import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, type KillScope, type KillEntry } from "@palup/state-postgres";
 import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices, type RuntimeStatePort } from "@palup/platform-ports";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -253,6 +253,32 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   app.post("/api/canary/stop", async (req) => {
     const b = (req.body ?? {}) as { tenantId?: unknown };
     return { config: await stopCanary(runtimeStore, canaryTenant(b.tenantId)) };
+  });
+
+  // ADR-0014 prereq #6 — SET a merchant's auto-promote opt-in. POST ⇒ already operator:mutate-gated by
+  // the onRequest hook; ON TOP of that this high-sensitivity flag requires a real STEP-UP assertion
+  // (x-stepup-assertion header, elevated AUTOPROMOTE_STEPUP_SECRET), bound to this exact action+tenant,
+  // single-use, and audited. An agent can never reach this: the actor is the authenticated operator and
+  // setAutoPromoteOptIn refuses a non-human actor. Ships dormant — the platform override defaults
+  // force-human, so flipping one merchant's opt-in still does not enable the fast-lane on its own.
+  app.post("/api/autopromote/optin", async (req, reply) => {
+    const b = (req.body ?? {}) as { tenantId?: unknown; enabled?: unknown };
+    const tenantId = typeof b.tenantId === "string" && b.tenantId ? b.tenantId : undefined;
+    if (!tenantId) return reply.code(400).send({ error: "tenantId required" });
+    const hdr = req.headers["x-stepup-assertion"];
+    const stepUpToken = typeof hdr === "string" ? hdr : undefined;
+    try {
+      await setAutoPromoteOptIn(runtimeStore, tenantId, b.enabled === true, {
+        actor: "operator", // the authenticated operator principal (shared-token model → "operator")
+        stepUpToken,
+        stepUpSecret: process.env.AUTOPROMOTE_STEPUP_SECRET,
+      });
+      return { ok: true, tenantId, enabled: b.enabled === true };
+    } catch (e) {
+      // Operator IS authenticated (onRequest hook) but the sensitive SET failed its step-up / actor
+      // check → 403, not a 200-with-error. Message carries no secret.
+      return reply.code(403).send({ error: (e as Error).message });
+    }
   });
   // Shadow-grade the canary on real logged traffic (live model + judge). Auto-rolls-back on regression.
   app.post("/api/canary/shadow", async (req) => {
