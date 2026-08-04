@@ -19,7 +19,8 @@ export type MemoryAction =
   | "erase.tenant"
   | "merge"
   | "ttl_sweep"
-  | "ttl_renew";
+  | "ttl_renew"
+  | "recall.dropped";
 
 const ACTOR = "agent:shopper-memory";
 
@@ -37,6 +38,8 @@ const REVERSAL_PATHS: Record<MemoryAction, string> = {
   ttl_sweep: "n/a — expiry is policy-driven; a fresh consent grant starts a new TTL",
   "ttl_renew":
     "shopper may withdraw (manage-memory / forget-me) — a withdrawn fact is never renewed again and ages out on its current expiry; erasure purges it immediately",
+  "recall.dropped":
+    "restore the key the record was written under (its outgoing value belongs at <MEMORY_ENCRYPTION_KEY>_previous for one rotation cycle) and the record decrypts again; without it the record is unrecoverable and should be erased",
 };
 
 /** Opaque, one-way reference to a subject — NEVER the raw anonId/account id, so the immutable,

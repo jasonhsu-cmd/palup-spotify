@@ -197,6 +197,12 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     // Security review finding 6 — a fail-closed special-category refusal must not be silent (ADR-0015
     // Inv 6 / NN#5): tallied across the whole turn and audited once below (PII-free: class + count only).
     let refusedSpecial = 0;
+    // A refused ORDINARY candidate is far lower stakes than a refused special one (encryption is
+    // best-effort for ordinary, so this only happens on a genuine adapter error once a key exists —
+    // realistic when a KMS adapter lands), but the same "no silent memory action" principle applies:
+    // silently discarding a fact the shopper consented to is an availability event an operator should
+    // be able to see. Counted separately so the audit records the class honestly.
+    let refusedOrdinary = 0;
 
     for (const rawCandidate of candidates) {
       const sanitized = sanitizeFact(rawCandidate.text);
@@ -227,8 +233,14 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // stored on the record — so such a candidate is treated as special end-to-end regardless of what
       // the distilled fact text alone would have classified as.
       const sanitizedQuote = rawDisposition?.sourceQuote ? sanitizeFact(rawDisposition.sourceQuote) : null;
-      const quoteClass = sanitizedQuote ? classify(sanitizedQuote, ctx.tenantPolicy).class : undefined;
-      const effectiveClass: FactClass = quoteClass === "special" ? "special" : factClass;
+      const quoteClassification = sanitizedQuote ? classify(sanitizedQuote, ctx.tenantPolicy) : undefined;
+      // Inv 11 (narrow-only tenant policy) applies to the QUOTE as well as the fact. Taking only `.class`
+      // from the quote's classification and dropping its `.remember` would let a category the tenant has
+      // explicitly narrowed out (`dropCategories`) still be persisted, just because it rode in on an
+      // otherwise-ordinary fact's sourceQuote. The tenant's narrowing decision governs whichever span
+      // triggered the category, so a quote the policy says not to remember drops the whole candidate.
+      if (quoteClassification && !quoteClassification.remember) continue;
+      const effectiveClass: FactClass = quoteClassification?.class === "special" ? "special" : factClass;
 
       const mayWrite = effectiveClass === "special" ? capability.mayWriteSpecial : capability.mayWriteOrdinary;
       if (!mayWrite) continue; // consent gate (Inv 3 / Inv 9) — gated on the STRICTER combined class
@@ -252,6 +264,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       const encryptedFact = await encryptOrRefuse(crypto, ctx.tenantId, effectiveClass, sanitized, aadFor("text"));
       if (!encryptedFact) {
         if (effectiveClass === "special") refusedSpecial++; // finding 6 — never silent
+        else refusedOrdinary++;
         continue;
       }
 
@@ -281,6 +294,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         }
         if (auxFailed) {
           if (effectiveClass === "special") refusedSpecial++; // finding 6 — never silent
+          else refusedOrdinary++;
           continue; // never persist a record with some protected fields encrypted and others not
         }
       }
@@ -345,6 +359,18 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         }),
       );
     }
+    if (refusedOrdinary > 0) {
+      await deps.audit.audit(
+        { tenantId: ctx.tenantId },
+        buildMemoryAudit({
+          action: "write.refused",
+          tenantId: ctx.tenantId,
+          anonId: ctx.anonId,
+          factClass: "ordinary",
+          count: refusedOrdinary,
+        }),
+      );
+    }
 
     return { written };
   }
@@ -357,6 +383,12 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     const matches = await deps.vector.query(namespace, { text: "", k: RECALL_LIMIT });
 
     const facts: RecalledFact[] = [];
+    // Security review finding 5 — a record dropped because it would not decrypt is a real operator event:
+    // a tampered or relocated ciphertext, or (most likely) a key rotated without keeping the outgoing
+    // value at `<name>_previous`, silently removes a shopper's memory from every future recall. Counted
+    // here and emitted as a PII-free `recall.dropped` audit below, so rotation damage is DETECTABLE
+    // rather than showing up only as memory that quietly stopped working.
+    let undecryptable = 0;
     const renewed: VectorRecord[] = []; // sliding-retention re-stamps (ADR-0015 Inv 4 amendment, 2026-08-04)
     for (const match of matches) {
       const meta = match.metadata as Partial<FactMetadata> | undefined;
@@ -381,7 +413,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       let text = meta.text;
       if (meta.encrypted) {
         const decrypted = await crypto.decrypt(ctx.tenantId, meta.text, aadFor("text"));
-        if (decrypted === undefined) continue; // undecryptable — drop the WHOLE record, do not slide its TTL either
+        if (decrypted === undefined) { undecryptable++; continue; } // undecryptable — drop the WHOLE record, do not slide its TTL either
         text = decrypted;
       }
       // Security review finding 1 — `disposition.value` decrypts alongside `sourceQuote` now (both are
@@ -428,6 +460,13 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       await deps.audit.audit(
         { tenantId: ctx.tenantId },
         buildMemoryAudit({ action: "ttl_renew", tenantId: ctx.tenantId, anonId: ctx.anonId, count: renewed.length }),
+      );
+    }
+
+    if (undecryptable > 0) {
+      await deps.audit.audit(
+        { tenantId: ctx.tenantId },
+        buildMemoryAudit({ action: "recall.dropped", tenantId: ctx.tenantId, anonId: ctx.anonId, count: undecryptable }),
       );
     }
 

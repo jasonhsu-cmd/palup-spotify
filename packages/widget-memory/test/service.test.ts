@@ -472,6 +472,89 @@ describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live bl
     ]);
   });
 
+  describe("re-review fixes — Inv 11 applies to the quote, and no refusal is silent", () => {
+    it("Inv 11 narrow-only: a tenant that dropped the quote's category does NOT get the candidate persisted as special", async () => {
+      // The quote ("I'm on tretinoin...") classifies special via health_reaction; the FACT alone is
+      // ordinary. Taking only the quote's CLASS and ignoring its `remember` flag would persist a
+      // category this tenant explicitly narrowed out — just because it rode in on a sourceQuote.
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const distiller: FactDistiller = {
+        async distill() {
+          return [{ text: "prefers fragrance-free", disposition: { axis: "style", value: "researcher", provenance: "observed", confidence: 0.8, sourceQuote: "I'm on tretinoin so I need fragrance-free" } }];
+        },
+      };
+      const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, secrets: keyedSecrets("acme-inv11") });
+      const ctx: MemoryCtx = {
+        tenantId: "acme-inv11", anonId: "g-inv11", region: "us", consent1: "in", consent2: "in",
+        tenantPolicy: { dropCategories: ["health_reaction"] },
+      };
+
+      const res = await service.remember(ctx, { message: "m", reply: "r" });
+      expect(res.written).toEqual([]); // narrowed out by the tenant's own policy
+      expect(await service.recall(ctx)).toEqual([]);
+      const actions = (await runtimeStore.readAudit({ tenantId: "acme-inv11" })).map((r) => r.action);
+      expect(actions).not.toContain("write.special");
+      expect(actions).not.toContain("write.ordinary");
+    });
+
+    it("an ORDINARY candidate refused by an encryption failure is not silent either — write.refused{class:ordinary}", async () => {
+      // The ordinary refusal path needs the FACT TEXT to encrypt successfully while an AUXILIARY field
+      // fails — a partially-failing adapter, the realistic shape once a KMS adapter lands. (A wholly
+      // unavailable key is NOT this case: ordinary encryption is best-effort, so it just falls back to
+      // plaintext and the fact is still written.) The candidate is then discarded to avoid a
+      // half-encrypted record — and that discard must be visible to an operator.
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      let calls = 0;
+      const flakyCrypto = {
+        async encrypt(_t: string, plaintext: string) {
+          calls++;
+          if (calls === 1) return `enc(${plaintext})`; // the fact text encrypts fine...
+          throw new Error("kms unavailable"); // ...the disposition value does not
+        },
+        async decrypt() { return undefined; },
+      };
+      const distiller: FactDistiller = {
+        async distill() {
+          return [{ text: "prefers fragrance-free", disposition: { axis: "style", value: "researcher", provenance: "observed", confidence: 0.8 } }];
+        },
+      };
+      const service = createMemoryService({
+        vector, audit: runtimeStore, distiller, enabled: true,
+        secrets: keyedSecrets("acme-ordref"), crypto: flakyCrypto as never,
+      });
+      const ctx: MemoryCtx = { tenantId: "acme-ordref", anonId: "g-ordref", region: "us", consent1: "in", consent2: "unknown" };
+
+      const res = await service.remember(ctx, { message: "m", reply: "r" });
+      expect(res.written).toEqual([]); // dropped rather than persisted half-encrypted
+      const log = await runtimeStore.readAudit({ tenantId: "acme-ordref" });
+      const refusal = log.find((r) => r.action === "write.refused");
+      expect(refusal).toBeDefined(); // previously entirely silent
+      expect((refusal!.decision as { class?: string }).class).toBe("ordinary");
+    });
+
+    it("an undecryptable record is not silently lost — recall emits a PII-free recall.dropped audit (rotation damage is detectable)", async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const namespace = subjectNamespace("acme-drop", "g-drop");
+      // A record marked encrypted whose ciphertext cannot be decrypted (the shape a key rotated without
+      // keeping `_previous` produces).
+      await vector.upsert(namespace, [
+        { id: "r1", text: "v1:deadbeef:AAAA:BBBB:CCCC", metadata: { text: "v1:deadbeef:AAAA:BBBB:CCCC", class: "ordinary", expiresAt: new Date(Date.now() + 86_400_000).toISOString(), encrypted: true } },
+      ]);
+      const service = createMemoryService({ vector, audit: runtimeStore, distiller: noopDistiller(), enabled: true, secrets: keyedSecrets("acme-drop") });
+      const ctx: MemoryCtx = { tenantId: "acme-drop", anonId: "g-drop", region: "us", consent1: "in", consent2: "in" };
+
+      expect(await service.recall(ctx)).toEqual([]); // dropped, never surfaced as garbage
+      const log = await runtimeStore.readAudit({ tenantId: "acme-drop" });
+      const dropped = log.find((r) => r.action === "recall.dropped");
+      expect(dropped).toBeDefined();
+      expect((dropped!.decision as { count?: number }).count).toBe(1);
+      expect(JSON.stringify(log)).not.toContain("g-drop"); // PII-free: raw anonId never in the log
+    });
+  });
+
   describe("security review finding 2 — an unclassified sourceQuote riding an ordinary fact is treated as special end-to-end", () => {
     const ordinaryFactWithArt9Quote: FactDistiller = {
       async distill() {
