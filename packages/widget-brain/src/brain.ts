@@ -1,4 +1,5 @@
 import type { CommercePort, GroundingContext, GroundingPort, ModelPort } from "@palup/platform-ports";
+import { consentPermitsFactClass } from "./consent-rules.js";
 import type {
   Decision,
   HistoryTurn,
@@ -485,16 +486,21 @@ const RECALLED_DISPOSITION_DIRECTIVE: Partial<Record<string, Record<string, stri
 // this, treat it exactly like "no disposition attached" — caution-only, no directive, no flag.
 const RECALLED_DISPOSITION_CONFIDENCE_THRESHOLD = 0.7;
 
-// PR-1 Finding 2 (security review, carried into PR-7's acceptance bar): a recalled disposition may steer
-// voice ONLY if THIS TURN's consent for its OWN sensitivity tier is exactly "in". Write-time consent
+// PR-1 Finding 2 (security review, carried into PR-7's acceptance bar): a recalled fact/disposition may
+// surface ONLY if THIS TURN's consent for its OWN sensitivity tier permits it. Write-time consent
 // (already enforced once, in the memory SERVICE, before the fact was ever stored — decideMemoryWrite) is
 // deliberately NOT treated as sufficient here: consent can be withdrawn, or simply go stale, between the
-// write and a later read, and this is an INDEPENDENT, current-turn re-check. `special` facts would need
-// `memorySpecial`; everything else (`ordinary`, or an unset class) needs `memoryOrdinary`. Anything other
-// than the literal `"in"` (out/unknown/absent) fails closed to no-consent, matching every other Consent
-// check in this codebase (Signals.consent's own doc comment: "unknown is treated as no-consent").
-function consentedAtReadTime(factClass: string | undefined, consent: Signals["consent"]): boolean {
-  return factClass === "special" ? consent?.memorySpecial === "in" : consent?.memoryOrdinary === "in";
+// write and a later read, and this is an INDEPENDENT, current-turn re-check.
+//
+// B7 (owner decision, 2026-08-05) made this REGION-AWARE. It previously demanded the literal `"in"` in
+// every region, while the WRITE gate applied the US opt-out regime — so in the US the system wrote
+// ordinary facts it could then never surface. Both gates now call the SAME `consentPermits`
+// (consent-rules.ts), so the read bar and the write bar cannot drift: in the US an ordinary fact needs
+// only "not out", everywhere else it still needs an explicit "in", and SPECIAL-CATEGORY still needs an
+// explicit "in" in EVERY region including the US (the ADR-0015 amendment ratified by legal, untouched).
+// An absent region is treated as non-US, i.e. the stricter rule.
+function consentedAtReadTime(factClass: string | undefined, consent: Signals["consent"], region: Signals["region"]): boolean {
+  return consentPermitsFactClass(region, factClass, consent);
 }
 
 /**
@@ -511,12 +517,12 @@ function consentedAtReadTime(factClass: string | undefined, consent: Signals["co
  * can never itself steer price/pitch (PR-6 condition) — this function never reads `fact.text` for
  * anything.
  */
-function findRecalledStyleDirective(recalled: RecalledFact[], consent: Signals["consent"]): string | undefined {
+function findRecalledStyleDirective(recalled: RecalledFact[], consent: Signals["consent"], region: Signals["region"]): string | undefined {
   for (const fact of recalled) {
     if (fact.class === "special") continue;
     for (const d of fact.disposition ?? []) {
       if (d.confidence < RECALLED_DISPOSITION_CONFIDENCE_THRESHOLD) continue;
-      if (!consentedAtReadTime(fact.class, consent)) continue;
+      if (!consentedAtReadTime(fact.class, consent, region)) continue;
       // Guarded lookup (same shape as classifyPersonaStyle's own whitelist check above): a recalled
       // fact's axis/value are UNTRUSTED strings from a third-party MemoryRecallPort implementation, not
       // just the closed DispositionAxis enum widget-memory happens to validate at write time. Using
@@ -1196,7 +1202,7 @@ export function createBrain(
       // consulted when a memory port is wired AND the server derived a subject key (`anonId`) for this
       // shopper; otherwise recall is never called (no autonomy granted, no subject to key on).
       if (memory && signals.anonId) {
-        const recalledRaw = await memory.recall({ tenantId, anonId: signals.anonId });
+        const recalledRaw = await memory.recall({ tenantId, anonId: signals.anonId, region: signals.region, consent: signals.consent });
         // PR-8 carried condition (PR-1 Finding 2, extended from the style translation below to the WHOLE
         // recall/DATA surface): a recalled fact may only surface at ALL — even as caution-only DATA,
         // even the bare `memory:recalled` flag — when THIS TURN's read-time consent for its own
@@ -1204,7 +1210,7 @@ export function createBrain(
         // SERVICE, before the fact was ever stored) is deliberately not sufficient on its own: consent
         // can be withdrawn, or simply go stale, between the write and a later read. Fails closed on
         // out/unknown/absent consent, exactly like `consentedAtReadTime`'s other caller below.
-        const recalled = recalledRaw.filter((f) => consentedAtReadTime(f.class, signals.consent));
+        const recalled = recalledRaw.filter((f) => consentedAtReadTime(f.class, signals.consent, signals.region));
         if (recalled.length > 0) {
           flags.push("memory:recalled");
           const lines = recalled.map((f) => `- ${sanitizeGroundingText(f.text, 300)}`).join("\n");
@@ -1220,7 +1226,7 @@ export function createBrain(
           // (FAIR-1, Inv 10). See findRecalledStyleDirective's own doc comment for the full eligibility
           // bar (non-special, confidence >= threshold, THIS TURN's read-time consent, and a whitelisted
           // (axis,value) — PR-1 Finding 2 + the PR-6 free-text-never-steers-price condition).
-          const styleDirective = findRecalledStyleDirective(recalled, signals.consent);
+          const styleDirective = findRecalledStyleDirective(recalled, signals.consent, signals.region);
           if (styleDirective) {
             flags.push("memory:style_applied");
             systemExtra += styleDirective;

@@ -4,6 +4,7 @@ import { createAesGcmCrypto, createEnvSecrets } from "@palup/platform-ports";
 import { isMemoryEnabled } from "./flag.js";
 import { subjectNamespace } from "./identity.js";
 import { decideMemoryWrite } from "./consent.js";
+import { consentPermitsFactClass } from "@palup/widget-brain";
 import { classifyFact, type FactClass } from "./classifier.js";
 import { sanitizeFact, createStubDistiller, createModelDistiller, isValidDisposition, type FactDistiller } from "./distiller.js";
 import type { Disposition } from "./disposition.js";
@@ -453,7 +454,16 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // consent1; only literal "in" renews), so a WITHDRAWN/absent-consent fact is NEVER extended — it keeps
       // its expiry and ages out (or is erased). Throttled to at most once per RENEW_MIN_GAP since the last
       // stamp (a same-session burst neither churns the store nor floods the audit log), and only ever FORWARD.
-      const consentIn = meta.class === "special" ? ctx.consent2 === "in" : ctx.consent1 === "in";
+      // B7 (2026-08-05): the SAME `consentPermits` rule the write gate and the brain's read gate use, so
+      // a fact that may lawfully be SURFACED this turn is also one whose retention may slide. Previously
+      // this demanded a literal "in" in every region, which in the US meant a fact could be written and
+      // served but never renewed — three bars where there should be one. Special-category still needs an
+      // explicit "in" everywhere. A withdrawn/absent-consent fact is still NEVER extended: it keeps its
+      // expiry and ages out.
+      const consentIn = consentPermitsFactClass(ctx.region, meta.class, {
+        memoryOrdinary: ctx.consent1,
+        memorySpecial: ctx.consent2,
+      });
       const lastStampedMs = expiresMs !== undefined ? expiresMs - ttlForClass(meta.class) : now;
       if (consentIn && now - lastStampedMs >= RENEW_MIN_GAP_MS) {
         renewed.push({ id: match.id, text: meta.text, metadata: { ...(meta as FactMetadata), expiresAt: new Date(now + ttlForClass(meta.class)).toISOString() } });

@@ -135,7 +135,25 @@ export interface RecalledFact {
  * available on `Signals` — never on the kill/injection/safety/support/uncertainty/b2b/proactive rungs.
  */
 export interface MemoryRecallPort {
-  recall(ctx: { tenantId: string; anonId: string }): Promise<RecalledFact[]>;
+  /**
+   * `region` and `consent` are OPTIONAL and carry THIS TURN's server-derived consent context. They exist
+   * because a recall implementation may need to apply retention correctly — the memory service slides a
+   * still-consented fact's TTL forward on a return visit (ADR-0015 Inv 4 amendment) and cannot decide
+   * that without knowing what the shopper consented to. Before they were threaded, widget-backend's
+   * wrapper hardcoded `"unknown"` for both tiers, so the renewal NEVER fired on the /chat path — a
+   * documented, pre-existing functional gap, closed by B7 (2026-08-05).
+   *
+   * They are NOT the brain's own read-time gate: the brain applies `consentPermits` (consent-rules.ts)
+   * to whatever this port returns, independently, so an implementation that ignores these fields can
+   * still never cause an unconsented fact to surface. Optional so a third-party adapter need not
+   * implement them.
+   */
+  recall(ctx: {
+    tenantId: string;
+    anonId: string;
+    region?: Signals["region"];
+    consent?: Signals["consent"];
+  }): Promise<RecalledFact[]>;
 }
 
 export interface Signals {

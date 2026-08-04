@@ -296,25 +296,27 @@ export async function buildServer(opts?: {
     : undefined;
   const memoryPort = memoryService
     ? {
-        recall: (ctx: { tenantId: string; anonId: string }) =>
+        recall: (ctx: { tenantId: string; anonId: string; region?: Signals["region"]; consent?: Signals["consent"] }) =>
           memoryService.recall({
             tenantId: ctx.tenantId,
             anonId: ctx.anonId,
-            // CORRECTED (this comment previously overclaimed "recall never consults consent" — that is
-            // FALSE: service.ts's recall() DOES consult consent1/consent2 to gate the sliding-TTL
-            // RENEWAL throttle, Inv 4's 2026-08-04 amendment). The SURFACING decision (whether a
-            // recalled fact reaches the model at all) is separately, correctly read-time-consent-gated
-            // in brain.ts via `signals.consent` (consentedAtReadTime) — that part of the original claim
-            // holds. But hardcoding "unknown" here means the RENEWAL never fires through this call path:
-            // a subject with a real consent1="in" on file still never gets their fact's expiry slid
-            // forward on return, because this wrapper never tells service.ts so. Discovered while adding
-            // the Finding-8 regression test (security review) — a genuine, pre-existing functional gap,
-            // orthogonal to that review's 12 findings, NOT fixed here (needs its own solution-architect-
-            // reviewed change threading `signals.consent` through, mirroring remember()'s call site two
-            // lines below `signals.consent?.memoryOrdinary ?? "unknown"`). Left as "unknown" for now so
-            // this PR changes nothing about memory WRITE behavior — only documented honestly.
-            consent1: "unknown",
-            consent2: "unknown",
+            // B7 FIX (2026-08-05) — these were hardcoded to "unknown", which made the sliding-TTL
+            // RENEWAL structurally unreachable on the /chat path: a subject with a real consent1="in"
+            // on file never got their fact's expiry slid forward on return, because this wrapper never
+            // told service.ts so (Inv 4's 2026-08-04 amendment was therefore inert here). That was a
+            // documented, pre-existing gap, deferred at the time as needing its own reviewed change.
+            //
+            // The brain now threads THIS TURN's server-derived consent context through the recall port
+            // (widget-brain types.ts `MemoryRecallPort`), so the real values arrive here. `?? "unknown"`
+            // keeps the fail-closed default for any caller that does not supply them — identical to the
+            // old behavior, rather than assuming consent when the context is missing.
+            //
+            // This only affects RETENTION RENEWAL and never what surfaces: brain.ts re-checks read-time
+            // consent independently on whatever this returns (`consentedAtReadTime`), so a permissive
+            // value here can never push an unconsented fact into the prompt.
+            region: ctx.region,
+            consent1: ctx.consent?.memoryOrdinary ?? "unknown",
+            consent2: ctx.consent?.memorySpecial ?? "unknown",
           }),
       }
     : undefined;
