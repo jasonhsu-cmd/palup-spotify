@@ -1046,11 +1046,16 @@ export async function buildServer(opts?: {
       // `validatedGuestAnonId` is hoisted to this outer scope so the restrictive-merge LOOKUP and N2's
       // write-through (both immediately below) resolve the same guest namespace — declared once, used
       // twice, mirroring `memorySubject` itself being derived once and reused (BLOCK-1 comment above).
-      // NOTE (corrected): an earlier revision of this comment said it was "reused three ways", counting a
-      // retention-sweep widening. That widening was attempted and deliberately REVERTED — sweeping a
-      // client-named namespace would let an unrelated signed-in caller's own turn query and delete
-      // against a namespace they merely named, reintroducing the cross-subject access F1 closed (see
-      // docs/MEMORY-GO-LIVE-CHECKLIST.md B4). The sweep below still uses `memorySubject` only.
+      // NOTE (corrected twice): an earlier revision said "reused three ways", counting a retention-sweep
+      // widening that was attempted and deliberately REVERTED; and it justified the revert as
+      // "reintroducing the cross-subject access F1 closed", which security review adjudicated as the WRONG
+      // reason — a sweep deletes only already-expired records (a strict subset of what the unauthenticated
+      // /forget path already allows), returns nothing to the caller, and never reaches the model, so it
+      // violates none of the property F1 protects. The revert stands on different grounds: attributability
+      // (an implicit per-turn ttl_sweep against a namespace the caller merely NAMED is not legible to an
+      // operator, unlike an erase.subject on a user-initiated /forget) and the fact that proactive
+      // reclamation belongs in a scheduled/admin job keyed off SERVER-known subjects. See
+      // docs/MEMORY-GO-LIVE-CHECKLIST.md B4. The sweep below still uses `memorySubject` only.
       let validatedGuestAnonId: string | undefined;
       let consentRecord: ConsentRecord | undefined;
       if (memorySubject) {
@@ -1083,8 +1088,16 @@ export async function buildServer(opts?: {
         // and no re-write on every subsequent turn.
         //
         // GATED: only reachable when `memorySubject` exists, i.e. `memoryService` is constructed (the
-        // double gate is on) — this never runs while memory is off. `!kill` mirrors every other audited
-        // memory write on this path (NN#4) — a halted tenant/agent gets no write, durable or otherwise.
+        // double gate is on) — this never runs while memory is off. `!kill` gives NN#4 parity: a halted
+        // tenant/agent gets no write, durable or otherwise (regression-locked by the NN#4 test).
+        // DELIBERATE DIFFERENCE (security review, round 3 — the earlier claim that this "mirrors every
+        // other audited memory write on this path" was inaccurate): the other two writes below also carry
+        // `!d.flags.includes("no_autonomous_action")`, this one does not, so it still fires on a
+        // guardrail-halt turn (e.g. `giveaway_declined`, brain.ts). That is intentional and safe here
+        // BECAUSE the write is strictly RESTRICTIVE — it can only ever persist an "out" (mergeConsentTier
+        // never adopts a guest "in"), so letting it through on a halted turn protects the shopper rather
+        // than acting on their behalf. Suppressing it would DELAY honoring an opt-out, which is the wrong
+        // direction. The kill switch still overrides everything.
         // Inherits /chat's own per-session/IP/tenant rate limiting (`allowRequest`, checked earlier in
         // this handler) — this is a side effect of an already-rate-limited call, not a new endpoint, so
         // no separate budget is introduced here.
@@ -1106,6 +1119,10 @@ export async function buildServer(opts?: {
               memoryOrdinary: merged.memoryOrdinary,
               memorySpecial: merged.memorySpecial,
               hmacKey: AUDIT_HMAC_SECRET,
+              // Finding 2 — mark this as SERVER-derived, so the immutable log distinguishes a consent
+              // change the shopper MADE from one the merge INFERRED, and carries a reversal path that is
+              // actually achievable for this entry (the shopper-facing one is false here — see C7).
+              source: "guest-merge",
             });
           } catch (e) {
             console.error(`[/chat] consent write-through error:`, (e as Error).message);

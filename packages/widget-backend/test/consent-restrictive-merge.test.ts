@@ -226,6 +226,48 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     expect(log.map((r) => r.action)).toContain("consent.record");
   });
 
+  // Finding 2 (security review, round 3): the write-through is a SERVER-derived consent change. In the
+  // immutable log it was byte-indistinguishable from an explicit shopper `POST /consent` — same actor
+  // ("shopper"), same reversalPath — so an operator could not tell a decision the shopper MADE from one
+  // the system INFERRED, and the recorded reversal path was provably FALSE for the merged case (a later
+  // /consent "in" is re-asserted back to "out" on the next turn that still presents the guest id).
+  it("Finding 2 — the write-through's audit entry is distinguishable from a shopper-initiated /consent, with a reversal path that is actually true", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    // The shopper's OWN explicit choice, as a guest.
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    // Signing in triggers the SERVER-derived write-through onto the account subject.
+    await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "audit-fidelity-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+
+    const entries = (await store.readAudit({ tenantId: "demo" })).filter((r) => r.action === "consent.record");
+    expect(entries).toHaveLength(2);
+    const shopperEntry = entries.find((r) => (r.input as { source?: string }).source === "shopper");
+    const mergeEntry = entries.find((r) => (r.input as { source?: string }).source === "guest-merge");
+
+    // The two are genuinely distinguishable — that is the whole point.
+    expect(shopperEntry).toBeDefined();
+    expect(mergeEntry).toBeDefined();
+    expect(shopperEntry!.actor).toBe("shopper");
+    expect(mergeEntry!.actor).toBe("agent:shopper-memory"); // the server's merge, not the shopper
+    // ...and the merged entry does NOT carry the shopper-facing reversal path, which is false for it.
+    expect(mergeEntry!.reversalPath).not.toBe(shopperEntry!.reversalPath);
+    expect(mergeEntry!.reversalPath).toMatch(/not reversible by POST \/consent alone/);
+    await app.close();
+  });
+
   // NN#4 regression lock (governance review, round 3): the write-through is a NEW autonomous WRITE on the
   // /chat path, so the operator kill switch must halt it like every other autonomous action. Correct by
   // reading (`!kill` guards the block) but nothing locked it — /forget has such a test, this did not.

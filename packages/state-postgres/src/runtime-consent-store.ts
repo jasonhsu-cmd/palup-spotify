@@ -40,6 +40,13 @@ export interface RecordConsentInput extends ConsentRecord {
    * brute-forceable (mirrors widget-backend/src/audit.ts's `hashShopperRef` rule and server.ts's own
    * `AUDIT_HMAC_SECRET`). */
   hmacKey?: string;
+  /** WHO caused this record (security review, PR #152 Finding 2). `"shopper"` (default) = an explicit
+   * `POST /consent` the shopper made. `"guest-merge"` = the SERVER derived it: /chat's restrictive
+   * merge discovered a guest `"out"` and wrote it through to the account subject. The two were
+   * previously byte-indistinguishable in the immutable log, so an operator could not tell a consent
+   * change the shopper MADE from one the system INFERRED — and the shopper-facing reversal path is not
+   * even true for the merged case (NN#5 / Inv 6). */
+  source?: "shopper" | "guest-merge";
 }
 
 export interface LookupConsentInput {
@@ -77,18 +84,25 @@ export async function recordConsent(
   input: RecordConsentInput,
   at = new Date().toISOString(),
 ): Promise<void> {
-  const { tenantId, anonId, memoryOrdinary, memorySpecial, hmacKey } = input;
+  const { tenantId, anonId, memoryOrdinary, memorySpecial, hmacKey, source } = input;
   const record: ConsentRecord = { memoryOrdinary, memorySpecial };
   await store.tx({ tenantId }, async (t) => {
     await t.put(MEMORY_CONSENT, anonId, record);
     await t.audit(
       {
-        actor: "shopper",
+        actor: source === "guest-merge" ? "agent:shopper-memory" : "shopper",
         action: "consent.record",
         // PII-safe: only a hashed subjectRef + the tri-state choices — never the raw anonId.
-        input: { subjectRef: subjectRef(tenantId, anonId, hmacKey), memoryOrdinary, memorySpecial },
+        input: { subjectRef: subjectRef(tenantId, anonId, hmacKey), memoryOrdinary, memorySpecial, source: source ?? "shopper" },
         decision: "recorded",
-        reversalPath: "POST /consent again with a different choice (e.g. 'out') — a fresh choice always overwrites the prior one",
+        reversalPath:
+          source === "guest-merge"
+            ? // VERIFIED BY EXECUTION (security review): the shopper-facing reversal is NOT true for this
+              // entry. A later `POST /consent {"in"}` does overwrite the row, but the very next turn from a
+              // client still presenting the stale guest anonId re-asserts "out" (checklist C7). The only
+              // reversal that actually holds is to stop presenting that guest id.
+              "not reversible by POST /consent alone — a client still presenting the originating guest anonId re-asserts this value on its next turn; the shopper must stop presenting that id (the widget's forget-me mints a fresh one). See docs/MEMORY-GO-LIVE-CHECKLIST.md C7."
+            : "POST /consent again with a different choice (e.g. 'out') — a fresh choice always overwrites the prior one",
       },
       at,
     );
