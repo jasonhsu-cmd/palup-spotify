@@ -160,6 +160,97 @@ describe("retention — sliding TTL on return (legal 2026: the 30d window resets
   });
 });
 
+describe("retention — sliding TTL survives a same-cycle sweep (security review, Finding 8)", () => {
+  // The review asked for: "a consented ('in') fact whose last stamp is >RENEW_MIN_GAP_MS old, one
+  // recall, assert the fact survives [a sweep] and expiresAt moved forward." Composed here at the
+  // widget-memory level (service.ts recall + retention.ts sweepExpired directly) rather than through a
+  // real /chat turn — server.ts's `memoryPort` wrapper currently hardcodes consent1/consent2 to
+  // "unknown" for every recall() call (a separate, pre-existing gap this PR does not fix — see
+  // widget-backend/test/chat-retention-sweep.test.ts's note), so a genuine consent1="in" renewal cannot
+  // be observed through a real /chat turn today. The ORDERING invariant this test proves — a fact
+  // renewed by recall is never then swept as if expired — holds at this level regardless of that gap,
+  // since it is a property of service.ts + retention.ts, not of server.ts's wiring.
+  it("a fact renewed by recall (stamped >RENEW_MIN_GAP_MS ago, still consented 'in') is NOT deleted by a sweep run immediately after, and its expiry moved forward", async () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const now = new Date("2026-06-01T00:00:00.000Z");
+    // Stamped 2 days before `now` (> RENEW_MIN_GAP_MS = 1 day) but still comfortably un-expired.
+    const originalExpiresAt = new Date(now.getTime() - 2 * DAY_MS + ORDINARY_TTL_DAYS * DAY_MS).toISOString();
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const ns = subjectNamespace("acme", "slide-then-sweep");
+    await vector.upsert(ns, [
+      { id: "f1", text: "prefers fragrance-free", metadata: { text: "prefers fragrance-free", class: "ordinary", expiresAt: originalExpiresAt } },
+    ]);
+
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller: noopDistiller(), enabled: true, clock: () => now });
+    const ctx: MemoryCtx = { tenantId: "acme", anonId: "slide-then-sweep", region: "us", consent1: "in", consent2: "unknown" };
+
+    // Recall's renewal upsert (service.ts) is awaited here, exactly mirroring server.ts's own ordering —
+    // it MUST complete before the sweep is invoked, so the sweep sees the already-renewed record.
+    const recalled = await service.recall(ctx);
+    expect(recalled.map((f) => f.text)).toEqual(["prefers fragrance-free"]); // served — not treated as expired
+    const renewedExpiresAt = (await vector.query(ns, { text: "", k: 10 }))[0]?.metadata?.expiresAt as string;
+    expect(new Date(renewedExpiresAt).getTime()).toBeGreaterThan(new Date(originalExpiresAt).getTime());
+
+    // Immediately after (same cycle), a sweep for the SAME subject must NOT delete it — the renewal
+    // already moved expiresAt into the future, so the sweep's own expiry check correctly skips it.
+    const deleted = await sweepExpired({ vector, audit: runtimeStore }, "acme", ["slide-then-sweep"], now);
+    expect(deleted).toBe(0);
+    const remaining = await vector.query(ns, { text: "", k: 10 });
+    expect(remaining.map((r) => r.id)).toEqual(["f1"]); // still physically present
+
+    const actions = (await runtimeStore.readAudit({ tenantId: "acme" })).map((r) => r.action);
+    expect(actions).toContain("ttl_renew");
+    expect(actions).not.toContain("ttl_sweep"); // nothing was expired -> the sweep decided nothing
+  });
+});
+
+describe("retention — sweepExpired never deletes without its audit (security review, HIGH)", () => {
+  it("a FAILING ttl_sweep audit aborts the delete for that subject — no deleted-but-unaudited records", async () => {
+    // The guarantee is ordering, not luck: audit first, and only delete if it committed. If the audit
+    // throws and we deleted anyway, a destructive autonomous action would be invisible in the immutable
+    // log (ADR-0015 Inv 6 / NN#5). Reverting the order makes this test fail.
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const namespace = subjectNamespace("acme", "guest-auditfail");
+    const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await vector.upsert(namespace, [
+      { id: "expired-1", text: "a", metadata: { text: "a", class: "ordinary", expiresAt: past } },
+    ]);
+    // Audit surface that rejects — a distressed/unavailable audit store.
+    const failingAudit = {
+      ...runtimeStore,
+      audit: async () => { throw new Error("audit store unavailable"); },
+    } as unknown as InMemoryRuntimeStore;
+
+    const deleted = await sweepExpired(
+      { vector, audit: failingAudit },
+      "acme",
+      ["guest-auditfail"],
+      new Date("2026-01-01T00:00:00.000Z"),
+    );
+
+    expect(deleted).toBe(0); // nothing counted as deleted...
+    const remaining = await vector.query(namespace, { text: "", k: 10 });
+    expect(remaining.map((r) => r.id)).toEqual(["expired-1"]); // ...and the record is genuinely still there
+  });
+
+  it("a subject whose audit succeeds is still swept normally (the guard does not block the happy path)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const namespace = subjectNamespace("acme", "guest-auditok");
+    const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await vector.upsert(namespace, [
+      { id: "expired-1", text: "a", metadata: { text: "a", class: "ordinary", expiresAt: past } },
+    ]);
+
+    const deleted = await sweepExpired({ vector, audit: runtimeStore }, "acme", ["guest-auditok"], new Date("2026-01-01T00:00:00.000Z"));
+    expect(deleted).toBe(1);
+    expect(await vector.query(namespace, { text: "", k: 10 })).toEqual([]);
+    expect((await runtimeStore.readAudit({ tenantId: "acme" })).map((r) => r.action)).toContain("ttl_sweep");
+  });
+});
+
 describe("retention — sweepExpired (reclaims storage; audited)", () => {
   it("deletes exactly the expired ids for the given subjects and emits a ttl_sweep audit", async () => {
     const vector = createInMemoryVectorStore();

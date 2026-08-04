@@ -22,7 +22,7 @@ import {
   createMeteringModelPort,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject, classifyFact } from "@palup/widget-memory";
+import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject, classifyFact, sweepExpired } from "@palup/widget-memory";
 import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -97,6 +97,27 @@ function parseEmbedKeys(): Record<string, string> {
   if (Object.keys(map).length === 0) map["demo-embed-key"] = "demo";
   return map;
 }
+// Go-live #3 — couple memory enablement to enforced widget auth. During the WIDGET_AUTH_REQUIRED
+// rollout window (default off) POST /consent and the DESTRUCTIVE POST /forget are callable
+// unauthenticated against RUNTIME_TENANT (both routes only 401 an unauthenticated caller when
+// WIDGET_AUTH_REQUIRED is true — see their handlers below). Both prior security reviews recorded "set
+// WIDGET_AUTH_REQUIRED=true before/at the flip" as a memory-enablement precondition. Rather than
+// flipping WIDGET_AUTH_REQUIRED's OWN default (which would change behavior for every existing
+// non-memory deployment), make the coupling STRUCTURAL and fail-closed: refuse to boot rather than
+// silently serve memory endpoints unauthenticated — mirrors how `createRuntimeStore` fails fast on
+// PALUP_REQUIRE_DATABASE_URL (state-postgres/factory.ts) rather than silently degrading to a
+// per-process store. Exported (and taking plain booleans, not reading env/gates itself) so a test can
+// exercise the guard directly without needing to flip the real flag.ts double gate.
+export function assertMemoryAuthCoupling(memoryEnabled: boolean, widgetAuthRequired: boolean): void {
+  if (memoryEnabled && !widgetAuthRequired) {
+    throw new Error(
+      "memory is enabled for this process but WIDGET_AUTH_REQUIRED is not \"true\" — refusing to " +
+        "boot with the memory endpoints (POST /consent, POST /forget) reachable unauthenticated. Set " +
+        "WIDGET_AUTH_REQUIRED=true before/at enabling memory (both prior security reviews recorded this " +
+        "as an enablement precondition).",
+    );
+  }
+}
 const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
 // 48h sliding (reset each turn): this is conversation-scoped CONTROL state (safety latch / open issues
 // / pitch budget), not customer memory — it shouldn't outlive a conversation. Cross-visit shopper
@@ -158,6 +179,19 @@ export async function buildServer(opts?: {
    */
   memoryEnabled?: boolean;
 }) {
+  // Security review (Finding 6 — LOW, corrected): FAIL FAST, before any store/pool construction or DDL —
+  // mirrors how `createRuntimeStore` fails fast on PALUP_REQUIRE_DATABASE_URL. This guard previously ran
+  // AFTER createRuntimeStore/createVectorStore/createMemoryService below, so a misconfigured live-memory
+  // boot would already have opened a pool and run idempotent CREATE TABLE/index DDL before refusing to
+  // start; computing it here (both inputs are pure env/config reads with no I/O) means a rejected boot
+  // leaves no pool/DDL work behind. `memoryServiceEnabled` (security review, Finding 2 — MEDIUM,
+  // corrected) is the SAME predicate reused below to actually construct the MemoryService and arm the
+  // retention sweep — not a parallel one that can diverge from it.
+  const underTestRunner = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
+  const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
+  assertMemoryAuthCoupling(memoryServiceEnabled, WIDGET_AUTH_REQUIRED);
+
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads. When a
   // test injects `opts.store`, `createRuntimeStore()` is never called at all (same as before this PR) —
@@ -221,8 +255,8 @@ export async function buildServer(opts?: {
   // Surfaces which adapter is actually live for BOTH stores (security review, MEDIUM — "no operator/log
   // line reveals which adapter is live"); also exposed on GET /health below.
   console.log(`[boot] runtime store=${runtimeResult.kind} vector store=${vectorResult.kind}`);
-  const underTestRunner = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
-  const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
+  // `underTestRunner` / `memoryServiceEnabled` are computed once, at the very top of this function
+  // (before the fail-fast boot guard) — reused here unchanged.
   const memoryService = memoryServiceEnabled
     ? createMemoryService({
         vector: vectorPort,
@@ -253,9 +287,19 @@ export async function buildServer(opts?: {
           memoryService.recall({
             tenantId: ctx.tenantId,
             anonId: ctx.anonId,
-            // Consent tiers are enforced at WRITE time in the memory service (decideMemoryWrite); recall
-            // itself never consults them (service.ts) — these are structural placeholders to satisfy
-            // MemoryCtx's shape, not a live consent decision.
+            // CORRECTED (this comment previously overclaimed "recall never consults consent" — that is
+            // FALSE: service.ts's recall() DOES consult consent1/consent2 to gate the sliding-TTL
+            // RENEWAL throttle, Inv 4's 2026-08-04 amendment). The SURFACING decision (whether a
+            // recalled fact reaches the model at all) is separately, correctly read-time-consent-gated
+            // in brain.ts via `signals.consent` (consentedAtReadTime) — that part of the original claim
+            // holds. But hardcoding "unknown" here means the RENEWAL never fires through this call path:
+            // a subject with a real consent1="in" on file still never gets their fact's expiry slid
+            // forward on return, because this wrapper never tells service.ts so. Discovered while adding
+            // the Finding-8 regression test (security review) — a genuine, pre-existing functional gap,
+            // orthogonal to that review's 12 findings, NOT fixed here (needs its own solution-architect-
+            // reviewed change threading `signals.consent` through, mirroring remember()'s call site two
+            // lines below `signals.consent?.memoryOrdinary ?? "unknown"`). Left as "unknown" for now so
+            // this PR changes nothing about memory WRITE behavior — only documented honestly.
             consent1: "unknown",
             consent2: "unknown",
           }),
@@ -289,7 +333,8 @@ export async function buildServer(opts?: {
   // Widget-identity config (read per boot so a test / deploy can configure it).
   const WIDGET_TOKEN_SECRET = process.env.WIDGET_TOKEN_SECRET;
   const WIDGET_TOKEN_TTL_SECONDS = posInt("WIDGET_TOKEN_TTL_SECONDS", 3_600);
-  const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
+  // `WIDGET_AUTH_REQUIRED` is computed once, at the very top of this function (before the fail-fast boot
+  // guard) — reused here unchanged.
   const EMBED_KEYS = parseEmbedKeys();
   const widgetIdentity = createWidgetTokenIdentity(WIDGET_TOKEN_SECRET);
   // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
@@ -683,9 +728,20 @@ export async function buildServer(opts?: {
   // subject's durable memory via `eraseSubject` (widget-memory/src/erasure.ts, reused unchanged). The
   // (tenantId, anonId) pair is derived the EXACT same server-trusted way `/consent` derives it — tenantId
   // from the verified widget token (falling back to RUNTIME_TENANT), anonId bound by the SAME
-  // `validateAnonId` charset/length check — so a shopper can only ever erase a well-formed subject key
-  // they hold, never an arbitrary one or another tenant's. Guarded exactly like `/consent`: per-IP +
-  // per-tenant rate limit (429) and the NN#4 operator kill switch (503).
+  // `validateAnonId` charset/length check.
+  //
+  // Security review (Finding 3 — MEDIUM, corrected: this previously overclaimed subject-scoped auth).
+  // What the widget-token coupling actually enforces is TENANT scope, not subject scope: the token is
+  // mintable by ANY caller who holds the tenant's PUBLIC embed key (server.ts's own /widget/token doc
+  // comment — the key "is NOT a secret"), so this endpoint is reachable by any internet visitor for that
+  // tenant, against ANY anonId they can obtain — `validateAnonId` only checks charset/length, it does not
+  // bind the anonId to the caller. Within a tenant, the anonId functions as an UNGUESSABLE BEARER
+  // CAPABILITY (128 bits of randomness — identity.ts `generateGuestId`), not a cryptographically-bound
+  // subject credential: practical impact is bounded to a shopper whose anonId leaks (shared device,
+  // storefront XSS), not to blind guessing. Subject-bound authorization (a SHOPPER_AUTH / anonId-bound
+  // token) is an explicit, already-recorded go-live precondition before MEMORY_ADR_ACCEPTED flips — NOT
+  // built here. Guarded exactly like `/consent`: per-IP + per-tenant rate limit (429) and the NN#4
+  // operator kill switch (503).
   //
   // UNLIKE every other memory-subsystem entry point, this one runs regardless of `memoryServiceEnabled` —
   // a shopper's right to erase what may already be stored does not depend on the feature's current on/off
@@ -960,6 +1016,46 @@ export async function buildServer(opts?: {
         } catch (e) {
           console.error(`[/chat] memory remember error:`, (e as Error).message);
         }
+      }
+      // ADR-0015 Inv 4 ("expiry is enforced, not aspirational") — opportunistic PER-SUBJECT retention
+      // reclamation. `sweepExpired` (widget-memory/src/retention.ts) physically deletes what TTL-on-read
+      // (service.ts recall) only ever HIDES; it had no production caller until now (that module's own
+      // doc comment tracked the gap as a go-live item). With the ephemeral dev vector store a process
+      // restart wiped everything anyway, so the gap was low-risk; the durable, portable VectorPort
+      // adapter (state-postgres) removes that safety net, so an expired fact could otherwise sit in
+      // durable storage indefinitely.
+      //
+      // NOT closed by this sweep (security review, Finding 4 — corrected from an earlier overclaim):
+      // (a) the sweep's ONLY predicate is EXPIRY (retention.ts) — a consent-WITHDRAWN Art-9 fact that
+      // has not yet expired is not touched here; it merely stops being renewed (service.ts recall) and
+      // survives up to its remaining TTL (up to 30 more days). Symmetric erasure-first withdrawal
+      // (ADR-0015 Inv 9) is NOT enforced by POST /consent today — `withdrawConsent1`/`withdrawConsent2`
+      // (widget-memory/src/erasure.ts) have no production caller; that remains a go-live gap. (b) the
+      // sweep is itself capped at retention.ts's SWEEP_QUERY_LIMIT (500) per call, so it cannot
+      // GUARANTEE bringing a namespace back under erasure.ts's own enumeration cap — it only deletes
+      // what expiry finds among the first 500 records it queries.
+      //
+      // Deliberately scoped to ONLY the subject already being served THIS turn (`signals.anonId`) —
+      // never an enumeration of every subject for the tenant (that would be an unbounded scan on the
+      // serving path, the exact hazard retention.ts's own comment says a cron/admin-endpoint sweep would
+      // need to solve separately). This is genuinely a narrower guarantee than a full periodic sweep: a
+      // subject who never returns keeps their expired-but-undeleted fact until *someone* triggers a sweep
+      // for them — TTL-on-read still means it is never served, so Inv 4's SERVING guarantee holds
+      // regardless; only the RECLAMATION timing for abandoned subjects is deferred to a future scheduled
+      // job (tracked in retention.ts). Fire-and-forget (mirrors the reqCount reclamation block below) so
+      // a slow/failing vector call can never delay or break the shopper's reply — but "fail-open for the
+      // shopper" must never mean "invisible to the operator" (security review, Finding 1 — HIGH): a
+      // swept failure that reaches here (retention.ts's own audit-vs-delete failures are already logged
+      // internally; anything ELSE that throws — e.g. the initial vector.query — lands here) is logged
+      // with a PII-free signal (tenantId + error class only — never fact text or the raw anonId), never
+      // silently swallowed. Kill-switch respectful (NN#4) — a halted tenant/agent gets no background
+      // action either, not even benign cleanup. Gated on `memoryService` (this instance's live double
+      // gate, INCLUDING the PR-8 test seam, so this is provably exercised in tests without waiting on
+      // the ADR flip) so it never runs when memory is off.
+      if (memoryService && signals.anonId && !kill && !d.flags.includes("no_autonomous_action")) {
+        void sweepExpired({ vector: vectorPort, audit: store }, tenantId, [signals.anonId]).catch((e) => {
+          console.error(`[/chat] ttl_sweep error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+        });
       }
       // M3 — per-turn telemetry enrichment: the business dimensions (mode/pitch/servedBy/escalate) and
       // end-to-end turn latency the model-port decorator can't see. PII-free (no message/reply). Under

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { InMemoryRuntimeStore, createInMemoryVectorStore } from "@palup/platform-ports";
+import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { lookupConsent, armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
@@ -13,6 +13,14 @@ import { buildServer } from "../src/server.js";
 
 const VALID_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // base32, passes validateAnonId's charset+length bound
 
+// Security review (Finding 2) — the boot guard now asserts on the SAME predicate that actually arms
+// memory in-process (`memoryServiceEnabled`), so every test below using the `memoryEnabled` seam must
+// also set WIDGET_AUTH_REQUIRED=true or `buildServer` throws. A "demo"-tenant widget token (the SAME
+// tenant the unauthenticated RUNTIME_TENANT fallback these tests relied on before) keeps every
+// assertion identical to before this change.
+const WIDGET_SECRET = "wsecret";
+const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
+
 function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: ModelRequest[] } {
   const calls: ModelRequest[] = [];
   return {
@@ -24,12 +32,14 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
   };
 }
 
-const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS", "PALUP_SECRETS"];
+const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS", "WIDGET_AUTH_REQUIRED", "PALUP_SECRETS"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
 describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => {
   it("EU (non-US), no consent record → lookup unknown/unknown → decideMemoryWrite denies ordinary + special", async () => {
     process.env.MERCHANT_REGION = "eu";
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -39,7 +49,7 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "eu-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID } },
+      payload: { sessionId: "eu-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled();
@@ -50,6 +60,8 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
 
   it("EU with recorded consent1 (memoryOrdinary='in') → ordinary write allowed", async () => {
     process.env.MERCHANT_REGION = "eu";
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -59,14 +71,14 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     const consentRes = await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown" },
+      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(consentRes.statusCode).toBe(200);
 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "eu-2", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID } },
+      payload: { sessionId: "eu-2", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(upsertSpy).toHaveBeenCalled();
@@ -77,6 +89,8 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
 
   it("US (default region), no record → ordinary ALLOWED (opt-out regime, 'unknown' != 'out')", async () => {
     // MERCHANT_REGION left unset -> defaults to "us" (server.ts).
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -86,7 +100,7 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "us-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID } },
+      payload: { sessionId: "us-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(upsertSpy).toHaveBeenCalled();
@@ -94,6 +108,8 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
   });
 
   it("US with recorded memoryOrdinary='out' → ordinary DENIED", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -103,12 +119,12 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown" },
+      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "us-2", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID } },
+      payload: { sessionId: "us-2", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled();
@@ -118,10 +134,12 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
   });
 
   it("special-category write allowed ONLY when memorySpecial='in', in every region including US", async () => {
-    // ADR-0015 Inv 9 (go-live blocker #2): a special-category write is refused without a configured
-    // encryption key (service.ts, fail closed) — provision one for the "demo" RUNTIME_TENANT so this
-    // test still exercises a REAL write.special, not just a refusal.
+    // ADR-0015 Inv 9: a special-category write is refused without a configured encryption key
+    // (service.ts, fail closed) — provision one for the "demo" RUNTIME_TENANT so this test still
+    // exercises a REAL write.special, not just a refusal.
     process.env.PALUP_SECRETS = JSON.stringify({ demo: { MEMORY_ENCRYPTION_KEY: "test-key-for-demo" } });
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     for (const region of ["us", "eu", "uk", "other"]) {
       process.env.MERCHANT_REGION = region;
       const store = new InMemoryRuntimeStore();
@@ -133,12 +151,12 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
       await app.inject({
         method: "POST",
         url: "/consent",
-        payload: { anonId: VALID_ANON_ID, memoryOrdinary: "unknown", memorySpecial: "in" },
+        payload: { anonId: VALID_ANON_ID, memoryOrdinary: "unknown", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
       });
       const res = await app.inject({
         method: "POST",
         url: "/chat",
-        payload: { sessionId: `special-${region}`, message: "I have a tree-nut allergy", signals: { anonId: VALID_ANON_ID } },
+        payload: { sessionId: `special-${region}`, message: "I have a tree-nut allergy", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
       });
       expect(res.statusCode).toBe(200);
       expect(upsertSpy).toHaveBeenCalled();
@@ -149,6 +167,8 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
   });
 
   it("special-category write is STILL denied without memorySpecial='in', even in the US", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -158,12 +178,12 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown" },
+      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "us-special-denied", message: "I have a tree-nut allergy", signals: { anonId: VALID_ANON_ID } },
+      payload: { sessionId: "us-special-denied", message: "I have a tree-nut allergy", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled();
@@ -201,6 +221,8 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
 
   it("client-supplied signals.consent is IGNORED — the server lookup value wins", async () => {
     process.env.MERCHANT_REGION = "eu";
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -215,6 +237,7 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
         sessionId: "spoof-1",
         message: "I like fragrance-free stuff",
         signals: { anonId: VALID_ANON_ID, consent: { memoryOrdinary: "in", memorySpecial: "in" } },
+        widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
     expect(res.statusCode).toBe(200);
