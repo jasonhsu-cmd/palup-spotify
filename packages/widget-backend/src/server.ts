@@ -786,7 +786,9 @@ export async function buildServer(opts?: {
       return { error: "invalid anonId or consent value" };
     }
 
-    await recordConsent(store, { tenantId, anonId: subject, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial, hmacKey: AUDIT_HMAC_SECRET });
+    // `source: "shopper"` — an explicit choice the shopper made, as distinct from the server-derived
+    // guest-merge write on /chat (Finding 2). Required, so no call site can silently misattribute.
+    await recordConsent(store, { tenantId, anonId: subject, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial, hmacKey: AUDIT_HMAC_SECRET, source: "shopper" });
     return { ok: true };
   });
 
@@ -1125,7 +1127,9 @@ export async function buildServer(opts?: {
               source: "guest-merge",
             });
           } catch (e) {
-            console.error(`[/chat] consent write-through error:`, (e as Error).message);
+            // PII-free: the error's CLASS only, never `.message` — a store/PG error can embed the KV key
+            // (`acct:<shopperId>`). Matches retention.ts's codified rule and the sweep's own catch below.
+            console.error(`[/chat] consent write-through error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
           }
         }
       }
@@ -1263,15 +1267,23 @@ export async function buildServer(opts?: {
       // runs when memory is off.
       //
       // NOT extended to `validatedGuestAnonId` (security review round 3, N1 — considered, reverted).
-      // N1's own text frames sweeping a signed-in shopper's OWN guest-era namespace here as safe by the
-      // same "no new capability" reasoning that justifies /forget's dual-erasure below. It is NOT safe by
-      // that reasoning on THIS path: doing so would make `subject-scoped-memory-auth.test.ts`'s "THE
-      // ATTACK (recall)" fail — a verified-but-UNRELATED shopper's own /chat turn would trigger a
-      // `vector.query` (and, via `sweepExpired`, a potential DELETE of already-expired records) against
-      // whatever namespace they attach as `signals.anonId`, reintroducing exactly the cross-subject query
-      // that F1's fix closed for the RECALL path specifically. Confirmed by execution this session (see
-      // PR notes/report). Per this PR's own guardrail ("keep ... F1/F2 ... fixes intact") this residual
-      // is left OPEN rather than accepted unilaterally — see docs/MEMORY-GO-LIVE-CHECKLIST.md's B4 row.
+      // MECHANICALLY, widening this would fail `subject-scoped-memory-auth.test.ts`'s "THE ATTACK
+      // (recall)", which asserts the victim namespace is never queried: `sweepExpired` opens with a
+      // `vector.query` against whatever namespace the caller attached as `signals.anonId`.
+      //
+      // But the SECURITY characterization once written here — "reintroducing exactly the cross-subject
+      // query that F1's fix closed" — was ADJUDICATED WRONG by security review and is retracted: a sweep
+      // deletes only ALREADY-EXPIRED records (a strict subset of what the unauthenticated `/forget` path
+      // already permits with no token at all), returns nothing to the caller, and never reaches the model,
+      // so it violates none of the property F1 protects (no cross-subject fact text reaching the
+      // prompt/reply). The revert stands on DIFFERENT grounds:
+      //   (i)  ATTRIBUTABILITY — an `erase.subject` on a user-initiated `/forget` is legible to an
+      //        operator; an implicit per-turn `ttl_sweep` against a namespace the caller merely NAMED is
+      //        not; and
+      //   (ii) proactive reclamation belongs in a scheduled/admin job keyed off SERVER-known subjects,
+      //        exactly as retention.ts's own header already says.
+      // (Note the mechanical test-failure above is what makes widening a deliberate decision rather than a
+      // silent one — it is not itself the security argument.) See docs/MEMORY-GO-LIVE-CHECKLIST.md B4.
       if (memoryService && memorySubject && !kill && !d.flags.includes("no_autonomous_action")) {
         void sweepExpired({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, tenantId, [memorySubject]).catch((e) => {
           console.error(`[/chat] ttl_sweep error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);

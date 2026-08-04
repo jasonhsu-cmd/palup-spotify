@@ -264,7 +264,14 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     expect(mergeEntry!.actor).toBe("agent:shopper-memory"); // the server's merge, not the shopper
     // ...and the merged entry does NOT carry the shopper-facing reversal path, which is false for it.
     expect(mergeEntry!.reversalPath).not.toBe(shopperEntry!.reversalPath);
-    expect(mergeEntry!.reversalPath).toMatch(/not reversible by POST \/consent alone/);
+    // Assert the PROPERTY (both required steps are named), not the exact prose — an earlier version of
+    // this test pinned wording that was itself still inaccurate. Security review proved by execution that
+    // NEITHER step alone reverses this entry: /consent alone is re-asserted on the next turn, and dropping
+    // the guest anonId alone leaves the account row "out" forever.
+    expect(mergeEntry!.reversalPath).toMatch(/BOTH/);
+    expect(mergeEntry!.reversalPath).toMatch(/POST \/consent/);
+    expect(mergeEntry!.reversalPath).toMatch(/guest anonId/);
+    expect(mergeEntry!.reversalPath).toMatch(/[Ee]ither step alone/);
     await app.close();
   });
 

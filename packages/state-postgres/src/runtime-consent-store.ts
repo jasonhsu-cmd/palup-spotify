@@ -45,8 +45,13 @@ export interface RecordConsentInput extends ConsentRecord {
    * merge discovered a guest `"out"` and wrote it through to the account subject. The two were
    * previously byte-indistinguishable in the immutable log, so an operator could not tell a consent
    * change the shopper MADE from one the system INFERRED — and the shopper-facing reversal path is not
-   * even true for the merged case (NN#5 / Inv 6). */
-  source?: "shopper" | "guest-merge";
+   * even true for the merged case (NN#5 / Inv 6).
+   *
+   * REQUIRED, not optional-with-a-default (security review, round 4): defaulting to `"shopper"` would
+   * mean a future server-side caller that forgets this field silently ATTRIBUTES ITS OWN WRITE TO THE
+   * SHOPPER in the immutable log — the wrong direction to fail for an Inv-6 attribution field. Making it
+   * required forces every new call site to state who caused the change. */
+  source: "shopper" | "guest-merge";
 }
 
 export interface LookupConsentInput {
@@ -93,15 +98,19 @@ export async function recordConsent(
         actor: source === "guest-merge" ? "agent:shopper-memory" : "shopper",
         action: "consent.record",
         // PII-safe: only a hashed subjectRef + the tri-state choices — never the raw anonId.
-        input: { subjectRef: subjectRef(tenantId, anonId, hmacKey), memoryOrdinary, memorySpecial, source: source ?? "shopper" },
+        input: { subjectRef: subjectRef(tenantId, anonId, hmacKey), memoryOrdinary, memorySpecial, source },
         decision: "recorded",
         reversalPath:
           source === "guest-merge"
-            ? // VERIFIED BY EXECUTION (security review): the shopper-facing reversal is NOT true for this
-              // entry. A later `POST /consent {"in"}` does overwrite the row, but the very next turn from a
-              // client still presenting the stale guest anonId re-asserts "out" (checklist C7). The only
-              // reversal that actually holds is to stop presenting that guest id.
-              "not reversible by POST /consent alone — a client still presenting the originating guest anonId re-asserts this value on its next turn; the shopper must stop presenting that id (the widget's forget-me mints a fresh one). See docs/MEMORY-GO-LIVE-CHECKLIST.md C7."
+            ? // VERIFIED BY EXECUTION (security review, twice). Neither half works ALONE:
+              //   • `POST /consent {"in"}` while the client still presents the originating guest anonId
+              //     → the next turn re-asserts "out" (the merge re-reads the guest row).
+              //   • Dropping the guest anonId (forget-me's fresh id) WITHOUT re-consenting
+              //     → still denied, because this account row itself stays "out" forever.
+              // Only the CONJUNCTION reverses it. An earlier revision of this string prescribed the second
+              // half alone and was therefore still not a usable reversal path (Inv 6 wants one that works
+              // when followed literally).
+              "reversible only by BOTH: (1) POST /consent with the desired value for this account subject, AND (2) stopping presentation of the originating guest anonId (the widget's forget-me mints a fresh one, at the cost of erasing the shopper's facts). Either step alone leaves the subject denied. See docs/MEMORY-GO-LIVE-CHECKLIST.md C7."
             : "POST /consent again with a different choice (e.g. 'out') — a fresh choice always overwrites the prior one",
       },
       at,
