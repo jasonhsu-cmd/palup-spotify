@@ -1,8 +1,28 @@
 import { describe, it, expect, vi } from "vitest";
-import { createInMemoryVectorStore, InMemoryRuntimeStore, type VectorPort } from "@palup/platform-ports";
+import {
+  createInMemoryVectorStore,
+  InMemoryRuntimeStore,
+  createEnvSecrets,
+  type VectorPort,
+  type SecretsPort,
+  type CryptoPort,
+} from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
+import { subjectNamespace } from "../src/identity.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
+
+// ADR-0015 Inv 9 (go-live blocker #2 — encryption at rest for special-category facts): most tests below
+// that write a SPECIAL-category fact via `service.remember` need a configured encryption key, because a
+// special-category write is now REFUSED (fail closed) without one — see the dedicated "encryption at
+// rest" describe block near the bottom of this file for the tests that exercise that gate directly.
+// `keyedSecrets` provisions one `MEMORY_ENCRYPTION_KEY` per tenant id, mirroring how a real deployment
+// would provision it (SecretsPort, ADR-0001) — never a hardcoded/global key.
+function keyedSecrets(...tenantIds: string[]): SecretsPort {
+  const byTenant: Record<string, Record<string, string>> = {};
+  for (const t of tenantIds) byTenant[t] = { MEMORY_ENCRYPTION_KEY: `test-key-for-${t}` };
+  return createEnvSecrets(JSON.stringify(byTenant));
+}
 
 // ADR-0015 PR A (T7): the memory service wires flag -> consent -> classifier -> distiller -> vector
 // port + audit. The headline property is INERTNESS while the double gate is off (which it always is in
@@ -97,7 +117,7 @@ describe("createMemoryService — consent gating (enabled:true, for wiring corre
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
     const distiller = fixedDistiller(["shopper has a tree-nut allergy"]);
-    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true });
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, secrets: keyedSecrets("acme") });
 
     const consented: MemoryCtx = { tenantId: "acme", anonId: "guest-a", region: "us", consent1: "in", consent2: "in" };
     const written = await service.remember(consented, { message: "m", reply: "r" });
@@ -148,7 +168,7 @@ describe("createMemoryService — audit (Inv 6: no silent memory action)", () =>
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
     const distiller = fixedDistiller(["shopper has a tree-nut allergy"]);
-    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true });
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, secrets: keyedSecrets("acme-special") });
     const ctx: MemoryCtx = { tenantId: "acme-special", anonId: "guest-s", region: "us", consent1: "in", consent2: "in" };
 
     await service.remember(ctx, { message: "m", reply: "r" });
@@ -163,7 +183,7 @@ describe("createMemoryService — audit (Inv 6: no silent memory action)", () =>
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
     const distiller = fixedDistiller(["shopper has a tree-nut allergy"]);
-    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true });
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, secrets: keyedSecrets("acme-pii") });
     const ctx: MemoryCtx = {
       tenantId: "acme-pii",
       anonId: "super-secret-anon-id",
@@ -211,7 +231,7 @@ describe("createMemoryService — per-class TTL (Inv 4; legal 2026: ordinary and
     const runtimeStore = new InMemoryRuntimeStore();
     const distiller = fixedDistiller(["prefers fragrance-free", "allergic to tree nuts"]);
     let nowMs = new Date("2026-01-01T00:00:00Z").getTime();
-    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, clock: () => new Date(nowMs) });
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, clock: () => new Date(nowMs), secrets: keyedSecrets("acme-ttl") });
     const ctx: MemoryCtx = { tenantId: "acme-ttl", anonId: "guest-ttl", region: "us", consent1: "in", consent2: "in" };
 
     const w = await service.remember(ctx, { message: "...", reply: "..." });
@@ -231,7 +251,7 @@ describe("createMemoryService — per-class TTL (Inv 4; legal 2026: ordinary and
     const runtimeStore = new InMemoryRuntimeStore();
     const distiller = fixedDistiller(["prefers fragrance-free", "allergic to tree nuts"]);
     let nowMs = new Date("2026-01-01T00:00:00Z").getTime();
-    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, clock: () => new Date(nowMs) });
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, clock: () => new Date(nowMs), secrets: keyedSecrets("acme-ttl") });
     const ctx: MemoryCtx = { tenantId: "acme-ttl", anonId: "guest-ttl2", region: "us", consent1: "in", consent2: "in" };
 
     await service.remember(ctx, { message: "...", reply: "..." });
@@ -245,5 +265,193 @@ describe("createMemoryService — per-class TTL (Inv 4; legal 2026: ordinary and
     const texts = (await service.recall(ctx)).map((f) => f.text);
     expect(texts).toContain("prefers fragrance-free");
     expect(texts).toContain("allergic to tree nuts");
+  });
+});
+
+describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live blocker #2)", () => {
+  function noopDistiller(): FactDistiller {
+    return { async distill() { return []; } };
+  }
+
+  it("a special-category fact is unreadable in the raw store (neither the fact text nor the sourceQuote appear in it), yet round-trips exactly through recall", async () => {
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert"); // captures the EXACT VectorRecord[] handed to the port
+    const runtimeStore = new InMemoryRuntimeStore();
+    const distiller: FactDistiller = {
+      async distill() {
+        return [
+          {
+            text: "shopper has a tree-nut allergy",
+            disposition: {
+              axis: "communication",
+              value: "direct",
+              provenance: "stated",
+              confidence: 0.9,
+              sourceQuote: "I definitely have a nut allergy",
+            },
+          },
+        ];
+      },
+    };
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller,
+      enabled: true,
+      secrets: keyedSecrets("acme-enc"),
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-enc", anonId: "guest-enc", region: "us", consent1: "in", consent2: "in" };
+
+    const written = await service.remember(ctx, { message: "m", reply: "r" });
+    expect(written.written).toEqual(["special"]);
+
+    // Inspect the RAW stored record directly via the vector port — bypassing the service entirely, the
+    // way a DBA/disk-snapshot/log-shipping path (the exact threat the durable Postgres adapter's own
+    // go-live-gap note flagged) would see it.
+    const raw = await vector.query(subjectNamespace("acme-enc", "guest-enc"), { text: "", k: 10 });
+    expect(raw).toHaveLength(1);
+    const rawStr = JSON.stringify(raw);
+    expect(rawStr).not.toContain("tree-nut");
+    expect(rawStr).not.toContain("allergy");
+    expect(rawStr).not.toContain("nut allergy");
+    expect(rawStr).not.toContain("I definitely");
+    expect(raw[0]?.metadata?.encrypted).toBe(true); // marked, not inferred from shape
+
+    // The vector record's OWN top-level `text` field (not just `metadata.text`) is ciphertext too —
+    // `VectorMatch` (what `query()` returns) doesn't surface `text` at all, so assert on the EXACT
+    // `VectorRecord[]` the service actually handed to `upsert()`.
+    expect(upsertSpy).toHaveBeenCalledTimes(1);
+    const upserted = upsertSpy.mock.calls[0]?.[1] as Array<{ text?: string }>;
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]?.text).not.toBe("shopper has a tree-nut allergy");
+    expect(upserted[0]?.text).not.toContain("tree-nut");
+
+    const recalled = await service.recall(ctx);
+    expect(recalled).toEqual([
+      {
+        text: "shopper has a tree-nut allergy",
+        class: "special",
+        disposition: [
+          {
+            axis: "communication",
+            value: "direct",
+            provenance: "stated",
+            confidence: 0.9,
+            sourceQuote: "I definitely have a nut allergy",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("no key + memory live ⇒ special-category write is REFUSED: dropped, no plaintext anywhere, and no write.special audit", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const distiller = fixedDistiller(["shopper has a tree-nut allergy"]);
+    // No `secrets`/`crypto` deps supplied at all — defaults to `createEnvSecrets()` (unset PALUP_SECRETS
+    // for this never-used-elsewhere tenant id), i.e. the real "nothing provisioned yet" production state.
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true });
+    const ctx: MemoryCtx = { tenantId: "acme-nokey", anonId: "guest-nokey", region: "us", consent1: "in", consent2: "in" };
+
+    const result = await service.remember(ctx, { message: "m", reply: "r" });
+    expect(result.written).toEqual([]); // refused — never silently downgraded to a plaintext write
+
+    expect(await service.recall(ctx)).toEqual([]);
+    const raw = await vector.query(subjectNamespace("acme-nokey", "guest-nokey"), { text: "", k: 10 });
+    expect(raw).toEqual([]); // nothing persisted at all — not even a plaintext fallback
+
+    const log = await runtimeStore.readAudit({ tenantId: "acme-nokey" });
+    expect(log.map((r) => r.action)).not.toContain("write.special");
+    expect(JSON.stringify(log)).not.toContain("tree-nut");
+  });
+
+  it("an undecryptable/corrupt encrypted record is dropped on recall, never thrown", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const ns = subjectNamespace("acme-corrupt", "guest-corrupt");
+    const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
+    await vector.upsert(ns, [
+      {
+        id: "corrupt-1",
+        text: "v1:bm90:cmVhbGx5:bm90LWEtcmVhbC1lbnZlbG9wZQ==", // well-formed SHAPE, wrong key/tampered content
+        metadata: {
+          text: "v1:bm90:cmVhbGx5:bm90LWEtcmVhbC1lbnZlbG9wZQ==",
+          class: "special",
+          expiresAt: future,
+          encrypted: true, // marked encrypted — recall MUST attempt decryption, not pass it through
+        },
+      },
+    ]);
+
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: noopDistiller(),
+      enabled: true,
+      secrets: keyedSecrets("acme-corrupt"),
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-corrupt", anonId: "guest-corrupt", region: "us", consent1: "in", consent2: "in" };
+
+    await expect(service.recall(ctx)).resolves.toEqual([]); // dropped, NOT thrown — never crashes the turn
+  });
+
+  it("ordinary facts: encrypted opportunistically when a key exists (round trips); falls back to plaintext when no key is configured (documented trade-off, unchanged pre-encryption behavior)", async () => {
+    // WITH a key: ordinary text is ALSO encrypted at rest (defense in depth — Inv 9 only mandates it for
+    // special-category, but nothing stops applying it to ordinary too when a key is already available).
+    const vectorA = createInMemoryVectorStore();
+    const svcA = createMemoryService({
+      vector: vectorA,
+      audit: new InMemoryRuntimeStore(),
+      distiller: fixedDistiller(["prefers fragrance-free"]),
+      enabled: true,
+      secrets: keyedSecrets("acme-ord-enc"),
+    });
+    const ctxA: MemoryCtx = { tenantId: "acme-ord-enc", anonId: "guest-a", region: "us", consent1: "in", consent2: "unknown" };
+    await svcA.remember(ctxA, { message: "m", reply: "r" });
+    const rawA = await vectorA.query(subjectNamespace("acme-ord-enc", "guest-a"), { text: "", k: 10 });
+    expect(rawA[0]?.metadata?.encrypted).toBe(true);
+    expect(JSON.stringify(rawA)).not.toContain("fragrance-free");
+    expect(await svcA.recall(ctxA)).toEqual([{ text: "prefers fragrance-free", class: "ordinary" }]);
+
+    // WITHOUT a key: ordinary text falls back to plaintext — NEVER refused (byte-identical to the
+    // pre-encryption behavior this package always had for ordinary facts).
+    const vectorB = createInMemoryVectorStore();
+    const svcB = createMemoryService({
+      vector: vectorB,
+      audit: new InMemoryRuntimeStore(),
+      distiller: fixedDistiller(["prefers fragrance-free"]),
+      enabled: true,
+    });
+    const ctxB: MemoryCtx = { tenantId: "acme-ord-nokey", anonId: "guest-b", region: "us", consent1: "in", consent2: "unknown" };
+    const written = await svcB.remember(ctxB, { message: "m", reply: "r" });
+    expect(written.written).toEqual(["ordinary"]); // never refused, unlike special-category
+
+    const rawB = await vectorB.query(subjectNamespace("acme-ord-nokey", "guest-b"), { text: "", k: 10 });
+    expect(rawB[0]?.metadata?.encrypted).toBe(false);
+    expect(rawB[0]?.metadata?.text).toBe("prefers fragrance-free"); // plaintext, unchanged from pre-encryption behavior
+    expect(await svcB.recall(ctxB)).toEqual([{ text: "prefers fragrance-free", class: "ordinary" }]);
+  });
+
+  it("INERT (memory off): even with a configured key, encrypt/decrypt are NEVER called — nothing touched", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const cryptoSpy: CryptoPort = {
+      encrypt: vi.fn(async () => "ciphertext-should-never-be-called"),
+      decrypt: vi.fn(async () => "plaintext-should-never-be-called"),
+    };
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: fixedDistiller(["shopper has a tree-nut allergy"]),
+      secrets: keyedSecrets("acme-inert"),
+      crypto: cryptoSpy,
+      enabled: false,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-inert", anonId: "guest-inert", region: "us", consent1: "in", consent2: "in" };
+
+    expect(await service.remember(ctx, { message: "m", reply: "r" })).toEqual({ written: [] });
+    expect(await service.recall(ctx)).toEqual([]);
+    expect(cryptoSpy.encrypt).not.toHaveBeenCalled();
+    expect(cryptoSpy.decrypt).not.toHaveBeenCalled();
   });
 });

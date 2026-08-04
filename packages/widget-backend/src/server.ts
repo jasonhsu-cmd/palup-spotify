@@ -238,6 +238,13 @@ export async function buildServer(opts?: {
         // text.
         model: createRedactingModelPort(meteredModel),
         enabled: memoryServiceEnabled,
+        // ADR-0015 Inv 9 (go-live blocker #2) — encryption-at-rest for special-category facts. Reuses
+        // the SAME composition-root `secrets` port already constructed above (Shopify creds, CAA client
+        // id/secret) rather than a second SecretsPort instance; a tenant's memory-encryption key is
+        // provisioned into PALUP_SECRETS exactly like any other tenant secret. Still fully inert while
+        // `memoryServiceEnabled` is false (MEMORY_ADR_ACCEPTED) — this dependency is never even
+        // constructed-into-use until that double gate is on.
+        secrets,
       })
     : undefined;
   const memoryPort = memoryService
