@@ -38,8 +38,10 @@ const REVERSAL_PATHS: Record<MemoryAction, string> = {
 
 /** Opaque, one-way reference to a subject — NEVER the raw anonId/account id, so the immutable,
  * long-lived audit log can't itself become a re-identification surface. Mirrors
- * widget-backend/src/audit.ts's sessionRef pattern (sha256, truncated). */
-function subjectRef(tenantId: string, anonId: string): string {
+ * widget-backend/src/audit.ts's sessionRef pattern (sha256, truncated). Exported so retention.ts's
+ * PII-free operator-visible failure signal (security review, Finding 1) can identify a subject without
+ * ever logging the raw anonId. */
+export function subjectRef(tenantId: string, anonId: string): string {
   return createHash("sha256").update(`${tenantId}::${anonId}`).digest("hex").slice(0, 16);
 }
 

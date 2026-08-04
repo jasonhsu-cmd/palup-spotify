@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { InMemoryRuntimeStore, createInMemoryVectorStore } from "@palup/platform-ports";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
@@ -11,6 +11,16 @@ import { buildServer } from "../src/server.js";
 // (see server.ts's own doc comment), so it can never flip memory on in production.
 
 const VALID_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // base32, passes validateAnonId's charset+length bound
+
+// Security review (Finding 2) — the boot guard now asserts on the SAME predicate that actually arms
+// memory in-process (`memoryServiceEnabled`), so every test below using the `memoryEnabled` seam must
+// also set WIDGET_AUTH_REQUIRED=true or `buildServer` throws. A "demo"-tenant widget token (the SAME
+// tenant the unauthenticated RUNTIME_TENANT fallback these tests relied on before) keeps every
+// assertion identical to before this change.
+const WIDGET_SECRET = "wsecret";
+const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED"];
+afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
 function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: ModelRequest[] } {
   const calls: ModelRequest[] = [];
@@ -29,6 +39,8 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
 
 describe("PR-8 — remember() wired into /chat, post-decision, on the clean path", () => {
   it("an ordinary distilled fact is written to the vector port and audited (write.ordinary) — remember() really was called", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -42,6 +54,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
         sessionId: "mem-remember-1",
         message: "I like fragrance-free stuff",
         signals: { cart: "empty", anonId: VALID_ANON_ID },
+        widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
 
@@ -53,6 +66,8 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
   });
 
   it("is NEVER called on the early-return validation path (e.g. an oversized message) — no memory-service call before a real decision exists", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -66,6 +81,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
         sessionId: "mem-remember-2",
         message: "a".repeat(5_000), // over MAX_MESSAGE_CHARS (default 4000) -> 400 input_rejected, no decision made
         signals: { cart: "empty", anonId: VALID_ANON_ID },
+        widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
 
@@ -76,6 +92,8 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
   });
 
   it("consent gate honored: a special-category candidate is classified + gated INSIDE remember() and never written (no /consent record for this subject → Consent 2 fail-closes to 'unknown' — PR-11a wires the lookup; full consent UX/CMP is still a later PR)", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -89,6 +107,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
         sessionId: "mem-remember-3",
         message: "I have a tree-nut allergy",
         signals: { cart: "empty", anonId: VALID_ANON_ID },
+        widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
 
@@ -101,6 +120,8 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
   });
 
   it("no subject key (no anonId) -> remember() is never even attempted, mirroring the brain's own recall guard", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -114,6 +135,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
         sessionId: "mem-remember-4",
         message: "I like fragrance-free stuff",
         signals: { cart: "empty" }, // no anonId at all
+        widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
 
@@ -123,6 +145,8 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
   });
 
   it("PR-6 Finding H — the model threaded into the memory service is redaction-wrapped: a pasted card/SSN in the shopper turn never reaches the model port", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -135,6 +159,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
         sessionId: "mem-redact-1",
         message: "my card is 4111 1111 1111 1111, please use it on file",
         signals: { cart: "empty", anonId: VALID_ANON_ID },
+        widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
     expect(res.statusCode).toBe(200);
@@ -164,6 +189,8 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
 
     await armKill(store, "global", "operator-halt"); // operator arms the halt on the shared store
 
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
     const res = await app.inject({
       method: "POST",
@@ -172,6 +199,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
         sessionId: "mem-killed-1",
         message: "I like fragrance-free stuff",
         signals: { cart: "empty", anonId: VALID_ANON_ID },
+        widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
 

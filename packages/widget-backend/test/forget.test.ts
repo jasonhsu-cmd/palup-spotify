@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { InMemoryRuntimeStore, createInMemoryVectorStore } from "@palup/platform-ports";
+import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
@@ -26,8 +26,16 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
   };
 }
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS", "WIDGET_AUTH_REQUIRED"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+
+// Security review (Finding 2) — the boot guard now asserts on the SAME predicate that actually arms
+// memory in-process (`memoryServiceEnabled`), so every test below using the `memoryEnabled` seam must
+// also set WIDGET_AUTH_REQUIRED=true or `buildServer` throws. A "demo"-tenant widget token (the SAME
+// tenant the unauthenticated RUNTIME_TENANT fallback these tests relied on before) keeps every
+// assertion identical to before this change.
+const WIDGET_SECRET = "wsecret";
+const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
 
 describe("POST /forget", () => {
   it("rejects a missing anonId (400) and erases nothing", async () => {
@@ -53,6 +61,8 @@ describe("POST /forget", () => {
   });
 
   it("erases a subject's stored fact and audits erase.subject (no raw anonId in the audit trail)", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -61,11 +71,11 @@ describe("POST /forget", () => {
     await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "forget-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID } },
+      payload: { sessionId: "forget-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
 
-    const res = await app.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID } });
+    const res = await app.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN } });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBe(0);
@@ -87,6 +97,8 @@ describe("POST /forget", () => {
   });
 
   it("works regardless of memoryEnabled: a memory-DISABLED instance sharing the same store+vector can still erase what a memory-ENABLED instance wrote", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -94,7 +106,7 @@ describe("POST /forget", () => {
     await writerApp.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "forget-2", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID } },
+      payload: { sessionId: "forget-2", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
     await writerApp.close();
@@ -102,7 +114,7 @@ describe("POST /forget", () => {
     // A fresh app instance sharing the SAME store+vector, this time WITHOUT the memoryEnabled seam — the
     // real-production posture (double gate off).
     const disabledApp = await buildServer({ store, vectorPort: vector });
-    const res = await disabledApp.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID } });
+    const res = await disabledApp.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN } });
     expect(res.statusCode).toBe(200);
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBe(0);
     await disabledApp.close();
@@ -110,6 +122,7 @@ describe("POST /forget", () => {
 
   it("is tenant-scoped: tenant B's /forget cannot erase tenant A's data for the same anonId", async () => {
     process.env.WIDGET_TOKEN_SECRET = "wsecret";
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     process.env.WIDGET_EMBED_KEYS = JSON.stringify({ "a-key": "tenant-a", "b-key": "tenant-b" });
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
@@ -139,6 +152,8 @@ describe("POST /forget", () => {
   });
 
   it("NN#4 — an operator kill switch halts /forget: 503, nothing erased, no audit entry", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -146,12 +161,12 @@ describe("POST /forget", () => {
     await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "forget-4", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID } },
+      payload: { sessionId: "forget-4", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
 
     await armKill(store, "global", "operator-halt");
-    const res = await app.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID } });
+    const res = await app.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN } });
     expect(res.statusCode).toBe(503);
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
     const log = await store.readAudit({ tenantId: "demo" });

@@ -75,11 +75,14 @@ function tenantIdFromNamespace(namespace: string): string {
 // SELECT"). The ONLY real consumer pattern is `query(ns, {text:"", k:500})` ("list everything for this
 // subject" — see the honest semantics note above), and `erasure.ts`'s `enumerateSubjectOrFail` already
 // refuses to treat >=500 rows as a complete enumeration. This scan bound sits comfortably above that (so
-// it never changes behavior for a well-behaved subject) while still bounding the WORST case: if
-// `sweepExpired` never runs for a namespace (see its own doc comment — there is currently no production
-// caller), a single `query()` can no longer become a full-table-shaped scan of an unboundedly large
-// namespace. Ranking beyond this cap is not attempted — this is a safety backstop, not a claim that
-// ranking over more than `MAX_SCAN_ROWS` records would still be correct/complete.
+// it never changes behavior for a well-behaved subject) while still bounding the WORST case: widget-
+// backend/server.ts's POST /chat now DOES call `sweepExpired` (widget-memory/src/retention.ts) as a
+// production caller, opportunistically and PER-SUBJECT (scoped to only the subject served that turn) —
+// but that reclamation still leaves a namespace unbounded for a subject who never returns (retention.ts's
+// own doc comment tracks that as a go-live gap), so this scan bound remains the backstop: a single
+// `query()` can never become a full-table-shaped scan of an unboundedly large namespace regardless of
+// whether/when a sweep runs for it. Ranking beyond this cap is not attempted — this is a safety backstop,
+// not a claim that ranking over more than `MAX_SCAN_ROWS` records would still be correct/complete.
 const MAX_SCAN_ROWS = 5000;
 
 interface VpRow {
