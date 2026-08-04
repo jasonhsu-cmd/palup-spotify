@@ -48,12 +48,12 @@ export interface FactMetadata {
   disposition?: Disposition[];
   /**
    * Encryption-at-rest marker (ADR-0015 Inv 9, go-live blocker #2): `true` iff `text` — and, when
-   * present, each `disposition[].sourceQuote` — is an AES-256-GCM `CryptoPort` envelope rather than
-   * plaintext. Set precisely at WRITE time (service.ts `remember`) from whether an encryption key was
-   * actually available for this tenant; NEVER inferred from the string's shape. `recall` decrypts a
-   * field ONLY when this is `true` — a record with `encrypted` absent/false is read as already-plaintext
-   * (the ordinary no-key best-effort fallback, or any record seeded directly at the vector-port layer,
-   * e.g. by a test or a future migration tool, bypassing `remember()` entirely).
+   * present, each `disposition[].value` and `disposition[].sourceQuote` — is an AES-256-GCM `CryptoPort`
+   * envelope rather than plaintext. Set precisely at WRITE time (service.ts `remember`) from whether an
+   * encryption key was actually available for this tenant; NEVER inferred from the string's shape.
+   * `recall` decrypts a field ONLY when this is `true` — a record with `encrypted` absent/false is read
+   * as already-plaintext (the ordinary no-key best-effort fallback, or any record seeded directly at the
+   * vector-port layer, e.g. by a test or a future migration tool, bypassing `remember()` entirely).
    */
   encrypted?: boolean;
 }

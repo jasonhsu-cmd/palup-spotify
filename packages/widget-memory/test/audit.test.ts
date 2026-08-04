@@ -46,6 +46,7 @@ describe("audit — buildMemoryAudit (mirrors the existing AuditInput shape; PII
       "consent.withdrawn",
       "write.ordinary",
       "write.special",
+      "write.refused",
       "recall",
       "erase.subject",
       "erase.tenant",
@@ -65,6 +66,24 @@ describe("audit — buildMemoryAudit (mirrors the existing AuditInput shape; PII
 
   it("carries a non-empty reversal path", () => {
     const input = buildMemoryAudit({ action: "write.ordinary", tenantId: "t", anonId: "a", factClass: "ordinary", count: 1 });
+    expect(typeof input.reversalPath).toBe("string");
+    expect(input.reversalPath!.length).toBeGreaterThan(0);
+  });
+
+  // Security review (feat/memory-encryption-at-rest, finding 6): a fail-closed special-category refusal
+  // must not be silent (ADR-0015 Inv 6 / NN#5). write.refused carries ONLY the class + a count — never
+  // the fact text, never the raw anonId — same PII discipline as every other memory audit action.
+  it("write.refused carries only class + count, never fact text or the raw anonId (finding 6)", () => {
+    const input = buildMemoryAudit({
+      action: "write.refused",
+      tenantId: "acme",
+      anonId: "guest-super-secret-id",
+      factClass: "special",
+      count: 2,
+    });
+    const serialized = JSON.stringify(input);
+    expect(serialized).not.toContain("guest-super-secret-id");
+    expect(input.decision).toMatchObject({ class: "special", count: 2 });
     expect(typeof input.reversalPath).toBe("string");
     expect(input.reversalPath!.length).toBeGreaterThan(0);
   });

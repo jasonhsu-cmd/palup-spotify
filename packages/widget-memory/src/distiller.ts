@@ -190,14 +190,47 @@ interface RawDistillResponse {
   facts?: RawCandidate[];
 }
 
-/** True iff `d` is a well-formed disposition candidate: a known axis, a non-empty value, a confidence
- * in [0,1], and — the fairness-structural check — a provenance that is EXACTLY "stated" or "observed".
- * Anything else (a hallucinated "inferred", a typo, a missing field) fails closed. Exported (PR-8) so
- * `service.ts` can re-apply the SAME reject-in-full check at the actual persistence boundary — defense
- * in depth for ANY `FactDistiller` a caller supplies, not just this module's own `createModelDistiller`. */
+// Security review (feat/memory-encryption-at-rest, finding 1): disposition.ts's own doc comment claims
+// `value` is a "controlled vocabulary per axis", but until now `isValidDisposition` only checked it was a
+// non-empty string — so arbitrary model-authored free text (up to and including a pasted card/SSN) could
+// land in `value` and be persisted un-redacted, even on a class:"special" row. "role" and "style" mirror
+// widget-brain's OWN closed enums exactly (`PersonaRole`/`PersonaStyle`, widget-brain/src/types.ts) — the
+// axis names are shared deliberately — so this enforces the REAL, already-product-confirmed vocabulary
+// for those two axes, not a guess. "communication" and "budget_stated" have NO design-confirmed closed
+// vocabulary anywhere in this codebase yet (brain.ts's own RECALLED_DISPOSITION_DIRECTIVE only maps
+// "style" today; brain.ts explicitly calls the other three axes "reserved for a future PR") — inventing
+// exact enum members for those two here would be guessing product design, not enforcing an existing one.
+// Until that design lands, those two axes are instead constrained STRUCTURALLY: `value` must be short
+// (well under a full fact's length) and pass the SAME PII-redaction guardrail already applied to fact
+// text (`sanitizeFact`, reused here rather than reimplemented) — reject-in-full (never rewritten) if
+// redaction would have changed it. This still fully closes THIS finding's concrete harm (an un-redacted
+// card/SSN/free-form sentence landing in `value`) for every axis, even though the exact permitted
+// vocabulary for "communication"/"budget_stated" is still open for a future PR to close vocabulary-first.
+const AXIS_VALUE_ENUM: Partial<Record<DispositionAxis, readonly string[]>> = {
+  role: ["for_self", "gift", "b2b"],
+  style: ["ready", "researcher", "deal_seeker", "needs_guidance"],
+};
+const CONTROLLED_VALUE_MAX_CHARS = 40; // "short controlled value" per this module's own distill prompt
+
+/** True iff `d` is a well-formed disposition candidate: a known axis, a value that clears its axis's
+ * controlled-vocabulary check (an exact closed-enum match for "role"/"style"; a short, PII-free,
+ * non-rewritten value for "communication"/"budget_stated" — see the comment above `AXIS_VALUE_ENUM`), a
+ * confidence in [0,1], and — the fairness-structural check — a provenance that is EXACTLY "stated" or
+ * "observed". Anything else (a hallucinated "inferred", a typo, a missing field, an out-of-vocabulary
+ * value) fails closed. Exported (PR-8) so `service.ts` can re-apply the SAME reject-in-full check at the
+ * actual persistence boundary — defense in depth for ANY `FactDistiller` a caller supplies, not just this
+ * module's own `createModelDistiller`. */
 export function isValidDisposition(d: RawDisposition): boolean {
   if (typeof d.axis !== "string" || !DISPOSITION_AXES.includes(d.axis as DispositionAxis)) return false;
   if (typeof d.value !== "string" || !d.value.trim()) return false;
+  const value = d.value.trim();
+  const enumValues = AXIS_VALUE_ENUM[d.axis as DispositionAxis];
+  if (enumValues) {
+    if (!enumValues.includes(value)) return false;
+  } else {
+    if (value.length > CONTROLLED_VALUE_MAX_CHARS) return false;
+    if (sanitizeFact(value) !== value) return false; // any redaction/stripping needed ⇒ reject, don't rewrite
+  }
   if (d.provenance !== "stated" && d.provenance !== "observed") return false;
   if (typeof d.confidence !== "number" || Number.isNaN(d.confidence) || d.confidence < 0 || d.confidence > 1) return false;
   return true;

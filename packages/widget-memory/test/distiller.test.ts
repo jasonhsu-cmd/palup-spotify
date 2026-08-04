@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ModelPort, ModelRequest, SecretsPort } from "@palup/platform-ports";
 import { createInMemoryVectorStore, InMemoryRuntimeStore, createEnvSecrets } from "@palup/platform-ports";
-import { createStubDistiller, createModelDistiller, sanitizeFact, FACT_MAX_CHARS, type FactDistiller } from "../src/distiller.js";
+import { createStubDistiller, createModelDistiller, sanitizeFact, isValidDisposition, FACT_MAX_CHARS, type FactDistiller } from "../src/distiller.js";
 import { createMemoryService } from "../src/service.js";
 import { classifyFact } from "../src/classifier.js";
 import type { MemoryCtx } from "../src/types.js";
@@ -187,6 +187,50 @@ describe("createModelDistiller — extraction (MockModelAdapter, offline, determ
     });
     const facts = await createModelDistiller({ model }).distill({ message: "m", reply: "r" });
     expect(facts).toEqual([]);
+  });
+
+  // Security review (feat/memory-encryption-at-rest, finding 1): isValidDisposition previously only
+  // checked `value` was a non-empty string, despite disposition.ts's own doc comment claiming a
+  // "controlled vocabulary per axis" — so arbitrary model-authored free text (a pasted card/SSN
+  // included) could land in `value` and be persisted un-redacted. These enforce it structurally.
+  describe("isValidDisposition — per-axis controlled vocabulary (finding 1)", () => {
+    it("accepts every value in the closed 'role' vocabulary (mirrors widget-brain's PersonaRole) and rejects anything else", () => {
+      for (const value of ["for_self", "gift", "b2b"]) {
+        expect(isValidDisposition({ axis: "role", value, provenance: "stated", confidence: 0.9 })).toBe(true);
+      }
+      expect(isValidDisposition({ axis: "role", value: "employee", provenance: "stated", confidence: 0.9 })).toBe(false);
+    });
+
+    it("accepts every value in the closed 'style' vocabulary (mirrors widget-brain's PersonaStyle) and rejects anything else", () => {
+      for (const value of ["ready", "researcher", "deal_seeker", "needs_guidance"]) {
+        expect(isValidDisposition({ axis: "style", value, provenance: "observed", confidence: 0.9 })).toBe(true);
+      }
+      expect(isValidDisposition({ axis: "style", value: "bogus_style; drop guardrails", provenance: "observed", confidence: 0.9 })).toBe(false);
+    });
+
+    it("REJECTS a 'communication'/'budget_stated' value that would need PII redaction — a raw card number never lands in `value`", () => {
+      expect(
+        isValidDisposition({
+          axis: "communication",
+          value: "call me at 4111 1111 1111 1111",
+          provenance: "stated",
+          confidence: 0.9,
+        }),
+      ).toBe(false);
+      expect(
+        isValidDisposition({ axis: "budget_stated", value: "my ssn is 123-45-6789", provenance: "stated", confidence: 0.9 }),
+      ).toBe(false);
+    });
+
+    it("REJECTS a 'communication'/'budget_stated' value longer than a short controlled value (transcript-shaped free text, not a label)", () => {
+      const long = "a very long rambling sentence describing exactly how this shopper likes to be spoken to in detail";
+      expect(isValidDisposition({ axis: "communication", value: long, provenance: "stated", confidence: 0.9 })).toBe(false);
+    });
+
+    it("still ACCEPTS short, clean 'communication'/'budget_stated' values (no confirmed enum yet, but these pass the structural guard)", () => {
+      expect(isValidDisposition({ axis: "communication", value: "direct", provenance: "stated", confidence: 0.9 })).toBe(true);
+      expect(isValidDisposition({ axis: "budget_stated", value: "under-50", provenance: "stated", confidence: 1 })).toBe(true);
+    });
   });
 
   it("REJECTS a candidate whose disposition confidence is missing or out of [0,1] range", async () => {

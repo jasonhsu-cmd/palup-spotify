@@ -16,9 +16,10 @@ import type { Sql } from "./sql.js";
 // literally promises "I'll keep it encrypted" — ADR-0015 line 108). This table still stores `text`/
 // `metadata` as plain `text`/`jsonb` columns, byte-identical for `class:"ordinary"` and `class:"special"`
 // rows — but by the time a record REACHES this adapter's `upsert`, a special-category fact's `text` (both
-// the top-level `VectorRecord.text` and `metadata.text`) and any `metadata.disposition[].sourceQuote` are
-// already an AES-256-GCM `CryptoPort` envelope, encrypted in `packages/widget-memory/src/service.ts`
-// BEFORE this (or ANY) `VectorPort` adapter ever sees them — deliberately adapter-agnostic defense in
+// the top-level `VectorRecord.text` and `metadata.text`) and any `metadata.disposition[].value`/
+// `sourceQuote` are already an AES-256-GCM `CryptoPort` envelope, encrypted in
+// `packages/widget-memory/src/service.ts` BEFORE this (or ANY) `VectorPort` adapter ever sees them —
+// deliberately adapter-agnostic defense in
 // depth (ADR-0001: the vector port must stay swappable without re-implementing encryption per adapter).
 // So a DBA, disk snapshot, or log-shipping path reading this table's raw columns sees ciphertext for
 // special-category rows, not a health fact in the clear; `metadata.encrypted` (a plain boolean, never the
