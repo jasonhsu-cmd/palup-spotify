@@ -77,7 +77,17 @@ describe("T11 governance — memory recall on the shopper brain (Inv 10: additiv
       "what do you recommend for dry skin?",
     );
 
-    expect(memory.recall).toHaveBeenCalledWith({ tenantId: "demo", anonId: "guest-recall-1" });
+    // B7 (2026-08-05): the recall port now also receives THIS TURN's server-derived consent context, so
+    // an implementation can apply retention correctly. widget-backend's wrapper previously hardcoded
+    // "unknown" for both tiers, which made the sliding-TTL renewal structurally unreachable on /chat.
+    // `region` is undefined here because TENANT_SIGNALS carries none — asserted explicitly rather than
+    // omitted, so a regression that silently stops threading it fails this test.
+    expect(memory.recall).toHaveBeenCalledWith({
+      tenantId: "demo",
+      anonId: "guest-recall-1",
+      region: undefined,
+      consent: { memorySpecial: "in" },
+    });
     expect(d.flags).toContain("memory:recalled");
     const req = spy.mock.calls[0]![0] as ModelRequest;
     const sys = req.messages.find((m) => m.role === "system")?.content ?? "";
@@ -164,7 +174,12 @@ describe("PR-8 — read-time consent gates the WHOLE recall surface (memory:reca
     expect(d.flags).not.toContain("memory:recalled");
   });
 
-  it("consent WITHDRAWN (unknown) for the ordinary tier → still no memory:recalled — a withdrawn-consent shopper is never recalled", async () => {
+  // REGION-SCOPED as of B7 (owner decision 2026-08-05). `TENANT_SIGNALS` carries no `region`, and an
+  // absent region is treated exactly like eu/uk/other (fail-closed) — so this case is about a GDPR-regime
+  // shopper. An earlier title said "a withdrawn-consent shopper is never recalled" full stop; that is no
+  // longer true in the US opt-out regime, where "unknown" now reads the same as "in" for ordinary facts.
+  // See the B7 block below for the US half. The rule itself is unchanged here.
+  it("GDPR regime (no/absent region): consent WITHDRAWN (unknown) for the ordinary tier → still no memory:recalled", async () => {
     const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
     const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
     const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
@@ -175,6 +190,21 @@ describe("PR-8 — read-time consent gates the WHOLE recall surface (memory:reca
     );
 
     expect(d.flags).not.toContain("memory:recalled");
+  });
+
+  it("EXPLICIT eu region + unknown ordinary consent → still no memory:recalled (B7 must not touch GDPR regions)", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", region: "eu", consent: { memoryOrdinary: "unknown" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).not.toContain("memory:recalled");
+    const sys = (spy.mock.calls[0]![0] as ModelRequest).messages.find((m) => m.role === "system")?.content ?? "";
+    expect(sys).not.toContain("REMEMBERED CONTEXT");
   });
 
   it("a SPECIAL recalled fact needs memorySpecial specifically — memoryOrdinary alone is not enough", async () => {
@@ -225,5 +255,106 @@ describe("PR-8 — read-time consent gates the WHOLE recall surface (memory:reca
     const sys = req.messages.find((m) => m.role === "system")?.content ?? "";
     expect(sys).toContain("prefers fragrance-free products");
     expect(sys).not.toContain("tree-nut allergy");
+  });
+});
+
+// B7 (owner decision, 2026-08-05): "unknown and yes work the same in non-GDPR region."
+//
+// THE ASYMMETRY THIS CLOSES: `decideMemoryWrite` (widget-memory/src/consent.ts) applies the US OPT-OUT
+// regime to ordinary facts — it WRITES unless the shopper explicitly opted out (`consent1 !== "out"`) —
+// while read-time consent required the literal `"in"`. So in the US the system accumulated ordinary facts
+// it could never surface: written, retained, never usable. Recorded as checklist row B7 and left as a
+// product decision rather than a bug, because either bar could have moved. The owner moved the READ bar
+// down to match the write bar, in non-GDPR regions only.
+//
+// SCOPE — deliberately narrow, and each half is pinned below:
+//   * ORDINARY tier only, and only where `region === "us"`. Every other region (eu/uk/other/absent) is
+//     unchanged and still requires an explicit "in".
+//   * SPECIAL-CATEGORY IS UNTOUCHED IN EVERY REGION, including the US: Art-9 memory always requires an
+//     explicit `memorySpecial === "in"`. That is not a code preference — it is the ADR-0015 amendment
+//     ratified by legal + the named owner (2026-08-04), and B7 does not reopen it.
+//   * WRITE behavior is unchanged in every region; this moves only what may be SURFACED.
+describe("B7 — non-GDPR read/write symmetry: in the US, 'unknown' reads the same as 'in' for ORDINARY facts", () => {
+  it("US + ordinary + consent UNKNOWN → the fact surfaces (memory:recalled + REMEMBERED CONTEXT)", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", region: "us", consent: { memoryOrdinary: "unknown" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).toContain("memory:recalled");
+    const sys = (spy.mock.calls[0]![0] as ModelRequest).messages.find((m) => m.role === "system")?.content ?? "";
+    expect(sys).toContain("REMEMBERED CONTEXT");
+    expect(sys).toContain("prefers fragrance-free products");
+  });
+
+  it("US + ordinary + NO consent object at all → same as unknown, so it surfaces", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide({ ...TENANT_SIGNALS, cart: "empty", region: "us" } as never, "what do you recommend for dry skin?");
+
+    expect(d.flags).toContain("memory:recalled");
+  });
+
+  it("US + ordinary + explicit OUT → still nothing. An opt-out is still an opt-out", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "prefers fragrance-free products", class: "ordinary" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", region: "us", consent: { memoryOrdinary: "out" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).not.toContain("memory:recalled");
+    const sys = (spy.mock.calls[0]![0] as ModelRequest).messages.find((m) => m.role === "system")?.content ?? "";
+    expect(sys).not.toContain("REMEMBERED CONTEXT");
+  });
+
+  it("LEGAL BOUNDARY — US + SPECIAL + memorySpecial UNKNOWN → still nothing, even though ordinary is now permissive there", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "tree-nut allergy", class: "special" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    // memoryOrdinary "in" too, so nothing about the ordinary tier can be blamed for the refusal.
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", region: "us", consent: { memoryOrdinary: "in", memorySpecial: "unknown" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).not.toContain("memory:recalled");
+    const sys = (spy.mock.calls[0]![0] as ModelRequest).messages.find((m) => m.role === "system")?.content ?? "";
+    expect(sys).not.toContain("tree-nut allergy");
+  });
+
+  it("LEGAL BOUNDARY — US + SPECIAL + memorySpecial OUT → nothing", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "tree-nut allergy", class: "special" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", region: "us", consent: { memoryOrdinary: "in", memorySpecial: "out" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).not.toContain("memory:recalled");
+  });
+
+  it("US + SPECIAL + explicit IN → surfaces, so the special path is gated, not broken", async () => {
+    const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+    const memory = recallReturning([{ text: "tree-nut allergy", class: "special" }]);
+    const brain = createBrain({ complete: spy }, new StaticGroundingAdapter(), DEFAULT_POLICY, undefined, "shopper-demo", memory);
+
+    const d = await brain.decide(
+      { ...TENANT_SIGNALS, cart: "empty", region: "us", consent: { memoryOrdinary: "in", memorySpecial: "in" } } as never,
+      "what do you recommend for dry skin?",
+    );
+
+    expect(d.flags).toContain("memory:recalled");
   });
 });

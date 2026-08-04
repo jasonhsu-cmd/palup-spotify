@@ -1,4 +1,5 @@
 import type { Consent, Signals } from "@palup/widget-brain";
+import { consentPermits } from "@palup/widget-brain";
 
 // Pure decision table, no I/O (ADR-0015 "Consent UX" + Inv 3/9). Region + the two consent signals are
 // server-derived (never client-forced) and passed in by the caller; this module only decides whether a
@@ -102,8 +103,13 @@ export function mergeAccountConsent(account: ConsentTiers, guest: ConsentTiers |
 
 export function decideMemoryWrite(i: ConsentInputs): WriteCapability {
   const isUs = i.region === "us";
-  const mayWriteOrdinary = isUs ? i.consent1 !== "out" : i.consent1 === "in";
-  const mayWriteSpecial = i.consent2 === "in";
+  // Delegates to the SINGLE consent rule (@palup/widget-brain consent-rules.ts), which the read gate
+  // (brain.ts `consentedAtReadTime`) and the sliding-retention renewal (service.ts) also call. The rule
+  // used to be written out here AND again at the read site with a different bar, which is exactly how
+  // checklist row B7 arose — the US wrote ordinary facts on "unknown" and could then never surface them.
+  // One definition, three callers; changing the regime is now a one-line change that moves all of them.
+  const mayWriteOrdinary = consentPermits(i.region, "ordinary", i.consent1);
+  const mayWriteSpecial = consentPermits(i.region, "special", i.consent2);
 
   const reason = [
     isUs
