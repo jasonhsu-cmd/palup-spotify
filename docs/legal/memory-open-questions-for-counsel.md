@@ -37,19 +37,42 @@ tri-states, no consent text version, no timestamp of the copy shown — see Q9).
 
 ---
 
-## Q2 — 30-day retention as a *sliding* window with no absolute cap
+## Q2 — 30-day retention as a *sliding* window with no absolute cap — and a wiring gap that changes the answer
 
-**What the code does.** Both classes retain 30 days (`packages/widget-memory/src/retention.ts:24,31`),
-measured **from last activity**: on a return visit, `recall` re-stamps a still-consented fact's expiry to
-`now + 30d`, at most once per day, each renewal audited as `ttl_renew`
-(`packages/widget-memory/src/service.ts:158-168`; `retention.ts:33-37`). An expired fact is never served and
-never renewed (`service.ts:154`).
+**What the memory package implements.** Both classes retain 30 days
+(`packages/widget-memory/src/retention.ts:20-31`), measured **from last activity**: on a return visit,
+`recall` re-stamps a still-consented fact's expiry to `now + 30d`, at most once per day, each renewal
+audited as `ttl_renew` (`packages/widget-memory/src/service.ts:158-168`; `retention.ts:33-37`). An expired
+fact is never served and never renewed (`service.ts:154`). Because the window slides, **this is not a
+30-day cap** — a fact can be held well beyond 30 days from first capture, for as long as the shopper keeps
+returning, with no absolute ceiling anywhere in the code.
 
-**The decision.** There is **no absolute ceiling** in the code — a shopper who visits monthly can have a
-fact retained indefinitely. Is "30 days of inactivity" defensible as *the* retention period in the notice,
-or must the notice describe it differently (e.g. "up to 30 days after your last visit, renewed while you
-keep coming back"), and/or must an absolute cap (12 months? 24?) be added? A cap would be a code change in
-`retention.ts`, not a copy change.
+**What the current wiring does — the renewal branch can never fire.** Renewal is gated on
+`ctx.consent1`/`ctx.consent2 === "in"` (`service.ts:164`). The only production caller of `recall` is the
+memory-port adapter at `packages/widget-backend/src/server.ts:218-231`, and it passes
+`consent1: "unknown", consent2: "unknown"` **hardcoded** (`server.ts:227-228`); the brain's own recall port
+has no consent field in its signature at all (`packages/widget-brain/src/types.ts:137-139`, called at
+`brain.ts:1127`). We searched `packages/` for every `.recall(` call site: those two are the only non-test
+ones. So as wired today **no fact would ever be renewed, no `ttl_renew` audit would ever be emitted, and
+retention would be a fixed 30 days from write.** (The in-code comment at `server.ts:224-226` stating that
+"recall itself never consults them" is out of date — recall does consult them, for renewal. Correcting that
+is a code change and is deliberately not made in this docs-only change.)
+
+**The decision — now in two parts.**
+
+(a) **Which model should the instruments describe?** The sliding model is what ADR-0015's 2026-08-04
+amendment and `retention.ts` specify, and closing the wiring gap is a few lines; the fixed-30-day model is
+what a deployment of today's code would actually do. These drafts describe the sliding model and flag the
+gap, but counsel should say which one the notice and DPA are to commit to, because the shopper-facing copy
+differs ("30 days after your last visit" vs "30 days").
+
+(b) **If sliding: is "30 days of inactivity" defensible as *the* retention period**, or must the notice
+describe it differently (e.g. "up to 30 days after your last visit, renewed while you keep coming back"),
+and/or must an absolute cap (12 months? 24?) be added? A cap would be a code change in `retention.ts`, not
+a copy change.
+
+**Note on scope.** Neither model describes durable data today — the only fact-storage adapter in the repo is
+in-memory (Q11), so retention is currently bounded above by the lifetime of the serving process.
 
 ---
 
@@ -82,19 +105,29 @@ counsel wants special-category data held for less time, that is a one-line const
 - per-IP and per-tenant rate limits (`server.ts:661-693`) and the operator kill switch (`server.ts:697-700`).
 
 There is **no proof of possession**: whoever presents a well-formed anonymous id can erase that subject's
-memory. The id itself is 128 bits of CSPRNG randomness (`identity.ts:35-37`), so guessing is not the threat
-model; exposure is — shared/kiosk devices, `localStorage` readable by any script on the storefront page
-(`packages/widget/public/index.html:203-208`), logs, or a copied link.
+memory. Guessing is not the intended threat model — the id is 128 random bits, base32-encoded — but note
+**where it is actually minted**: in the browser (`packages/widget/public/index.html:194-202`, called at
+`:342`), not by `identity.ts:35-37` (that is the server-side equivalent and is not on this path). The
+browser mint prefers `crypto.getRandomValues` but **falls back to `Math.random()` if it is unavailable**
+(`index.html:197`), which is not a cryptographic RNG. That fallback is rare in modern browsers, but since
+this question asks counsel to accept a bearer design on the strength of unguessability, the premise should
+be stated accurately. The larger exposure risk is unchanged — shared/kiosk devices, `localStorage` readable
+by any script on the storefront page (`index.html:203-208`), logs, or a copied link.
 
 **The same residual applies to `POST /consent`, and arguably matters more**: it accepts `anonId` under the
-identical validation (`server.ts:636-643`) and overwrites that subject's consent record — so a third party
-who learns an id can *grant* Consent 1/Consent 2 on someone else's behalf, not just revoke it.
+identical format-only validation and writes the two consent values **verbatim from the request body**
+(`server.ts:600-605,636-643`), overwriting that subject's consent record — so a third party who learns an
+id can *grant* Consent 1/Consent 2 on someone else's behalf, not just revoke it. This is the precise reason
+neither draft claims that "the client cannot assert its own consent": the *subject* is server-derived and
+unforgeable, the *choice* is not.
 
 **The decision.** Is a bearer-style pseudonymous identifier acceptable authorization for (a) an irreversible
 erasure and (b) a consent grant, in the target jurisdictions — or must go-live require
 `WIDGET_AUTH_REQUIRED=true` plus a per-subject proof (e.g. a server-signed token bound to the anonymous id)?
 Note the erasure direction is fail-safe from a privacy standpoint (it deletes data) while the consent
-direction is fail-unsafe (it enables retention). Engineering tracks the auth posture as go-live item #3.
+direction is fail-unsafe (it enables retention). Engineering intends to enforce `WIDGET_AUTH_REQUIRED`
+before enablement; that intent is recorded in `memory-dpa-addendum-draft.md` §7 item 7 and nowhere else
+inspectable in this repository.
 
 ---
 
@@ -221,9 +254,13 @@ code** — the `store.sweepExpired()` at `server.ts:964` is the unrelated runtim
 instance handling the request.
 
 **The decision.** Does a retention commitment in the notice/DPA require *deletion* on schedule, or is
-"never served after expiry" sufficient for the period between expiry and sweep? (Engineering intends a
-scheduled sweep and a durable adapter — go-live item #1 — but counsel should state the requirement so it is
-built to spec rather than to convenience.)
+"never served after expiry" sufficient for the period between expiry and sweep? And separately: **until a
+durable adapter exists, may the notice/DPA make any retention or erasure representation at all**, given
+that today's answer to "how long is it kept" is "until the process restarts" and today's answer to "is it
+deleted when I ask" is "on the one instance that received the request"? Engineering intends both a
+scheduled sweep and a durable adapter — a durable adapter is in development on a **separate, unmerged
+branch** and is not part of the code described in these drafts — but counsel should state the requirement
+so it is built to spec rather than to convenience.
 
 ---
 
@@ -287,8 +324,15 @@ being linked to their account, and is the irreversibility (the pre-merge namespa
 be encrypted at rest. There is **no encryption in `packages/widget-memory`** — the only `node:crypto` uses are
 `randomUUID`, `randomBytes` and the audit `sha256` (`service.ts:1`, `identity.ts:1`, `audit.ts:1`).
 Application-layer AES-256-GCM exists elsewhere for OAuth grants
-(`packages/widget-backend/src/customer-grant-store.ts:28-48`) and is not applied here. Engineering tracks this
-as go-live item #2.
+(`packages/widget-backend/src/customer-grant-store.ts:28-48`) and is not applied here. There is also no
+at-rest store to encrypt yet (Q11). Engineering intends to close this before enablement; that intent is
+recorded in `memory-dpa-addendum-draft.md` §7 item 1 and nowhere else inspectable in this repository.
+
+**Copy hazard flagged for counsel.** ADR-0015's *illustrative* Consent-2 prompt copy contains the phrase
+"I'll keep it encrypted" (`docs/adr/0015-cross-visit-memory-eu-consent-gated.md:105-108`). The copy actually
+shipped in the widget does **not** make that claim (`packages/widget/public/index.html:277`), and neither do
+these drafts. It must not be reinstated in any shopper- or merchant-facing text unless and until the control
+exists.
 
 **The decision.** Is encryption at rest (application-layer, over and above whatever the eventual storage
 engine provides) a **blocking** precondition for enabling the health tier, and if so must it be
@@ -303,8 +347,11 @@ Not code questions — listed so they are not forgotten:
 
 1. Whether a **DPIA / Art. 35 assessment** is required before enablement (special-category data + systematic
    monitoring of shopper behavior). Nothing of the kind exists in this repo.
-2. The **lawful basis** framing itself: ADR-0015 assumes Art. 6 for Consent 1 and Art. 9(2)(a) for Consent 2 —
-   an engineering assumption, not a legal determination.
+2. The **lawful basis** framing itself. ADR-0015 says only "(ordinary personal data, Art. 6)" and "(explicit
+   special-category consent, Art. 9)" (`docs/adr/0015-cross-visit-memory-eu-consent-gated.md:102,105`) —
+   we grepped the ADR and the string "9(2)" appears nowhere in it, so any narrowing to Art. 9(2)(a) is an
+   inference, not the ADR's own framing. Either way it is an engineering assumption, not a legal
+   determination.
 3. The **sub-processor exhibit** for the memory path specifically (model provider + eventual vector store) and
    the change-notice/objection mechanics (`provisions-brief.md` §4).
 4. **International transfers / residency**: nothing in the memory code addresses data location; residency is
@@ -314,3 +361,27 @@ Not code questions — listed so they are not forgotten:
    `audit.ts:58-64`).
 6. Whether the **merchant** (as controller) must publish its own shopper-facing notice text before PalUp may
    enable the feature for that store, and who supplies/approves that text.
+
+---
+
+## Q18 — The manage panel displays "off" while ordinary memory is being written (US default)
+
+**What the code does.** The "What I remember" panel's two checkboxes are rendered checked **only when the
+stored value is literally `"in"`** (`packages/widget/public/index.html:291-296,298-303`). A US shopper who
+has never answered sits at `consent1 = "unknown"` — the opt-out card's primary button ("Got it")
+deliberately makes no server call, because only a deviation from the regional default is recorded
+(`index.html:253-257`). But `"unknown"` **permits** ordinary writes under the US opt-out regime
+(`packages/widget-memory/src/consent.ts:51`). Net effect in the default US configuration: the shopper opens
+the panel, sees **"Preferences" unchecked**, and ordinary notes are nonetheless being written about them.
+
+The same subject also has every *read* blocked, because recall requires a literal `"in"`
+(`packages/widget-brain/src/brain.ts:458-460,1135`) — so the data is written, never surfaced, and (per Q2)
+never renewed. Q5 covers the write/read asymmetry; this question is specifically about **what the interface
+tells the shopper while that is happening**.
+
+**The decision.** Does a control surface that displays "off" for processing that is in fact occurring
+undermine the validity, transparency, or fairness of the consent artifact — and if so, what is the fix:
+(a) render the US opt-out state as a distinct third state ("on by default — turn off"), (b) record an
+affirmative `"in"` when the US shopper acknowledges the notice (which also resolves Q5(b)), or (c) defer
+writes until an explicit choice exists? All three are code changes, and (b) and (c) change what data is
+collected — so this should be decided before, not after, the copy is finalized.
