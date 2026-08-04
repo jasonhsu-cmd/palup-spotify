@@ -111,7 +111,7 @@ function parseEmbedKeys(): Record<string, string> {
 export function assertMemoryAuthCoupling(memoryEnabled: boolean, widgetAuthRequired: boolean): void {
   if (memoryEnabled && !widgetAuthRequired) {
     throw new Error(
-      "memory is enabled (isMemoryEnabled()) but WIDGET_AUTH_REQUIRED is not \"true\" — refusing to " +
+      "memory is enabled for this process but WIDGET_AUTH_REQUIRED is not \"true\" — refusing to " +
         "boot with the memory endpoints (POST /consent, POST /forget) reachable unauthenticated. Set " +
         "WIDGET_AUTH_REQUIRED=true before/at enabling memory (both prior security reviews recorded this " +
         "as an enablement precondition).",

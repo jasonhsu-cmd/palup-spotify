@@ -205,6 +205,52 @@ describe("retention — sliding TTL survives a same-cycle sweep (security review
   });
 });
 
+describe("retention — sweepExpired never deletes without its audit (security review, HIGH)", () => {
+  it("a FAILING ttl_sweep audit aborts the delete for that subject — no deleted-but-unaudited records", async () => {
+    // The guarantee is ordering, not luck: audit first, and only delete if it committed. If the audit
+    // throws and we deleted anyway, a destructive autonomous action would be invisible in the immutable
+    // log (ADR-0015 Inv 6 / NN#5). Reverting the order makes this test fail.
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const namespace = subjectNamespace("acme", "guest-auditfail");
+    const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await vector.upsert(namespace, [
+      { id: "expired-1", text: "a", metadata: { text: "a", class: "ordinary", expiresAt: past } },
+    ]);
+    // Audit surface that rejects — a distressed/unavailable audit store.
+    const failingAudit = {
+      ...runtimeStore,
+      audit: async () => { throw new Error("audit store unavailable"); },
+    } as unknown as InMemoryRuntimeStore;
+
+    const deleted = await sweepExpired(
+      { vector, audit: failingAudit },
+      "acme",
+      ["guest-auditfail"],
+      new Date("2026-01-01T00:00:00.000Z"),
+    );
+
+    expect(deleted).toBe(0); // nothing counted as deleted...
+    const remaining = await vector.query(namespace, { text: "", k: 10 });
+    expect(remaining.map((r) => r.id)).toEqual(["expired-1"]); // ...and the record is genuinely still there
+  });
+
+  it("a subject whose audit succeeds is still swept normally (the guard does not block the happy path)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const namespace = subjectNamespace("acme", "guest-auditok");
+    const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+    await vector.upsert(namespace, [
+      { id: "expired-1", text: "a", metadata: { text: "a", class: "ordinary", expiresAt: past } },
+    ]);
+
+    const deleted = await sweepExpired({ vector, audit: runtimeStore }, "acme", ["guest-auditok"], new Date("2026-01-01T00:00:00.000Z"));
+    expect(deleted).toBe(1);
+    expect(await vector.query(namespace, { text: "", k: 10 })).toEqual([]);
+    expect((await runtimeStore.readAudit({ tenantId: "acme" })).map((r) => r.action)).toContain("ttl_sweep");
+  });
+});
+
 describe("retention — sweepExpired (reclaims storage; audited)", () => {
   it("deletes exactly the expired ids for the given subjects and emits a ttl_sweep audit", async () => {
     const vector = createInMemoryVectorStore();
