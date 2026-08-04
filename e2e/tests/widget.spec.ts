@@ -50,3 +50,197 @@ test("the sign-in control opens the Customer Account OAuth login via window.open
   expect(popup.url()).toContain("/auth/customer/login");
   await popup.close();
 });
+
+// PR-11b — shopper consent UX + durable anonId. The mock-mode backend this suite runs against always
+// returns memoryEnabled:false (the double gate, flag.ts's hardcoded MEMORY_ADR_ACCEPTED — see the note in
+// the PR description: driving memoryEnabled:true through this real E2E server needs a seam the double
+// gate deliberately doesn't offer). So:
+//   - "memory OFF" below runs against the REAL, unmocked backend — this is genuinely the inert default.
+//   - "memory ON" below drives the enabled path by intercepting /chat (and observing /consent, /forget)
+//     with Playwright route mocking — a real browser executing the REAL widget code, with only the
+//     network response faked. This is the documented "unit-testable seam" for the frontend enabled path.
+test.describe("PR-11b — memory OFF (default, real unmocked backend): fully inert", () => {
+  test("no consent UI, no anonId minted/sent, no /consent or /forget calls, disclosures intact", async ({ page }) => {
+    let consentCalls = 0;
+    let forgetCalls = 0;
+    await page.route("**/consent", (route) => {
+      consentCalls++;
+      return route.continue();
+    });
+    await page.route("**/forget", (route) => {
+      forgetCalls++;
+      return route.continue();
+    });
+    let lastChatBody: Record<string, unknown> | null = null;
+    await page.route("**/chat", (route) => {
+      lastChatBody = route.request().postDataJSON();
+      return route.continue();
+    });
+
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("tell me about the serum");
+    await page.getByTestId("send").click();
+    // NOTE: the widget always shows a greeting `agent-msg` on load, so ".last().toBeVisible()" would be
+    // trivially true before the real reply even arrives — poll on the captured request body instead.
+    await expect.poll(() => lastChatBody).toBeTruthy();
+
+    const signals = (lastChatBody as { signals?: Record<string, unknown> }).signals;
+    expect(signals).toBeTruthy();
+    expect(Object.prototype.hasOwnProperty.call(signals, "anonId")).toBe(false);
+
+    await expect(page.locator('[data-testid="consent-prompt"]')).toHaveCount(0);
+    await page.locator("#gear").click();
+    await expect(page.locator('[data-testid="manage-memory"]')).toHaveCount(0);
+
+    expect(consentCalls).toBe(0);
+    expect(forgetCalls).toBe(0);
+
+    const hasMemKey = await page.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("palup.widget.memory")));
+    expect(hasMemKey).toBe(false);
+
+    // The AI + PalUp disclosures must still be present, unchanged.
+    await expect(page.locator("#whStatus")).toContainText("AI-generated");
+    await expect(page.locator(".powered")).toContainText("Powered by PalUp");
+  });
+});
+
+test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () => {
+  test("opt_in (EU/UK): first-run prompt shown once, accepting posts consent + anonId persists + is sent on the next turn + manage panel reflects it", async ({
+    page,
+  }) => {
+    let consentBody: Record<string, unknown> | null = null;
+    await page.route("**/consent", async (route) => {
+      consentBody = route.request().postDataJSON();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+    });
+    const chatResponse = (extra: Record<string, unknown> = {}) =>
+      JSON.stringify({
+        reply: "Sure — here is what I would suggest.",
+        mode: "sales",
+        pitch: "soft",
+        escalate: false,
+        outbound: false,
+        flags: [],
+        servedBy: "prop-0",
+        memoryEnabled: true,
+        consentMode: "opt_in",
+        ...extra,
+      });
+    let secondChatBody: Record<string, unknown> | null = null;
+    let chatCalls = 0;
+    await page.route("**/chat", async (route) => {
+      chatCalls++;
+      if (chatCalls === 2) secondChatBody = route.request().postDataJSON();
+      await route.fulfill({ status: 200, contentType: "application/json", body: chatResponse() });
+    });
+
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("tell me about the serum");
+    await page.getByTestId("send").click();
+
+    const prompt = page.locator('[data-testid="consent-prompt"]');
+    await expect(prompt).toBeVisible();
+    await expect(prompt.locator('[data-testid="consent-title"]')).toHaveText("Want me to remember this for next time?");
+    await expect(prompt.locator('[data-testid="consent-body"]')).toHaveText(
+      "I can keep a few preferences — like fragrance-free — so you don't have to repeat yourself on your next visit. Just for this store, kept for 30 days after you last drop by, and you can clear it anytime.",
+    );
+    await prompt.locator('[data-testid="consent-primary"]').click();
+    await expect(prompt).toHaveCount(0);
+
+    // postConsent's own fetch is fire-and-forget from the click handler's point of view — poll for it.
+    await expect.poll(() => consentBody).toBeTruthy();
+    expect(consentBody).toMatchObject({ memoryOrdinary: "in", memorySpecial: "unknown" });
+    const anonId = (consentBody as { anonId?: string }).anonId as string;
+    expect(anonId).toMatch(/^[A-Z2-7]{16,64}$/);
+
+    const storedAnonId = await page.evaluate(() => {
+      const k = Object.keys(localStorage).find((key) => key.startsWith("palup.widget.memory"));
+      return k ? JSON.parse(localStorage.getItem(k) as string).anonId : null;
+    });
+    expect(storedAnonId).toBe(anonId);
+
+    // A subsequent /chat call now carries the anonId.
+    await page.getByTestId("chat-input").fill("another question");
+    await page.getByTestId("send").click();
+    await expect.poll(() => secondChatBody).toBeTruthy();
+    expect(((secondChatBody as { signals?: Record<string, unknown> })?.signals as Record<string, unknown>)?.anonId).toBe(anonId);
+
+    // The prompt never reappears for this (unchanged) anonId.
+    await expect(page.locator('[data-testid="consent-prompt"]')).toHaveCount(0);
+
+    // Manage panel reflects the accepted preferences consent.
+    await page.locator("#gear").click();
+    await expect(page.locator('[data-testid="manage-memory"]')).toBeVisible();
+    await expect(page.locator('[data-testid="manage-memory-heading"]')).toHaveText("What I remember");
+    await expect(page.locator('[data-testid="manage-memory-toggle-ordinary"]')).toBeChecked();
+    await expect(page.locator('[data-testid="manage-memory-toggle-special"]')).not.toBeChecked();
+  });
+
+  test("opt_out (US): notice shown once, declining posts an explicit opt-out, toggling health-notes on posts consent, and forget-me erases + mints a new anonId", async ({
+    page,
+  }) => {
+    const consentBodies: Record<string, unknown>[] = [];
+    await page.route("**/consent", async (route) => {
+      consentBodies.push(route.request().postDataJSON());
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+    });
+    let forgetBody: Record<string, unknown> | null = null;
+    await page.route("**/forget", async (route) => {
+      forgetBody = route.request().postDataJSON();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+    });
+    await page.route("**/chat", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "hi there",
+          mode: "sales",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          memoryEnabled: true,
+          consentMode: "opt_out",
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("hello");
+    await page.getByTestId("send").click();
+
+    const prompt = page.locator('[data-testid="consent-prompt"]');
+    await expect(prompt).toBeVisible();
+    await expect(prompt.locator('[data-testid="consent-title"]')).toHaveText("I remember your preferences to help you shop.");
+    await expect(prompt.locator('[data-testid="consent-body"]')).toHaveText(
+      "I keep a few basics — like fragrance-free — just for this store, for 30 days after your last visit. You're in control: manage or turn this off anytime.",
+    );
+    await prompt.locator('[data-testid="consent-secondary"]').click(); // "Don't remember me"
+    await expect(prompt).toHaveCount(0);
+
+    await expect.poll(() => consentBodies.length).toBe(1);
+    expect(consentBodies[0]).toMatchObject({ memoryOrdinary: "out", memorySpecial: "unknown" });
+    const firstAnonId = consentBodies[0].anonId as string;
+
+    await page.locator("#gear").click();
+    await page.locator('[data-testid="manage-memory-toggle-special"]').check();
+    await expect.poll(() => consentBodies.length).toBe(2);
+    expect(consentBodies[1]).toMatchObject({ anonId: firstAnonId, memorySpecial: "in" });
+
+    await page.locator('[data-testid="manage-memory-forget"]').click();
+    await expect.poll(() => forgetBody).toBeTruthy();
+    expect((forgetBody as { anonId?: string }).anonId).toBe(firstAnonId);
+
+    const confirmation = page.locator('[data-testid="manage-memory-confirmation"]');
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation).toHaveText("Done — I've cleared what I remembered and started fresh.");
+
+    const newAnonId = await page.evaluate(() => {
+      const k = Object.keys(localStorage).find((key) => key.startsWith("palup.widget.memory"));
+      return k ? JSON.parse(localStorage.getItem(k) as string).anonId : null;
+    });
+    expect(newAnonId).not.toBe(firstAnonId);
+  });
+});
