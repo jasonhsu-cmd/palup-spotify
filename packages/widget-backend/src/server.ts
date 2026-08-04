@@ -22,7 +22,7 @@ import {
   createMeteringModelPort,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject, classifyFact } from "@palup/widget-memory";
+import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject, classifyFact, sweepExpired } from "@palup/widget-memory";
 import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -96,6 +96,27 @@ function parseEmbedKeys(): Record<string, string> {
   }
   if (Object.keys(map).length === 0) map["demo-embed-key"] = "demo";
   return map;
+}
+// Go-live #3 — couple memory enablement to enforced widget auth. During the WIDGET_AUTH_REQUIRED
+// rollout window (default off) POST /consent and the DESTRUCTIVE POST /forget are callable
+// unauthenticated against RUNTIME_TENANT (both routes only 401 an unauthenticated caller when
+// WIDGET_AUTH_REQUIRED is true — see their handlers below). Both prior security reviews recorded "set
+// WIDGET_AUTH_REQUIRED=true before/at the flip" as a memory-enablement precondition. Rather than
+// flipping WIDGET_AUTH_REQUIRED's OWN default (which would change behavior for every existing
+// non-memory deployment), make the coupling STRUCTURAL and fail-closed: refuse to boot rather than
+// silently serve memory endpoints unauthenticated — mirrors how `createRuntimeStore` fails fast on
+// PALUP_REQUIRE_DATABASE_URL (state-postgres/factory.ts) rather than silently degrading to a
+// per-process store. Exported (and taking plain booleans, not reading env/gates itself) so a test can
+// exercise the guard directly without needing to flip the real flag.ts double gate.
+export function assertMemoryAuthCoupling(memoryEnabled: boolean, widgetAuthRequired: boolean): void {
+  if (memoryEnabled && !widgetAuthRequired) {
+    throw new Error(
+      "memory is enabled (isMemoryEnabled()) but WIDGET_AUTH_REQUIRED is not \"true\" — refusing to " +
+        "boot with the memory endpoints (POST /consent, POST /forget) reachable unauthenticated. Set " +
+        "WIDGET_AUTH_REQUIRED=true before/at enabling memory (both prior security reviews recorded this " +
+        "as an enablement precondition).",
+    );
+  }
 }
 const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
 // 48h sliding (reset each turn): this is conversation-scoped CONTROL state (safety latch / open issues
@@ -283,6 +304,12 @@ export async function buildServer(opts?: {
   const WIDGET_TOKEN_SECRET = process.env.WIDGET_TOKEN_SECRET;
   const WIDGET_TOKEN_TTL_SECONDS = posInt("WIDGET_TOKEN_TTL_SECONDS", 3_600);
   const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
+  // Checked against isMemoryEnabled() itself (the real double gate: flag.ts's MEMORY_ADR_ACCEPTED stays
+  // hardcoded false, so this can never fire in real production until a separate, reviewed ADR-flip PR
+  // lands) rather than the PR-8 `memoryServiceEnabled` test-seam mirror computed above — that seam
+  // exists so OTHER tests can exercise remember()/recall() in isolation without also standing up
+  // widget-token auth, and must stay unaffected by this guard.
+  assertMemoryAuthCoupling(isMemoryEnabled(), WIDGET_AUTH_REQUIRED);
   const EMBED_KEYS = parseEmbedKeys();
   const widgetIdentity = createWidgetTokenIdentity(WIDGET_TOKEN_SECRET);
   // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
@@ -953,6 +980,30 @@ export async function buildServer(opts?: {
         } catch (e) {
           console.error(`[/chat] memory remember error:`, (e as Error).message);
         }
+      }
+      // ADR-0015 Inv 4 ("expiry is enforced, not aspirational") — opportunistic PER-SUBJECT retention
+      // reclamation. `sweepExpired` (widget-memory/src/retention.ts) physically deletes what TTL-on-read
+      // (service.ts recall) only ever HIDES; it had no production caller until now (that module's own
+      // doc comment tracked the gap as a go-live item). With the ephemeral dev vector store a process
+      // restart wiped everything anyway, so the gap was low-risk; the durable, portable VectorPort
+      // adapter (state-postgres) removes that safety net, so an expired — or consent-withdrawn — Art-9
+      // fact could otherwise sit in durable storage indefinitely, and a subject's namespace could grow
+      // past erasure.ts's enumeration cap.
+      //
+      // Deliberately scoped to ONLY the subject already being served THIS turn (`signals.anonId`) —
+      // never an enumeration of every subject for the tenant (that would be an unbounded scan on the
+      // serving path, the exact hazard retention.ts's own comment says a cron/admin-endpoint sweep would
+      // need to solve separately). This is genuinely a narrower guarantee than a full periodic sweep: a
+      // subject who never returns keeps their expired-but-undeleted fact until *someone* triggers a sweep
+      // for them — TTL-on-read still means it is never served, so Inv 4's SERVING guarantee holds
+      // regardless; only the RECLAMATION timing for abandoned subjects is deferred to a future scheduled
+      // job (tracked in retention.ts). Fire-and-forget (mirrors the reqCount reclamation block below) so
+      // a slow/failing vector call can never delay or break the shopper's reply. Kill-switch respectful
+      // (NN#4) — a halted tenant/agent gets no background action either, not even benign cleanup. Gated
+      // on `memoryService` (this instance's live double gate, INCLUDING the PR-8 test seam, so this is
+      // provably exercised in tests without waiting on the ADR flip) so it never runs when memory is off.
+      if (memoryService && signals.anonId && !kill) {
+        void sweepExpired({ vector: vectorPort, audit: store }, tenantId, [signals.anonId]).catch(() => {});
       }
       // M3 — per-turn telemetry enrichment: the business dimensions (mode/pitch/servedBy/escalate) and
       // end-to-end turn latency the model-port decorator can't see. PII-free (no message/reply). Under
