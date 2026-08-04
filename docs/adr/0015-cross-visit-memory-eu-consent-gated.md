@@ -6,6 +6,9 @@
   consent/notice UX + retention/erasure subsystem exist. The **in-session** multi-turn memory already
   shipped (PR #76) is unaffected — that holds no server-side transcript; this ADR is the *durable,
   cross-visit* half.
+- **Enablement gate list: [`docs/MEMORY-GO-LIVE-CHECKLIST.md`](../MEMORY-GO-LIVE-CHECKLIST.md)** — the
+  single checklist of everything that must be MET (and the residuals that must be explicitly ACCEPTED)
+  before `MEMORY_ADR_ACCEPTED` may be flipped and this Status moved to *Accepted*. Human-only step.
 - **Amendment (2026-08-04 — named owner + legal, retention):** resolves the retention "Still open" items
   below. Ordinary **and** special-category facts both retain **30 days**, as a **sliding window** measured
   from last activity — a return re-stamps the fact's expiry to `now + TTL` (throttled to ≤ once/day; each
