@@ -3,6 +3,7 @@ import { subjectNamespace } from "./identity.js";
 import { buildMemoryAudit, subjectRef } from "./audit.js";
 import type { FactClass } from "./classifier.js";
 import type { FactMetadata } from "./types.js";
+import { listSubjects, retireSubject } from "./subject-index.js";
 
 // ADR-0015 Invariant 4 (retention TTL, "expiry is enforced, not aspirational", "since last activity") +
 // Invariant 9 (special-category stricter storage). The day-counts + the sliding-renewal policy are set by
@@ -88,15 +89,18 @@ function errorClassName(e: unknown): string {
  * `list()` caller today) without itself becoming an unbounded scan on the serving path (the same class
  * of hot-path risk state-postgres's shared-pool fix addresses for connections).
  *
- * REMAINING TRADE-OFF: this closes reclamation for any subject who returns (their own next /chat turn
- * sweeps their own expired facts before storage would otherwise grow unboundedly on the durable Postgres
- * VectorPort adapter — before that adapter existed, a process restart wiped the in-memory store,
- * bounding growth incidentally). It does NOT reclaim storage for a subject who never returns — TTL-on-
- * read (service.ts `recall`) still means an expired fact for such a subject is never SERVED (Inv 4's
- * serving guarantee holds unconditionally), but it is not physically deleted until either they return or
- * a separate scheduled job (e.g. Cloud Scheduler → an admin-only endpoint enumerating each tenant's known
- * subjects) or a DB-side expiry mechanism is added — that broader periodic sweep is still a go-live item,
- * now narrower in scope (only "gone forever, never returns" subjects, not every subject).
+ * SCOPE: this closes reclamation for any subject who RETURNS — their own next /chat turn sweeps their own
+ * expired facts. It does not, and structurally cannot, reach a subject who never comes back, because it
+ * only ever visits the subject being served.
+ *
+ * THAT GAP IS NOW CLOSED BY `sweepAllSubjects` BELOW (B4, 2026-08-05), which enumerates the tenant's
+ * subject index (subject-index.ts) and is driven by a scheduled job
+ * (widget-backend/src/jobs/retention-sweep.ts, `pnpm sweep`). An earlier revision of this comment said
+ * that broader sweep "is still a go-live item" and speculated it would need an admin HTTP endpoint; it
+ * shipped as a JOB instead, deliberately — a scheduled process needs no new network-reachable
+ * destructive endpoint and no new shared secret to guard one. TTL-on-read (service.ts `recall`) remains
+ * the unconditional serving guarantee either way: an expired fact is never SERVED even if no sweep has
+ * run yet.
  */
 export async function sweepExpired(
   deps: RetentionDeps,
@@ -160,4 +164,80 @@ export async function sweepExpired(
   }
 
   return totalDeleted;
+}
+
+export interface SweepAllResult {
+  /** Subjects actually visited this run (≤ `maxSubjects`). */
+  visited: number;
+  /** Records physically deleted across those subjects. */
+  deleted: number;
+  /** Index entries dropped because the subject's namespace is now empty. */
+  retired: number;
+  /** Subjects whose sweep threw and were skipped. The run continues past them. */
+  failed: number;
+  /** Indexed subjects NOT visited because `maxSubjects` cut the run short. Non-zero means work was
+   * deliberately left behind — surfaced so a caller can log it or schedule another pass, rather than a
+   * bounded run silently reading as "everything is reclaimed". */
+  remaining: number;
+}
+
+/** Default ceiling on subjects per run, so one invocation cannot become an unbounded scan. A scheduler
+ * simply runs it again; `remaining` says whether it needs to. */
+const DEFAULT_MAX_SUBJECTS = 500;
+
+/**
+ * B4 — the SCHEDULED half of Inv 4 retention, and the part the per-turn sweep structurally cannot do.
+ *
+ * `sweepExpired` above reclaims only the subject being served on a live /chat turn, so a shopper who
+ * RETURNS cleans up after themselves while one who never comes back is never reclaimed at all. This
+ * enumerates the tenant's subject index (subject-index.ts — built from actual fact writes, because
+ * `VectorPort` cannot list namespaces and the consent KV misses every "unknown"-consent shopper) and
+ * sweeps each one, retiring subjects whose storage is now empty.
+ *
+ * NOT AN ERASURE PATH. The only predicate remains EXPIRY (`sweepExpired`): a live fact is untouched, a
+ * consent-withdrawn-but-unexpired fact is untouched (that asymmetry is unchanged and still documented on
+ * `sweepExpired` itself). This reclaims storage; it never decides what may be remembered.
+ *
+ * WHAT THIS DOES NOT CHECK — deliberately, and it matters. There is no kill-switch check here, because
+ * `RuntimeStatePort`'s kill registry lives in @palup/state-postgres and this package does not depend on
+ * it (ADR-0001 layering). The CALLER must check the kill switch before invoking this per tenant — the
+ * shipped job (widget-backend/src/jobs/retention-sweep.ts) does, and its test covers it. A future caller
+ * that forgets would run a mass delete against a halted tenant.
+ *
+ * Resilient by design: one subject's failure is counted and stepped over, never aborting the run, so a
+ * single corrupt namespace cannot indefinitely block reclamation for every other subject.
+ */
+export async function sweepAllSubjects(
+  deps: RetentionDeps,
+  tenantId: string,
+  opts?: { maxSubjects?: number; now?: Date },
+): Promise<SweepAllResult> {
+  const now = opts?.now ?? new Date();
+  const max = opts?.maxSubjects ?? DEFAULT_MAX_SUBJECTS;
+  const all = await listSubjects(deps.audit, tenantId);
+  const batch = all.slice(0, max);
+
+  const result: SweepAllResult = { visited: 0, deleted: 0, retired: 0, failed: 0, remaining: all.length - batch.length };
+
+  for (const entry of batch) {
+    result.visited++;
+    try {
+      result.deleted += await sweepExpired(deps, tenantId, [entry.subject], now);
+      // Retire only on a CONFIRMED-empty namespace, re-read after the delete — never inferred from the
+      // delete count, which would wrongly retire a subject whose only records happened to be expired
+      // while a concurrent write was landing.
+      const remainingRecords = await deps.vector.query(subjectNamespace(tenantId, entry.subject), { text: "", k: 1 });
+      if (remainingRecords.length === 0) {
+        await retireSubject(deps.audit, { tenantId, subject: entry.subject });
+        result.retired++;
+      }
+    } catch (e) {
+      result.failed++;
+      console.error(
+        `[retention] sweepAllSubjects: subject skipped tenant=${tenantId} subjectRef=${subjectRef(tenantId, entry.subject, deps.hmacKey)} error=${errorClassName(e)} — continuing with the rest`,
+      );
+    }
+  }
+
+  return result;
 }

@@ -17,6 +17,7 @@
     "monitor": "tsx packages/control-plane/src/server.ts",
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
+    "sweep": "tsx packages/widget-backend/src/jobs/retention-sweep.ts",
     "widget:dev": "pnpm --filter @palup/widget dev",
     "e2e": "playwright test --config e2e/playwright.config.ts",
     "e2e:live": "playwright test --config e2e/playwright.live.config.ts",
