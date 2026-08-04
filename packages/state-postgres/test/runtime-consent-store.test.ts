@@ -39,6 +39,10 @@ const adapters: Array<[string, () => Promise<RuntimeStatePort>]> = [
   ["PostgresRuntimeStore (pglite)", makePgAdapter],
 ];
 
+// Security review (PR #152) — the requiredness of `source` is enforced at RUNTIME, not just by the type,
+// because nothing in this repo typechecks: no root tsconfig, and CI runs no typecheck step. Without this
+// guard a future call site that omits `source` would ship green and silently record `actor: "shopper"`
+// for a server-derived write — the exact misattribution the field exists to prevent.
 describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
   it("fail-closed: no record for a subject → lookup returns unknown/unknown", async () => {
     const store = await makeStore();
@@ -117,5 +121,21 @@ describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
     expect(unkeyedRef).toBeTruthy();
     expect(keyedRef).toBeTruthy();
     expect(keyedRef).not.toBe(unkeyedRef);
+  });
+});
+
+describe("recordConsent — `source` is enforced at runtime, not only by the type", () => {
+  it("rejects a call that omits `source` rather than silently attributing it to the shopper", async () => {
+    const store = new InMemoryRuntimeStore();
+    await expect(
+      // Cast away the type exactly as an un-typechecked JS/TS call site would reach this function.
+      recordConsent(store, { tenantId: "acme", anonId: "SHOPPER1SUBJECTKEY", memoryOrdinary: "in", memorySpecial: "out" } as never),
+    ).rejects.toThrow(/'source' must be/);
+    // ...and nothing was written or audited.
+    expect(await lookupConsent(store, { tenantId: "acme", anonId: "SHOPPER1SUBJECTKEY" })).toEqual({
+      memoryOrdinary: "unknown",
+      memorySpecial: "unknown",
+    });
+    expect(await store.readAudit({ tenantId: "acme" })).toEqual([]);
   });
 });

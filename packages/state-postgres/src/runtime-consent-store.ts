@@ -90,6 +90,14 @@ export async function recordConsent(
   at = new Date().toISOString(),
 ): Promise<void> {
   const { tenantId, anonId, memoryOrdinary, memorySpecial, hmacKey, source } = input;
+  // The TYPE says `source` is required, but nothing in this repo enforces types: there is no root
+  // tsconfig and CI runs no typecheck step (vitest strips types without checking), so a future call site
+  // that omits it would ship green — and the ternary below would then silently record `actor: "shopper"`
+  // for a SERVER-derived write, the exact misattribution this field exists to prevent (security review,
+  // PR #152). Fail loudly instead: an omission is a programming error, and a wrong actor in an immutable
+  // Inv-6 log is worse than a rejected write. Both production call sites supply it (server.ts).
+  if (source !== "shopper" && source !== "guest-merge")
+    throw new Error(`recordConsent: 'source' must be "shopper" or "guest-merge" (got ${JSON.stringify(source)}) — it attributes this entry in the immutable audit log`);
   const record: ConsentRecord = { memoryOrdinary, memorySpecial };
   await store.tx({ tenantId }, async (t) => {
     await t.put(MEMORY_CONSENT, anonId, record);

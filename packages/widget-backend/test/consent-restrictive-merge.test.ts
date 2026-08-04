@@ -264,10 +264,6 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     expect(mergeEntry!.actor).toBe("agent:shopper-memory"); // the server's merge, not the shopper
     // ...and the merged entry does NOT carry the shopper-facing reversal path, which is false for it.
     expect(mergeEntry!.reversalPath).not.toBe(shopperEntry!.reversalPath);
-    // Assert the PROPERTY (both required steps are named), not the exact prose — an earlier version of
-    // this test pinned wording that was itself still inaccurate. Security review proved by execution that
-    // NEITHER step alone reverses this entry: /consent alone is re-asserted on the next turn, and dropping
-    // the guest anonId alone leaves the account row "out" forever.
     // Assert the PROPERTIES the string must carry, not its prose — earlier versions of this test pinned
     // wording that was itself inaccurate. The three properties, each backed by an executed test above:
     // the ORDER is stated, the guest subject must be neutralised, and erasure is NOT the only route.
@@ -373,13 +369,14 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken() }, payload: { sessionId: "ord-1", message: "hi", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN } });
     upsertSpy.mockClear();
 
-    // STEP (1) ONLY, per the string's stated order: opt in on the ACCOUNT subject.
+    // STEP (2) ONLY, in the string's numbering: opt in on the ACCOUNT subject, WITHOUT first
+    // neutralising the guest subject (step 1). This is the order that does NOT work.
     await app.inject({ method: "POST", url: "/consent", headers: { "x-shopper-token": shopperToken() }, payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
 
     // A turn still presenting the stale guest anonId re-asserts "out" — the opt-in is undone.
     const turn = await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken() }, payload: { sessionId: "ord-2", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN } });
     expect(turn.statusCode).toBe(200);
-    expect(upsertSpy).not.toHaveBeenCalled(); // still denied — order (1)->(2) does NOT reverse it
+    expect(upsertSpy).not.toHaveBeenCalled(); // still denied — doing (2) BEFORE (1) does not reverse it
     await app.close();
   });
 
