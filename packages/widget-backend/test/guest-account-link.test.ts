@@ -219,6 +219,179 @@ describe("B12 — server-recorded guest->account link (migration deliberately NO
   });
 });
 
+// C15(b) — human-owner-directed remedy: the guest->account link is now REVOCABLE and SELF-HEALING
+// (docs/MEMORY-GO-LIVE-CHECKLIST.md C15). Previously first-writer-wins with no unlink: any verified
+// shopper who obtained a victim's anonId could bind it to their OWN account and durably deny the victim,
+// unrevocably. These are the three critical tests the spec calls out by name.
+describe("C15(b) — the guest->account link is revocable and self-healing", () => {
+  it("SQUAT CLEARED NON-DESTRUCTIVELY: the victim's own verified /consent overwrites an attacker's squatted link, and their signed-out turn is governed by their OWN consent afterward — nothing erased", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    const ATTACKER_ID = "shopify:demo:66601";
+    const VICTIM_ID = "shopify:demo:66602";
+    const attackerToken = mintShopperToken(SHOPPER_SECRET, ATTACKER_ID, "shopify", 3_600);
+    const victimToken = mintShopperToken(SHOPPER_SECRET, VICTIM_ID, "shopify", 3_600);
+
+    // ATTACKER obtains the victim's anonId (C1's premise — shared device, storefront XSS) and squats the
+    // link: binds it to their OWN account, then sets THEMSELVES "out" — denying the victim's signed-out
+    // turns.
+    const squat = await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: { "x-shopper-token": attackerToken },
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(squat.statusCode).toBe(200);
+    expect(await lookupGuestLink(store, { tenantId: "demo", guestAnonId: GUEST_ANON_ID })).toEqual({ accountSubject: accountSubjectId(ATTACKER_ID) });
+
+    // The victim's signed-out turn is DENIED — the squatted link's "out" narrows it.
+    const denied = await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "c15-squat-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(denied.statusCode).toBe(200);
+    expect(upsertSpy).not.toHaveBeenCalled();
+
+    // VICTIM signs in and posts their OWN verified /consent, presenting the SAME anonId — last-VERIFIED-
+    // writer-wins overwrites the squatted link. NOTHING is erased anywhere in this flow.
+    const reclaim = await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: { "x-shopper-token": victimToken },
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(reclaim.statusCode).toBe(200);
+    expect(await lookupGuestLink(store, { tenantId: "demo", guestAnonId: GUEST_ANON_ID })).toEqual({ accountSubject: accountSubjectId(VICTIM_ID) });
+
+    // The victim's signed-out turn is now governed by the VICTIM's OWN consent — memory works again.
+    const restored = await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "c15-squat-2", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(restored.statusCode).toBe(200);
+    expect(upsertSpy).toHaveBeenCalled();
+    await app.close();
+  });
+
+  // THE TRAP (spec's single most important constraint): an UNRESTRICTED "/forget clears the link" would
+  // hand an attacker a PERMISSIVE-direction primitive — clearing a victim's own link would silently stop
+  // the victim's account-level "out" from governing their signed-out turns, re-opening C14 against them.
+  it("/forget CANNOT clear someone else's link: attacker /forgets the victim's anonId whose link points at the victim → the link SURVIVES", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const app = await buildServer({ store, vectorPort: vector, memoryEnabled: true });
+
+    const ATTACKER_ID = "shopify:demo:66701";
+    const VICTIM_ID = "shopify:demo:66702";
+    const attackerToken = mintShopperToken(SHOPPER_SECRET, ATTACKER_ID, "shopify", 3_600);
+    const victimToken = mintShopperToken(SHOPPER_SECRET, VICTIM_ID, "shopify", 3_600);
+
+    // Victim establishes their OWN link.
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: { "x-shopper-token": victimToken },
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(await lookupGuestLink(store, { tenantId: "demo", guestAnonId: GUEST_ANON_ID })).toEqual({ accountSubject: accountSubjectId(VICTIM_ID) });
+
+    // ATTACKER tries to /forget the victim's anonId while signed in as THEMSELVES.
+    const res = await app.inject({
+      method: "POST",
+      url: "/forget",
+      headers: { "x-shopper-token": attackerToken },
+      payload: { anonId: GUEST_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+
+    // The link SURVIVES — untouched.
+    expect(await lookupGuestLink(store, { tenantId: "demo", guestAnonId: GUEST_ANON_ID })).toEqual({ accountSubject: accountSubjectId(VICTIM_ID) });
+    await app.close();
+  });
+
+  it("/forget CLEARS your own link: the linked account's own /forget removes the association", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const app = await buildServer({ store, vectorPort: vector, memoryEnabled: true });
+
+    const SHOPPER = "shopify:demo:66801";
+    const token = mintShopperToken(SHOPPER_SECRET, SHOPPER, "shopify", 3_600);
+
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: { "x-shopper-token": token },
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(await lookupGuestLink(store, { tenantId: "demo", guestAnonId: GUEST_ANON_ID })).toEqual({ accountSubject: accountSubjectId(SHOPPER) });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/forget",
+      headers: { "x-shopper-token": token },
+      payload: { anonId: GUEST_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(await lookupGuestLink(store, { tenantId: "demo", guestAnonId: GUEST_ANON_ID })).toBeUndefined();
+    await app.close();
+  });
+
+  it("the link consult is audited when it narrows an unverified turn's decision (PII-free)", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "c15-consult-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+
+    const log = await store.readAudit({ tenantId: "demo" });
+    const entry = log.find((r) => r.action === "guest_link.consulted");
+    expect(entry).toBeDefined();
+    const serialized = JSON.stringify(entry?.input ?? {});
+    expect(serialized).not.toContain(GUEST_ANON_ID);
+    expect(serialized).not.toContain(SHOPPER_ID);
+    await app.close();
+  });
+
+  it("the link consult is NOT audited when no link exists (nothing narrowed)", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "c15-consult-2", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    const log = await store.readAudit({ tenantId: "demo" });
+    expect(log.map((r) => r.action)).not.toContain("guest_link.consulted");
+    await app.close();
+  });
+});
+
 // CRITICAL REGRESSION LOCK — the vulnerability the first B12 build shipped, found by probe before review.
 // That build migrated the guest namespace's facts into the account on link. Because `validateAnonId` only
 // proves an anonId is well-FORMED and never that the caller owns it, a signed-in attacker presenting a

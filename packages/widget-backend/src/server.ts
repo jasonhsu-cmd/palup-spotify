@@ -31,6 +31,9 @@ import {
   recordConsent,
   lookupConsent,
   recordGuestLink,
+  clearGuestLinkIfOwnedBy,
+  auditGuestLinkConsulted,
+  auditGuestLinkWriteFailure,
   lookupGuestLink,
   type Sql,
   type ConsentRecord,
@@ -797,21 +800,31 @@ export async function buildServer(opts?: {
       return { error: "invalid anonId or consent value" };
     }
 
-    // B12 (docs/MEMORY-GO-LIVE-CHECKLIST.md B12/C6/C7/C14) — the server-recorded guest->account LINK,
-    // established ONLY here, ONLY from a request the server itself verified. This is NOT one of the three
-    // shapes rejected below (see the BLOCK-A history at the end of this handler): it never propagates a
-    // CONSENT VALUE across subjects, and it never touches the `subject` this call writes to. It records an
-    // IDENTITY ASSOCIATION — "this guest anonId belongs to this verified account" — that `/chat`'s
-    // UNVERIFIED-turn path later CONSULTS for its own consent decision (never for the SUBJECT — see that
-    // handler's own doc comment; switching the subject there would let anyone holding this anonId read the
-    // account's whole memory, escalating C1). Runs BEFORE this call's own `recordConsent` write below, so
-        // GATING POSTURE: the LINK runs regardless of `memoryServiceEnabled`, matching this endpoint's OWN
+    // B12/C15(b) (docs/MEMORY-GO-LIVE-CHECKLIST.md B12/C6/C7/C14/C15) — the server-recorded guest->account
+    // LINK, established/overwritten ONLY here, ONLY from a request the server itself verified. This is NOT
+    // one of the three shapes rejected below (see the BLOCK-A history at the end of this handler): it never
+    // propagates a CONSENT VALUE across subjects, and it never touches the `subject` this call writes to.
+    // It records an IDENTITY ASSOCIATION — "this guest anonId belongs to this verified account" — that
+    // `/chat`'s UNVERIFIED-turn path later CONSULTS for its own consent decision (never for the SUBJECT —
+    // see that handler's own doc comment; switching the subject there would let anyone holding this anonId
+    // read the account's whole memory, escalating C1). Runs BEFORE this call's own `recordConsent` write
+    // below.
+    //
+    // GATING POSTURE: the LINK runs regardless of `memoryServiceEnabled`, matching this endpoint's OWN
     // existing posture (reachable whenever WIDGET_AUTH_REQUIRED/kill allow it, independent of the double
     // gate). It touches no vector data at all — the fact migration that once did was REMOVED (see below).
     //
-    // IDEMPOTENT: gated on `!existingLink` — the link's PRESENCE is the sole "already migrated" marker.
-    // `recordGuestLink` is the ONLY write in this block (the consent + fact migration it once accompanied were removed), so a
-    // failure leaves no link recorded and a later verified turn safely retries it.
+    // C15(b) — LAST-VERIFIED-writer-wins, ATOMICALLY, closing the link-squatting hole: this used to be
+    // gated on `if (!existingLink)` (first-writer-wins) with the existence check OUTSIDE `recordGuestLink`'s
+    // own transaction (a TOCTOU race besides). Any verified shopper who obtained a victim's anonId could
+    // bind it to their OWN account and durably, unrevocably deny the victim. Now `recordGuestLink` is
+    // called UNCONDITIONALLY whenever this branch is reached, and the compare-and-write (including the
+    // "did this actually change" idempotency check) happens INSIDE ONE `store.tx`
+    // (state-postgres/guest-link-store.ts) — so a squatted link is cleared by the rightful shopper's own
+    // ordinary, NON-DESTRUCTIVE action (sign in, post /consent), an identical re-post never re-audits, and
+    // there is no window between "check" and "write" a concurrent call could race. See
+    // guest-account-link.test.ts's "C15(b)" tests. NOT ELIMINATED: an attacker who re-obtains the same
+    // anonId can re-squat; see this call's `recordGuestLink` doc comment and C15's current checklist text.
     //
     // TRUST NOTE (same class as the already-accepted C1/C8/C10 residuals) — this reachable ONLY once
     // `verifiedShopperId` is present, but `validateAnonId` still only proves the presented anonId is
@@ -820,42 +833,55 @@ export async function buildServer(opts?: {
     // same consent-oracle/deny class as C1/C8/C10 — the link can only ever make an unverified turn's
     // decision MORE restrictive. The fact migration that would have made it a data-OWNERSHIP transfer was
     // removed for exactly that reason (see below).
+    //
+    // HISTORY, KEPT — CRITICAL: FACT/CONSENT MIGRATION REMOVED. Found by probe before review; the builder
+    // had disclosed the risk in prose ("moves data OWNERSHIP, not just a read/deny signal") and shipped it
+    // anyway, with the suite green at 1231 tests.
+    //
+    // What it allowed, proven by execution: an attacker signed in as THEMSELVES, posting /consent with a
+    // VICTIM's anonId, got 200 and:
+    //     ATTACKER namespace now holds: ["shopper is allergic to tree nuts"]
+    //     VICTIM  namespace now holds: []
+    // The victim's memory — special-category facts included — was MOVED into the attacker's own account
+    // (readable via the attacker's own recall) and destroyed on the victim's side. Theft plus destruction:
+    // strictly worse than the C14 write-when-denied hole B12 exists to close.
+    //
+    // The design error was MINE, in the B12 spec. Recording the link from a VERIFIED session proves the
+    // ACCOUNT is real; it never proves the client-supplied `anonId` BELONGS to that account. A restrictive
+    // consent merge is safe on an unproven id — it can only ever deny. A MIGRATION is not, because it
+    // transfers ownership of data. No proof of anonId ownership exists anywhere in this system (that IS
+    // residual C1), so no amount of care here makes migration safe; it needs the proof, not better
+    // handling.
+    //
+    // KEPT: the link itself, which is what C14 actually needed — /chat's UNVERIFIED-turn path consults it
+    // so a linked account's consent participates RESTRICTIVELY in that turn's decision, never as the
+    // subject. Fact migration and guest-consent-row retirement remain UNBUILT (checklist B12, C6, C7).
     if (verifiedShopperId) {
       const validatedGuestAnonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
       if (validatedGuestAnonId) {
         try {
-          const existingLink = await lookupGuestLink(store, { tenantId, guestAnonId: validatedGuestAnonId });
-          if (!existingLink) {
-            // CRITICAL — FACT/CONSENT MIGRATION REMOVED. Found by probe before review; the builder had
-            // disclosed the risk in prose ("moves data OWNERSHIP, not just a read/deny signal") and
-            // shipped it anyway, with the suite green at 1231 tests.
-            //
-            // What it allowed, proven by execution: an attacker signed in as THEMSELVES, posting
-            // /consent with a VICTIM's anonId, got 200 and:
-            //     ATTACKER namespace now holds: ["shopper is allergic to tree nuts"]
-            //     VICTIM  namespace now holds: []
-            // The victim's memory — special-category facts included — was MOVED into the attacker's own
-            // account (readable via the attacker's own recall) and destroyed on the victim's side. Theft
-            // plus destruction: strictly worse than the C14 write-when-denied hole B12 exists to close.
-            //
-            // The design error was MINE, in the B12 spec. Recording the link from a VERIFIED session
-            // proves the ACCOUNT is real; it never proves the client-supplied `anonId` BELONGS to that
-            // account. A restrictive consent merge is safe on an unproven id — it can only ever deny. A
-            // MIGRATION is not, because it transfers ownership of data. No proof of anonId ownership
-            // exists anywhere in this system (that IS residual C1), so no amount of care here makes
-            // migration safe; it needs the proof, not better handling.
-            //
-            // KEPT: the link itself, which is what C14 actually needed — /chat's UNVERIFIED-turn path
-            // consults it so a linked account's consent participates RESTRICTIVELY in that turn's
-            // decision, never as the subject. Fact migration and guest-consent-row retirement remain
-            // UNBUILT (checklist B12, C6, C7).
-            await recordGuestLink(store, { tenantId, guestAnonId: validatedGuestAnonId, accountSubject: subject, hmacKey: AUDIT_HMAC_SECRET });
-          }
+          await recordGuestLink(store, { tenantId, guestAnonId: validatedGuestAnonId, accountSubject: subject, hmacKey: AUDIT_HMAC_SECRET });
         } catch (e) {
-          // PII-free: the error's CLASS only (mirrors /chat's own guest-merge write-through catch below).
-          // The shopper's OWN consent choice (recorded next, unconditionally) must not be blocked by a
-          // migration-side failure.
-          console.error(`[/consent] guest-link error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+          const errorClass = e instanceof Error ? e.constructor.name : typeof e;
+          // PII-free console signal (mirrors /chat's own guest-merge write-through catch below). The
+          // shopper's OWN consent choice (recorded next, unconditionally) must not be blocked by a
+          // link-write failure.
+          console.error(`[/consent] guest-link error tenant=${tenantId} error=${errorClass}`);
+          // C15(b) item 4 (security MEDIUM) — this failure used to be invisible to the immutable log
+          // (console-only). Best-effort: if THIS audit call itself throws too, the console signal above is
+          // the only remaining trace (mirrors retention.ts's own accepted residual on its two failure
+          // branches).
+          try {
+            await auditGuestLinkWriteFailure(store, {
+              tenantId,
+              guestAnonId: validatedGuestAnonId,
+              accountSubject: subject,
+              hmacKey: AUDIT_HMAC_SECRET,
+              errorClass,
+            });
+          } catch {
+            /* see comment above — the console.error already fired */
+          }
         }
       }
     }
@@ -997,6 +1023,22 @@ export async function buildServer(opts?: {
       const guestAnonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
       if (guestAnonId && guestAnonId !== subject) {
         await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: guestAnonId });
+        // C15(b) item 2 — THE TRAP: clearing a guest->account link REMOVES a narrowing input to `/chat`'s
+        // unverified-turn consent decision, so an UNRESTRICTED "/forget clears the link" would hand an
+        // attacker a PERMISSIVE-direction primitive — clearing a VICTIM's own link would silently stop the
+        // victim's account-level "out" from governing their signed-out turns, re-opening exactly the C14
+        // hole B12 closed. So this only ever clears the link when it ALREADY points at the CALLER's own
+        // verified account (`subject` here, derived above from the server-verified principal, never from
+        // `body.anonId`). `clearGuestLinkIfOwnedBy` checks that ownership and deletes atomically, and is a
+        // no-op — the link is left completely untouched — for every other caller. Proven by
+        // guest-account-link.test.ts's "/forget CANNOT clear someone else's link" test.
+        try {
+          await clearGuestLinkIfOwnedBy(store, { tenantId, guestAnonId, accountSubject: subject, hmacKey: AUDIT_HMAC_SECRET });
+        } catch (e) {
+          // PII-free: mirrors the guest-link write-failure catch in /consent above. The shopper's OWN
+          // erasure (already completed above) must not be undone or blocked by a link-clear failure.
+          console.error(`[/forget] guest-link clear error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+        }
       }
     }
     return { ok: true };
@@ -1273,7 +1315,33 @@ export async function buildServer(opts?: {
           const link = await lookupGuestLink(store, { tenantId, guestAnonId: memorySubject });
           if (link) {
             const linkedAccountRecord = await lookupConsent(store, { tenantId, anonId: link.accountSubject });
-            consentRecord = mergeAccountConsent(ownRecord, linkedAccountRecord);
+            const merged = mergeAccountConsent(ownRecord, linkedAccountRecord);
+            // C15(b) item 3 (security MEDIUM, previously invisible) — audit it whenever the linked
+            // account's consent actually NARROWED this turn's decision (i.e. differs from the guest's own
+            // record alone), so exploitation of C15 leaves a trace in the immutable log — previously the
+            // only trace was a refusal against the guest's OWN subjectRef, which said nothing about a
+            // third-party-controllable link having governed. `mergeConsentTier` can only ever move a tier
+            // TOWARD "out", so any difference here IS a narrowing, never a widening — the identical diff
+            // check the write-through above uses, for the same reason. A link that is present but changes
+            // nothing audits nothing (Inv 6 requires no SILENT action, not an audit for a read that decided
+            // nothing).
+            const narrowedOrdinary = merged.memoryOrdinary !== ownRecord.memoryOrdinary;
+            const narrowedSpecial = merged.memorySpecial !== ownRecord.memorySpecial;
+            if (narrowedOrdinary || narrowedSpecial) {
+              try {
+                await auditGuestLinkConsulted(store, {
+                  tenantId,
+                  guestAnonId: memorySubject,
+                  accountSubject: link.accountSubject,
+                  hmacKey: AUDIT_HMAC_SECRET,
+                  narrowedOrdinary,
+                  narrowedSpecial,
+                });
+              } catch (e) {
+                console.error(`[/chat] guest-link consult audit failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+              }
+            }
+            consentRecord = merged;
           }
         }
       }

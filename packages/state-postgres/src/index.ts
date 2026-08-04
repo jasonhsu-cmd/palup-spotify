@@ -55,8 +55,14 @@ export {
 } from "./runtime-consent-store.js";
 export {
   recordGuestLink,
+  clearGuestLinkIfOwnedBy,
+  auditGuestLinkConsulted,
+  auditGuestLinkWriteFailure,
   lookupGuestLink,
   type GuestLinkRecord,
   type RecordGuestLinkInput,
+  type RecordGuestLinkResult,
+  type ClearGuestLinkInput,
+  type ClearGuestLinkResult,
   type LookupGuestLinkInput,
 } from "./guest-link-store.js";
