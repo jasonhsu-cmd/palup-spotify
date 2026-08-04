@@ -21,6 +21,12 @@ export interface ErasureDeps {
   vector: VectorPort;
   /** The RuntimeStatePort's audit surface (ADR-0015 Inv 6) — reused as-is, no new audit mechanism. */
   audit: RuntimeStatePort;
+  /** MEDIUM finding (security-review remediation, PR #152) — keyed-HMAC key for the audit `subjectRef`
+   * (audit.ts). Optional: omitted means the ref falls back to a plain sha256, which is only safe for a
+   * high-entropy guest anon id — supply this whenever one is configured (mirrors server.ts's
+   * `AUDIT_HMAC_SECRET`), which is required for a low-entropy `acct:` subject's ref to be genuinely
+   * pseudonymous rather than brute-forceable. */
+  hmacKey?: string;
 }
 
 /** Identifies one subject (a guest anon id, or an account id post sign-up merge) under one tenant. */
@@ -64,7 +70,7 @@ export async function eraseSubject(deps: ErasureDeps, ctx: SubjectRef): Promise<
   await deps.vector.deleteNamespace(subjectNamespace(ctx.tenantId, ctx.anonId));
   await deps.audit.audit(
     { tenantId: ctx.tenantId },
-    buildMemoryAudit({ action: "erase.subject", tenantId: ctx.tenantId, anonId: ctx.anonId }),
+    buildMemoryAudit({ action: "erase.subject", tenantId: ctx.tenantId, anonId: ctx.anonId, hmacKey: deps.hmacKey }),
   );
 }
 
@@ -89,6 +95,7 @@ export async function withdrawConsent2(deps: ErasureDeps, ctx: SubjectRef): Prom
       anonId: ctx.anonId,
       factClass: "special",
       count: specialIds.length,
+      hmacKey: deps.hmacKey,
     }),
   );
 
@@ -119,6 +126,7 @@ export async function withdrawConsent1(deps: ErasureDeps, ctx: SubjectRef): Prom
       anonId: ctx.anonId,
       factClass: "ordinary",
       count: ordinaryIds.length,
+      hmacKey: deps.hmacKey,
     }),
   );
 

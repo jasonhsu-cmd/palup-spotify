@@ -22,8 +22,8 @@ import {
   createMeteringModelPort,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject, classifyFact, sweepExpired } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql } from "@palup/state-postgres";
+import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
+import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -205,6 +205,16 @@ export async function buildServer(opts?: {
   // module-level). Construct secrets in the composition root after config load (per the slice-2 review).
   const secrets = createEnvSecrets();
   const grounding = createGroundingPort(store, secrets);
+  // Hoisted ABOVE `createMemoryService` below (it used to be declared much later, alongside
+  // `shopperIdentity`) so the memory service can be constructed with a real `hmacKey` from the start —
+  // security-review remediation MEDIUM finding, PR #152: a `acct:` subject's audit `subjectRef` must be
+  // a KEYED HMAC, not a bare hash (widget-backend/src/audit.ts's own `hashShopperRef` rule). A verified
+  // shopper principal can only ever reach a memory surface after `/shopper/session` mints a token with
+  // SHOPPER_TOKEN_SECRET, so that secret is guaranteed configured whenever an `acct:` subject exists;
+  // AUDIT_HMAC_SECRET is an optional, separately-provisionable override (defense-in-depth key
+  // separation) that needs nothing extra to provision today.
+  const SHOPPER_TOKEN_SECRET = process.env.SHOPPER_TOKEN_SECRET;
+  const AUDIT_HMAC_SECRET = process.env.AUDIT_HMAC_SECRET || SHOPPER_TOKEN_SECRET;
   // M3 — telemetry (cost/latency measurement). The metering decorator wraps the model port so every
   // model call's tokens + latency are recorded under the request tenant; fail-open, so it can never
   // break serving. Built here because the store-backed telemetry adapter needs the store.
@@ -279,6 +289,9 @@ export async function buildServer(opts?: {
         // `memoryServiceEnabled` is false (MEMORY_ADR_ACCEPTED) — this dependency is never even
         // constructed-into-use until that double gate is on.
         secrets,
+        // MEDIUM finding (security-review remediation, PR #152) — keyed-HMAC key for every memory audit
+        // subjectRef this service writes; see MemoryServiceDeps's own doc comment.
+        hmacKey: AUDIT_HMAC_SECRET,
       })
     : undefined;
   const memoryPort = memoryService
@@ -354,15 +367,52 @@ export async function buildServer(opts?: {
   if (SUBSCRIPTION_SELFSERVE && !SHOPPER_AUTH_ENABLED) {
     console.warn("[config] SUBSCRIPTION_SELFSERVE=true has no effect without SHOPPER_AUTH enabled (ADR-0016 prereq #1) — every shopper is unverified, so skip/pause stays human-routed.");
   }
-  const SHOPPER_TOKEN_SECRET = process.env.SHOPPER_TOKEN_SECRET;
+  // SHOPPER_TOKEN_SECRET itself is now declared earlier, alongside AUDIT_HMAC_SECRET (see that comment).
   const SHOPPER_TOKEN_TTL_SECONDS = posInt("SHOPPER_TOKEN_TTL_SECONDS", 3_600);
   const shopperIdentity = createShopperTokenIdentity(SHOPPER_TOKEN_SECRET);
-  // Keyed-HMAC key for the T8 identity-resolution audit ref (F7 — never a bare hash). A verified shopper
-  // principal can only reach /chat after /shopper/session minted a token with SHOPPER_TOKEN_SECRET, so
-  // that secret is guaranteed configured whenever this key is actually used; AUDIT_HMAC_SECRET is an
-  // optional, separately-provisionable override so the audit ref key needn't literally equal the token-
-  // signing key (defense-in-depth key separation), while still needing nothing extra to provision today.
-  const AUDIT_HMAC_SECRET = process.env.AUDIT_HMAC_SECRET || SHOPPER_TOKEN_SECRET;
+
+  /**
+   * Subject-scoped auth — resolve the SERVER-VERIFIED shopper id for a request, or `undefined`.
+   *
+   * The cross-visit-memory subject used to be a raw client-supplied `anonId` on every surface, and
+   * `validateAnonId` only proves a string is well-FORMED, never that the caller owns it — so within one
+   * tenant, possession of another shopper's `anonId` was enough to set their consent or DELETE their
+   * memory. `/consent` and `/forget` below both call this helper directly.
+   *
+   * CORRECTED (this comment previously overclaimed "the single derivation all three memory surfaces use,
+   * so they cannot drift"): `/chat` does NOT call this helper — it re-derives the equivalent check
+   * inline (below, where `shopperPrincipal` is resolved) because it needs the full verified `Principal`
+   * object for other purposes (the `shopperVerified` signal, `withRequestPrincipal`'s commerce-guard
+   * binding), not just the id string this helper returns. The two derivations apply the EXACT SAME gates
+   * (feature flag, `kind === "shopper"` + explicit `verified`, cross-shop tenant check) and are kept in
+   * sync by inspection, not by sharing code — a genuine, if narrow, drift risk versus a true single
+   * source of truth. Unifying them (having `/chat` derive its Principal through a shared helper that
+   * also returns the resolved token id) is a reasonable follow-up, not done here to avoid touching the
+   * already-tested recall path (subject-scoped-memory-auth.test.ts's "THE ATTACK (recall)") for a
+   * documentation-only finding.
+   *
+   * Every gate here is load-bearing: the feature flag, a verified MERCHANT principal (the shopper token
+   * is only meaningful inside a verified tenant session), `kind === "shopper"` AND the explicit
+   * `verified` flag (an id-set-but-unverified principal must never authorize — the same trap
+   * `deriveServingSignals` guards against), and the cross-shop check that the token's own tenant equals
+   * THIS request's tenant (a token minted for some other verified tenant must not be replayable here).
+   */
+  const verifiedShopperIdFor = async (
+    merchantPrincipal: Principal,
+    tenantId: string,
+    headerToken: unknown,
+    bodyToken: unknown,
+  ): Promise<string | undefined> => {
+    if (!SHOPPER_AUTH_ENABLED || merchantPrincipal.kind !== "merchant") return undefined;
+    const token =
+      typeof headerToken === "string" ? headerToken : typeof bodyToken === "string" ? bodyToken : undefined;
+    const resolved = await shopperIdentity.authenticate(token);
+    if (resolved.kind !== "shopper" || !resolved.verified) return undefined;
+    if (shopperIdTenant(resolved.shopperId) !== tenantId) return undefined;
+    return resolved.shopperId;
+  };
+  // AUDIT_HMAC_SECRET (T8 identity-resolution audit ref, F7 — never a bare hash) is now declared much
+  // earlier, alongside SHOPPER_TOKEN_SECRET, so `createMemoryService` below can use it too.
   // T7 — server-derived trust-bearing signals. These govern behavior/residency/competitor-mode, so they
   // come from merchant/server config, never the shopper. Single-tenant defaults for now; when real
   // multi-tenancy lands (post flag-flip) these are looked up per-merchant by tenantId. `region` should
@@ -655,12 +705,19 @@ export async function buildServer(opts?: {
 
   // PR-11a (ADR-0015 T12) — the server-side consent-record CAPTURE point: the future in-chat consent-UX
   // PR (PR-11) calls this to record the shopper's OWN memory-consent choice for THEIR OWN subject. The
-  // (tenantId, anonId) pair is derived the EXACT same server-trusted way `/chat` derives it — tenantId
-  // from the verified widget token (falling back to RUNTIME_TENANT during the same rollout window /chat
-  // uses), NEVER a client-supplied tenant; anonId must pass the SAME `validateAnonId` charset/length
-  // bound `/chat`'s `signals.anonId` does, so a shopper can only ever record consent for a well-formed
-  // subject key they hold — never an arbitrary/forged one. `recordConsent` (runtime-consent-store.ts)
-  // audits the write atomically inside its own transaction — no separate audit call needed here.
+  // tenantId is derived the EXACT same server-trusted way `/chat` derives it — from the verified widget
+  // token (falling back to RUNTIME_TENANT during the same rollout window /chat uses), NEVER a
+  // client-supplied tenant.
+  //
+  // CORRECTED (this comment previously overclaimed): the `anonId` need only pass the SAME `validateAnonId`
+  // charset/length bound `/chat`'s `signals.anonId` does — that proves the string is well-FORMED, never
+  // that the caller HOLDS/owns it, so on its own this does NOT stop a caller from recording consent for
+  // an arbitrary well-formed anonId belonging to someone else (the guest anonId remains the same
+  // bearer-capability caveat as `/forget`'s own doc comment below). What actually stops that for a
+  // SIGNED-IN shopper is subject-scoped auth just below (`verifiedShopperIdFor`/`memorySubjectId`): a
+  // verified principal's account subject wins outright and any supplied anonId is ignored. `recordConsent`
+  // (runtime-consent-store.ts) audits the write atomically inside its own transaction — no separate audit
+  // call needed here.
   app.post("/consent", async (req, reply) => {
     // Rate-limit this public (unauthenticated during the rollout window) audit-writing endpoint the SAME
     // way the mint endpoints do — per IP, under the reserved mint bucket — so it can't be flooded to grow
@@ -682,6 +739,8 @@ export async function buildServer(opts?: {
       memoryOrdinary?: unknown;
       memorySpecial?: unknown;
       widgetToken?: string;
+      /** Mirrors /chat's dual-transport fallback for the x-shopper-token header (subject-scoped auth). */
+      shopperToken?: string;
     };
     const authHeader = req.headers["authorization"];
     const widgetToken =
@@ -713,15 +772,66 @@ export async function buildServer(opts?: {
       return { error: "paused" };
     }
 
-    const anonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
+    // SUBJECT-SCOPED AUTH — a server-VERIFIED shopper's consent is recorded against `acct:<shopperId>`,
+    // never against whatever `anonId` the caller typed; a supplied anonId is IGNORED (not rejected) for
+    // such a shopper, exactly like ADR-0017's tenantId/shopperId precedence, because a signed-in
+    // shopper's browser legitimately still holds its old guest id. An anonymous guest keeps the anonId
+    // path unchanged. This is what stops someone holding another shopper's anonId from setting THEIR
+    // consent.
+    const verifiedShopperId = await verifiedShopperIdFor(principal, tenantId, req.headers["x-shopper-token"], body.shopperToken);
+    const subject = memorySubjectId({ verifiedShopperId, rawAnonId: body.anonId });
     const isTriStateConsent = (v: unknown): v is Consent => v === "in" || v === "out" || v === "unknown";
-    if (!anonId || !isTriStateConsent(body.memoryOrdinary) || !isTriStateConsent(body.memorySpecial)) {
+    if (!subject || !isTriStateConsent(body.memoryOrdinary) || !isTriStateConsent(body.memorySpecial)) {
       reply.code(400);
       return { error: "invalid anonId or consent value" };
     }
 
-    await recordConsent(store, { tenantId, anonId, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial });
-    return { ok: true };
+    // `source: "shopper"` — an explicit choice the shopper made, as distinct from the server-derived
+    // guest-merge write on /chat (Finding 2). Required, so no call site can silently misattribute.
+    await recordConsent(store, { tenantId, anonId: subject, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial, hmacKey: AUDIT_HMAC_SECRET, source: "shopper" });
+
+    // BLOCK-A (governance review round 6) — DELIBERATELY NOT FIXED HERE. Recorded as checklist residual
+    // C14; the real fix is B12's server-side guest->account link, which does not exist.
+    //
+    // The defect: the /chat merge is one-directional, so on an UNVERIFIED turn the subject is the guest
+    // anonId, the acct: row is never consulted, and the US opt-out regime reads an unresolved "unknown"
+    // as ALLOWED — an authenticated opt-out does not govern that same browser's signed-OUT turns (the
+    // shopper token is sessionStorage, 1h TTL, so a new tab reverts them to guest). This PR created the
+    // class: pre-PR the signed-in write landed on the guest row itself.
+    //
+    // Three successive attempts to fix it HERE were each rejected in review, and the pattern is the
+    // point: governing a signed-OUT browser requires trusting a CLIENT-SUPPLIED anonId, which is exactly
+    // what subject-scoped auth exists to stop.
+    //   1. restrictive-only propagation -> made the ordinary signed-in toggle OFF->ON leave memory OFF
+    //      while the panel rendered ON, because the manage panel posts only on change (round 7 BLOCK-1 /
+    //      B-1); it also left destructive forget-me as the only escape the UI could express, re-creating
+    //      the harmful advice round 5 removed.
+    //   2. it also failed open silently with no repair path, so one transient error reopened the hole
+    //      (B-2), and it only ever governed the single anonId presented in that one call (B-3).
+    //   3. symmetric propagation removed the trap but broke this PR's founding property — "a supplied
+    //      anonId is IGNORED for a verified shopper" — by writing to it, and dissolved the order
+    //      semantics the reversal path documents.
+    // Shipping the hole DISCLOSED beats shipping a fix that contradicts the control it is bolted onto.
+    //
+    // Answer with the EFFECTIVE state the values just recorded produce, so the widget's manage panel can
+    // render what is true without re-implementing the region regime client-side. It must not: the panel
+    // binding its checkbox to `consent === "in"` is exactly how it came to render "off" for the US
+    // opt-out regime's ACTIVE "unknown" (see manage-panel-honesty.test.ts). Same function, same region
+    // source (`MERCHANT_REGION`, which is also what `deriveServingSignals` puts on `signals.region`) as
+    // /chat's own `memoryActive` and the `remember()` gate.
+    //
+    // SCOPE: this is the state for the subject THIS call recorded against — `acct:<shopperId>` when
+    // signed in, the guest anonId otherwise. It is not a promise about a later turn under a different
+    // principal: once the shopper's token expires, their signed-OUT turns are governed by the guest
+    // record alone (residual C14, accepted 2026-08-04), and /chat's own `memoryActive` on that turn
+    // reports that lower state. The panel follows whichever came last, so it tracks the subject actually
+    // being served rather than the last one the shopper authenticated as.
+    return {
+      ok: true,
+      memoryActive: (({ mayWriteOrdinary, mayWriteSpecial }) => ({ ordinary: mayWriteOrdinary, special: mayWriteSpecial }))(
+        decideMemoryWrite({ region: MERCHANT_REGION, consent1: body.memoryOrdinary, consent2: body.memorySpecial }),
+      ),
+    };
   });
 
   // PR-11b (ADR-0015 Inv 5 — right-to-erasure) — the shopper-facing data-RIGHTS endpoint: erase THIS
@@ -738,10 +848,17 @@ export async function buildServer(opts?: {
   // bind the anonId to the caller. Within a tenant, the anonId functions as an UNGUESSABLE BEARER
   // CAPABILITY (128 bits of randomness — identity.ts `generateGuestId`), not a cryptographically-bound
   // subject credential: practical impact is bounded to a shopper whose anonId leaks (shared device,
-  // storefront XSS), not to blind guessing. Subject-bound authorization (a SHOPPER_AUTH / anonId-bound
-  // token) is an explicit, already-recorded go-live precondition before MEMORY_ADR_ACCEPTED flips — NOT
-  // built here. Guarded exactly like `/consent`: per-IP + per-tenant rate limit (429) and the NN#4
-  // operator kill switch (503).
+  // storefront XSS), not to blind guessing.
+  //
+  // CORRECTED (subject-scoped auth, PR #152 — this paragraph previously said subject-bound authorization
+  // was "NOT built here"; it now is, immediately below): when the caller presents a valid
+  // `x-shopper-token`, `verifiedShopperIdFor`/`memorySubjectId` bind the subject to `acct:<shopperId>`
+  // and the anonId above is ignored entirely — closing exactly the gap this paragraph used to describe.
+  // This does NOT close the general case above: the token is never REQUIRED here, so an unauthenticated
+  // caller (or one who simply omits the header) still falls back to the bearer-capability anonId path,
+  // unchanged. See identity.ts `memorySubjectId`'s own doc comment and docs/MEMORY-GO-LIVE-CHECKLIST.md's
+  // C1/C2 rows for the exact boundary. Guarded exactly like `/consent`: per-IP + per-tenant rate limit
+  // (429) and the NN#4 operator kill switch (503).
   //
   // UNLIKE every other memory-subsystem entry point, this one runs regardless of `memoryServiceEnabled` —
   // a shopper's right to erase what may already be stored does not depend on the feature's current on/off
@@ -759,7 +876,12 @@ export async function buildServer(opts?: {
     } catch {
       /* fail-open: mirrors /consent */
     }
-    const body = (req.body ?? {}) as { anonId?: unknown; widgetToken?: string };
+    const body = (req.body ?? {}) as {
+      anonId?: unknown;
+      widgetToken?: string;
+      /** Mirrors /chat's dual-transport fallback for the x-shopper-token header (subject-scoped auth). */
+      shopperToken?: string;
+    };
     const authHeader = req.headers["authorization"];
     const widgetToken =
       typeof authHeader === "string" && authHeader.startsWith("Bearer ")
@@ -790,13 +912,36 @@ export async function buildServer(opts?: {
       return { error: "paused" };
     }
 
-    const anonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
-    if (!anonId) {
+    // SUBJECT-SCOPED AUTH — same derivation as /consent and /chat. This endpoint is DESTRUCTIVE, so it
+    // is the one that most needed it: previously anyone who obtained another shopper's anonId could
+    // erase that shopper's memory. For a server-verified shopper the target is `acct:<shopperId>` and a
+    // supplied anonId is ignored, so a caller can only ever erase their OWN subject.
+    const verifiedShopperId = await verifiedShopperIdFor(principal, tenantId, req.headers["x-shopper-token"], body.shopperToken);
+    const subject = memorySubjectId({ verifiedShopperId, rawAnonId: body.anonId });
+    if (!subject) {
       reply.code(400);
       return { error: "invalid anonId" };
     }
 
-    await eraseSubject({ vector: vectorPort, audit: store }, { tenantId, anonId });
+    await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: subject });
+    // N1 fix (security review round 3, HIGH) — a verified shopper's GUEST-ERA facts previously sat in a
+    // namespace this endpoint never touched: `subject` above is `acct:<shopperId>` for a signed-in
+    // shopper and a supplied `anonId` was IGNORED entirely, so `/forget` erased the account namespace
+    // only while the shipped widget's own `forgetMe()` still sends the shopper's just-superseded guest
+    // anonId in the SAME request body (`prevAnonId`, index.html) — meaning real erasure silently stopped
+    // short of what the UI promised ("Done — I've cleared what I remembered"). This is SAFE, not a
+    // repeat of the C1 delete attack: the guest path a few lines above already lets an *unauthenticated*
+    // caller erase ANY well-formed anonId they hold with no token at all, so erasing a caller-presented
+    // anonId on a VERIFIED turn grants an attacker nothing they could not already get by omitting the
+    // token entirely. Only fires when the presented `anonId` is (a) well-formed (`validateAnonId`) and
+    // (b) actually a DIFFERENT namespace from the account subject (a guest calling /forget with no
+    // shopper token already goes through the `subject` erase above and must not double-audit itself).
+    if (verifiedShopperId) {
+      const guestAnonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
+      if (guestAnonId && guestAnonId !== subject) {
+        await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: guestAnonId });
+      }
+    }
     return { ok: true };
   });
 
@@ -920,9 +1065,116 @@ export async function buildServer(opts?: {
       // the brain recall path — are gated on the same off memoryService/memoryPort), so the read is pure
       // overhead; skipping it keeps the inert /chat path byte-identical to pre-PR-11a (consentRecord stays
       // undefined ⇒ deriveServingSignals's own `ctx.consent?.… ?? "unknown"` default, i.e. the old hardcode).
-      const consentAnonId =
-        memoryService && typeof body.signals?.anonId === "string" ? validateAnonId(body.signals.anonId) : undefined;
-      const consentRecord = consentAnonId ? await lookupConsent(store, { tenantId, anonId: consentAnonId }) : undefined;
+      //
+      // SUBJECT-SCOPED AUTH: the memory subject is `acct:<shopperId>` for a server-VERIFIED shopper and
+      // the validated client `anonId` only for an anonymous guest (memorySubjectId, widget-memory/
+      // identity.ts). Derived ONCE here and reused for the consent lookup, remember(), and the retention
+      // sweep below, so all three can never disagree about whose memory this turn touches. Uses
+      // `shopperPrincipal` (resolved above from the x-shopper-token, gated on `verified`) rather than
+      // anything client-asserted.
+      const verifiedShopperId =
+        shopperPrincipal.kind === "shopper" && shopperPrincipal.verified ? shopperPrincipal.shopperId : undefined;
+      const memorySubject = memoryService
+        ? memorySubjectId({ verifiedShopperId, rawAnonId: body.signals?.anonId })
+        : undefined;
+      // BLOCK-1 fix (security-review remediation, PR #152) — restrictive-merge consent across the
+      // guest/account subjects on sign-in (mergeAccountConsent, widget-memory/src/consent.ts — see its
+      // own doc comment for the full rationale). Without this, the ACCOUNT subject's consent lookup
+      // alone regressed a guest-recorded "out" the instant the shopper signed in: the new `acct:` key
+      // has no record yet, degrades to the fail-closed default ("unknown"), and the US opt-out regime
+      // reads "unknown" as ALLOWED. The guest record is consulted ONLY when the client ALSO supplied a
+      // validated anonId this turn (its own browser-held guest id) — never an unvalidated string, and
+      // never merged in for a guest turn (verifiedShopperId absent), where `memorySubject` already IS
+      // that same validated anonId and no merge is needed.
+      //
+      // `validatedGuestAnonId` is hoisted to this outer scope so the restrictive-merge LOOKUP and N2's
+      // write-through (both immediately below) resolve the same guest namespace — declared once, used
+      // twice, mirroring `memorySubject` itself being derived once and reused (BLOCK-1 comment above).
+      // NOTE (corrected twice): an earlier revision said "reused three ways", counting a retention-sweep
+      // widening that was attempted and deliberately REVERTED; and it justified the revert as
+      // "reintroducing the cross-subject access F1 closed", which security review adjudicated as the WRONG
+      // reason — a sweep deletes only already-expired records (a strict subset of what the unauthenticated
+      // /forget path already allows), returns nothing to the caller, and never reaches the model, so it
+      // violates none of the property F1 protects. The revert stands on different grounds: attributability
+      // (an implicit per-turn ttl_sweep against a namespace the caller merely NAMED is not legible to an
+      // operator, unlike an erase.subject on a user-initiated /forget) and the fact that proactive
+      // reclamation belongs in a scheduled/admin job keyed off SERVER-known subjects. See
+      // docs/MEMORY-GO-LIVE-CHECKLIST.md B4. The sweep below still uses `memorySubject` only.
+      let validatedGuestAnonId: string | undefined;
+      let consentRecord: ConsentRecord | undefined;
+      if (memorySubject) {
+        const accountRecord = await lookupConsent(store, { tenantId, anonId: memorySubject });
+        validatedGuestAnonId = verifiedShopperId
+          ? validateAnonId(typeof body.signals?.anonId === "string" ? body.signals.anonId : undefined)
+          : undefined;
+        const guestRecord = validatedGuestAnonId ? await lookupConsent(store, { tenantId, anonId: validatedGuestAnonId }) : undefined;
+        const merged = validatedGuestAnonId ? mergeAccountConsent(accountRecord, guestRecord) : accountRecord;
+        consentRecord = merged;
+
+        // N2 fix (security review round 3, HIGH) — DURABLE write-through of the RESTRICTIVE ("out")
+        // direction only. Without this, the merge above is READ-TIME ONLY: it corrects THIS turn's
+        // decision but persists nothing, so an opt-out survives only for as long as the client keeps
+        // echoing the exact guest anonId that recorded it — a new device, cleared storage, or the
+        // widget's own `forgetMe()` (which mints a fresh anonId, index.html) all silently drop the
+        // linkage and the opt-out along with it. Proven by execution (two independent reviews): 0 writes
+        // with the echoed anonId, 1 write once it's gone.
+        //
+        // SAFE DIRECTION ONLY: this can only ever move a tier's durable value TOWARD "out", never adopt
+        // an "in". `mergeConsentTier` (consent.ts) returns a value DIFFERENT from `accountRecord`'s own
+        // for a tier if and only if the guest side is "out" and the account wasn't already "out" — a
+        // guest "in" is never adopted by the merge itself, so there is no code path here that could ever
+        // write a guest-sourced "in" onto the account (that would let anyone borrow a stranger's opt-in
+        // merely by holding/guessing their anonId post sign-in). See consent-restrictive-merge.test.ts's
+        // "guest 'in' is NEVER adopted" case, which this write-through must not (and does not) affect.
+        //
+        // IDEMPOTENT: the diff check means this only fires on the turn a NEW restriction is discovered —
+        // once written, the next lookup's `accountRecord` already equals `merged`, so there is no diff
+        // and no re-write on every subsequent turn.
+        //
+        // GATED: only reachable when `memorySubject` exists, i.e. `memoryService` is constructed (the
+        // double gate is on) — this never runs while memory is off. `!kill` gives NN#4 parity: a halted
+        // tenant/agent gets no write, durable or otherwise (regression-locked by the NN#4 test).
+        // DELIBERATE DIFFERENCE (security review, round 3 — the earlier claim that this "mirrors every
+        // other audited memory write on this path" was inaccurate): the other two writes below also carry
+        // `!d.flags.includes("no_autonomous_action")`, this one does not, so it still fires on a
+        // guardrail-halt turn (e.g. `giveaway_declined`, brain.ts). That is intentional and safe here
+        // BECAUSE the write is strictly RESTRICTIVE — it can only ever persist an "out" (mergeConsentTier
+        // never adopts a guest "in"), so letting it through on a halted turn protects the shopper rather
+        // than acting on their behalf. Suppressing it would DELAY honoring an opt-out, which is the wrong
+        // direction. The kill switch still overrides everything.
+        // Inherits /chat's own per-session/IP/tenant rate limiting (`allowRequest`, checked earlier in
+        // this handler) — this is a side effect of an already-rate-limited call, not a new endpoint, so
+        // no separate budget is introduced here.
+        //
+        // RESIDUAL (documented, not fixed here — see docs/MEMORY-GO-LIVE-CHECKLIST.md C7): because "out"
+        // always wins outright and is now durable, a stale guest "out" record can permanently override a
+        // LATER authenticated `/consent` "in" for the same tiers, for as long as the client keeps
+        // presenting that stale guest anonId — a strictly more privacy-conservative failure mode than
+        // before (durable rather than merely per-turn), but not a fix for that separate, pre-existing gap.
+        if (
+          validatedGuestAnonId &&
+          !kill &&
+          (merged.memoryOrdinary !== accountRecord.memoryOrdinary || merged.memorySpecial !== accountRecord.memorySpecial)
+        ) {
+          try {
+            await recordConsent(store, {
+              tenantId,
+              anonId: memorySubject,
+              memoryOrdinary: merged.memoryOrdinary,
+              memorySpecial: merged.memorySpecial,
+              hmacKey: AUDIT_HMAC_SECRET,
+              // Finding 2 — mark this as SERVER-derived, so the immutable log distinguishes a consent
+              // change the shopper MADE from one the merge INFERRED, and carries a reversal path that is
+              // actually achievable for this entry (the shopper-facing one is false here — see C7).
+              source: "guest-merge",
+            });
+          } catch (e) {
+            // PII-free: the error's CLASS only, never `.message` — a store/PG error can embed the KV key
+            // (`acct:<shopperId>`). Matches retention.ts's codified rule and the sweep's own catch below.
+            console.error(`[/chat] consent write-through error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+          }
+        }
+      }
       // PR-11c — contextual in-the-moment health-consent prompt: the deferred follow-up to PR-11b's
       // manage-panel-only UX. Ask exactly when it's relevant — THIS turn's message reveals
       // special-category info — rather than only passively via the manage panel. This is a READ-ONLY
@@ -957,7 +1209,43 @@ export async function buildServer(opts?: {
         shopperId: shopperPrincipal.kind === "shopper" ? shopperPrincipal.shopperId : undefined,
         shopperVerified: shopperPrincipal.kind === "shopper" ? shopperPrincipal.verified : undefined,
         consent: consentRecord,
+        // The SAME subject the consent lookup above used — so recall, remember(), the sweep and the
+        // consent gate all key off one namespace (security review F1/F2).
+        memorySubject,
       });
+
+      // The ONE consent input set for this turn. `remember()`'s gate below and the `memoryActive` the
+      // client is told (response, further down) BOTH read from this object — they cannot disagree,
+      // because there is only one of them. Deliberately not two parallel expressions: the panel
+      // contradicting the write path is precisely the defect this exists to fix, and a duplicated
+      // `?? "unknown"` is exactly how it would come back.
+      const memoryConsentInputs = {
+        region: signals.region,
+        consent1: signals.consent?.memoryOrdinary ?? "unknown",
+        consent2: signals.consent?.memorySpecial ?? "unknown",
+      };
+
+      // What the shopper's OWN recorded choice permits, in their region — the truth the widget's
+      // "What I remember" panel must render instead of its localStorage echo of the last box they
+      // ticked. Rendering `consent === "in"` client-side is WRONG in the default US region, where
+      // `decideMemoryWrite`'s ordinary rule is the opt-out regime `!== "out"`: the tri-state "unknown"
+      // means memory is ON while an unticked box reads as off, for every US shopper who never answered
+      // the prompt. Same lookup, same merge, same function as the write gate (widget-memory/src/
+      // consent.ts) — see manage-panel-honesty.test.ts, which asserts this field against the actual
+      // upsert count on the same turn rather than against itself.
+      //
+      // SCOPE, precisely: this reports the CONSENT decision, not a promise about any individual turn.
+      // The kill switch and a guardrail halt (`no_autonomous_action`) both still suppress the write
+      // below without changing what the shopper consented to — an operator halt is not the shopper's
+      // setting and must not silently flip their toggle. Pinned by the kill-switch case in that test.
+      //
+      // Absent (undefined) whenever memory is not live for this turn, which `JSON.stringify` (Fastify's
+      // default serializer — no route schema here) drops from the wire entirely, keeping the response
+      // byte-identical to before this change while the double gate (flag.ts) is off.
+      const memoryCapability = memoryService && memorySubject ? decideMemoryWrite(memoryConsentInputs) : undefined;
+      const memoryActive = memoryCapability
+        ? { ordinary: memoryCapability.mayWriteOrdinary, special: memoryCapability.mayWriteSpecial }
+        : undefined;
 
       // Canary split: a sticky fraction of THIS tenant's sessions is served by that tenant's canary
       // policy; the rest by champion. Keyed by the server-derived tenantId, so one merchant's canary can
@@ -1001,16 +1289,12 @@ export async function buildServer(opts?: {
       // the operator halt must genuinely stop the write, not just the reply. (Narrowing writes further to
       // the clean SALES path only is a separate PR-11 human-sign-off scope decision; this guard is the
       // code-owned guardrail, not a business-policy choice.)
-      if (memoryService && signals.anonId && !kill && !d.flags.includes("no_autonomous_action")) {
+      if (memoryService && memorySubject && !kill && !d.flags.includes("no_autonomous_action")) {
         try {
           await memoryService.remember(
-            {
-              tenantId,
-              anonId: signals.anonId,
-              region: signals.region,
-              consent1: signals.consent?.memoryOrdinary ?? "unknown",
-              consent2: signals.consent?.memorySpecial ?? "unknown",
-            },
+            // `memoryConsentInputs` — the same object the client-facing `memoryActive` is derived from,
+            // so what the shopper is TOLD and what is actually gated here are one decision, not two.
+            { tenantId, anonId: memorySubject, ...memoryConsentInputs },
             { message, reply: d.reply },
           );
         } catch (e) {
@@ -1035,25 +1319,44 @@ export async function buildServer(opts?: {
       // GUARANTEE bringing a namespace back under erasure.ts's own enumeration cap — it only deletes
       // what expiry finds among the first 500 records it queries.
       //
-      // Deliberately scoped to ONLY the subject already being served THIS turn (`signals.anonId`) —
-      // never an enumeration of every subject for the tenant (that would be an unbounded scan on the
-      // serving path, the exact hazard retention.ts's own comment says a cron/admin-endpoint sweep would
-      // need to solve separately). This is genuinely a narrower guarantee than a full periodic sweep: a
-      // subject who never returns keeps their expired-but-undeleted fact until *someone* triggers a sweep
-      // for them — TTL-on-read still means it is never served, so Inv 4's SERVING guarantee holds
-      // regardless; only the RECLAMATION timing for abandoned subjects is deferred to a future scheduled
-      // job (tracked in retention.ts). Fire-and-forget (mirrors the reqCount reclamation block below) so
-      // a slow/failing vector call can never delay or break the shopper's reply — but "fail-open for the
-      // shopper" must never mean "invisible to the operator" (security review, Finding 1 — HIGH): a
-      // swept failure that reaches here (retention.ts's own audit-vs-delete failures are already logged
-      // internally; anything ELSE that throws — e.g. the initial vector.query — lands here) is logged
-      // with a PII-free signal (tenantId + error class only — never fact text or the raw anonId), never
-      // silently swallowed. Kill-switch respectful (NN#4) — a halted tenant/agent gets no background
-      // action either, not even benign cleanup. Gated on `memoryService` (this instance's live double
-      // gate, INCLUDING the PR-8 test seam, so this is provably exercised in tests without waiting on
-      // the ADR flip) so it never runs when memory is off.
-      if (memoryService && signals.anonId && !kill && !d.flags.includes("no_autonomous_action")) {
-        void sweepExpired({ vector: vectorPort, audit: store }, tenantId, [signals.anonId]).catch((e) => {
+      // Deliberately scoped to ONLY the subject already being served THIS turn (`memorySubject`) — never
+      // an enumeration of every subject for the tenant (that would be an unbounded scan on the serving
+      // path, the exact hazard retention.ts's own comment says a cron/admin-endpoint sweep would need to
+      // solve separately). This is genuinely a narrower guarantee than a full periodic sweep: a subject
+      // who never returns keeps their expired-but-undeleted fact until *someone* triggers a sweep for
+      // them — TTL-on-read still means it is never served, so Inv 4's SERVING guarantee holds regardless;
+      // only the RECLAMATION timing for abandoned subjects is deferred to a future scheduled job (tracked
+      // in retention.ts). Fire-and-forget (mirrors the reqCount reclamation block below) so a slow/failing
+      // vector call can never delay or break the shopper's reply — but "fail-open for the shopper" must
+      // never mean "invisible to the operator" (security review, Finding 1 — HIGH): a swept failure that
+      // reaches here (retention.ts's own audit-vs-delete failures are already logged internally; anything
+      // ELSE that throws — e.g. the initial vector.query — lands here) is logged with a PII-free signal
+      // (tenantId + error class only — never fact text or the raw anonId), never silently swallowed.
+      // Kill-switch respectful (NN#4) — a halted tenant/agent gets no background action either, not even
+      // benign cleanup. Gated on `memoryService` (this instance's live double gate, INCLUDING the PR-8
+      // test seam, so this is provably exercised in tests without waiting on the ADR flip) so it never
+      // runs when memory is off.
+      //
+      // NOT extended to `validatedGuestAnonId` (security review round 3, N1 — considered, reverted).
+      // MECHANICALLY, widening this would fail `subject-scoped-memory-auth.test.ts`'s "THE ATTACK
+      // (recall)", which asserts the victim namespace is never queried: `sweepExpired` opens with a
+      // `vector.query` against whatever namespace the caller attached as `signals.anonId`.
+      //
+      // But the SECURITY characterization once written here — "reintroducing exactly the cross-subject
+      // query that F1's fix closed" — was ADJUDICATED WRONG by security review and is retracted: a sweep
+      // deletes only ALREADY-EXPIRED records (a strict subset of what the unauthenticated `/forget` path
+      // already permits with no token at all), returns nothing to the caller, and never reaches the model,
+      // so it violates none of the property F1 protects (no cross-subject fact text reaching the
+      // prompt/reply). The revert stands on DIFFERENT grounds:
+      //   (i)  ATTRIBUTABILITY — an `erase.subject` on a user-initiated `/forget` is legible to an
+      //        operator; an implicit per-turn `ttl_sweep` against a namespace the caller merely NAMED is
+      //        not; and
+      //   (ii) proactive reclamation belongs in a scheduled/admin job keyed off SERVER-known subjects,
+      //        exactly as retention.ts's own header already says.
+      // (Note the mechanical test-failure above is what makes widening a deliberate decision rather than a
+      // silent one — it is not itself the security argument.) See docs/MEMORY-GO-LIVE-CHECKLIST.md B4.
+      if (memoryService && memorySubject && !kill && !d.flags.includes("no_autonomous_action")) {
+        void sweepExpired({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, tenantId, [memorySubject]).catch((e) => {
           console.error(`[/chat] ttl_sweep error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
         });
       }
@@ -1111,6 +1414,7 @@ export async function buildServer(opts?: {
         memoryEnabled: memoryServiceEnabled,
         consentMode: CONSENT_MODE,
         consentPrompt,
+        memoryActive,
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;

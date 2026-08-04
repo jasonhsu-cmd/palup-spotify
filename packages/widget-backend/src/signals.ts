@@ -42,6 +42,15 @@ export interface ServingSignalContext {
    * this field existed. Absent ⇒ fail-closed "unknown"/"unknown" (byte-identical to the old hardcode).
    */
   consent?: { memoryOrdinary: Consent; memorySpecial: Consent };
+  /**
+   * SUBJECT-SCOPED AUTH — the server-derived cross-visit-memory subject for this request
+   * (`acct:<shopperId>` for a verified shopper, else the validated guest `anonId`; see
+   * `memorySubjectId`). When present it BECOMES `signals.anonId`, so every memory consumer — the
+   * brain's `memory.recall` gate, `remember()`, the retention sweep, and the consent lookup — reads and
+   * writes the SAME namespace. Absent (memory off, or a caller that doesn't supply it) the old
+   * client-validated behavior applies, keeping the inert path byte-identical.
+   */
+  memorySubject?: string;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -101,6 +110,11 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // dropped to `undefined` (never thrown), exactly like an invalid mood/cart enum above. Recall stays
     // inert regardless (the flag.ts double gate), so this is wiring-correctness ahead of go-live, not a
     // live capability.
-    anonId: validateAnonId(typeof r.anonId === "string" ? r.anonId : undefined),
+    // SUBJECT-SCOPED AUTH: the server-derived subject WINS when supplied. Without this the recall path
+    // (brain.ts's `memory.recall({ anonId: signals.anonId })`) would keep reading the raw client value
+    // while writes went to the bound subject — a verified shopper could read another subject's facts by
+    // supplying their anonId, and the read-time consent gate would be evaluated against the CALLER's
+    // consent record rather than the record whose facts were read. Both surfaced in security review.
+    anonId: ctx.memorySubject ?? validateAnonId(typeof r.anonId === "string" ? r.anonId : undefined),
   };
 }

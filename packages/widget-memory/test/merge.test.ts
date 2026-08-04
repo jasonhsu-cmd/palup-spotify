@@ -185,4 +185,46 @@ describe("merge — mergeGuestIntoAccount", () => {
     // No trace of the session-side style disposition anywhere in the migrated account data.
     expect(JSON.stringify(migrated)).not.toContain("researcher");
   });
+
+  // N6 (LOW/latent, security review round 3) — `hmacKey` is optional on `MergeDeps` so tests above can
+  // construct it without one, but this module has no production caller today; the day one is wired
+  // (B12), silently omitting the key would degrade an `acct:` subject's audit ref to a brute-forceable
+  // bare hash. `mergeGuestIntoAccount` must fail loudly outside a test runner instead.
+  it("N6 — hmacKey is required outside a test runner: omitting it throws rather than silently degrading to a bare hash", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const originalVitest = process.env.VITEST;
+    const originalNodeEnv = process.env.NODE_ENV;
+    delete process.env.VITEST;
+    process.env.NODE_ENV = "production";
+    try {
+      await expect(
+        mergeGuestIntoAccount({ vector, audit: runtimeStore }, { tenantId: "acme", anonId: "guest-n6", accountId: "acct-n6", consent2: "unknown" }),
+      ).rejects.toThrow(/hmacKey/);
+    } finally {
+      if (originalVitest === undefined) delete process.env.VITEST;
+      else process.env.VITEST = originalVitest;
+      if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = originalNodeEnv;
+    }
+  });
+
+  it("N6 — supplying hmacKey works exactly as before, in or out of a test runner", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: fixedDistiller(["prefers fragrance-free"]),
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-n6b", region: "us", consent1: "in", consent2: "unknown" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    const result = await mergeGuestIntoAccount(
+      { vector, audit: runtimeStore, hmacKey: "test-audit-key" },
+      { tenantId: "acme", anonId: "guest-n6b", accountId: "acct-n6b", consent2: "unknown" },
+    );
+    expect(result.merged).toBe(1);
+  });
 });

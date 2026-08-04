@@ -46,6 +46,60 @@ export interface WriteCapability {
  * including the US, given emerging US state health-privacy law. Ordinary-fact memory keeps the US opt-out
  * regime; only special-category is fail-closed everywhere.
  */
+/** One subject's recorded tri-states for BOTH consent tiers — structurally the same shape as
+ * state-postgres's `ConsentRecord` (kept independent here, not imported, so this package never depends
+ * on state-postgres). */
+export interface ConsentTiers {
+  memoryOrdinary: MemoryConsent;
+  memorySpecial: MemoryConsent;
+}
+
+/**
+ * BLOCK-1 fix (security-review remediation, PR #152) — restrictive-merge, for ONE tier, of an ACCOUNT
+ * subject's recorded consent with an optional GUEST subject's recorded consent.
+ *
+ * WHY THIS EXISTS: subject-scoped auth (identity.ts `memorySubjectId`) rebinds the cross-visit-memory
+ * subject from a raw client-supplied `anonId` to the server-verified `acct:<shopperId>` once a shopper
+ * signs in. Looking up consent by the NEW subject key alone means a choice the shopper recorded as a
+ * GUEST — in particular an explicit "out" — simply stops resolving the instant they sign in (the
+ * `acct:` row doesn't exist yet), degrading to the fail-closed default ("unknown"). In the US opt-out
+ * regime (`decideMemoryWrite`: `consent1 !== "out"`), "unknown" reads as ALLOWED — so sign-in would
+ * silently VOID an explicit opt-out. Proven by execution (two independent security reviews): guest
+ * records "out" -> 0 writes; the SAME person signs in -> 1 write. `decideMemoryWrite`'s own logic never
+ * changed; only its INPUT regressed with the subject-derivation switch.
+ *
+ * THE RULE (most-restrictive-wins):
+ *   - An "out" on EITHER side wins outright — an opt-out must survive sign-in.
+ *   - An "in" is adopted ONLY from the ACCOUNT record. A guest "in" is NEVER promoted to the account,
+ *     because — unlike the subject derivation itself, which trusts the SERVER-verified principal — the
+ *     guest `anonId` is still client-SUPPLIED and unauthenticated. Adopting a guest "in" would let
+ *     anyone borrow a stranger's opt-in merely by holding/guessing their anonId post sign-in.
+ *   - Otherwise "unknown" (neither side has decided).
+ *
+ * The caller is responsible for only ever passing a `guestValue` when the client supplied a validated
+ * `anonId` THIS request (never an unvalidated string) — see `mergeAccountConsent`'s own caller in
+ * server.ts. Passing `undefined` for `guestValue` (no anonId supplied) collapses this to "the account
+ * record alone", which is the correct behavior for a shopper who never presents a guest id.
+ */
+export function mergeConsentTier(accountValue: MemoryConsent, guestValue: MemoryConsent | undefined): MemoryConsent {
+  if (accountValue === "out" || guestValue === "out") return "out";
+  if (accountValue === "in") return "in";
+  return "unknown";
+}
+
+/**
+ * Applies `mergeConsentTier` to BOTH consent tiers at once — the single, named, unit-tested place this
+ * restrictive-merge rule lives (do not scatter it across call sites). `guest` is `undefined` exactly
+ * when there is no guest record to consult this turn (no validated anonId supplied, or none ever
+ * recorded), in which case the result is `account` unchanged.
+ */
+export function mergeAccountConsent(account: ConsentTiers, guest: ConsentTiers | undefined): ConsentTiers {
+  return {
+    memoryOrdinary: mergeConsentTier(account.memoryOrdinary, guest?.memoryOrdinary),
+    memorySpecial: mergeConsentTier(account.memorySpecial, guest?.memorySpecial),
+  };
+}
+
 export function decideMemoryWrite(i: ConsentInputs): WriteCapability {
   const isUs = i.region === "us";
   const mayWriteOrdinary = isUs ? i.consent1 !== "out" : i.consent1 === "in";

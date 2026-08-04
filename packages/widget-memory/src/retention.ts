@@ -56,6 +56,11 @@ export interface RetentionDeps {
   vector: VectorPort;
   /** The RuntimeStatePort's audit surface (ADR-0015 Inv 6) — reused as-is, no new audit mechanism. */
   audit: RuntimeStatePort;
+  /** MEDIUM finding (security-review remediation, PR #152) — keyed-HMAC key for the audit `subjectRef`
+   * (audit.ts's own doc comment). Optional: omitted falls back to a plain sha256, safe only for a
+   * high-entropy guest anon id — required for an `acct:` subject's ref to be genuinely pseudonymous
+   * rather than brute-forceable. Mirrors server.ts's `AUDIT_HMAC_SECRET`. */
+  hmacKey?: string;
 }
 
 /** The error's constructor name only (never `.message`) — an operator-visible failure signal must stay
@@ -76,7 +81,7 @@ function errorClassName(e: unknown): string {
  *
  * PRODUCTION CALLER (partially closes the prior "no production caller" go-live gap, security review,
  * MEDIUM): widget-backend/server.ts's POST /chat handler now calls this OPPORTUNISTICALLY, scoped to
- * ONLY the subject already being served that turn (`[signals.anonId]`, a one-element `subjects` array)
+ * ONLY the subject already being served that turn (`[memorySubject]`, a one-element `subjects` array — the server-derived subject, not the raw client `signals.anonId`)
  * — never an enumeration of every subject for the tenant. That narrow scope is deliberate: enumerating
  * "every subject for the request's tenant" has no existing bounded way to do it (the `memory_consent` KV
  * collection — state-postgres's `runtime-consent-store.ts` — is the only per-subject index and has no
@@ -132,11 +137,11 @@ export async function sweepExpired(
     // nothing is served past its TTL) rather than an invisible destructive action, and that failure is
     // never silently swallowed — it is surfaced below as a PII-free, operator-visible signal (tenantId +
     // hashed subjectRef + attempted count + the error's class only — never fact text or the raw anonId).
-    const ref = subjectRef(tenantId, anonId);
+    const ref = subjectRef(tenantId, anonId, deps.hmacKey);
     try {
       await deps.audit.audit(
         { tenantId },
-        buildMemoryAudit({ action: "ttl_sweep", tenantId, anonId, count: expiredIds.length }),
+        buildMemoryAudit({ action: "ttl_sweep", tenantId, anonId, count: expiredIds.length, hmacKey: deps.hmacKey }),
       );
     } catch (e) {
       console.error(
