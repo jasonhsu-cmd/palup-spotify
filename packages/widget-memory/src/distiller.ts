@@ -42,6 +42,21 @@ const TRANSCRIPT_LIKE_CHARS = FACT_MAX_CHARS * 3;
 const EMAIL_PATTERN = /[\w.+-]+@[\w-]+\.[a-z]{2,}/i;
 const PHONE_PATTERN = /\(\d{3}\)\s?\d{3}[-.\s]?\d{4}|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b|\+\d{1,3}[\s-]\d{6,}/;
 
+// Security review, MEDIUM — "contract-fidelity gap on untrusted input": a NUL byte in shopper-derived
+// text is accepted by the in-memory VectorPort oracle but THROWS in Postgres ("invalid byte sequence for
+// encoding UTF8", verified against pglite); a lone (unpaired) UTF-16 surrogate is likewise NOT handled
+// identically across engines (Postgres silently mangles it to U+FFFD on the wire; the in-memory adapter
+// keeps it byte-for-byte). Both classes are stripped HERE — the one place shopper-derived text is
+// finalized before it is ever considered for persistence — so every VectorPort adapter downstream sees
+// the same, already-safe string and neither divergence is reachable. (platform-ports' `requireCleanText`
+// is a SEPARATE, port-level defense-in-depth backstop for a caller that skips this function entirely.)
+const CONTROL_CHAR_RE = /[\x00-\x1F\x7F-\x9F]/g; // C0 + DEL + C1
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+function stripUnsafeChars(text: string): string {
+  return text.replace(CONTROL_CHAR_RE, "").replace(LONE_SURROGATE_RE, "");
+}
+
 /**
  * Runs the redaction guardrail (`redactPII` — cards/SSNs) over a candidate fact, rejects it outright if
  * it's transcript-shaped or still carries contact-info PII redactPII doesn't cover, then caps its
@@ -50,7 +65,7 @@ const PHONE_PATTERN = /\(\d{3}\)\s?\d{3}[-.\s]?\d{4}|\b\d{3}[-.\s]\d{3}[-.\s]\d{
  */
 export function sanitizeFact(raw: string | undefined | null): string | null {
   if (!raw) return null;
-  const trimmed = raw.trim();
+  const trimmed = stripUnsafeChars(raw).trim();
   if (!trimmed) return null;
   if (trimmed.length > TRANSCRIPT_LIKE_CHARS) return null; // transcript-shaped, not a distilled fact
 

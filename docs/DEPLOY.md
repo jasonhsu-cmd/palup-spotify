@@ -54,13 +54,30 @@ green.
 - **Connection:** Cloud Run attaches the instance with `--add-cloudsql-instances` and connects over the
   unix socket (`host=/cloudsql/<conn>`). The runtime SA has `roles/cloudsql.client` + `secretAccessor`
   on the URL secret.
-- **Schema:** auto-created on boot (`PostgresRuntimeStore.migrate()`), no manual migration.
+- **Schema:** auto-created on boot — TWO idempotent migrations run against the SAME shared connection
+  pool (state-postgres's `createRuntimeStore()`/`createVectorStore()` share one `pg.Pool` per process; see
+  the vector-factory doc comment): `PostgresRuntimeStore.migrate()` (`rs_kv`/`rs_stream`/`rs_audit`) and
+  `PostgresVectorStore.migrate()` (`vp_records` — the durable cross-visit-memory table, ADR-0015). No
+  manual migration for either.
 - **Audit immutability (#19):** `rs_audit` is INSERT/SELECT-only for `palup_app` (applied on staging;
   UPDATE/DELETE denied — verified). Re-apply for any new instance via
   `scripts/setup-audit-immutability.sql` (run as `postgres` through the Cloud SQL proxy). The backend
   also emits an `AUDIT_ANCHOR {seq,hash}` line to stdout per audited turn → Cloud Logging keeps an
   immutable witness of the chain head *outside* the DB, so tail-truncation / rewrite by a compromised
   DBA is reconcilable. (Automated anchor↔DB reconciliation is a monitoring follow-up.)
+- **`vp_records` privileges (ADR-0015 durable cross-visit memory) — not yet applied to any instance as far
+  as this doc's own history shows** (this table ships on the branch that adds `PostgresVectorStore`,
+  which had not deployed as of this note; verify against the live instance before relying on this).
+  Unlike `rs_audit`, `vp_records` genuinely needs `SELECT`/`INSERT`/`UPDATE`/`DELETE` for `palup_app` — a
+  right-to-erasure (`POST /forget`, Consent-2 withdrawal) must be able to `DELETE`, and `upsert`'s
+  `ON CONFLICT ... DO UPDATE` needs `UPDATE`. There is currently no immutability guarantee analogous to
+  `rs_audit`'s INSERT/SELECT-only grant on this table (erasure requiring DELETE is the reason it can't be
+  INSERT-only the same way). `tenant_id` is a real, indexed column on this table specifically so a
+  defense-in-depth **row-level security** policy scoped by `tenant_id` can be added later without a
+  migration — production SHOULD enable it, mirroring `PostgresRuntimeStore.migrate()`'s own RLS note; it
+  is not enabled by app code today. Special-category (Art-9) fact payloads are stored in PLAINTEXT on this
+  table — encryption-at-rest for those rows is a separate, tracked go-live item (see
+  `postgres-vector-store.ts`'s own file-level note), not yet implemented.
 
 ## Shopify grounding (M2, ADR-0012)
 

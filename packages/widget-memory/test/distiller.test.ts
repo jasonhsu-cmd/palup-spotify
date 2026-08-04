@@ -43,6 +43,38 @@ describe("distiller — sanitizeFact (redact + cap; never the transcript)", () =
   it("passes short, clean, ordinary facts through unchanged", () => {
     expect(sanitizeFact("prefers fragrance-free products")).toBe("prefers fragrance-free products");
   });
+
+  // Security review, MEDIUM — "contract-fidelity gap on untrusted input": a NUL byte in shopper-derived
+  // text is accepted by the in-memory VectorPort but THROWS in Postgres ("invalid byte sequence for
+  // encoding UTF8"); a lone (unpaired) UTF-16 surrogate is accepted by neither adapter identically (in
+  // memory it round-trips as-is, in Postgres it is silently mangled to U+FFFD on the wire — verified
+  // against pglite). Stripped HERE, at the one place shopper-derived text is finalized before it is ever
+  // considered for persistence, so every adapter downstream sees the same, already-safe string.
+  it("strips a NUL byte (and other C0/C1 control characters) rather than passing it through", () => {
+    const nul = String.fromCharCode(0);
+    const soh = String.fromCharCode(1);
+    const esc = String.fromCharCode(27);
+    const result = sanitizeFact(`prefers${nul} ${soh}${esc}fragrance-free products`);
+    expect(result).not.toBeNull();
+    expect(result).not.toContain(nul);
+    expect(result).not.toContain(soh);
+    expect(result).not.toContain(esc);
+    expect(result).toBe("prefers fragrance-free products");
+  });
+
+  it("strips an unpaired (lone) UTF-16 surrogate rather than passing it through", () => {
+    const loneHigh = String.fromCharCode(0xd800);
+    const loneLow = String.fromCharCode(0xdc00);
+    const result = sanitizeFact(`likes${loneHigh} wool socks${loneLow}`);
+    expect(result).not.toBeNull();
+    expect(result).not.toContain(loneHigh);
+    expect(result).not.toContain(loneLow);
+  });
+
+  it("keeps a VALID surrogate pair (e.g. an emoji) intact — only UNPAIRED surrogates are stripped", () => {
+    const emoji = String.fromCodePoint(0x1f600);
+    expect(sanitizeFact(`loves this product ${emoji}`)).toBe(`loves this product ${emoji}`);
+  });
 });
 
 describe("distiller — createStubDistiller (deterministic, zero model calls)", () => {

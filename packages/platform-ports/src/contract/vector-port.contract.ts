@@ -151,6 +151,22 @@ export function runVectorPortContract(makeAdapter: () => VectorPort | Promise<Ve
       expect(hits.map((h) => h.id).sort()).toEqual(["__proto__", "constructor"]);
     });
 
+    it("upsert REJECTS record.text carrying a control character (e.g. NUL) or an unpaired UTF-16 " +
+        "surrogate — every adapter must fail closed the SAME way (verified: pglite/Postgres throws on a " +
+        "raw NUL byte; a naive in-memory adapter would otherwise accept it silently)", async () => {
+      const v = await makeAdapter();
+      const NUL = String.fromCharCode(0);
+      const LONE_SURROGATE = String.fromCharCode(0xd800);
+      await expect(v.upsert("t", [{ id: "a", text: `abc${NUL}def` }])).rejects.toThrow(
+        /control character|surrogate/i,
+      );
+      await expect(v.upsert("t", [{ id: "b", text: `abc${LONE_SURROGATE}def` }])).rejects.toThrow(
+        /control character|surrogate/i,
+      );
+      // A valid surrogate PAIR (an emoji) must NOT be rejected.
+      await expect(v.upsert("t", [{ id: "c", text: "abc\u{1F600}def" }])).resolves.not.toThrow();
+    });
+
     it("returned metadata is independent of caller mutation afterwards", async () => {
       const v = await makeAdapter();
       await v.upsert("t", [{ id: "a", vector: [1, 0], metadata: { n: 1 } }]);

@@ -65,6 +65,27 @@ export interface RetentionDeps {
  * had something deleted; a subject with nothing expired triggers no vector call and no audit (nothing
  * happened — Inv 6 requires no SILENT action, not an audit for doing nothing). Returns the total number
  * of records deleted across all subjects.
+ *
+ * GO-LIVE GAP — NO PRODUCTION CALLER (security review, MEDIUM). Nothing in widget-backend/control-plane
+ * calls this function today; the only wired periodic sweep is `RuntimeStatePort.sweepExpired()` for
+ * `rs_kv` (server.ts's opportunistic reclamation, ~every RECLAIM_EVERY requests), which does NOT touch
+ * `vp_records`. Before the durable Postgres adapter (state-postgres) existed this was low-risk — a
+ * process restart wiped the in-memory vector store, bounding growth incidentally; a DURABLE store turns
+ * that into UNBOUNDED retention: an expired Art-9 fact is hidden from recall (TTL-on-read) but never
+ * actually deleted, so ADR-0015 Inv 4 ("expiry is enforced, not aspirational") is not fully met in
+ * practice, and a subject whose namespace grows past `erasure.ts`'s 500-row enumeration cap can have
+ * their `withdrawConsent1`/`withdrawConsent2`/erasure permanently fail. This function itself IS safe to
+ * call (per-subject, audited, tested) — what's missing is a CALLER: a real deployment needs either (a) a
+ * scheduled job (e.g. Cloud Scheduler → an admin-only endpoint) that enumerates each tenant's known
+ * subjects (the `memory_consent` KV collection — state-postgres's `runtime-consent-store.ts` — is the
+ * only existing per-subject index and would need its own bounded `list()` caller) and calls this per
+ * tenant, or (b) a DB-side expiry mechanism. Deliberately NOT wired as an opportunistic per-request call
+ * (mirroring server.ts's `rs_kv`/traffic/telemetry reclamation) here: unlike those, there is no existing
+ * bounded way to enumerate "every subject for the request's tenant" without itself becoming an unbounded
+ * scan on the serving path (the same class of hot-path risk state-postgres's shared-pool fix addresses
+ * for connections) — landing that safely is real, separate design work, not a two-line call. Tracked as
+ * a go-live item; silence about it is exactly what a prior review flagged, so this comment is that
+ * visibility.
  */
 export async function sweepExpired(
   deps: RetentionDeps,

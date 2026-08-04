@@ -23,7 +23,7 @@ import {
   createRedactingModelPort,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject, classifyFact } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -159,8 +159,14 @@ export async function buildServer(opts?: {
   memoryEnabled?: boolean;
 }) {
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
-  // inject a store so they can arm an operator kill on the SAME instance the request path reads.
-  const store = opts?.store ?? (await createRuntimeStore()).store;
+  // inject a store so they can arm an operator kill on the SAME instance the request path reads. When a
+  // test injects `opts.store`, `createRuntimeStore()` is never called at all (same as before this PR) —
+  // `runtimeResult.sql` then stays `undefined`, so `createVectorStore` below falls back to building its
+  // OWN pool if DATABASE_URL happens to be set, exactly as it would with no runtime store at all.
+  const runtimeResult = opts?.store
+    ? { store: opts.store, kind: "injected", sql: undefined as Sql | undefined }
+    : await createRuntimeStore();
+  const store = runtimeResult.store;
   // Per-merchant grounding needs the store (cache) + secrets (Shopify creds), so it is built here (not
   // module-level). Construct secrets in the composition root after config load (per the slice-2 review).
   const secrets = createEnvSecrets();
@@ -195,15 +201,26 @@ export async function buildServer(opts?: {
   // `memoryService`/`memoryPort` below) remains strictly gated on `memoryServiceEnabled` exactly as
   // before.
   //
-  // go-live blocker #1 (durable, portable VectorPort adapter): `createVectorStore()` mirrors
-  // `createRuntimeStore()`'s own env-driven selection — a real, durable Postgres-backed store when
-  // DATABASE_URL is set (so cross-visit memory survives a restart and is shared across Cloud Run
-  // instances, and a POST /forget erasure is REAL — ADR-0015 Inv 5), else the same in-memory dev adapter
-  // as before. Constructing it when memory is off remains a no-op either way: the double gate means
-  // nothing here ever calls upsert/query on this port except /forget (see above), and the Postgres
-  // branch's own construction only runs an idempotent CREATE TABLE IF NOT EXISTS migration — the exact
-  // same class of startup-only DDL `store` above already runs unconditionally, not a data read/write.
-  const vectorPort = opts?.vectorPort ?? (await createVectorStore()).store;
+  // Durable, portable VectorPort adapter (ADR-0001 `vector` port; ADR-0015 durable cross-visit memory):
+  // `createVectorStore()` mirrors `createRuntimeStore()`'s own env-driven selection — a real, durable
+  // Postgres-backed store when DATABASE_URL is set (so cross-visit memory survives a restart and is
+  // shared across Cloud Run instances, and a POST /forget erasure is REAL — ADR-0015 Inv 5), else the
+  // same in-memory dev adapter as before. `runtimeResult.sql` is threaded through so the Postgres branch
+  // reuses the SAME pool the runtime store already opened (security review, HIGH — a second, unshared
+  // `pg.Pool` here would double per-process connections against a shared-core Cloud SQL tier and risk
+  // starving the pool /chat's kill-switch read depends on). Constructing it when memory is off is
+  // NOT a no-op (that prior claim was inaccurate): the Postgres branch still runs its own idempotent
+  // `CREATE TABLE IF NOT EXISTS`/index DDL — the same class of startup-only migration `store` above
+  // already runs unconditionally, sharing its pool rather than opening a second one — nothing here ever
+  // calls upsert/query on this port except /forget (see above), which is the part that genuinely stays
+  // gated on memoryServiceEnabled.
+  const vectorResult = opts?.vectorPort
+    ? { store: opts.vectorPort, kind: "injected" }
+    : await createVectorStore(runtimeResult.sql);
+  const vectorPort = vectorResult.store;
+  // Surfaces which adapter is actually live for BOTH stores (security review, MEDIUM — "no operator/log
+  // line reveals which adapter is live"); also exposed on GET /health below.
+  console.log(`[boot] runtime store=${runtimeResult.kind} vector store=${vectorResult.kind}`);
   const underTestRunner = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
   const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
   const memoryService = memoryServiceEnabled
@@ -338,7 +355,10 @@ export async function buildServer(opts?: {
 
   const app = Fastify({ logger: false });
 
-  app.get("/health", async () => ({ ok: true, model: modelName }));
+  // `store`/`vector` surface which adapter is actually live (security review, MEDIUM — same rationale as
+  // the [boot] log line above): "postgres" in every real deploy (DATABASE_URL set), "memory" only in
+  // local/dev/test, "injected" only under a test that supplies its own store/vectorPort.
+  app.get("/health", async () => ({ ok: true, model: modelName, store: runtimeResult.kind, vector: vectorResult.kind }));
 
   app.get("/", async (_req, reply) => {
     reply.type("text/html").send(widgetHtml);
