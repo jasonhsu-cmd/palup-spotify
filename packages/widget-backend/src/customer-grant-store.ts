@@ -9,6 +9,17 @@ import type { RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
 // the namespaced shopperId. Decision-A (owner, this session): the grant is CREDENTIAL CUSTODY, not
 // ADR-0015 durable memory — so it is NOT consent-gated as memory, but it MUST honor data-subject erasure
 // (deleteGrant) and EU data-residency for where it is stored.
+//
+// NOT YET MIGRATED to `CryptoPort` (security review, feat/memory-encryption-at-rest, finding 8): this
+// module still hand-rolls its own inline AES-256-GCM with a single-round SHA-256 KDF over an APP-scoped
+// (not per-tenant) secret, predating `packages/platform-ports/src/crypto-port.ts` (built for ADR-0015 Inv
+// 9's tenant-scoped, HKDF-derived, AAD-bound encryption). Two encryption implementations means a crypto
+// defect must be fixed twice and behaviors can diverge — this is a known, tracked gap, not a silent one;
+// `CryptoPort`'s own header no longer claims to be "the only way feature code encrypts at rest" for
+// exactly this reason. Migrating this module onto `CryptoPort` is future work (it would also need a
+// tenant-scoped key per merchant rather than one app-wide key, and AAD binding to shopperId) — left
+// out of THIS PR's scope to avoid changing OAuth-grant custody behavior in the same change as ADR-0015's
+// encryption-at-rest fixes.
 
 const GRANTS = "caa_grants";
 /** App-scoped SecretsPort location of the 32-byte data-encryption key (base material, hashed to 32 bytes). */

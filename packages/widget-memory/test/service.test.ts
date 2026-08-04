@@ -9,6 +9,7 @@ import {
 } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
 import { subjectNamespace } from "../src/identity.js";
+import { withdrawConsent2 } from "../src/erasure.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
@@ -344,7 +345,7 @@ describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live bl
     ]);
   });
 
-  it("no key + memory live ⇒ special-category write is REFUSED: dropped, no plaintext anywhere, and no write.special audit", async () => {
+  it("no key + memory live ⇒ special-category write is REFUSED: dropped, no plaintext anywhere, and no write.special audit — but a PII-free write.refused audit IS emitted (security review finding 6)", async () => {
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
     const distiller = fixedDistiller(["shopper has a tree-nut allergy"]);
@@ -362,7 +363,12 @@ describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live bl
 
     const log = await runtimeStore.readAudit({ tenantId: "acme-nokey" });
     expect(log.map((r) => r.action)).not.toContain("write.special");
-    expect(JSON.stringify(log)).not.toContain("tree-nut");
+    // Security review finding 6: the refusal is NOT silent — an operator can see "memory is live, consent
+    // was given, and nothing is being stored because no key is provisioned" via a PII-free audit record.
+    const refusal = log.find((r) => r.action === "write.refused");
+    expect(refusal).toBeDefined();
+    expect(refusal?.decision).toMatchObject({ class: "special", count: 1 });
+    expect(JSON.stringify(log)).not.toContain("tree-nut"); // still never any fact text in the log
   });
 
   it("an undecryptable/corrupt encrypted record is dropped on recall, never thrown", async () => {
@@ -430,6 +436,177 @@ describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live bl
     expect(rawB[0]?.metadata?.encrypted).toBe(false);
     expect(rawB[0]?.metadata?.text).toBe("prefers fragrance-free"); // plaintext, unchanged from pre-encryption behavior
     expect(await svcB.recall(ctxB)).toEqual([{ text: "prefers fragrance-free", class: "ordinary" }]);
+  });
+
+  it("security review finding 1 — disposition.value is ALSO encrypted on the special-category path, not just text/sourceQuote", async () => {
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const runtimeStore = new InMemoryRuntimeStore();
+    const distiller: FactDistiller = {
+      async distill() {
+        return [
+          {
+            text: "shopper has a tree-nut allergy",
+            disposition: { axis: "role", value: "gift", provenance: "stated", confidence: 0.9, sourceQuote: "it's a gift for my nut-allergic friend" },
+          },
+        ];
+      },
+    };
+    const service = createMemoryService({ vector, audit: runtimeStore, distiller, enabled: true, secrets: keyedSecrets("acme-dispval") });
+    const ctx: MemoryCtx = { tenantId: "acme-dispval", anonId: "guest-dispval", region: "us", consent1: "in", consent2: "in" };
+
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    const raw = await vector.query(subjectNamespace("acme-dispval", "guest-dispval"), { text: "", k: 10 });
+    expect(raw[0]?.metadata?.encrypted).toBe(true);
+    // The raw stored disposition.value must NOT be the plaintext "gift" — it's a CryptoPort envelope.
+    const upserted = upsertSpy.mock.calls[0]?.[1] as Array<{ metadata?: { disposition?: Array<{ value?: string }> } }>;
+    const rawValue = upserted?.[0]?.metadata?.disposition?.[0]?.value;
+    expect(rawValue).toBeDefined();
+    expect(rawValue).not.toBe("gift");
+    expect(rawValue).toMatch(/^v1:/); // a real envelope, not just a differently-cased string
+
+    const recalled = await service.recall(ctx);
+    expect(recalled[0]?.disposition).toEqual([
+      { axis: "role", value: "gift", provenance: "stated", confidence: 0.9, sourceQuote: "it's a gift for my nut-allergic friend" },
+    ]);
+  });
+
+  describe("security review finding 2 — an unclassified sourceQuote riding an ordinary fact is treated as special end-to-end", () => {
+    const ordinaryFactWithArt9Quote: FactDistiller = {
+      async distill() {
+        return [
+          {
+            text: "prefers fragrance-free",
+            disposition: {
+              axis: "style",
+              value: "needs_guidance",
+              provenance: "stated",
+              confidence: 0.9,
+              // Art-9 per classifier.ts's medication terms ("tretinoin"/"prescription"), even though the
+              // FACT text alone ("prefers fragrance-free") classifies ordinary.
+              sourceQuote: "I'm on tretinoin so I need fragrance-free",
+            },
+          },
+        ];
+      },
+    };
+
+    it("requires Consent 2 (NOT just Consent 1) — Consent 1 alone is not enough to write it", async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const service = createMemoryService({
+        vector,
+        audit: runtimeStore,
+        distiller: ordinaryFactWithArt9Quote,
+        enabled: true,
+        secrets: keyedSecrets("acme-q2"),
+      });
+      const ctx: MemoryCtx = { tenantId: "acme-q2", anonId: "guest-q2", region: "us", consent1: "in", consent2: "unknown" };
+
+      const result = await service.remember(ctx, { message: "m", reply: "r" });
+      expect(result.written).toEqual([]); // refused — Consent 1 alone does not cover a special-classed candidate
+      expect(await service.recall(ctx)).toEqual([]);
+      const log = await runtimeStore.readAudit({ tenantId: "acme-q2" });
+      expect(log.map((r) => r.action)).not.toContain("write.ordinary");
+      expect(log.map((r) => r.action)).not.toContain("write.special");
+    });
+
+    it("with Consent 2 granted: written+audited as SPECIAL, encrypted fail-closed (refused with no key), and stored with class:\"special\"", async () => {
+      // No key configured — the candidate must be REFUSED (fail-closed), not silently written ordinary
+      // or in the clear, exactly like any other special-category candidate with no key.
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const service = createMemoryService({ vector, audit: runtimeStore, distiller: ordinaryFactWithArt9Quote, enabled: true });
+      const ctx: MemoryCtx = { tenantId: "acme-q2-nokey", anonId: "guest-q2-nokey", region: "us", consent1: "in", consent2: "in" };
+
+      const result = await service.remember(ctx, { message: "m", reply: "r" });
+      expect(result.written).toEqual([]); // refused fail-closed, not silently downgraded to ordinary/plaintext
+      const raw = await vector.query(subjectNamespace("acme-q2-nokey", "guest-q2-nokey"), { text: "", k: 10 });
+      expect(raw).toEqual([]);
+      const log = await runtimeStore.readAudit({ tenantId: "acme-q2-nokey" });
+      expect(log.map((r) => r.action)).toContain("write.refused"); // audited as a SPECIAL refusal
+      const refusal = log.find((r) => r.action === "write.refused");
+      expect(refusal?.decision).toMatchObject({ class: "special" });
+
+      // Now WITH a key configured: written+audited as special, encrypted, and the record's stored class
+      // really is "special" — not "ordinary" (the fact text alone would have classified as).
+      const vectorB = createInMemoryVectorStore();
+      const runtimeStoreB = new InMemoryRuntimeStore();
+      const serviceB = createMemoryService({
+        vector: vectorB,
+        audit: runtimeStoreB,
+        distiller: ordinaryFactWithArt9Quote,
+        enabled: true,
+        secrets: keyedSecrets("acme-q2-keyed"),
+      });
+      const ctxB: MemoryCtx = { tenantId: "acme-q2-keyed", anonId: "guest-q2-keyed", region: "us", consent1: "in", consent2: "in" };
+      const resultB = await serviceB.remember(ctxB, { message: "m", reply: "r" });
+      expect(resultB.written).toEqual(["special"]); // NOT "ordinary"
+
+      const rawB = await vectorB.query(subjectNamespace("acme-q2-keyed", "guest-q2-keyed"), { text: "", k: 10 });
+      expect(rawB[0]?.metadata?.class).toBe("special");
+      expect(rawB[0]?.metadata?.encrypted).toBe(true);
+      expect(JSON.stringify(rawB)).not.toContain("tretinoin");
+      expect(JSON.stringify(rawB)).not.toContain("fragrance-free");
+
+      const logB = await runtimeStoreB.readAudit({ tenantId: "acme-q2-keyed" });
+      expect(logB.map((r) => r.action)).toContain("write.special");
+      expect(logB.map((r) => r.action)).not.toContain("write.ordinary");
+
+      // Recall returns it as class:"special" (round-trips cleanly through decryption).
+      const recalled = await serviceB.recall(ctxB);
+      expect(recalled).toEqual([
+        {
+          text: "prefers fragrance-free",
+          class: "special",
+          disposition: [
+            { axis: "style", value: "needs_guidance", provenance: "stated", confidence: 0.9, sourceQuote: "I'm on tretinoin so I need fragrance-free" },
+          ],
+        },
+      ]);
+
+      // Purged by the Consent-2 withdrawal/erasure path (erasure.ts filters on class === "special") —
+      // proving the record is REALLY governed as special, not just labeled that way superficially.
+      const purge = await withdrawConsent2({ vector: vectorB, audit: runtimeStoreB }, { tenantId: "acme-q2-keyed", anonId: "guest-q2-keyed" });
+      expect(purge.purged).toBe(1);
+      expect(await serviceB.recall(ctxB)).toEqual([]);
+    });
+  });
+
+  it("security review finding 4 — a ciphertext relocated onto a DIFFERENT record's text field is dropped on recall, not served", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: fixedDistiller(["shopper has a tree-nut allergy"]),
+      enabled: true,
+      secrets: keyedSecrets("acme-relocate"),
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-relocate", anonId: "guest-relocate", region: "us", consent1: "in", consent2: "in" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    const ns = subjectNamespace("acme-relocate", "guest-relocate");
+    const raw = await vector.query(ns, { text: "", k: 10 });
+    expect(raw).toHaveLength(1);
+    const stolenCiphertext = (raw[0]!.metadata as { text: string }).text;
+
+    // Simulate an actor with store write access relocating the ciphertext onto a DIFFERENT record id in
+    // the SAME namespace (same tenant, so the key derivation alone would not stop this).
+    const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
+    await vector.upsert(ns, [
+      {
+        id: "a-different-record-id",
+        text: stolenCiphertext,
+        metadata: { text: stolenCiphertext, class: "special", expiresAt: future, encrypted: true },
+      },
+    ]);
+
+    const recalled = await service.recall(ctx);
+    // Exactly one fact recalled: the ORIGINAL record. The relocated copy fails aad-bound authentication
+    // and is dropped, never served under its new (wrong) record identity.
+    expect(recalled).toEqual([{ text: "shopper has a tree-nut allergy", class: "special" }]);
   });
 
   it("INERT (memory off): even with a configured key, encrypt/decrypt are NEVER called — nothing touched", async () => {

@@ -75,9 +75,21 @@ green.
   INSERT-only the same way). `tenant_id` is a real, indexed column on this table specifically so a
   defense-in-depth **row-level security** policy scoped by `tenant_id` can be added later without a
   migration — production SHOULD enable it, mirroring `PostgresRuntimeStore.migrate()`'s own RLS note; it
-  is not enabled by app code today. Special-category (Art-9) fact payloads are stored in PLAINTEXT on this
-  table — encryption-at-rest for those rows is a separate, tracked go-live item (see
-  `postgres-vector-store.ts`'s own file-level note), not yet implemented.
+  is not enabled by app code today. **Special-category (Art-9) fact payloads are encrypted before they
+  ever reach this table** (ADR-0015 Inv 9, go-live blocker #2 — CLOSED): `packages/widget-memory/src/
+  service.ts` AES-256-GCM-encrypts a special-category fact's `text` and its `disposition[].value`/
+  `sourceQuote` BEFORE calling this adapter's `upsert`, via a new `CryptoPort` (`packages/
+  platform-ports/src/crypto-port.ts`) — this table itself still just stores whatever bytes it's handed
+  (plain `text`/`jsonb` columns), so a DBA/disk-snapshot/log-shipping path sees ciphertext, not a health
+  fact in the clear (see `postgres-vector-store.ts`'s own file-level note). **This requires a new secret**:
+  `MEMORY_ENCRYPTION_KEY`, provisioned per tenant in the SAME `PALUP_SECRETS` JSON map the Shopify
+  Storefront token already lives in (`{"<tenant>":{"MEMORY_ENCRYPTION_KEY":"<a high-entropy secret,
+  16+ bytes>", ...}}`) — without it, a special-category memory write is REFUSED (fail-closed, never
+  stored in the clear) and a `write.refused` audit entry records it. **None of this is reachable in
+  production yet**: cross-visit memory itself stays fully OFF behind `MEMORY_ADR_ACCEPTED` (hardcoded
+  `false`, `packages/widget-memory/src/flag.ts`) until a separately-governed PR flips it with named-owner +
+  `security-reviewer` + LEGAL sign-off (ADR-0015 Status note) — so `MEMORY_ENCRYPTION_KEY` is go-live prep,
+  not yet something staging needs provisioned.
 
 ## Shopify grounding (M2, ADR-0012)
 

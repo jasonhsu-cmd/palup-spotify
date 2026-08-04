@@ -13,6 +13,7 @@ export type MemoryAction =
   | "consent.withdrawn"
   | "write.ordinary"
   | "write.special"
+  | "write.refused"
   | "recall"
   | "erase.subject"
   | "erase.tenant"
@@ -27,6 +28,8 @@ const REVERSAL_PATHS: Record<MemoryAction, string> = {
   "consent.withdrawn": "n/a — withdrawal is itself the reversal; re-granting re-enables writes",
   "write.ordinary": "erase this subject's memory via the vector port (deleteById/deleteNamespace)",
   "write.special": "erase-first: withdrawing Consent 2 purges this fact via the vector port",
+  "write.refused":
+    "n/a — nothing was persisted to reverse; provision the tenant's MEMORY_ENCRYPTION_KEY so future special-category writes are no longer refused (already-refused turns are not retroactively recoverable)",
   recall: "n/a — read-only, no state change",
   "erase.subject": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
   "erase.tenant": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
