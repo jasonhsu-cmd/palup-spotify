@@ -1043,11 +1043,14 @@ export async function buildServer(opts?: {
       // never merged in for a guest turn (verifiedShopperId absent), where `memorySubject` already IS
       // that same validated anonId and no merge is needed.
       //
-      // `validatedGuestAnonId` is hoisted to this outer scope (not just the `if (memorySubject)` block
-      // below) because N1's retention-sweep fix (server.ts, further down) and N2's write-through
-      // (immediately below) both need it too — declared once, reused three ways, so they can never
-      // disagree about which guest namespace this turn is also touching (mirrors `memorySubject` itself
-      // being derived once and reused, per the BLOCK-1 comment above).
+      // `validatedGuestAnonId` is hoisted to this outer scope so the restrictive-merge LOOKUP and N2's
+      // write-through (both immediately below) resolve the same guest namespace — declared once, used
+      // twice, mirroring `memorySubject` itself being derived once and reused (BLOCK-1 comment above).
+      // NOTE (corrected): an earlier revision of this comment said it was "reused three ways", counting a
+      // retention-sweep widening. That widening was attempted and deliberately REVERTED — sweeping a
+      // client-named namespace would let an unrelated signed-in caller's own turn query and delete
+      // against a namespace they merely named, reintroducing the cross-subject access F1 closed (see
+      // docs/MEMORY-GO-LIVE-CHECKLIST.md B4). The sweep below still uses `memorySubject` only.
       let validatedGuestAnonId: string | undefined;
       let consentRecord: ConsentRecord | undefined;
       if (memorySubject) {

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { armKill } from "@palup/state-postgres";
 import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken, mintShopperToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
@@ -223,6 +224,41 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     // fact write — an operator can see the account's consent state actually changed.
     const log = await store.readAudit({ tenantId: "demo" });
     expect(log.map((r) => r.action)).toContain("consent.record");
+  });
+
+  // NN#4 regression lock (governance review, round 3): the write-through is a NEW autonomous WRITE on the
+  // /chat path, so the operator kill switch must halt it like every other autonomous action. Correct by
+  // reading (`!kill` guards the block) but nothing locked it — /forget has such a test, this did not.
+  it("NN#4 — an operator kill switch halts the consent write-through: nothing is persisted to the account record", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    // A guest opt-out exists, so a NON-halted turn would durably write it through to the account.
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    await armKill(store, "global", "operator-halt");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "kill-wt-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().flags).toContain("kill_switch"); // the turn really was halted
+
+    // No consent.record audit from the write-through (the /consent grant above is a DIFFERENT subject —
+    // the guest — so assert specifically that the ACCOUNT subject was never written).
+    const log = await store.readAudit({ tenantId: "demo" });
+    const writeThroughs = log.filter((r) => r.action === "consent.record");
+    expect(writeThroughs).toHaveLength(1); // only the shopper's own original guest grant
+    await app.close();
   });
 
   it("N2 — a guest 'in' is still NEVER durably adopted either: after the same borrowed-'in' turn, a LATER anonId-less turn behaves exactly as before (still denied)", async () => {
