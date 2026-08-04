@@ -95,4 +95,26 @@ describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
     expect(JSON.stringify(entry?.input ?? {})).not.toContain("SUPER-SECRET-ANON-ID");
     expect((await store.verifyAudit({ tenantId: "acme" })).ok).toBe(true);
   });
+
+  // MEDIUM finding (security-review remediation, PR #152) — a low-entropy `acct:` subject id routed
+  // through a bare/unsalted hash is brute-forceable (widget-backend/src/audit.ts's own `hashShopperRef`
+  // rule). `recordConsent`'s `hmacKey` must produce a DIFFERENT subjectRef than the unkeyed default for
+  // the identical (tenantId, anonId) — proving the ref is genuinely keyed, not just re-hashed.
+  it("hmacKey changes the audited subjectRef for the identical (tenantId, anonId)", async () => {
+    const storeA = await makeStore();
+    const storeB = await makeStore();
+    await recordConsent(storeA, { tenantId: "acme", anonId: "acct:shopify:acme:12345", memoryOrdinary: "in", memorySpecial: "unknown" });
+    await recordConsent(storeB, { tenantId: "acme", anonId: "acct:shopify:acme:12345", memoryOrdinary: "in", memorySpecial: "unknown", hmacKey: "secret-audit-key" });
+
+    const refFrom = async (store: RuntimeStatePort) => {
+      const log = await store.readAudit({ tenantId: "acme" });
+      const entry = log.find((r) => r.action === "consent.record");
+      return (entry?.input as { subjectRef?: string } | undefined)?.subjectRef;
+    };
+    const unkeyedRef = await refFrom(storeA);
+    const keyedRef = await refFrom(storeB);
+    expect(unkeyedRef).toBeTruthy();
+    expect(keyedRef).toBeTruthy();
+    expect(keyedRef).not.toBe(unkeyedRef);
+  });
 });

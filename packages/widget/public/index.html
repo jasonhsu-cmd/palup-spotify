@@ -228,6 +228,11 @@
       await ensureToken(false);
       const headers = { "content-type": "application/json" };
       if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      // BLOCK-2 fix (security-review remediation, PR #152) — mirrors /chat's own header (line ~478): a
+      // signed-in shopper's consent must record against their server-verified acct: subject, not the
+      // guest anonId this call also carries. Without this header /consent looked anonymous and recorded
+      // against the (usually irrelevant) guest subject instead.
+      if (shopperToken) headers["x-shopper-token"] = shopperToken;
       await fetch("/consent", { method: "POST", headers, body: JSON.stringify({ anonId: memState.anonId, memoryOrdinary, memorySpecial }) });
     } catch { /* best-effort — the shopper's own local state still reflects their choice */ }
   }
@@ -323,6 +328,12 @@
       await ensureToken(false);
       const headers = { "content-type": "application/json" };
       if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      // BLOCK-2 fix (security-review remediation, PR #152) — mirrors /chat's own header (line ~478):
+      // without this, a signed-in shopper's DESTRUCTIVE erase request looked anonymous to the server and
+      // erased the (usually empty) guest subject while their real acct: data survived, even though this
+      // panel then confirmed success. The widget already holds `shopperToken` (ADR-0018 sign-in) and
+      // already sends it on /chat — this was the one call site it was missing from.
+      if (shopperToken) headers["x-shopper-token"] = shopperToken;
       if (prevAnonId) await fetch("/forget", { method: "POST", headers, body: JSON.stringify({ anonId: prevAnonId }) });
     } catch { /* best-effort — the local reset below still gives the shopper a fresh identity */ }
     memState = { anonId: mintAnonId(), consentShown: false, consent1: "unknown", consent2: "unknown" };

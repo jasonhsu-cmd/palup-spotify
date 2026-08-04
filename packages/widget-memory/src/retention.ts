@@ -56,6 +56,11 @@ export interface RetentionDeps {
   vector: VectorPort;
   /** The RuntimeStatePort's audit surface (ADR-0015 Inv 6) — reused as-is, no new audit mechanism. */
   audit: RuntimeStatePort;
+  /** MEDIUM finding (security-review remediation, PR #152) — keyed-HMAC key for the audit `subjectRef`
+   * (audit.ts's own doc comment). Optional: omitted falls back to a plain sha256, safe only for a
+   * high-entropy guest anon id — required for an `acct:` subject's ref to be genuinely pseudonymous
+   * rather than brute-forceable. Mirrors server.ts's `AUDIT_HMAC_SECRET`. */
+  hmacKey?: string;
 }
 
 /** The error's constructor name only (never `.message`) — an operator-visible failure signal must stay
@@ -132,11 +137,11 @@ export async function sweepExpired(
     // nothing is served past its TTL) rather than an invisible destructive action, and that failure is
     // never silently swallowed — it is surfaced below as a PII-free, operator-visible signal (tenantId +
     // hashed subjectRef + attempted count + the error's class only — never fact text or the raw anonId).
-    const ref = subjectRef(tenantId, anonId);
+    const ref = subjectRef(tenantId, anonId, deps.hmacKey);
     try {
       await deps.audit.audit(
         { tenantId },
-        buildMemoryAudit({ action: "ttl_sweep", tenantId, anonId, count: expiredIds.length }),
+        buildMemoryAudit({ action: "ttl_sweep", tenantId, anonId, count: expiredIds.length, hmacKey: deps.hmacKey }),
       );
     } catch (e) {
       console.error(

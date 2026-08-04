@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildMemoryAudit, type MemoryAction } from "../src/audit.js";
+import { buildMemoryAudit, subjectRef, type MemoryAction } from "../src/audit.js";
 
 // ADR-0015 Inv 6: consent + memory access are audited — no silent memory action. Mirrors
 // packages/widget-backend/src/audit.ts's shape (actor, action, input, decision, reversalPath) and its
@@ -86,5 +86,36 @@ describe("audit — buildMemoryAudit (mirrors the existing AuditInput shape; PII
     expect(input.decision).toMatchObject({ class: "special", count: 2 });
     expect(typeof input.reversalPath).toBe("string");
     expect(input.reversalPath!.length).toBeGreaterThan(0);
+  });
+});
+
+// MEDIUM finding (security-review remediation, PR #152) — a low-entropy `acct:` subject id routed
+// through a bare/unsalted hash is brute-forceable (widget-backend/src/audit.ts's own `hashShopperRef`
+// rule). `subjectRef` must support a KEYED HMAC when a key is supplied.
+describe("subjectRef — keyed HMAC when hmacKey is supplied", () => {
+  it("with NO hmacKey, behaves exactly as before (a stable, deterministic hash, still never the raw id)", () => {
+    const ref = subjectRef("acme", "acct:shopify:acme:12345");
+    expect(ref).toBe(subjectRef("acme", "acct:shopify:acme:12345")); // deterministic
+    expect(ref).not.toContain("12345");
+  });
+
+  it("with an hmacKey, the ref DIFFERS from the unkeyed hash for the SAME (tenantId, anonId)", () => {
+    const unkeyed = subjectRef("acme", "acct:shopify:acme:12345");
+    const keyed = subjectRef("acme", "acct:shopify:acme:12345", "secret-hmac-key");
+    expect(keyed).not.toBe(unkeyed);
+  });
+
+  it("a different hmacKey produces a different ref for the SAME (tenantId, anonId) — the ref is genuinely keyed, not just re-hashed", () => {
+    const refA = subjectRef("acme", "acct:shopify:acme:12345", "key-a");
+    const refB = subjectRef("acme", "acct:shopify:acme:12345", "key-b");
+    expect(refA).not.toBe(refB);
+  });
+
+  it("buildMemoryAudit threads hmacKey through to subjectRef", () => {
+    const withKey = buildMemoryAudit({ action: "erase.subject", tenantId: "acme", anonId: "acct:shopify:acme:12345", hmacKey: "secret" });
+    const withoutKey = buildMemoryAudit({ action: "erase.subject", tenantId: "acme", anonId: "acct:shopify:acme:12345" });
+    const refOf = (i: typeof withKey) => (i.input as { subjectRef?: string }).subjectRef;
+    expect(refOf(withKey)).not.toBe(refOf(withoutKey));
+    expect(refOf(withKey)).toBe(subjectRef("acme", "acct:shopify:acme:12345", "secret"));
   });
 });

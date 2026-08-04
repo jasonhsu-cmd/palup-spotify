@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import type { RuntimeStatePort } from "@palup/platform-ports";
 import type { Consent } from "@palup/widget-brain";
 
@@ -34,6 +34,12 @@ export interface RecordConsentInput extends ConsentRecord {
   tenantId: string;
   /** The subject key — the SAME validated anonId (or account id, post-merge) `signals.anonId` carries. */
   anonId: string;
+  /** MEDIUM finding (security-review remediation, PR #152) — keyed-HMAC key for the audit `subjectRef`
+   * below. Optional: omitted falls back to a plain sha256, which is only safe for a high-entropy guest
+   * anon id — required for a low-entropy `acct:` subject's ref to be genuinely pseudonymous rather than
+   * brute-forceable (mirrors widget-backend/src/audit.ts's `hashShopperRef` rule and server.ts's own
+   * `AUDIT_HMAC_SECRET`). */
+  hmacKey?: string;
 }
 
 export interface LookupConsentInput {
@@ -45,11 +51,20 @@ export interface LookupConsentInput {
  * decideMemoryWrite's own fail-closed bias: an unknown consent state is never treated as granted). */
 const NO_RECORD: ConsentRecord = { memoryOrdinary: "unknown", memorySpecial: "unknown" };
 
-/** Opaque, one-way reference to a subject for the audit log — NEVER the raw anonId (mirrors
- * widget-memory/src/audit.ts's subjectRef and widget-backend/src/audit.ts's sessionRef pattern), so the
- * immutable, long-lived audit log can't itself become a re-identification surface. */
-function subjectRef(tenantId: string, anonId: string): string {
-  return createHash("sha256").update(`${tenantId}::${anonId}`).digest("hex").slice(0, 16);
+/** Opaque reference to a subject for the audit log — NEVER the raw anonId (mirrors
+ * widget-memory/src/audit.ts's subjectRef and widget-backend/src/audit.ts's sessionRef/hashShopperRef
+ * patterns), so the immutable, long-lived audit log can't itself become a re-identification surface.
+ *
+ * MEDIUM finding (security-review remediation, PR #152) — widget-backend/src/audit.ts's OWN rule is
+ * that a shopperId is LOW-ENTROPY (public/known merchant + a small per-store numeric customer-id space),
+ * so a bare/unsalted hash is brute-forceable and the ref MUST be a KEYED HMAC. Subject-scoped auth now
+ * routes exactly that id (`acct:shopify:<tenant>:<numeric customerId>`) through this function on every
+ * `consent.record` audit. `hmacKey`, when supplied, makes the ref pseudonymous instead of
+ * brute-forceable; when omitted it falls back to the prior unsalted sha256 — which remains fine for a
+ * high-entropy guest anon id but is NOT a safe ref for an `acct:` subject. */
+function subjectRef(tenantId: string, anonId: string, hmacKey?: string): string {
+  const input = `${tenantId}::${anonId}`;
+  return hmacKey ? createHmac("sha256", hmacKey).update(input).digest("hex").slice(0, 16) : createHash("sha256").update(input).digest("hex").slice(0, 16);
 }
 
 /**
@@ -62,7 +77,7 @@ export async function recordConsent(
   input: RecordConsentInput,
   at = new Date().toISOString(),
 ): Promise<void> {
-  const { tenantId, anonId, memoryOrdinary, memorySpecial } = input;
+  const { tenantId, anonId, memoryOrdinary, memorySpecial, hmacKey } = input;
   const record: ConsentRecord = { memoryOrdinary, memorySpecial };
   await store.tx({ tenantId }, async (t) => {
     await t.put(MEMORY_CONSENT, anonId, record);
@@ -71,7 +86,7 @@ export async function recordConsent(
         actor: "shopper",
         action: "consent.record",
         // PII-safe: only a hashed subjectRef + the tri-state choices — never the raw anonId.
-        input: { subjectRef: subjectRef(tenantId, anonId), memoryOrdinary, memorySpecial },
+        input: { subjectRef: subjectRef(tenantId, anonId, hmacKey), memoryOrdinary, memorySpecial },
         decision: "recorded",
         reversalPath: "POST /consent again with a different choice (e.g. 'out') — a fresh choice always overwrites the prior one",
       },

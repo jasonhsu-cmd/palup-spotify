@@ -6,8 +6,8 @@ export { MEMORY_ADR_ACCEPTED, isMemoryEnabled } from "./flag.js";
 
 export { generateGuestId, subjectNamespace, validateAnonId, accountSubjectId, memorySubjectId } from "./identity.js";
 
-export type { MemoryConsent, ConsentInputs, WriteCapability, Region } from "./consent.js";
-export { decideMemoryWrite } from "./consent.js";
+export type { MemoryConsent, ConsentInputs, WriteCapability, Region, ConsentTiers } from "./consent.js";
+export { decideMemoryWrite, mergeConsentTier, mergeAccountConsent } from "./consent.js";
 
 export type { FactClass, FactClassification, TenantSensitivityPolicy } from "./classifier.js";
 export { classifyFact } from "./classifier.js";

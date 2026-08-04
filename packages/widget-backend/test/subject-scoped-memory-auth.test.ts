@@ -185,7 +185,15 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     await app.close();
   });
 
-  it("an UNVERIFIED / invalid shopper token does not authorize an account subject — it falls back to the guest path", async () => {
+  // RELABELED (security-review remediation, PR #152, §5 LOW) — this exercises only the INVALID/malformed
+  // token path (`authenticate` rejects it outright -> `kind !== "shopper"`), NOT an "unverified" shopper.
+  // `createShopperTokenIdentity`'s adapter never returns `verified: false` — its Principal type makes
+  // `verified` a literal `true` on the `shopper` kind (platform-ports/identity-port.ts), so ANY failure
+  // (tampered, wrong `typ`, expired, unconfigured secret) resolves to `kind: "anonymous"` instead. The
+  // defensive `!resolved.verified` guard in `verifiedShopperIdFor` is therefore unreachable via this
+  // adapter and NOT exercised by this test — it stays in the code as defense-in-depth for a future
+  // IdentityPort adapter that COULD return `verified: false`, and is deliberately not removed.
+  it("an invalid/malformed shopper token does not authorize an account subject — it falls back to the guest path", async () => {
     armAuth();
     const store = new InMemoryRuntimeStore();
     const app = await buildServer({ store, vectorPort: createInMemoryVectorStore() });

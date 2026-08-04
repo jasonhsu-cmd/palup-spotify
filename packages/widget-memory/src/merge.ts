@@ -19,6 +19,9 @@ export interface MergeDeps {
   vector: VectorPort;
   /** The RuntimeStatePort's audit surface (ADR-0015 Inv 6) — reused as-is, no new audit mechanism. */
   audit: RuntimeStatePort;
+  /** MEDIUM finding (security-review remediation, PR #152) — keyed-HMAC key for the audit `subjectRef`
+   * (audit.ts's own doc comment); see ErasureDeps/RetentionDeps/MemoryServiceDeps for the same field. */
+  hmacKey?: string;
 }
 
 export interface MergeCtx {
@@ -54,7 +57,7 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
 
   await deps.audit.audit(
     { tenantId: ctx.tenantId },
-    buildMemoryAudit({ action: "merge", tenantId: ctx.tenantId, anonId: ctx.anonId, count: toMigrate.length }),
+    buildMemoryAudit({ action: "merge", tenantId: ctx.tenantId, anonId: ctx.anonId, count: toMigrate.length, hmacKey: deps.hmacKey }),
   );
 
   return { merged: toMigrate.length };

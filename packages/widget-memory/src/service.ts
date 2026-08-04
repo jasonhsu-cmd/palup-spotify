@@ -164,6 +164,11 @@ export interface MemoryServiceDeps {
    * the test seam for exercising specific key-present/absent scenarios without touching env vars —
    * supplying it always wins over `secrets`. */
   crypto?: CryptoPort;
+  /** MEDIUM finding (security-review remediation, PR #152) — keyed-HMAC key for every audit
+   * `subjectRef` this service writes (audit.ts's own doc comment). Optional: omitted falls back to a
+   * plain sha256, safe only for a high-entropy guest anon id — required for an `acct:` subject's ref to
+   * be genuinely pseudonymous rather than brute-forceable. Mirrors server.ts's `AUDIT_HMAC_SECRET`. */
+  hmacKey?: string;
 }
 
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
@@ -327,6 +332,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
           anonId: ctx.anonId,
           factClass: "ordinary",
           count: ordinaryRecords.length,
+          hmacKey: deps.hmacKey,
         }),
       );
     }
@@ -340,6 +346,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
           anonId: ctx.anonId,
           factClass: "special",
           count: specialRecords.length,
+          hmacKey: deps.hmacKey,
         }),
       );
     }
@@ -356,6 +363,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
           anonId: ctx.anonId,
           factClass: "special",
           count: refusedSpecial,
+          hmacKey: deps.hmacKey,
         }),
       );
     }
@@ -368,6 +376,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
           anonId: ctx.anonId,
           factClass: "ordinary",
           count: refusedOrdinary,
+          hmacKey: deps.hmacKey,
         }),
       );
     }
@@ -459,20 +468,20 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       await deps.vector.upsert(namespace, renewed);
       await deps.audit.audit(
         { tenantId: ctx.tenantId },
-        buildMemoryAudit({ action: "ttl_renew", tenantId: ctx.tenantId, anonId: ctx.anonId, count: renewed.length }),
+        buildMemoryAudit({ action: "ttl_renew", tenantId: ctx.tenantId, anonId: ctx.anonId, count: renewed.length, hmacKey: deps.hmacKey }),
       );
     }
 
     if (undecryptable > 0) {
       await deps.audit.audit(
         { tenantId: ctx.tenantId },
-        buildMemoryAudit({ action: "recall.dropped", tenantId: ctx.tenantId, anonId: ctx.anonId, count: undecryptable }),
+        buildMemoryAudit({ action: "recall.dropped", tenantId: ctx.tenantId, anonId: ctx.anonId, count: undecryptable, hmacKey: deps.hmacKey }),
       );
     }
 
     await deps.audit.audit(
       { tenantId: ctx.tenantId },
-      buildMemoryAudit({ action: "recall", tenantId: ctx.tenantId, anonId: ctx.anonId, count: facts.length }),
+      buildMemoryAudit({ action: "recall", tenantId: ctx.tenantId, anonId: ctx.anonId, count: facts.length, hmacKey: deps.hmacKey }),
     );
 
     return facts;
