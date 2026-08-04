@@ -81,7 +81,7 @@ function errorClassName(e: unknown): string {
  *
  * PRODUCTION CALLER (partially closes the prior "no production caller" go-live gap, security review,
  * MEDIUM): widget-backend/server.ts's POST /chat handler now calls this OPPORTUNISTICALLY, scoped to
- * ONLY the subject already being served that turn (`[signals.anonId]`, a one-element `subjects` array)
+ * ONLY the subject already being served that turn (`[memorySubject]`, a one-element `subjects` array — the server-derived subject, not the raw client `signals.anonId`)
  * — never an enumeration of every subject for the tenant. That narrow scope is deliberate: enumerating
  * "every subject for the request's tenant" has no existing bounded way to do it (the `memory_consent` KV
  * collection — state-postgres's `runtime-consent-store.ts` — is the only per-subject index and has no

@@ -51,7 +51,7 @@ export interface RecordConsentInput extends ConsentRecord {
    * mean a future server-side caller that forgets this field silently ATTRIBUTES ITS OWN WRITE TO THE
    * SHOPPER in the immutable log — the wrong direction to fail for an Inv-6 attribution field. Making it
    * required forces every new call site to state who caused the change. */
-  source: "shopper" | "guest-merge";
+  source: "shopper" | "guest-merge" | "account-out-propagation";
 }
 
 export interface LookupConsentInput {
@@ -96,20 +96,20 @@ export async function recordConsent(
   // for a SERVER-derived write, the exact misattribution this field exists to prevent (security review,
   // PR #152). Fail loudly instead: an omission is a programming error, and a wrong actor in an immutable
   // Inv-6 log is worse than a rejected write. Both production call sites supply it (server.ts).
-  if (source !== "shopper" && source !== "guest-merge")
-    throw new Error(`recordConsent: 'source' must be "shopper" or "guest-merge" (got ${JSON.stringify(source)}) — it attributes this entry in the immutable audit log`);
+  if (source !== "shopper" && source !== "guest-merge" && source !== "account-out-propagation")
+    throw new Error(`recordConsent: 'source' must be "shopper", "guest-merge" or "account-out-propagation" (got ${JSON.stringify(source)}) — it attributes this entry in the immutable audit log`);
   const record: ConsentRecord = { memoryOrdinary, memorySpecial };
   await store.tx({ tenantId }, async (t) => {
     await t.put(MEMORY_CONSENT, anonId, record);
     await t.audit(
       {
-        actor: source === "guest-merge" ? "agent:shopper-memory" : "shopper",
+        actor: source === "shopper" ? "shopper" : "agent:shopper-memory",
         action: "consent.record",
         // PII-safe: only a hashed subjectRef + the tri-state choices — never the raw anonId.
         input: { subjectRef: subjectRef(tenantId, anonId, hmacKey), memoryOrdinary, memorySpecial, source },
         decision: "recorded",
         reversalPath:
-          source === "guest-merge"
+          source === "guest-merge" || source === "account-out-propagation"
             ? // VERIFIED BY EXECUTION (governance review round 5 — three earlier revisions of this string
               // were written by REASONING and were each wrong; these claims are now backed by tests in
               // consent-restrictive-merge.test.ts, "BLOCK-1(a)" and "BLOCK-1(b)"):
@@ -121,7 +121,7 @@ export async function recordConsent(
               //     row directly. An earlier revision prescribed forget-me (which erases the shopper's
               //     facts) as the only escape — actively harmful advice in a field an operator or support
               //     agent follows literally.
-              "reversible, but ORDER MATTERS: (1) FIRST neutralise the originating guest subject — either record the desired value on it from a SIGNED-OUT client (no shopper token; non-destructive, nothing is erased), or stop presenting that guest anonId entirely (the widget's forget-me mints a fresh one, which DOES erase the shopper's facts); THEN (2) record the desired value on this account subject while signed in. Doing (2) before (1) is undone by the next turn that still presents the guest anonId. See docs/MEMORY-GO-LIVE-CHECKLIST.md C7."
+              "reversible, but ORDER MATTERS: (1) FIRST neutralise the originating guest subject — either record the desired value on it from a SIGNED-OUT client (no shopper token; non-destructive, nothing is erased), or stop presenting that guest anonId entirely (the widget's forget-me mints a fresh one, which DOES erase the shopper's facts); THEN (2) record the desired value on this account subject while signed in. Doing (2) before (1) is undone by any /chat turn that intervenes while the guest anonId is still presented. See docs/MEMORY-GO-LIVE-CHECKLIST.md C7."
             : "POST /consent again with a different choice (e.g. 'out') — a fresh choice always overwrites the prior one",
       },
       at,

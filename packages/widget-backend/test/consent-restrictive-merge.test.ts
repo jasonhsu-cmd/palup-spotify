@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { armKill } from "@palup/state-postgres";
+import { armKill, lookupConsent } from "@palup/state-postgres";
 import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken, mintShopperToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
@@ -346,6 +346,69 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     });
     expect(later.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled();
+  });
+
+  // GOVERNANCE REVIEW round 6, BLOCK-A — the SYMMETRIC failure. The /chat merge is one-directional, so
+  // an explicit AUTHENTICATED opt-out did not govern the same browser's signed-OUT turns: on an
+  // unverified turn the subject is the guest anonId, the acct: row is never consulted, and the US
+  // opt-out regime reads an unresolved "unknown" as ALLOWED. Reviewer proved this branch CREATED the
+  // class (pre-PR the signed-in write landed on the guest row itself, so it governed those turns).
+  // Trigger is mundane, not adversarial: the shopper token is sessionStorage with a 1h default TTL, so a
+  // new tab or an expiry reverts the shopper to guest while the manage panel still renders "off".
+  it("BLOCK-A — an authenticated opt-out governs the SAME browser's signed-out turns (restrictive value propagates to the guest subject)", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    // The shopper opts OUT while SIGNED IN, presenting the guest anonId their browser still holds.
+    const res = await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "out", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+
+    // Their token then expires (sessionStorage, 1h TTL) — a new tab is a SIGNED-OUT client holding the
+    // same anonId. Pre-fix this wrote a fact despite the explicit opt-out.
+    const signedOutTurn = await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "block-a-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(signedOutTurn.statusCode).toBe(200);
+    expect(upsertSpy).not.toHaveBeenCalled(); // the opt-out is honored on the signed-OUT turn too
+
+    // The propagation is audited and attributed to the server, not the shopper.
+    const entries = (await store.readAudit({ tenantId: "demo" })).filter((r) => r.action === "consent.record");
+    const propagated = entries.find((r) => (r.input as { source?: string }).source === "account-out-propagation");
+    expect(propagated).toBeDefined();
+    expect(propagated!.actor).toBe("agent:shopper-memory");
+    await app.close();
+  });
+
+  it("BLOCK-A — only the RESTRICTIVE direction propagates: a signed-in 'in' is NEVER written to the guest subject", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const app = await buildServer({ store, vectorPort: createInMemoryVectorStore() });
+
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+
+    // The guest row is untouched — propagating a GRANT would let a signed-in caller enable memory on a
+    // subject they merely named (the anonId is client-supplied and unauthenticated).
+    expect(await lookupConsent(store, { tenantId: "demo", anonId: GUEST_ANON_ID })).toEqual({
+      memoryOrdinary: "unknown",
+      memorySpecial: "unknown",
+    });
+    await app.close();
   });
 
   // GOVERNANCE REVIEW round 5, BLOCK-1 — the recorded reversal path must WORK WHEN FOLLOWED. Three

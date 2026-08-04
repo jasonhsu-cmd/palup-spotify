@@ -789,6 +789,38 @@ export async function buildServer(opts?: {
     // `source: "shopper"` — an explicit choice the shopper made, as distinct from the server-derived
     // guest-merge write on /chat (Finding 2). Required, so no call site can silently misattribute.
     await recordConsent(store, { tenantId, anonId: subject, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial, hmacKey: AUDIT_HMAC_SECRET, source: "shopper" });
+
+    // BLOCK-A (governance review round 6) — SYMMETRIC PROPAGATION of a restrictive choice.
+    // The /chat merge is one-directional: on an UNVERIFIED turn the subject is the guest `anonId`, the
+    // account row is never consulted, and under the US opt-out regime an unresolved `"unknown"` reads as
+    // ALLOWED. So an authenticated opt-out did NOT govern the same browser's signed-OUT turns — and that
+    // is not an exotic path: the shopper token lives in sessionStorage with a 1h default TTL, so a new
+    // tab or an expiry reverts the shopper to the guest subject while the manage panel still shows "off".
+    // Proven by execution on both branches: this PR CREATED the class (pre-PR the signed-in write landed
+    // on the guest row itself, so it governed those turns).
+    //
+    // Fix: when a VERIFIED shopper records a RESTRICTIVE value and also presents a validated guest
+    // `anonId`, write that `"out"` through to the guest subject too. RESTRICTIVE-ONLY, mirroring the
+    // /chat merge's asymmetry — an `"in"` is never propagated, because the guest `anonId` is
+    // client-supplied and unauthenticated, so propagating a grant would let a signed-in caller enable
+    // memory on a subject they merely named. Adds NO capability: the unauthenticated `/consent` path
+    // already lets anyone holding that `anonId` write `"out"` to it (residual C1/C10), so this reaches
+    // nothing an attacker could not already reach by omitting the token.
+    const guestAnonId = verifiedShopperId ? validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined) : undefined;
+    if (guestAnonId && (body.memoryOrdinary === "out" || body.memorySpecial === "out")) {
+      const guestRow = await lookupConsent(store, { tenantId, anonId: guestAnonId });
+      const propagated = {
+        memoryOrdinary: body.memoryOrdinary === "out" ? ("out" as const) : guestRow.memoryOrdinary,
+        memorySpecial: body.memorySpecial === "out" ? ("out" as const) : guestRow.memorySpecial,
+      };
+      if (propagated.memoryOrdinary !== guestRow.memoryOrdinary || propagated.memorySpecial !== guestRow.memorySpecial) {
+        try {
+          await recordConsent(store, { tenantId, anonId: guestAnonId, ...propagated, hmacKey: AUDIT_HMAC_SECRET, source: "account-out-propagation" });
+        } catch (e) {
+          console.error(`[/consent] out-propagation error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+        }
+      }
+    }
     return { ok: true };
   });
 
