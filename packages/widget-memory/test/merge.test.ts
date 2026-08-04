@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createInMemoryVectorStore, InMemoryRuntimeStore } from "@palup/platform-ports";
+import { createInMemoryVectorStore, InMemoryRuntimeStore, createEnvSecrets, type SecretsPort } from "@palup/platform-ports";
 import { createBrain, createSession, MockModelAdapter } from "@palup/widget-brain";
 import { createMemoryService } from "../src/service.js";
 import { mergeGuestIntoAccount } from "../src/merge.js";
@@ -14,6 +14,14 @@ import type { FactDistiller } from "../src/distiller.js";
 function fixedDistiller(facts: string[]): FactDistiller {
   // PR-8: FactDistiller.distill() returns candidate OBJECTS ({text, disposition?}), not bare strings.
   return { async distill() { return facts.map((text) => ({ text })); } };
+}
+
+// ADR-0015 Inv 9 (go-live blocker #2): a special-category write is refused without a configured
+// encryption key (service.ts, fail closed) — mirrors service.test.ts's own `keyedSecrets` helper.
+function keyedSecrets(...tenantIds: string[]): SecretsPort {
+  const byTenant: Record<string, Record<string, string>> = {};
+  for (const t of tenantIds) byTenant[t] = { MEMORY_ENCRYPTION_KEY: `test-key-for-${t}` };
+  return createEnvSecrets(JSON.stringify(byTenant));
 }
 
 describe("merge — mergeGuestIntoAccount", () => {
@@ -75,6 +83,7 @@ describe("merge — mergeGuestIntoAccount", () => {
       audit: runtimeStore,
       distiller: fixedDistiller(["shopper has a tree-nut allergy"]),
       enabled: true,
+      secrets: keyedSecrets("acme"),
     });
     const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-special", region: "us", consent1: "in", consent2: "in" };
     await service.remember(ctx, { message: "m", reply: "r" });
@@ -98,6 +107,7 @@ describe("merge — mergeGuestIntoAccount", () => {
       audit: runtimeStore,
       distiller: fixedDistiller(["shopper has a tree-nut allergy"]),
       enabled: true,
+      secrets: keyedSecrets("acme"),
     });
     const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-special-in", region: "us", consent1: "in", consent2: "in" };
     await service.remember(ctx, { message: "m", reply: "r" });

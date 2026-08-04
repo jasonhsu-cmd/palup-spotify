@@ -75,9 +75,34 @@ green.
   INSERT-only the same way). `tenant_id` is a real, indexed column on this table specifically so a
   defense-in-depth **row-level security** policy scoped by `tenant_id` can be added later without a
   migration — production SHOULD enable it, mirroring `PostgresRuntimeStore.migrate()`'s own RLS note; it
-  is not enabled by app code today. Special-category (Art-9) fact payloads are stored in PLAINTEXT on this
-  table — encryption-at-rest for those rows is a separate, tracked go-live item (see
-  `postgres-vector-store.ts`'s own file-level note), not yet implemented.
+  is not enabled by app code today. **Special-category (Art-9) fact payloads are encrypted before they
+  ever reach this table** (ADR-0015 Inv 9, go-live blocker #2 — CLOSED): `packages/widget-memory/src/
+  service.ts` AES-256-GCM-encrypts a special-category fact's `text` and its `disposition[].value`/
+  `sourceQuote` BEFORE calling this adapter's `upsert`, via a new `CryptoPort` (`packages/
+  platform-ports/src/crypto-port.ts`) — this table itself still just stores whatever bytes it's handed
+  (plain `text`/`jsonb` columns), so a DBA/disk-snapshot/log-shipping path sees ciphertext, not a health
+  fact in the clear (see `postgres-vector-store.ts`'s own file-level note). **This requires a new secret**:
+  `MEMORY_ENCRYPTION_KEY`, provisioned per tenant in the SAME `PALUP_SECRETS` JSON map the Shopify
+  Storefront token already lives in (`{"<tenant>":{"MEMORY_ENCRYPTION_KEY":"<a high-entropy secret,
+  16+ bytes>", ...}}`) — without it, a special-category memory write is REFUSED (fail-closed, never
+  stored in the clear) and a `write.refused` audit entry records it. **None of this is reachable in
+  production yet**: cross-visit memory itself stays fully OFF behind `MEMORY_ADR_ACCEPTED` (hardcoded
+  `false`, `packages/widget-memory/src/flag.ts`) until a separately-governed PR flips it with named-owner +
+  `security-reviewer` + LEGAL sign-off (ADR-0015 Status note) — so `MEMORY_ENCRYPTION_KEY` is go-live prep,
+  not yet something staging needs provisioned.
+- **Rotating `MEMORY_ENCRYPTION_KEY` — two steps, in this order.** A naive one-step replacement is
+  IRRECOVERABLE: every fact written under the outgoing key stops decrypting, and `recall` drops each one
+  permanently (it is detected — a PII-free `recall.dropped` audit records the count — but detection is
+  not recovery; the plaintext is gone). To rotate safely, for the tenant being rotated:
+  1. Copy the CURRENT value to `MEMORY_ENCRYPTION_KEY_previous` in the same `PALUP_SECRETS` entry, and
+     put the NEW value at `MEMORY_ENCRYPTION_KEY`. `decrypt` tries the current key first and falls back
+     to `_previous` when the envelope's key id doesn't match, so existing records keep decrypting while
+     new writes use the new key.
+  2. Keep `_previous` for at least one full retention window (30 days — `ORDINARY_TTL_DAYS`/
+     `SPECIAL_TTL_DAYS`, and note retention SLIDES from last activity, so an actively-returning shopper's
+     records outlive a bare 30 days from rotation). Only then remove `_previous`. Watch for
+     `recall.dropped` audit entries during the window — a non-zero count means records were written under
+     a key that is no longer reachable.
 
 ## Shopify grounding (M2, ADR-0012)
 

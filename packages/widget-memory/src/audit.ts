@@ -13,12 +13,14 @@ export type MemoryAction =
   | "consent.withdrawn"
   | "write.ordinary"
   | "write.special"
+  | "write.refused"
   | "recall"
   | "erase.subject"
   | "erase.tenant"
   | "merge"
   | "ttl_sweep"
-  | "ttl_renew";
+  | "ttl_renew"
+  | "recall.dropped";
 
 const ACTOR = "agent:shopper-memory";
 
@@ -27,6 +29,8 @@ const REVERSAL_PATHS: Record<MemoryAction, string> = {
   "consent.withdrawn": "n/a — withdrawal is itself the reversal; re-granting re-enables writes",
   "write.ordinary": "erase this subject's memory via the vector port (deleteById/deleteNamespace)",
   "write.special": "erase-first: withdrawing Consent 2 purges this fact via the vector port",
+  "write.refused":
+    "n/a — nothing was persisted to reverse; provision the tenant's MEMORY_ENCRYPTION_KEY so future special-category writes are no longer refused (already-refused turns are not retroactively recoverable)",
   recall: "n/a — read-only, no state change",
   "erase.subject": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
   "erase.tenant": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
@@ -34,6 +38,8 @@ const REVERSAL_PATHS: Record<MemoryAction, string> = {
   ttl_sweep: "n/a — expiry is policy-driven; a fresh consent grant starts a new TTL",
   "ttl_renew":
     "shopper may withdraw (manage-memory / forget-me) — a withdrawn fact is never renewed again and ages out on its current expiry; erasure purges it immediately",
+  "recall.dropped":
+    "restore the key the record was written under (its outgoing value belongs at <MEMORY_ENCRYPTION_KEY>_previous for one rotation cycle) and the record decrypts again; without it the record is unrecoverable and should be erased",
 };
 
 /** Opaque, one-way reference to a subject — NEVER the raw anonId/account id, so the immutable,

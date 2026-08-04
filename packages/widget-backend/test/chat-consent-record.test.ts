@@ -24,7 +24,7 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
   };
 }
 
-const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS"];
+const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS", "PALUP_SECRETS"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
 describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => {
@@ -118,6 +118,10 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
   });
 
   it("special-category write allowed ONLY when memorySpecial='in', in every region including US", async () => {
+    // ADR-0015 Inv 9 (go-live blocker #2): a special-category write is refused without a configured
+    // encryption key (service.ts, fail closed) — provision one for the "demo" RUNTIME_TENANT so this
+    // test still exercises a REAL write.special, not just a refusal.
+    process.env.PALUP_SECRETS = JSON.stringify({ demo: { MEMORY_ENCRYPTION_KEY: "test-key-for-demo" } });
     for (const region of ["us", "eu", "uk", "other"]) {
       process.env.MERCHANT_REGION = region;
       const store = new InMemoryRuntimeStore();

@@ -78,6 +78,14 @@ const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF
  * for this input class is enforced at the port, not left to each adapter to (mis)handle independently.
  * Scoped to `record.text` only (the field a shopper's own words land in via the distiller); arbitrary
  * `metadata` is untouched here.
+ *
+ * NOTE (security review, feat/memory-encryption-at-rest, finding 11): once widget-memory's ADR-0015 Inv 9
+ * encryption-at-rest lands, an ENCRYPTED record's `text` is a base64 `CryptoPort` envelope, not shopper
+ * prose — this backstop can never actually fire on that path (base64 output never contains a control
+ * character or a lone surrogate) because `sanitizeFact` already ran on the plaintext BEFORE encryption.
+ * The guarantee above ("a caller that skips app-level sanitization gets the same fail-closed error from
+ * every engine") still holds for PLAINTEXT records (ordinary facts with no key configured); it's a no-op,
+ * not a broken promise, for encrypted ones — documented here rather than silently no-longer-true.
  */
 export function requireCleanText(text: string | undefined): void {
   if (text === undefined) return;

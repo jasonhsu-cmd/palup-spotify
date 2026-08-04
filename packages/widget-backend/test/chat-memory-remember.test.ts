@@ -81,23 +81,37 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
     const upsertSpy = vi.spyOn(vector, "upsert");
     const modelPort = distillingModel([{ text: "shopper has a tree-nut allergy" }]);
 
-    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
-    const res = await app.inject({
-      method: "POST",
-      url: "/chat",
-      payload: {
-        sessionId: "mem-remember-3",
-        message: "I have a tree-nut allergy",
-        signals: { cart: "empty", anonId: VALID_ANON_ID },
-      },
-    });
+    // Security review finding 10 — provision a key for "demo" so this test isolates the CONSENT gate:
+    // without one, "no write.special" would ALSO be true for the unrelated reason that the encryption
+    // fail-closed refusal (service.ts) refuses ANY special-category write when no key is configured,
+    // regardless of consent — which would let a real consent-gate regression go undetected here.
+    const origSecrets = process.env.PALUP_SECRETS;
+    process.env.PALUP_SECRETS = JSON.stringify({ demo: { MEMORY_ENCRYPTION_KEY: "test-key-for-demo-tenant-12345" } });
+    try {
+      const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+      const res = await app.inject({
+        method: "POST",
+        url: "/chat",
+        payload: {
+          sessionId: "mem-remember-3",
+          message: "I have a tree-nut allergy",
+          signals: { cart: "empty", anonId: VALID_ANON_ID },
+        },
+      });
 
-    expect(res.statusCode).toBe(200);
-    expect(upsertSpy).not.toHaveBeenCalled(); // Consent 2 required; no /consent record exists for this subject -> fail-closed "unknown" -> denied
-    const log = await store.readAudit({ tenantId: "demo" });
-    expect(log.map((r) => r.action)).not.toContain("write.special");
-    expect(log.map((r) => r.action)).not.toContain("write.ordinary");
-    await app.close();
+      expect(res.statusCode).toBe(200);
+      expect(upsertSpy).not.toHaveBeenCalled(); // Consent 2 required; no /consent record exists for this subject -> fail-closed "unknown" -> denied
+      const log = await store.readAudit({ tenantId: "demo" });
+      expect(log.map((r) => r.action)).not.toContain("write.special");
+      expect(log.map((r) => r.action)).not.toContain("write.ordinary");
+      // With a key configured, an absence of write.special is genuinely the CONSENT gate — not the
+      // encryption fail-closed refusal (which would show up as write.refused).
+      expect(log.map((r) => r.action)).not.toContain("write.refused");
+      await app.close();
+    } finally {
+      if (origSecrets === undefined) delete process.env.PALUP_SECRETS;
+      else process.env.PALUP_SECRETS = origSecrets;
+    }
   });
 
   it("no subject key (no anonId) -> remember() is never even attempted, mirroring the brain's own recall guard", async () => {
