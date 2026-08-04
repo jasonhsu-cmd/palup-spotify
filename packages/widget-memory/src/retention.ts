@@ -1,6 +1,6 @@
 import type { RuntimeStatePort, VectorPort } from "@palup/platform-ports";
 import { subjectNamespace } from "./identity.js";
-import { buildMemoryAudit } from "./audit.js";
+import { buildMemoryAudit, subjectRef } from "./audit.js";
 import type { FactClass } from "./classifier.js";
 import type { FactMetadata } from "./types.js";
 
@@ -58,13 +58,21 @@ export interface RetentionDeps {
   audit: RuntimeStatePort;
 }
 
+/** The error's constructor name only (never `.message`) — an operator-visible failure signal must stay
+ * PII-free even in the unlikely case an adapter's error message happened to echo back call arguments. */
+function errorClassName(e: unknown): string {
+  return e instanceof Error ? e.constructor.name : typeof e;
+}
+
 /**
  * Deletes every already-expired record, per subject, under `tenantId` — the reclamation half of Inv 4
  * (TTL-on-read in service.ts's `recall` is the correctness half: a stale fact is never SERVED even
  * before a sweep runs; this actually frees the storage). Emits one `ttl_sweep` audit per subject that
- * had something deleted; a subject with nothing expired triggers no vector call and no audit (nothing
- * happened — Inv 6 requires no SILENT action, not an audit for doing nothing). Returns the total number
- * of records deleted across all subjects.
+ * had something DECIDED for deletion (the audit is written BEFORE the physical delete — see the
+ * ordering note below — so it records the sweep's decision even in the rare case the delete itself
+ * then fails); a subject with nothing expired triggers no vector call and no audit (nothing happened —
+ * Inv 6 requires no SILENT action, not an audit for doing nothing). Returns the total number of records
+ * ACTUALLY deleted (not merely decided) across all subjects.
  *
  * PRODUCTION CALLER (partially closes the prior "no production caller" go-live gap, security review,
  * MEDIUM): widget-backend/server.ts's POST /chat handler now calls this OPPORTUNISTICALLY, scoped to
@@ -98,6 +106,12 @@ export async function sweepExpired(
     const namespace = subjectNamespace(tenantId, anonId);
     const matches = await deps.vector.query(namespace, { text: "", k: SWEEP_QUERY_LIMIT });
 
+    // INVARIANT (security review, Finding 10, NOTE): a record with NO `expiresAt` at all is structurally
+    // UNREACHABLE by this sweep (and by recall's renewal, service.ts) — it would be retained and served
+    // forever. Nothing in this codebase writes such a record today (service.ts's `remember` always
+    // stamps `expiresAt`), so this is latent, not live. If any future non-widget-memory writer ever
+    // touches `vp_records` without stamping `expiresAt`, that record silently escapes Inv 4 entirely —
+    // this filter has no floor for metadata-less rows.
     const expiredIds = matches
       .filter((match) => {
         const meta = match.metadata as Partial<FactMetadata> | undefined;
@@ -107,12 +121,37 @@ export async function sweepExpired(
 
     if (expiredIds.length === 0) continue;
 
-    await deps.vector.deleteById(namespace, expiredIds);
-    await deps.audit.audit(
-      { tenantId },
-      buildMemoryAudit({ action: "ttl_sweep", tenantId, anonId, count: expiredIds.length }),
-    );
-    totalDeleted += expiredIds.length;
+    // ADR-0015 Inv 6 / NN#5 (security review, Finding 1 — HIGH: "a destructive delete can land
+    // unaudited"). AUDIT BEFORE DELETE, never the reverse, so "deleted but unaudited" is structurally
+    // unreachable: if the audit write itself throws, we skip the delete for THIS subject entirely
+    // (caught below) rather than risk an unaudited destructive action. `audit` and `vector` are
+    // separate ports (ADR-0001 — a VectorPort adapter need not even be Postgres), so this ordering,
+    // not a cross-port DB transaction, is what makes the guarantee hold portably. The accepted, narrower
+    // residual is the mirror case: audited, but the physical delete then fails — a stale record simply
+    // stays undeleted (TTL-on-read in service.ts `recall` still hides it from ever being served, so
+    // nothing is served past its TTL) rather than an invisible destructive action, and that failure is
+    // never silently swallowed — it is surfaced below as a PII-free, operator-visible signal (tenantId +
+    // hashed subjectRef + attempted count + the error's class only — never fact text or the raw anonId).
+    const ref = subjectRef(tenantId, anonId);
+    try {
+      await deps.audit.audit(
+        { tenantId },
+        buildMemoryAudit({ action: "ttl_sweep", tenantId, anonId, count: expiredIds.length }),
+      );
+    } catch (e) {
+      console.error(
+        `[retention] ttl_sweep audit failed tenant=${tenantId} subjectRef=${ref} attemptedCount=${expiredIds.length} error=${errorClassName(e)} — skipping delete for this subject (never delete without its audit)`,
+      );
+      continue;
+    }
+    try {
+      await deps.vector.deleteById(namespace, expiredIds);
+      totalDeleted += expiredIds.length;
+    } catch (e) {
+      console.error(
+        `[retention] ttl_sweep delete failed tenant=${tenantId} subjectRef=${ref} attemptedCount=${expiredIds.length} error=${errorClassName(e)} — audited as decided, NOT physically deleted; TTL-on-read still hides it from serving`,
+      );
+    }
   }
 
   return totalDeleted;
