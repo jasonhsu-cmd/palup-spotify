@@ -208,6 +208,13 @@
   function saveMemState(){ try { localStorage.setItem(MEM_KEY, JSON.stringify(memState)); } catch {} }
   let memoryEnabled = false; // learned ONLY from a /chat response; NEVER client-guessed
   let consentMode = null;    // "opt_in" | "opt_out", learned the same way
+  // { ordinary: boolean, special: boolean } — the EFFECTIVE memory state for the subject the server is
+  // actually serving, from /chat and /consent alike. Also never client-guessed, and for the same reason
+  // the other two aren't: the panel used to bind its checkbox to `consent === "in"`, which is simply
+  // WRONG in the US opt-out regime, where the server's ordinary rule is `!== "out"` — so the tri-state
+  // "unknown" meant memory was ON while the box rendered unchecked, for every US shopper who never
+  // answered the prompt. Null until a response says otherwise.
+  let memoryActive = null;
 
   // PR-11c — contextual in-the-moment health-consent prompt (Consent 2). The server (server.ts) sets a
   // READ-ONLY `consentPrompt:"special"` signal on /chat when memory is live, THIS message reveals
@@ -223,6 +230,12 @@
 
   async function postConsent(memoryOrdinary, memorySpecial){
     memState.consent1 = memoryOrdinary; memState.consent2 = memorySpecial; saveMemState();
+    // Drop the server's previous answer and render the click optimistically. Safe here specifically
+    // because this path only ever posts an EXPLICIT "in"/"out" — and an explicit choice means the same
+    // thing in both regimes ("in" -> active, "out" -> inactive), so the local echo cannot disagree with
+    // the server about it. Only "unknown" is regime-dependent, and the shopper can never click that.
+    // The server's answer below supersedes this either way.
+    memoryActive = null;
     syncManagePanelToggles();
     try {
       await ensureToken(false);
@@ -233,7 +246,14 @@
       // guest anonId this call also carries. Without this header /consent looked anonymous and recorded
       // against the (usually irrelevant) guest subject instead.
       if (shopperToken) headers["x-shopper-token"] = shopperToken;
-      await fetch("/consent", { method: "POST", headers, body: JSON.stringify({ anonId: memState.anonId, memoryOrdinary, memorySpecial }) });
+      const r = await fetch("/consent", { method: "POST", headers, body: JSON.stringify({ anonId: memState.anonId, memoryOrdinary, memorySpecial }) });
+      // The server answers with the effective state its own gate will apply — adopt it rather than
+      // inferring it here (that inference is the bug this replaces).
+      const body = await r.json().catch(() => null);
+      if (body && body.memoryActive && typeof body.memoryActive === "object") {
+        memoryActive = body.memoryActive;
+        syncManagePanelToggles();
+      }
     } catch { /* best-effort — the shopper's own local state still reflects their choice */ }
   }
   const setConsent1 = (v) => postConsent(v, memState.consent2 ?? "unknown");
@@ -303,8 +323,11 @@
   function syncManagePanelToggles(){
     const o = document.querySelector('[data-testid="manage-memory-toggle-ordinary"]');
     const s = document.querySelector('[data-testid="manage-memory-toggle-special"]');
-    if (o) o.checked = memState.consent1 === "in";
-    if (s) s.checked = memState.consent2 === "in";
+    // Prefer the server's effective state. The `=== "in"` fallback applies only before any response has
+    // arrived, or in the brief optimistic window inside postConsent where the shopper's own explicit
+    // click is unambiguous in either regime — never as the steady-state source of truth.
+    if (o) o.checked = memoryActive ? memoryActive.ordinary : memState.consent1 === "in";
+    if (s) s.checked = memoryActive ? memoryActive.special : memState.consent2 === "in";
   }
   function ensureManagePanel(){
     if (managePanelBuilt) return; managePanelBuilt = true;
@@ -338,6 +361,18 @@
     } catch { /* best-effort — the local reset below still gives the shopper a fresh identity */ }
     memState = { anonId: mintAnonId(), consentShown: false, consent1: "unknown", consent2: "unknown" };
     saveMemState();
+    // The previous subject's effective state is now stale — this is a BRAND-NEW anonId whose consent is
+    // "unknown" on both tiers. Leaving it stale, or clearing it to null, would both render unchecked,
+    // which in the US opt-out regime is a lie in the worse direction: a fresh subject IS active for
+    // ordinary memory, and the shopper would read "off" while the next turn writes.
+    //
+    // Derived, not guessed: for the single input state we know exactly ("unknown"/"unknown"), the
+    // server's own rule reduces to the regime it already told us — ordinary is active iff the regime is
+    // opt-out, and special is inactive in EVERY region because it always requires an explicit "in"
+    // (widget-memory/src/consent.ts `decideMemoryWrite`). The next /chat response replaces this with the
+    // server's answer regardless. If that rule ever stops holding for "unknown"/"unknown", this line has
+    // to change with it — it is the one place the client reproduces any part of the consent decision.
+    memoryActive = consentMode ? { ordinary: consentMode === "opt_out", special: false } : null;
     syncManagePanelToggles();
     const c = document.querySelector('[data-testid="manage-memory-confirmation"]');
     if (c){ c.hidden = false; c.textContent = "Done — I've cleared what I remembered and started fresh."; }
@@ -352,6 +387,11 @@
     if (!memoryEnabled) return;
     if (!memState.anonId){ memState.anonId = mintAnonId(); saveMemState(); }
     ensureManagePanel();
+    // The server's effective state for the subject it just served — the panel's source of truth. Comes
+    // AFTER ensureManagePanel so the toggles exist to be synced. Note this tracks the SUBJECT SERVED, so
+    // a signed-in shopper whose token later expires sees the panel move to their guest state on the next
+    // turn: that is residual C14 (accepted 2026-08-04) being shown rather than hidden.
+    if (d.memoryActive && typeof d.memoryActive === "object"){ memoryActive = d.memoryActive; syncManagePanelToggles(); }
     if (!memState.consentShown) showConsentPrompt();
     // PR-11c — the contextual health-consent prompt (Consent 2), independent of the general prompt
     // above: fires off the server's OWN `consentPrompt:"special"` signal (never guessed client-side),

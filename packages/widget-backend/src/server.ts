@@ -22,7 +22,7 @@ import {
   createMeteringModelPort,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent } from "@palup/widget-memory";
+import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
 import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -812,7 +812,26 @@ export async function buildServer(opts?: {
     //      anonId is IGNORED for a verified shopper" — by writing to it, and dissolved the order
     //      semantics the reversal path documents.
     // Shipping the hole DISCLOSED beats shipping a fix that contradicts the control it is bolted onto.
-    return { ok: true };
+    //
+    // Answer with the EFFECTIVE state the values just recorded produce, so the widget's manage panel can
+    // render what is true without re-implementing the region regime client-side. It must not: the panel
+    // binding its checkbox to `consent === "in"` is exactly how it came to render "off" for the US
+    // opt-out regime's ACTIVE "unknown" (see manage-panel-honesty.test.ts). Same function, same region
+    // source (`MERCHANT_REGION`, which is also what `deriveServingSignals` puts on `signals.region`) as
+    // /chat's own `memoryActive` and the `remember()` gate.
+    //
+    // SCOPE: this is the state for the subject THIS call recorded against — `acct:<shopperId>` when
+    // signed in, the guest anonId otherwise. It is not a promise about a later turn under a different
+    // principal: once the shopper's token expires, their signed-OUT turns are governed by the guest
+    // record alone (residual C14, accepted 2026-08-04), and /chat's own `memoryActive` on that turn
+    // reports that lower state. The panel follows whichever came last, so it tracks the subject actually
+    // being served rather than the last one the shopper authenticated as.
+    return {
+      ok: true,
+      memoryActive: (({ mayWriteOrdinary, mayWriteSpecial }) => ({ ordinary: mayWriteOrdinary, special: mayWriteSpecial }))(
+        decideMemoryWrite({ region: MERCHANT_REGION, consent1: body.memoryOrdinary, consent2: body.memorySpecial }),
+      ),
+    };
   });
 
   // PR-11b (ADR-0015 Inv 5 — right-to-erasure) — the shopper-facing data-RIGHTS endpoint: erase THIS
@@ -1195,6 +1214,39 @@ export async function buildServer(opts?: {
         memorySubject,
       });
 
+      // The ONE consent input set for this turn. `remember()`'s gate below and the `memoryActive` the
+      // client is told (response, further down) BOTH read from this object — they cannot disagree,
+      // because there is only one of them. Deliberately not two parallel expressions: the panel
+      // contradicting the write path is precisely the defect this exists to fix, and a duplicated
+      // `?? "unknown"` is exactly how it would come back.
+      const memoryConsentInputs = {
+        region: signals.region,
+        consent1: signals.consent?.memoryOrdinary ?? "unknown",
+        consent2: signals.consent?.memorySpecial ?? "unknown",
+      };
+
+      // What the shopper's OWN recorded choice permits, in their region — the truth the widget's
+      // "What I remember" panel must render instead of its localStorage echo of the last box they
+      // ticked. Rendering `consent === "in"` client-side is WRONG in the default US region, where
+      // `decideMemoryWrite`'s ordinary rule is the opt-out regime `!== "out"`: the tri-state "unknown"
+      // means memory is ON while an unticked box reads as off, for every US shopper who never answered
+      // the prompt. Same lookup, same merge, same function as the write gate (widget-memory/src/
+      // consent.ts) — see manage-panel-honesty.test.ts, which asserts this field against the actual
+      // upsert count on the same turn rather than against itself.
+      //
+      // SCOPE, precisely: this reports the CONSENT decision, not a promise about any individual turn.
+      // The kill switch and a guardrail halt (`no_autonomous_action`) both still suppress the write
+      // below without changing what the shopper consented to — an operator halt is not the shopper's
+      // setting and must not silently flip their toggle. Pinned by the kill-switch case in that test.
+      //
+      // Absent (undefined) whenever memory is not live for this turn, which `JSON.stringify` (Fastify's
+      // default serializer — no route schema here) drops from the wire entirely, keeping the response
+      // byte-identical to before this change while the double gate (flag.ts) is off.
+      const memoryCapability = memoryService && memorySubject ? decideMemoryWrite(memoryConsentInputs) : undefined;
+      const memoryActive = memoryCapability
+        ? { ordinary: memoryCapability.mayWriteOrdinary, special: memoryCapability.mayWriteSpecial }
+        : undefined;
+
       // Canary split: a sticky fraction of THIS tenant's sessions is served by that tenant's canary
       // policy; the rest by champion. Keyed by the server-derived tenantId, so one merchant's canary can
       // never bucket another merchant's shoppers (ADR-0014 blast-radius fix).
@@ -1240,13 +1292,9 @@ export async function buildServer(opts?: {
       if (memoryService && memorySubject && !kill && !d.flags.includes("no_autonomous_action")) {
         try {
           await memoryService.remember(
-            {
-              tenantId,
-              anonId: memorySubject,
-              region: signals.region,
-              consent1: signals.consent?.memoryOrdinary ?? "unknown",
-              consent2: signals.consent?.memorySpecial ?? "unknown",
-            },
+            // `memoryConsentInputs` — the same object the client-facing `memoryActive` is derived from,
+            // so what the shopper is TOLD and what is actually gated here are one decision, not two.
+            { tenantId, anonId: memorySubject, ...memoryConsentInputs },
             { message, reply: d.reply },
           );
         } catch (e) {
@@ -1366,6 +1414,7 @@ export async function buildServer(opts?: {
         memoryEnabled: memoryServiceEnabled,
         consentMode: CONSENT_MODE,
         consentPrompt,
+        memoryActive,
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
