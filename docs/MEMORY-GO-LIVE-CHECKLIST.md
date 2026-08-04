@@ -17,6 +17,8 @@ being "in a PR" is *not* met — merged and verified is met.
 
 _Last updated: 2026-08-04. Update the status column in the same PR that closes an item._
 
+_Open PRs against this list: #144 (B9), #145 (B1), #146 (A1/A2 drafts), #148 (B2), #149 (B3/B4)._
+
 ---
 
 ## A. Legal and governance — all OPEN, all human
@@ -38,13 +40,13 @@ These cannot be closed by engineering work. They are the reason this checklist e
 | # | Condition | Status |
 |---|---|---|
 | B1 | **Durable vector storage.** Production ran `createInMemoryVectorStore()` — memory would evaporate on restart, not be shared across instances, and `/forget` erasure would not be real (Inv 5). | **OPEN — PR #145** |
-| B2 | **Encryption-at-rest for special-category facts** (Inv 9). Art-9 payloads were stored in plaintext. | **OPEN — in review** |
-| B3 | **Memory-live implies enforced widget auth.** `WIDGET_AUTH_REQUIRED` defaults false; in that window `/consent` and the destructive `/forget` are callable unauthenticated. | **OPEN — in review** |
-| B4 | **Retention actually enforced** (Inv 4, "expiry is enforced, not aspirational"). `sweepExpired` had no production caller: with durable storage, expired facts are hidden on read but never deleted. | **OPEN — in review** |
+| B2 | **Encryption-at-rest for special-category facts** (Inv 9). Art-9 payloads were stored in plaintext. Also closed two holes found in review: `disposition.value` persisted in the clear, and an Art-9 `sourceQuote` riding an ordinary fact escaped the health gate (no Consent 2, no encryption, invisible to Consent-2 withdrawal). | **OPEN — PR #148** |
+| B3 | **Memory-live implies enforced widget auth.** `WIDGET_AUTH_REQUIRED` defaults false; in that window `/consent` and the destructive `/forget` are callable unauthenticated. Now fail-closed at boot rather than by flipping that default. | **OPEN — PR #149** |
+| B4 | **Retention actually enforced** (Inv 4, "expiry is enforced, not aspirational"). `sweepExpired` had no production caller: with durable storage, expired facts are hidden on read but never deleted. Opportunistic per-subject sweep added, audit-before-delete so a destructive action is never invisible. | **OPEN — PR #149** |
 | B5 | **Prod audit sink is the immutable, hash-chained log** — not `InMemoryRuntimeStore`. `consent.record`, `write.*`, `recall`, `ttl_renew`, `ttl_sweep`, and `erase.subject` must all be durably recorded. Verify against the deployed configuration, not the default. | **OPEN — verify at deploy** |
 | B6 | **Erasure completeness re-confirmed against the real adapter.** Inv 5 is adapter-dependent; only the in-memory oracle and pglite are proven today. Re-run the erasure proof against the actual cloud store. | **OPEN** |
 | B7 | **Consent write/read bar reconciled.** `decideMemoryWrite` allows *ordinary* US writes on `"unknown"` (opt-out regime) while recall requires literal `"in"`. Confirm this asymmetry is the intended product behaviour, or the system will persist ordinary facts it can never lawfully recall. | **OPEN — decision** |
-| B8 | **Encryption key provisioned** in the secrets port for every serving tenant. Without it, special-category writes are refused (fail-closed by design) — consented health facts would silently not be stored. | **OPEN — deploy** |
+| B8 | **Encryption key provisioned** (`MEMORY_ENCRYPTION_KEY`, per tenant) in the secrets port. Without it, special-category writes are refused (fail-closed by design) — consented health facts are not stored, though a `write.refused` audit now records it. Rotation is two-step (`_previous`) — see the runbook in `DEPLOY.md`; a one-step rotation is **irrecoverable**. | **OPEN — deploy** |
 | B9 | **FAIR-1 fairness floor is non-vacuous.** The graders measured `personaPriceInvariance` on a brain that could not see persona signals, so every candidate scored a perfect 1.0. Fixed + regression-locked. | **MET — PR #144** |
 | B10 | **Kill switch halts memory.** A kill-switched turn must not write memory. | **MET — #139** |
 | B11 | **Shopper controls shipped**: consent capture, manage panel, and "forget everything" (erasure + anonId reset). | **MET — #142, #143** |
