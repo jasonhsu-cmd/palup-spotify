@@ -3,6 +3,7 @@ import type {
   Decision,
   HistoryTurn,
   MemoryRecallPort,
+  PersonaRole,
   PersonaStyle,
   PitchKind,
   Policy,
@@ -343,6 +344,45 @@ const PERSONA_STYLE_DIRECTIVE: Record<PersonaStyle, string> = {
     "\nPERSONA STYLE - deal seeker: If a merchant-approved promo is already present in the grounded CATALOG/POLICY context, you may surface it honestly and exactly as written. NEVER invent, imply, or promise a discount, coupon, or promo that isn't explicitly grounded there, and never withhold one the shopper genuinely qualifies for.",
   ready:
     "\nPERSONA STYLE - ready to buy: Be efficient. Confirm what they want and help them move to checkout - add no extra pitch, upsell, or friction.",
+};
+
+// ── Persona-ROLE directives (deferred follow-up #42 from PR-3, SAME flag DISPOSITION_STYLE) ─────────
+// Consume a SUPPLIED signals.personaRole — who the shopper is buying for (docs/design/shopper-widget.md
+// §4 Persona: roles = for-self / gift / B2B) — into a benign, code-owned, closed-enum-keyed STYLE
+// directive appended to systemExtra on the clean sales path, exactly like PERSONA_STYLE_DIRECTIVE above.
+// FAIR-1 / Inv 10 is absolute here too: role steers SERVICE/GUIDANCE VOICE ONLY — never selectPitch,
+// pitch, outbound, price, offers, or tiering, so a gift shopper gets the EXACT same pitch surface as a
+// for_self shopper. No price/%/$N/tier language in any line. No classifier/recall/session fallback yet
+// (mirrors PR-3's own initial scope for personaStyle before PR-5/7/8) — only a caller-SUPPLIED
+// signals.personaRole is consumed here.
+//
+// b2b is the one role that ALSO has a pre-existing, INDEPENDENT hard-escalation guardrail (§3.5 above,
+// keyed off B2B/wholesale/bulk TEXT in the message, flag `persona:b2b`) that already returns before this
+// block is ever reached whenever it fires — so this directive can only ever run on a turn that guardrail
+// did NOT already catch (e.g. a caller-supplied personaRole with no B2B keyword in THIS message). Its
+// directive text never asserts an escalation is already happening and never invents new escalation
+// authority: it only nudges VOICE toward volume/lead-time/spec questions and mentions that a team member
+// is available for wholesale/trade needs — the same non-committal "offer_human" shape used elsewhere in
+// this file (e.g. the AI-identity and abuse guardrails) — while `escalateToHuman` itself is left untouched
+// (still false unless a genuinely separate rung set it).
+const PERSONA_ROLE_DIRECTIVE: Record<PersonaRole, string> = {
+  for_self:
+    "\nPERSONA ROLE - for_self: The shopper is buying for themselves. Use your normal direct, helpful voice - no special framing needed.",
+  gift:
+    "\nPERSONA ROLE - gift: The shopper is buying this as a gift, not for themselves - the recipient, not the shopper, will use it. Ask who it's for (or their skin type/size, if that's uncertain) before assuming a fit, and present options as gift-appropriate.",
+  b2b:
+    "\nPERSONA ROLE - b2b: This may be a business, trade, or bulk inquiry. Ask about volume, lead time, or specifications where relevant, and mention that a team member can help directly with wholesale or bulk questions if that's what they need - never quote or imply special business pricing yourself.",
+};
+
+// Flag emitted alongside each PERSONA_ROLE_DIRECTIVE entry (persona:* precedent, mirroring the PR-0
+// forward-declared PersonaFlag vocabulary's `persona:role_gift` / `persona:role_self`). Deliberately a
+// DIFFERENT token from the guardrail's own `persona:b2b` (which always co-occurs with a forced
+// escalateToHuman:true) — `persona:role_b2b` here marks a voice-only nudge that never asserts escalation
+// on its own, so the two flags can never be confused for one another in the audit log.
+const PERSONA_ROLE_FLAG: Record<PersonaRole, string> = {
+  for_self: "persona:role_self",
+  gift: "persona:role_gift",
+  b2b: "persona:role_b2b",
 };
 
 // ── Persona-style MODEL CLASSIFIER (PR-5, flag DISPOSITION_CLASSIFIER) ────────────────────────────
@@ -1030,6 +1070,22 @@ export function createBrain(
         if (directive) {
           flags.push(`persona:${effectivePersonaStyle}`);
           systemExtra += directive;
+        }
+      }
+      // Deferred follow-up #42 from PR-3 — a SUPPLIED signals.personaRole adds ONE closed-enum-keyed,
+      // code-owned voice directive to systemExtra, gated on the SAME DISPOSITION_STYLE flag as
+      // personaStyle above (default OFF ⇒ byte-identical to before this PR). FAIR-1 / Inv 10: never
+      // threaded into selectPitch/pitch/outbound/price below — a gift or b2b role gets the exact same
+      // pitch surface as for_self. No classifier/recall/session fallback yet — only a caller-supplied
+      // value is consumed (mirrors PR-3's own initial scope for personaStyle).
+      if (dispositionStyleEnabled && signals.personaRole) {
+        // Guarded lookup (same shape as the personaStyle lookup above, PR-3's own security-review fix):
+        // an out-of-enum personaRole yields undefined here — skip rather than append the literal
+        // "undefined" or emit an out-of-vocab flag.
+        const roleDirective = PERSONA_ROLE_DIRECTIVE[signals.personaRole];
+        if (roleDirective) {
+          flags.push(PERSONA_ROLE_FLAG[signals.personaRole]);
+          systemExtra += roleDirective;
         }
       }
       // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL) — a shopper who has asked a

@@ -246,7 +246,13 @@ export interface Signals {
  */
 export type PersonaFlag =
   | "persona:researcher" | "persona:deal_seeker" | "persona:needs_guidance" | "persona:ready"
-  | "persona:role_gift" | "persona:role_self"
+  // `persona:role_b2b` completes the role vocabulary (deferred follow-up #42 from PR-3, brain.ts's
+  // PERSONA_ROLE_FLAG). It is DELIBERATELY distinct from the pre-existing guardrail flag `persona:b2b`
+  // (the B2B-keyword hard-escalation rung, §3.5 brain.ts): that one always co-occurs with a forced
+  // `escalateToHuman: true`, while `persona:role_b2b` marks a voice-only nudge that never asserts
+  // escalation on its own — the two are never emitted on the same decision (the guardrail rung always
+  // returns before the role-directive block is reached whenever it fires).
+  | "persona:role_gift" | "persona:role_self" | "persona:role_b2b"
   | "behavioral:dwell" | "behavioral:hesitation" | "behavioral:repeat_question" | "behavioral:declined" | "behavioral:idle_return" | "behavioral:rage"
   | "disposition:one_strike" | "safety:regulated_claim" | "memory:style_applied";
 
