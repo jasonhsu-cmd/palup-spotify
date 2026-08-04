@@ -87,6 +87,23 @@
   .powered{ display:flex; align-items:center; justify-content:center; gap:6px; padding:7px 12px; border-top:1px solid var(--line); background:var(--panel); font-size:11px; letter-spacing:.02em; color:var(--muted); user-select:none }
   .powered b{ color:var(--fg); font-weight:600 }
   .powered-dot{ width:8px; height:8px; border-radius:50%; background:var(--palup); flex:0 0 auto }
+
+  /* PR-11b — shopper consent + durable anon-id UX (fully inert until the server confirms memoryEnabled;
+     mirrors this file's own existing token set — no new colors/spacing introduced). */
+  .consent{ align-self:stretch; max-width:100%; padding:12px 13px; margin:2px 0; border:1px solid var(--line); border-radius:12px; background:var(--panel) }
+  .consent b{ display:block; margin-bottom:6px; font-size:13.5px }
+  .consent [data-testid="consent-body"]{ color:var(--muted); font-size:12.5px; margin-bottom:10px }
+  .consent-actions{ display:flex; gap:8px; justify-content:flex-end }
+  .consent-actions button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
+  .consent-actions button:focus-visible{ outline:2px solid var(--brand); outline-offset:1px }
+  .consent-actions button[data-testid="consent-primary"]{ background:var(--brand); border-color:var(--brand); color:var(--brand-ink); font-weight:600 }
+  .manage-memory{ width:100%; border-top:1px solid var(--line); margin-top:4px; padding-top:8px; display:flex; flex-direction:column; gap:7px }
+  .manage-memory > b{ font-size:12.5px }
+  .mm-row{ display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--fg); cursor:pointer }
+  .manage-memory button[data-testid="manage-memory-forget"]{ align-self:flex-start; font:inherit; font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand); cursor:pointer }
+  .mm-helper{ font-size:11.5px; color:var(--muted) }
+  .mm-confirm{ font-size:12px; color:var(--fg) }
+  .mm-confirm[hidden]{ display:none }
 </style>
 </head>
 <body>
@@ -163,6 +180,129 @@
       if (r.ok){ widgetToken = (await r.json()).token || null; }
     } catch { /* backend may not require it yet; /chat falls back during rollout */ }
     return widgetToken;
+  }
+
+  // --- PR-11b — durable, resettable anon id + shopper consent UX (ADR-0015 Inv 8) ----------------
+  // Fully INERT until a /chat response confirms `memoryEnabled:true` (the server's own double-gated
+  // state — widget-backend/src/server.ts's memoryServiceEnabled/CONSENT_MODE). Until then: nothing below
+  // mints an id, shows any UI, or makes a /consent or /forget call, and `signals.anonId` is never added
+  // to the /chat body — byte-identical to before this PR. localStorage (not sessionStorage) so the id
+  // survives across visits; namespaced by EMBED_KEY so distinct merchants served from this same backend
+  // origin never share one shopper's local storage.
+  const MEM_KEY = "palup.widget.memory.v1." + EMBED_KEY;
+  const ANON_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // RFC4648 base32, no padding — mirrors widget-memory/src/identity.ts
+  function mintAnonId(){
+    // 128 random bits, base32-encoded — comfortably inside validateAnonId's 10-64 char bound.
+    const bytes = new Uint8Array(16);
+    (crypto.getRandomValues ? crypto : { getRandomValues: (a) => { for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256); return a; } }).getRandomValues(bytes);
+    let bits = 0, value = 0, out = "";
+    for (const b of bytes){ value = (value << 8) | b; bits += 8; while (bits >= 5){ out += ANON_ALPHABET[(value >>> (bits - 5)) & 31]; bits -= 5; } }
+    if (bits > 0) out += ANON_ALPHABET[(value << (5 - bits)) & 31];
+    return out;
+  }
+  function loadMemState(){
+    try { const raw = localStorage.getItem(MEM_KEY); const o = raw ? JSON.parse(raw) : null; if (o && typeof o === "object") return o; } catch {}
+    return {};
+  }
+  let memState = loadMemState(); // { anonId?, consentShown?, consent1?, consent2? } — durable across visits
+  function saveMemState(){ try { localStorage.setItem(MEM_KEY, JSON.stringify(memState)); } catch {} }
+  let memoryEnabled = false; // learned ONLY from a /chat response; NEVER client-guessed
+  let consentMode = null;    // "opt_in" | "opt_out", learned the same way
+
+  async function postConsent(memoryOrdinary, memorySpecial){
+    memState.consent1 = memoryOrdinary; memState.consent2 = memorySpecial; saveMemState();
+    syncManagePanelToggles();
+    try {
+      await ensureToken(false);
+      const headers = { "content-type": "application/json" };
+      if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      await fetch("/consent", { method: "POST", headers, body: JSON.stringify({ anonId: memState.anonId, memoryOrdinary, memorySpecial }) });
+    } catch { /* best-effort — the shopper's own local state still reflects their choice */ }
+  }
+  const setConsent1 = (v) => postConsent(v, memState.consent2 ?? "unknown");
+  const setConsent2 = (v) => postConsent(memState.consent1 ?? "unknown", v);
+
+  function showConsentPrompt(){
+    memState.consentShown = true; saveMemState(); // shown ONCE per anonId, regardless of the outcome
+    const isOptIn = consentMode === "opt_in";
+    const el = document.createElement("div");
+    el.className = "consent"; el.setAttribute("role", "status"); el.setAttribute("data-testid", "consent-prompt");
+    const h = document.createElement("b"); h.setAttribute("data-testid", "consent-title");
+    h.textContent = isOptIn ? "Want me to remember this for next time?" : "I remember your preferences to help you shop.";
+    const body = document.createElement("div"); body.setAttribute("data-testid", "consent-body");
+    body.textContent = isOptIn
+      ? "I can keep a few preferences — like fragrance-free — so you don't have to repeat yourself on your next visit. Just for this store, kept for 30 days after you last drop by, and you can clear it anytime."
+      : "I keep a few basics — like fragrance-free — just for this store, for 30 days after your last visit. You're in control: manage or turn this off anytime.";
+    const actions = document.createElement("div"); actions.className = "consent-actions";
+    const secondary = document.createElement("button"); secondary.type = "button"; secondary.setAttribute("data-testid", "consent-secondary");
+    secondary.textContent = isOptIn ? "Not now" : "Don't remember me";
+    const primary = document.createElement("button"); primary.type = "button"; primary.setAttribute("data-testid", "consent-primary");
+    primary.textContent = isOptIn ? "Remember my preferences" : "Got it";
+    // EU/UK opt-in already defaults to NO memory, so "Not now" needs no server call; US opt-out already
+    // defaults to memory ON, so "Got it" needs no call either — only the choice that DEVIATES from the
+    // passive regional default is worth recording.
+    secondary.onclick = () => { el.remove(); if (!isOptIn) setConsent1("out"); };
+    primary.onclick = () => { el.remove(); if (isOptIn) setConsent1("in"); };
+    actions.append(secondary, primary);
+    el.append(h, body, actions);
+    msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  let managePanelBuilt = false;
+  function memRow(label, testid, checked, onToggle){
+    const row = document.createElement("label"); row.className = "mm-row";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.setAttribute("data-testid", testid); cb.checked = checked;
+    cb.onchange = (e) => onToggle(e.target.checked ? "in" : "out");
+    row.append(cb, document.createTextNode(" " + label));
+    return row;
+  }
+  function syncManagePanelToggles(){
+    const o = document.querySelector('[data-testid="manage-memory-toggle-ordinary"]');
+    const s = document.querySelector('[data-testid="manage-memory-toggle-special"]');
+    if (o) o.checked = memState.consent1 === "in";
+    if (s) s.checked = memState.consent2 === "in";
+  }
+  function ensureManagePanel(){
+    if (managePanelBuilt) return; managePanelBuilt = true;
+    const wrap = document.createElement("div"); wrap.className = "manage-memory"; wrap.setAttribute("data-testid", "manage-memory");
+    const h = document.createElement("b"); h.setAttribute("data-testid", "manage-memory-heading"); h.textContent = "What I remember";
+    const rowOrdinary = memRow("Preferences", "manage-memory-toggle-ordinary", memState.consent1 === "in", setConsent1);
+    const rowSpecial = memRow("Health notes", "manage-memory-toggle-special", memState.consent2 === "in", setConsent2);
+    const forget = document.createElement("button"); forget.type = "button"; forget.setAttribute("data-testid", "manage-memory-forget");
+    forget.textContent = "Forget everything about me";
+    forget.onclick = () => forgetMe();
+    const helper = document.createElement("div"); helper.className = "mm-helper"; helper.setAttribute("data-testid", "manage-memory-helper");
+    helper.textContent = "Turning something off stops new saving; \"Forget everything\" deletes what's stored now and resets your anonymous ID. This never affects your orders or account.";
+    const confirmation = document.createElement("div"); confirmation.className = "mm-confirm"; confirmation.setAttribute("data-testid", "manage-memory-confirmation"); confirmation.hidden = true;
+    wrap.append(h, rowOrdinary, rowSpecial, forget, helper, confirmation);
+    $("#drawer").appendChild(wrap);
+  }
+
+  async function forgetMe(){
+    const prevAnonId = memState.anonId;
+    try {
+      await ensureToken(false);
+      const headers = { "content-type": "application/json" };
+      if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      if (prevAnonId) await fetch("/forget", { method: "POST", headers, body: JSON.stringify({ anonId: prevAnonId }) });
+    } catch { /* best-effort — the local reset below still gives the shopper a fresh identity */ }
+    memState = { anonId: mintAnonId(), consentShown: false, consent1: "unknown", consent2: "unknown" };
+    saveMemState();
+    syncManagePanelToggles();
+    const c = document.querySelector('[data-testid="manage-memory-confirmation"]');
+    if (c){ c.hidden = false; c.textContent = "Done — I've cleared what I remembered and started fresh."; }
+  }
+
+  // The single entry point: called after every REAL (shopper-initiated) /chat reply. Learns the server's
+  // authoritative memory state; while it says false (always true in real production — the double gate,
+  // flag.ts), this is a complete no-op: no mint, no UI, no /consent or /forget call.
+  function onChatMeta(d){
+    if (typeof d.memoryEnabled === "boolean") memoryEnabled = d.memoryEnabled;
+    if (typeof d.consentMode === "string") consentMode = d.consentMode;
+    if (!memoryEnabled) return;
+    if (!memState.anonId){ memState.anonId = mintAnonId(); saveMemState(); }
+    ensureManagePanel();
+    if (!memState.consentShown) showConsentPrompt();
   }
 
   // --- ADR-0018 task 10 — Customer Account API shopper sign-in ----------------------------------
@@ -276,7 +416,7 @@
   });
   async function send(message, isRetry){
     if (!isRetry) add(message, "user");
-    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined };
+    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined, ...(memoryEnabled && memState.anonId ? { anonId: memState.anonId } : {}) };
     // Stable idempotency key per turn, REUSED on retry, so a replayed request the server already
     // processed is de-duplicated (never double-counts the pitch budget or double-audits).
     const idempotencyKey = (isRetry && lastSend && lastSend.idempotencyKey)
@@ -299,7 +439,7 @@
       let r = await doFetch();
       if (r.status === 401){ await ensureToken(true); r = await doFetch(); } // token expired → refresh once
       if (!r.ok) throw new Error("http " + r.status);
-      const d = await r.json(); add(d.reply, "agent", d); if (d.escalate) enterHandoff();
+      const d = await r.json(); add(d.reply, "agent", d); onChatMeta(d); if (d.escalate) enterHandoff();
       // The verified-shopper session expired/was rejected (e.g. a credentialed read needs re-auth) →
       // drop the stale token and offer sign-in again. App-Proxy shoppers never see this.
       if (d.flags && d.flags.indexOf("reauth_required") >= 0){ setShopperToken(null); promptSignIn("reauth"); }
@@ -320,7 +460,7 @@
   async function sendProactive(trigger){
     if (exitIntentFired() || !cartHasItems()) return;   // once per session; only an unrecovered cart
     markExitIntentFired();                                // mark BEFORE the request so it can never double-fire
-    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value, proactiveTrigger: trigger, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined };
+    const signals = { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value, proactiveTrigger: trigger, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined, ...(memoryEnabled && memState.anonId ? { anonId: memState.anonId } : {}) };
     const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
     try {
       await ensureToken(false);

@@ -23,7 +23,7 @@ import {
   createInMemoryVectorStore,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId } from "@palup/widget-memory";
+import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject } from "@palup/widget-memory";
 import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -177,19 +177,30 @@ export async function buildServer(opts?: {
   // ADR-0015 T12 — cross-visit memory, wired ONLY behind the double gate (flag.ts: MEMORY_ADR_ACCEPTED is
   // hardcoded false, so `isMemoryEnabled()` is false today regardless of any env var — NN#1: no
   // config-only flip). When off (always in real production), the MemoryService is never even
-  // constructed, so nothing here — including an injected test-seam vector port — is ever touched: the
-  // composition root (this file) MAY import @palup/widget-memory (the brain itself never does — no dep
-  // cycle). The dev in-memory vector adapter (or an injected spy) stands in for a real vector-DB adapter
-  // later; the runtime store's own audit surface is reused as-is (no new audit mechanism).
+  // constructed, so nothing in the remember()/recall() PATH — including an injected test-seam vector
+  // port — is ever touched: the composition root (this file) MAY import @palup/widget-memory (the brain
+  // itself never does — no dep cycle). The dev in-memory vector adapter (or an injected spy) stands in
+  // for a real vector-DB adapter later; the runtime store's own audit surface is reused as-is (no new
+  // audit mechanism).
   //
   // PR-8 (opts.memoryEnabled test seam): honored ONLY under a real test runner — see its own doc comment
   // above — so this can NEVER flip memory on in production; `isMemoryEnabled()` alone gates construction
   // there, byte-identical to before this PR.
+  //
+  // PR-11b: `vectorPort` is now constructed UNCONDITIONALLY (hoisted out of the `memoryServiceEnabled`
+  // ternary below) so the new POST /forget data-rights endpoint has somewhere to erase from regardless of
+  // the double gate's current state — a shopper's right to erase what may have been stored does not
+  // depend on the feature being live right now (a killed/rolled-back feature can still have prior data
+  // sitting in the store). This is the ONE deliberate exception to "nothing here is touched while off":
+  // /forget calls `eraseSubject` directly against this port; every OTHER consumer (recall/remember, via
+  // `memoryService`/`memoryPort` below) remains strictly gated on `memoryServiceEnabled` exactly as
+  // before. Constructing the (cheap, in-memory, no-I/O) dev adapter when unused is a no-op.
+  const vectorPort = opts?.vectorPort ?? createInMemoryVectorStore();
   const underTestRunner = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
   const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
   const memoryService = memoryServiceEnabled
     ? createMemoryService({
-        vector: opts?.vectorPort ?? createInMemoryVectorStore(),
+        vector: vectorPort,
         audit: store,
         // PR-8 / PR-6 Finding H: the distiller sends the RAW shopper turn to the model — wrap it with the
         // SAME PII-redaction guardrail every other model call gets (createRedactingModelPort) so a
@@ -283,6 +294,14 @@ export async function buildServer(opts?: {
     const r = process.env.MERCHANT_REGION;
     return r === "us" || r === "eu" || r === "uk" || r === "other" ? r : "us";
   })();
+  // PR-11b — read-only client-facing memory state, returned on every /chat response so the (still fully
+  // inert-by-default) widget can learn it and gate its own anonId-minting/consent-UX ONLY off the real
+  // server state — never guessed client-side. `memoryEnabled` mirrors the SAME double-gated
+  // `memoryServiceEnabled` computed above (false in real production — the double gate, flag.ts).
+  // `consentMode` mirrors ADR-0015's region split: the US gets an opt-out NOTICE (memory defaults on,
+  // shopper may decline); every other region gets an opt-in PROMPT (memory defaults off, shopper must
+  // accept). Both are static per boot (no per-request cost).
+  const CONSENT_MODE: "opt_in" | "opt_out" = MERCHANT_REGION === "us" ? "opt_out" : "opt_in";
   const MERCHANT_GROUNDING_MODE: NonNullable<Signals["groundingMode"]> = (() => {
     const g = process.env.MERCHANT_GROUNDING_MODE;
     return g === "off" || g === "general" || g === "full" ? g : "full";
@@ -625,6 +644,71 @@ export async function buildServer(opts?: {
     return { ok: true };
   });
 
+  // PR-11b (ADR-0015 Inv 5 — right-to-erasure) — the shopper-facing data-RIGHTS endpoint: erase THIS
+  // subject's durable memory via `eraseSubject` (widget-memory/src/erasure.ts, reused unchanged). The
+  // (tenantId, anonId) pair is derived the EXACT same server-trusted way `/consent` derives it — tenantId
+  // from the verified widget token (falling back to RUNTIME_TENANT), anonId bound by the SAME
+  // `validateAnonId` charset/length check — so a shopper can only ever erase a well-formed subject key
+  // they hold, never an arbitrary one or another tenant's. Guarded exactly like `/consent`: per-IP +
+  // per-tenant rate limit (429) and the NN#4 operator kill switch (503).
+  //
+  // UNLIKE every other memory-subsystem entry point, this one runs regardless of `memoryServiceEnabled` —
+  // a shopper's right to erase what may already be stored does not depend on the feature's current on/off
+  // state (see `vectorPort`'s own doc comment above). It no-ops safely (still `{ ok: true }`) when there
+  // is nothing to erase — which, in real production today, is EVERY call, since the double gate has never
+  // let anything be written in the first place.
+  app.post("/forget", async (req, reply) => {
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open: mirrors /consent */
+    }
+    const body = (req.body ?? {}) as { anonId?: unknown; widgetToken?: string };
+    const authHeader = req.headers["authorization"];
+    const widgetToken =
+      typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7)
+        : typeof body.widgetToken === "string"
+          ? body.widgetToken
+          : undefined;
+    const principal = await widgetIdentity.authenticate(widgetToken);
+    if (principal.kind !== "merchant" && WIDGET_AUTH_REQUIRED) {
+      reply.code(401);
+      return { error: "unauthenticated" };
+    }
+    const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
+    // Per-tenant ceiling — backstop against a distributed-IP flood inside one tenant (own bucket key so a
+    // /forget flood can't spend down /consent's budget or vice versa).
+    try {
+      if (!(await underLimit(store, { tenantId }, "forget", RL_TENANT, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open, as above */
+    }
+    // NN#4 — the operator kill switch outranks everything: while this tenant/agent is halted, refuse the
+    // audited erasure too (parity with /consent and /chat's kill handling).
+    if (await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) {
+      reply.code(503);
+      return { error: "paused" };
+    }
+
+    const anonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
+    if (!anonId) {
+      reply.code(400);
+      return { error: "invalid anonId" };
+    }
+
+    await eraseSubject({ vector: vectorPort, audit: store }, { tenantId, anonId });
+    return { ok: true };
+  });
+
   app.post("/chat", async (req, reply) => {
     const body = (req.body ?? {}) as {
       message?: string;
@@ -645,7 +729,7 @@ export async function buildServer(opts?: {
     // T5 — input bounds: reject oversized input before any work (bounds the model + the KV keys).
     if (message.length > MAX_MESSAGE_CHARS || sessionId.length > MAX_ID_CHARS || (idemKey && idemKey.length > MAX_ID_CHARS)) {
       reply.code(400);
-      return { reply: "Sorry — that message is too long. Could you shorten it?", mode: "support", pitch: "none", escalate: false, flags: ["input_rejected"] };
+      return { reply: "Sorry — that message is too long. Could you shorten it?", mode: "support", pitch: "none", escalate: false, flags: ["input_rejected"], memoryEnabled: memoryServiceEnabled, consentMode: CONSENT_MODE };
     }
 
     // T3 — TENANT IDENTITY: derive the merchant/tenant from a VERIFIED widget token (Authorization:
@@ -662,7 +746,7 @@ export async function buildServer(opts?: {
     const principal = await widgetIdentity.authenticate(widgetToken);
     if (principal.kind !== "merchant" && WIDGET_AUTH_REQUIRED) {
       reply.code(401);
-      return { reply: "This assistant needs to be opened from the store page.", mode: "support", pitch: "none", escalate: false, flags: ["unauthenticated"] };
+      return { reply: "This assistant needs to be opened from the store page.", mode: "support", pitch: "none", escalate: false, flags: ["unauthenticated"], memoryEnabled: memoryServiceEnabled, consentMode: CONSENT_MODE };
     }
     const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
     const serving = { tenantId };
@@ -705,7 +789,7 @@ export async function buildServer(opts?: {
     });
     if (!allowed) {
       reply.code(429);
-      return { reply: "You're sending messages a little too fast — give me a moment and try again.", mode: "support", pitch: "none", escalate: false, flags: ["rate_limited"] };
+      return { reply: "You're sending messages a little too fast — give me a moment and try again.", mode: "support", pitch: "none", escalate: false, flags: ["rate_limited"], memoryEnabled: memoryServiceEnabled, consentMode: CONSENT_MODE };
     }
 
     try {
@@ -860,6 +944,8 @@ export async function buildServer(opts?: {
 
       }
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
+      // PR-11b: memoryEnabled/consentMode are the widget's SOLE source of truth for whether to ever mint
+      // a durable anonId or show any consent UI — read-only, never client-settable.
       const response = {
         reply: d.reply,
         mode: d.mode,
@@ -868,6 +954,8 @@ export async function buildServer(opts?: {
         outbound: d.outbound,
         flags: d.flags,
         servedBy: policy.id,
+        memoryEnabled: memoryServiceEnabled,
+        consentMode: CONSENT_MODE,
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
@@ -882,6 +970,8 @@ export async function buildServer(opts?: {
         pitch: "none",
         escalate: true,
         flags: ["model_error"],
+        memoryEnabled: memoryServiceEnabled,
+        consentMode: CONSENT_MODE,
       };
     }
   });
