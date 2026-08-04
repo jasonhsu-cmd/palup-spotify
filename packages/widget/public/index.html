@@ -209,6 +209,18 @@
   let memoryEnabled = false; // learned ONLY from a /chat response; NEVER client-guessed
   let consentMode = null;    // "opt_in" | "opt_out", learned the same way
 
+  // PR-11c — contextual in-the-moment health-consent prompt (Consent 2). The server (server.ts) sets a
+  // READ-ONLY `consentPrompt:"special"` signal on /chat when memory is live, THIS message reveals
+  // special-category info, and the subject hasn't yet decided on memorySpecial — a prompt-only signal
+  // that decides nothing about storage. `SPECIAL_CONSENT_KEY` mirrors EXIT_KEY's own sessionStorage
+  // "once per session" pattern below: shown at most once per session, and never re-stacked while an
+  // earlier health message's prompt is still unanswered (the server has no notion of "already asked
+  // this session" — it may legitimately keep returning the signal on every eligible turn until the
+  // shopper actually answers).
+  const SPECIAL_CONSENT_KEY = "palup.widget.specialconsent.v1";
+  let specialConsentShown = false;
+  try { specialConsentShown = sessionStorage.getItem(SPECIAL_CONSENT_KEY) === "1"; } catch {}
+
   async function postConsent(memoryOrdinary, memorySpecial){
     memState.consent1 = memoryOrdinary; memState.consent2 = memorySpecial; saveMemState();
     syncManagePanelToggles();
@@ -243,6 +255,33 @@
     // passive regional default is worth recording.
     secondary.onclick = () => { el.remove(); if (!isOptIn) setConsent1("out"); };
     primary.onclick = () => { el.remove(); if (isOptIn) setConsent1("in"); };
+    actions.append(secondary, primary);
+    el.append(h, body, actions);
+    msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  // PR-11c — approved copy "B" (Consent 2, in-the-moment). Deliberately generic ("some health
+  // information") rather than echoing the specific fact — `classifyFact` on the server only gives a
+  // coarse category, not the exact allergen/condition text, and echoing the wrong one would be worse
+  // than a generic prompt. Reuses the SAME `.consent` card mechanism/styling as `showConsentPrompt`
+  // (Consent 1) above, wired to POST /consent via the existing `setConsent2` helper — this tier is
+  // fully independent of Consent 1 (ADR-0015 Inv 9 / scope B amendment).
+  function showSpecialConsentPrompt(){
+    specialConsentShown = true;
+    try { sessionStorage.setItem(SPECIAL_CONSENT_KEY, "1"); } catch {}
+    const el = document.createElement("div");
+    el.className = "consent"; el.setAttribute("role", "status"); el.setAttribute("data-testid", "consent-prompt-special");
+    const h = document.createElement("b"); h.setAttribute("data-testid", "consent-special-title");
+    h.textContent = "Should I remember this to help keep you safe?";
+    const body = document.createElement("div"); body.setAttribute("data-testid", "consent-special-body");
+    body.textContent = "You mentioned some health information. With your permission I can remember it so I can steer you away from products that don't suit you next time. This is health information, so I only keep it if you say yes — kept for 30 days after your last visit, never shared with other stores, and you can delete it anytime.";
+    const actions = document.createElement("div"); actions.className = "consent-actions";
+    const secondary = document.createElement("button"); secondary.type = "button"; secondary.setAttribute("data-testid", "consent-special-secondary");
+    secondary.textContent = "No, don't keep this";
+    const primary = document.createElement("button"); primary.type = "button"; primary.setAttribute("data-testid", "consent-special-primary");
+    primary.textContent = "Yes, remember it";
+    secondary.onclick = () => { el.remove(); setConsent2("out"); };
+    primary.onclick = () => { el.remove(); setConsent2("in"); };
     actions.append(secondary, primary);
     el.append(h, body, actions);
     msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
@@ -303,6 +342,10 @@
     if (!memState.anonId){ memState.anonId = mintAnonId(); saveMemState(); }
     ensureManagePanel();
     if (!memState.consentShown) showConsentPrompt();
+    // PR-11c — the contextual health-consent prompt (Consent 2), independent of the general prompt
+    // above: fires off the server's OWN `consentPrompt:"special"` signal (never guessed client-side),
+    // at most once per session until answered (specialConsentShown).
+    if (d.consentPrompt === "special" && !specialConsentShown) showSpecialConsentPrompt();
   }
 
   // --- ADR-0018 task 10 — Customer Account API shopper sign-in ----------------------------------
