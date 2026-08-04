@@ -1,10 +1,18 @@
 import { describe, it, expect, vi } from "vitest";
-import type { ModelPort, ModelRequest } from "@palup/platform-ports";
-import { createInMemoryVectorStore, InMemoryRuntimeStore } from "@palup/platform-ports";
+import type { ModelPort, ModelRequest, SecretsPort } from "@palup/platform-ports";
+import { createInMemoryVectorStore, InMemoryRuntimeStore, createEnvSecrets } from "@palup/platform-ports";
 import { createStubDistiller, createModelDistiller, sanitizeFact, FACT_MAX_CHARS, type FactDistiller } from "../src/distiller.js";
 import { createMemoryService } from "../src/service.js";
 import { classifyFact } from "../src/classifier.js";
 import type { MemoryCtx } from "../src/types.js";
+
+// ADR-0015 Inv 9 (go-live blocker #2): a special-category write is refused without a configured
+// encryption key (service.ts, fail closed) — mirrors service.test.ts's own `keyedSecrets` helper.
+function keyedSecrets(...tenantIds: string[]): SecretsPort {
+  const byTenant: Record<string, Record<string, string>> = {};
+  for (const t of tenantIds) byTenant[t] = { MEMORY_ENCRYPTION_KEY: `test-key-for-${t}` };
+  return createEnvSecrets(JSON.stringify(byTenant));
+}
 
 // ADR-0015 Inv 1: distilled facts only — never the raw transcript; every stored fact passes the
 // redaction guardrail (no card/SSN/PII) and a length cap.
@@ -245,6 +253,7 @@ describe("createModelDistiller — wired into createMemoryService (reuse, not re
       audit: new InMemoryRuntimeStore(),
       distiller: createModelDistiller({ model }),
       enabled: true,
+      secrets: keyedSecrets("acme-md"),
     });
 
     const noConsent2: MemoryCtx = { tenantId: "acme-md", anonId: "g1", region: "us", consent1: "in", consent2: "unknown" };

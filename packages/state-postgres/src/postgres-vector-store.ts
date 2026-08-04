@@ -10,17 +10,24 @@ import type { Sql } from "./sql.js";
 // PostgresRuntimeStore already uses for `rs_kv.value` — reusing a working pattern rather than
 // introducing a second one this file would be the only user of).
 //
-// GO-LIVE GAP — NO ENCRYPTION FOR SPECIAL-CATEGORY (Art-9) DATA (security review, HIGH). ADR-0015
-// Invariant 9 requires special-category facts to get STRICTER STORAGE "including encryption" (the
-// shopper-facing consent copy literally promises "I'll keep it encrypted" — ADR-0015 line 108). This
-// table does NOT implement that: `text`/`metadata` are stored as plain `text`/`jsonb`, byte-identical for
-// `class:"ordinary"` and `class:"special"` rows — any DBA, disk snapshot, or log-shipping path can read a
-// health fact in the clear. This is a DELIBERATE, TRACKED DEFERRAL, not an oversight: encrypting
-// special-class payloads (e.g. via the secrets/KMS port, before persistence) is the next work item on
-// this subsystem, and — like every other change to this table — needs named-owner + `security-reviewer`
-// + LEGAL sign-off before `MEMORY_ADR_ACCEPTED` can ever flip (ADR-0015 Status note). Silence about this
-// gap is exactly what a prior review flagged; this comment is that visibility, mirrored on the ANN note
-// below. Do not remove this note without landing the encryption it describes.
+// ENCRYPTION FOR SPECIAL-CATEGORY (Art-9) DATA — CLOSED, AT THE SERVICE LAYER, NOT HERE (go-live blocker
+// #2; formerly a GO-LIVE GAP flagged HIGH by security review). ADR-0015 Invariant 9 requires
+// special-category facts to get STRICTER STORAGE "including encryption" (the shopper-facing consent copy
+// literally promises "I'll keep it encrypted" — ADR-0015 line 108). This table still stores `text`/
+// `metadata` as plain `text`/`jsonb` columns, byte-identical for `class:"ordinary"` and `class:"special"`
+// rows — but by the time a record REACHES this adapter's `upsert`, a special-category fact's `text` (both
+// the top-level `VectorRecord.text` and `metadata.text`) and any `metadata.disposition[].sourceQuote` are
+// already an AES-256-GCM `CryptoPort` envelope, encrypted in `packages/widget-memory/src/service.ts`
+// BEFORE this (or ANY) `VectorPort` adapter ever sees them — deliberately adapter-agnostic defense in
+// depth (ADR-0001: the vector port must stay swappable without re-implementing encryption per adapter).
+// So a DBA, disk snapshot, or log-shipping path reading this table's raw columns sees ciphertext for
+// special-category rows, not a health fact in the clear; `metadata.encrypted` (a plain boolean, never the
+// key or plaintext) records which rows are protected this way. This adapter itself does NOT decrypt,
+// encrypt, or even know about sensitivity classes — it is a dumb byte store, exactly as before; the
+// invariant is enforced one layer up. `MEMORY_ADR_ACCEPTED` still needs named-owner + `security-reviewer`
+// + LEGAL sign-off before it can ever flip (ADR-0015 Status note) — this note is updated, not removed,
+// because the mechanism it originally flagged as missing now exists (see service.ts's own module-header
+// note for the fail-closed/best-effort contract and the similarity-search trade-off this implies).
 //
 // TENANT ISOLATION / RLS (security review, HIGH). The app-level isolation guarantee is `namespace=$1`
 // bound-equality on every statement below (never interpolated, never a prefix/LIKE match) — verified by
