@@ -90,6 +90,19 @@ green.
   `false`, `packages/widget-memory/src/flag.ts`) until a separately-governed PR flips it with named-owner +
   `security-reviewer` + LEGAL sign-off (ADR-0015 Status note) — so `MEMORY_ENCRYPTION_KEY` is go-live prep,
   not yet something staging needs provisioned.
+- **Rotating `MEMORY_ENCRYPTION_KEY` — two steps, in this order.** A naive one-step replacement is
+  IRRECOVERABLE: every fact written under the outgoing key stops decrypting, and `recall` drops each one
+  permanently (it is detected — a PII-free `recall.dropped` audit records the count — but detection is
+  not recovery; the plaintext is gone). To rotate safely, for the tenant being rotated:
+  1. Copy the CURRENT value to `MEMORY_ENCRYPTION_KEY_previous` in the same `PALUP_SECRETS` entry, and
+     put the NEW value at `MEMORY_ENCRYPTION_KEY`. `decrypt` tries the current key first and falls back
+     to `_previous` when the envelope's key id doesn't match, so existing records keep decrypting while
+     new writes use the new key.
+  2. Keep `_previous` for at least one full retention window (30 days — `ORDINARY_TTL_DAYS`/
+     `SPECIAL_TTL_DAYS`, and note retention SLIDES from last activity, so an actively-returning shopper's
+     records outlive a bare 30 days from rotation). Only then remove `_previous`. Watch for
+     `recall.dropped` audit entries during the window — a non-zero count means records were written under
+     a key that is no longer reachable.
 
 ## Shopify grounding (M2, ADR-0012)
 

@@ -123,9 +123,10 @@ function gcmAad(aad: string): Buffer {
  * operator rotating the key should, for one rotation cycle, move the outgoing value to
  * `"<secretName>_previous"` and put the new value at `secretName` — existing records then keep
  * decrypting via the fallback while new writes use the new key. Without keeping the previous value
- * around, a rotation is still NOT silent (recall's drop-count telemetry — service.ts — surfaces it as a
- * distinct decrypt-failure count) but the affected records are genuinely unrecoverable, same as before
- * this change; this documents that trade-off rather than hiding it.
+ * around, the affected records are genuinely unrecoverable. It is not SILENT — `recall` counts records
+ * it had to drop as undecryptable and emits a PII-free `recall.dropped` audit (count only) — but that is
+ * detection after the fact, not recovery: once the outgoing key is gone the plaintext is gone. The
+ * operator runbook for the two-step rotation lives in `docs/DEPLOY.md`.
  *
  * FAIL CLOSED: `encrypt` throws (never returns a plaintext fallback) when `secrets.get` resolves to
  * undefined/empty for `tenantId`, or when the configured material is below the entropy floor — the
