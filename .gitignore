@@ -14,3 +14,6 @@ playwright-report/
 
 # self-improvement loop runtime state
 .palup-state/
+
+# Claude Code agent worktrees (transient; never repo content)
+.claude/worktrees/
