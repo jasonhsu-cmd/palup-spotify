@@ -4,7 +4,7 @@
 
 export { MEMORY_ADR_ACCEPTED, isMemoryEnabled } from "./flag.js";
 
-export { generateGuestId, subjectNamespace, validateAnonId } from "./identity.js";
+export { generateGuestId, subjectNamespace, validateAnonId, accountSubjectId, memorySubjectId } from "./identity.js";
 
 export type { MemoryConsent, ConsentInputs, WriteCapability, Region } from "./consent.js";
 export { decideMemoryWrite } from "./consent.js";

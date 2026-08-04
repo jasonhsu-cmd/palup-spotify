@@ -1,5 +1,5 @@
 import type { RuntimeStatePort, VectorPort, VectorRecord } from "@palup/platform-ports";
-import { subjectNamespace } from "./identity.js";
+import { subjectNamespace, accountSubjectId } from "./identity.js";
 import { buildMemoryAudit } from "./audit.js";
 import type { MemoryConsent } from "./consent.js";
 import type { FactMetadata } from "./types.js";
@@ -14,13 +14,6 @@ import type { FactMetadata } from "./types.js";
 // against the vector port returns every record in the namespace, which is exactly "give me everything
 // for this subject" for the modest per-subject fact counts this system deals in.
 const QUERY_LIMIT = 500;
-
-/** Distinguishes an account id from a guest anon id inside the same tenant's Option B id space (guest
- * anon ids are base32, identity.ts; account ids are tenant-defined) so the two id spaces can never
- * collide inside one tenant's namespace set. */
-function accountSubjectId(accountId: string): string {
-  return `acct:${accountId}`;
-}
 
 export interface MergeDeps {
   vector: VectorPort;
