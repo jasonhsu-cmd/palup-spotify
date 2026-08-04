@@ -47,7 +47,16 @@ export {
 export {
   recordConsent,
   lookupConsent,
+  hasConsentRecord,
+  retireConsent,
   type ConsentRecord,
   type RecordConsentInput,
   type LookupConsentInput,
 } from "./runtime-consent-store.js";
+export {
+  recordGuestLink,
+  lookupGuestLink,
+  type GuestLinkRecord,
+  type RecordGuestLinkInput,
+  type LookupGuestLinkInput,
+} from "./guest-link-store.js";

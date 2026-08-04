@@ -4,7 +4,7 @@ import { InMemoryRuntimeStore } from "@palup/platform-ports";
 import type { RuntimeStatePort } from "@palup/platform-ports";
 import { PostgresRuntimeStore } from "../src/postgres-runtime-store.js";
 import type { Sql } from "../src/sql.js";
-import { recordConsent, lookupConsent } from "../src/runtime-consent-store.js";
+import { recordConsent, lookupConsent, hasConsentRecord, retireConsent } from "../src/runtime-consent-store.js";
 
 // PR-11a — server-side consent-record plumbing. Mirrors runtime-kill-registry.ts's own store-port
 // contract: recordConsent/lookupConsent are built ENTIRELY on the generic RuntimeStatePort (no new port
@@ -121,6 +121,53 @@ describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
     expect(unkeyedRef).toBeTruthy();
     expect(keyedRef).toBeTruthy();
     expect(keyedRef).not.toBe(unkeyedRef);
+  });
+  // B12 — `hasConsentRecord` must distinguish "no record" from "a record explicitly saying
+  // unknown/unknown", since `lookupConsent`'s own fail-closed default return value is indistinguishable
+  // from an explicit unknown/unknown write. The guest->account consent migration (server.ts /consent)
+  // depends on this distinction to decide whether the account already "has" a choice of its own.
+  it("hasConsentRecord — false when nothing was ever recorded, true once something (even unknown/unknown) is", async () => {
+    const store = await makeStore();
+    expect(await hasConsentRecord(store, { tenantId: "acme", anonId: "S-HAS-1" })).toBe(false);
+    await recordConsent(store, { tenantId: "acme", anonId: "S-HAS-1", memoryOrdinary: "unknown", memorySpecial: "unknown", source: "shopper" });
+    expect(await hasConsentRecord(store, { tenantId: "acme", anonId: "S-HAS-1" })).toBe(true);
+  });
+
+  // B12 (C7 remedy) — `retireConsent` deletes a subject's record entirely (not merely resets it), and
+  // audits the retirement itself (mirrors erasure.ts's erase.subject discipline: the retirement is the
+  // meaningful, governed event).
+  it("retireConsent deletes the record (lookup reverts to the fail-closed default) and audits the retirement", async () => {
+    const store = await makeStore();
+    await recordConsent(store, { tenantId: "acme", anonId: "S-RETIRE-1", memoryOrdinary: "out", memorySpecial: "out", source: "shopper" });
+    expect(await hasConsentRecord(store, { tenantId: "acme", anonId: "S-RETIRE-1" })).toBe(true);
+
+    await retireConsent(store, { tenantId: "acme", anonId: "S-RETIRE-1" });
+
+    expect(await hasConsentRecord(store, { tenantId: "acme", anonId: "S-RETIRE-1" })).toBe(false);
+    expect(await lookupConsent(store, { tenantId: "acme", anonId: "S-RETIRE-1" })).toEqual({ memoryOrdinary: "unknown", memorySpecial: "unknown" });
+    const log = await store.readAudit({ tenantId: "acme" });
+    expect(log.map((r) => r.action)).toContain("consent.retire");
+    const entry = log.find((r) => r.action === "consent.retire");
+    expect(JSON.stringify(entry?.input ?? {})).not.toContain("S-RETIRE-1");
+  });
+
+  it("retireConsent on an already-absent subject is a no-op that still audits (idempotent at the store level)", async () => {
+    const store = await makeStore();
+    await retireConsent(store, { tenantId: "acme", anonId: "S-NEVER-EXISTED" });
+    expect(await hasConsentRecord(store, { tenantId: "acme", anonId: "S-NEVER-EXISTED" })).toBe(false);
+    const log = await store.readAudit({ tenantId: "acme" });
+    expect(log.map((r) => r.action)).toContain("consent.retire");
+  });
+
+  // B12 — `recordConsent`'s `source` union grew a third value; the runtime guard must accept it (not
+  // just the original two) and record it distinguishably.
+  it("recordConsent accepts source: 'guest-link-migration' and records it as a server-derived actor", async () => {
+    const store = await makeStore();
+    await recordConsent(store, { tenantId: "acme", anonId: "acct:shopify:acme:1", memoryOrdinary: "out", memorySpecial: "unknown", source: "guest-link-migration" });
+    const log = await store.readAudit({ tenantId: "acme" });
+    const entry = log.find((r) => r.action === "consent.record");
+    expect(entry?.actor).toBe("agent:shopper-memory");
+    expect((entry?.input as { source?: string })?.source).toBe("guest-link-migration");
   });
 });
 

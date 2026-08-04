@@ -348,15 +348,30 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     expect(upsertSpy).not.toHaveBeenCalled();
   });
 
-  // CHECKLIST RESIDUAL C14 (governance round 6 BLOCK-A / security round 7 B-3) — PINNED, NOT FIXED.
-  // An authenticated opt-out does NOT govern that same browser's signed-OUT turns: on an unverified turn
-  // the subject is the guest anonId, the acct: row is never consulted, and the US opt-out regime reads an
-  // unresolved "unknown" as ALLOWED. This PR created the class (pre-PR the signed-in write landed on the
-  // guest row itself). Three attempts to fix it in /consent were each rejected in review — see the note
-  // at that call site — because governing a signed-out browser means trusting a client-supplied anonId,
-  // which is what subject-scoped auth exists to prevent. The real fix is B12's server-side guest->account
-  // link. This test exists so the disclosed behaviour cannot change without someone noticing.
-  it("C14 (residual, PINNED) — an authenticated opt-out does NOT govern the same browser's signed-OUT turns", async () => {
+  // CHECKLIST RESIDUAL C14 — CLOSED by B12 (server-side guest->account link), for the scenario this test
+  // exercises. Was: "PINNED, NOT FIXED" (governance round 6 BLOCK-A / security round 7 B-3) — an
+  // authenticated opt-out did NOT govern that same browser's signed-OUT turns, because on an unverified
+  // turn the subject is the guest anonId, the acct: row was never consulted, and the US opt-out regime
+  // reads an unresolved "unknown" as ALLOWED. Three attempts to fix it INSIDE /consent (propagating a
+  // CONSENT VALUE to the guest row) were each rejected in review — see the note at that call site.
+  //
+  // B12's remedy is NOT a value-propagation fix at /consent: the SAME /consent call above still leaves
+  // the guest row's own record exactly as before (see the still-"unknown/unknown" assertion below — the
+  // supplied anonId is still IGNORED for the ACCOUNT write, this PR's founding property, unchanged). What
+  // changed is that /consent now ALSO records a SERVER-verified guest->account LINK as a side effect of
+  // this same request (verifiedShopperId present + a validated guest anonId supplied), and /chat's
+  // UNVERIFIED-turn path now consults that link to fold the linked account's consent RESTRICTIVELY into
+  // its own decision — never switching the subject away from the guest anonId (see the "no read
+  // escalation" test in guest-account-link.test.ts for the load-bearing half of that constraint).
+  //
+  // NARROWED CLOSURE, stated precisely: this closes C14 only for a shopper who has called `/consent`
+  // (opted out) at least once while VERIFIED with their guest anonId presented — which is the only way an
+  // account-level "out" can exist without ever having been written to the guest row directly. A verified
+  // turn that never calls `/consent` at all never establishes a link (server.ts only records one from
+  // that call site), so there is nothing this remedy governs for such a shopper — but there is also
+  // nothing TO govern: with no explicit opt-out anywhere, both subjects fail closed to the identical
+  // "unknown" default under the US opt-out regime, so no discrepancy (and no C14 exposure) exists.
+  it("C14 CLOSED (B12) — an authenticated opt-out now DOES govern the same browser's signed-OUT turns, via the server-recorded link", async () => {
     armAuth();
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
@@ -364,15 +379,18 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
     const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
 
-    // Shopper opts OUT while SIGNED IN — this lands on acct:<id> only.
+    // Shopper opts OUT while SIGNED IN, presenting their guest anonId — this lands the explicit choice on
+    // acct:<id> only (unchanged), AND (B12, new) records a server-verified link from GUEST_ANON_ID to
+    // that account, because verifiedShopperId was present and a validated guest anonId was supplied.
     await app.inject({
       method: "POST",
       url: "/consent",
       headers: { "x-shopper-token": shopperToken() },
       payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "out", widgetToken: DEMO_WIDGET_TOKEN },
     });
-    // The guest row is untouched — the supplied anonId is IGNORED for a verified shopper, which is this
-    // PR's founding property and the reason the residual exists.
+    // UNCHANGED — the guest row's OWN record is still untouched: the supplied anonId is still IGNORED for
+    // the account write itself. This PR does not propagate a consent VALUE across subjects; it separately
+    // records an IDENTITY LINK the /chat path consults on an unverified turn (see below).
     expect(await lookupConsent(store, { tenantId: "demo", anonId: GUEST_ANON_ID })).toEqual({
       memoryOrdinary: "unknown",
       memorySpecial: "unknown",
@@ -382,12 +400,12 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     const signedOutTurn = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "c14-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      payload: { sessionId: "c14-closed-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(signedOutTurn.statusCode).toBe(200);
-    // THE DISCLOSED HOLE: a fact is written despite the explicit opt-out, because the guest row says
-    // "unknown" and the US regime treats that as allowed. If this ever stops being true, C14 is stale.
-    expect(upsertSpy).toHaveBeenCalled();
+    // CLOSED: the linked account's "out" now governs this signed-out turn too — zero writes, where a fact
+    // was previously written despite the explicit opt-out.
+    expect(upsertSpy).not.toHaveBeenCalled();
     await app.close();
   });
 

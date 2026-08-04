@@ -22,8 +22,21 @@ import {
   createMeteringModelPort,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, mergeGuestIntoAccount } from "@palup/widget-memory";
+import {
+  createRuntimeStore,
+  createVectorStore,
+  matchedKill,
+  RUNTIME_AGENT_TYPE,
+  recordConsent,
+  lookupConsent,
+  hasConsentRecord,
+  retireConsent,
+  recordGuestLink,
+  lookupGuestLink,
+  type Sql,
+  type ConsentRecord,
+} from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -786,22 +799,111 @@ export async function buildServer(opts?: {
       return { error: "invalid anonId or consent value" };
     }
 
+    // B12 (docs/MEMORY-GO-LIVE-CHECKLIST.md B12/C6/C7/C14) — the server-recorded guest->account LINK,
+    // established ONLY here, ONLY from a request the server itself verified. This is NOT one of the three
+    // shapes rejected below (see the BLOCK-A history at the end of this handler): it never propagates a
+    // CONSENT VALUE across subjects, and it never touches the `subject` this call writes to. It records an
+    // IDENTITY ASSOCIATION — "this guest anonId belongs to this verified account" — that `/chat`'s
+    // UNVERIFIED-turn path later CONSULTS for its own consent decision (never for the SUBJECT — see that
+    // handler's own doc comment; switching the subject there would let anyone holding this anonId read the
+    // account's whole memory, escalating C1). Runs BEFORE this call's own `recordConsent` write below, so
+    // "does the account already have a consent record" (used by the consent-migration step) reflects state
+    // PRIOR to this request, not the value this same request is about to set.
+    //
+    // GATING POSTURE (say-which-is-which, per the design note): the LINK and the CONSENT migration below
+    // run regardless of `memoryServiceEnabled` — matching this endpoint's OWN existing posture (already
+    // reachable whenever WIDGET_AUTH_REQUIRED/kill allow it, independent of the double gate). The FACT
+    // migration (`mergeGuestIntoAccount`, further below) is separately gated on `memoryService` — it
+    // touches the vector port, which stays untouched while memory is off.
+    //
+    // IDEMPOTENT: gated on `!existingLink` — the link's PRESENCE is the sole "already migrated" marker.
+    // `recordGuestLink` itself is called LAST (after consent + fact migration below), so a mid-sequence
+    // failure leaves no link recorded and a later verified turn safely RETRIES the whole sequence
+    // (`mergeGuestIntoAccount`/`retireConsent` are each independently idempotent — see their own doc
+    // comments) rather than silently stranding a half-migrated guest. This is best-effort, not one atomic
+    // transaction across all of recordGuestLink/hasConsentRecord/recordConsent/retireConsent/
+    // mergeGuestIntoAccount — each of those commits its OWN write+audit atomically (mirrors every other
+    // multi-step memory flow on this branch, e.g. /forget's two separate `eraseSubject` calls).
+    //
+    // TRUST NOTE (same class as the already-accepted C1/C8/C10 residuals) — this reachable ONLY once
+    // `verifiedShopperId` is present, but `validateAnonId` still only proves the presented anonId is
+    // well-FORMED, never that THIS shopper owns it. A verified shopper who presents a validated anonId
+    // they merely obtained can cause a link (and the fact migration below) to run against THEIR account —
+    // see guest-link-store.ts's own header and docs/MEMORY-GO-LIVE-CHECKLIST.md's C1 row for why the fact
+    // migration specifically is a materially stronger consequence than the pre-existing consent-oracle
+    // class (it moves data OWNERSHIP, not just a read/deny signal).
+    if (verifiedShopperId) {
+      const validatedGuestAnonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
+      if (validatedGuestAnonId) {
+        try {
+          const existingLink = await lookupGuestLink(store, { tenantId, guestAnonId: validatedGuestAnonId });
+          if (!existingLink) {
+            // "Has none" reflects state BEFORE this request's own write two lines below this block.
+            const accountHadConsent = await hasConsentRecord(store, { tenantId, anonId: subject });
+            // NARROWER THAN "always retire" (must-not-regress finding): migrate-and-retire are ONE
+            // conditional action, not two independent ones. Retiring the guest row UNCONDITIONALLY here
+            // regressed BLOCK-1(a)/(b) and the C7-restated test in consent-restrictive-merge.test.ts —
+            // those depend on a stale guest "out" surviving (and continuing to re-durabilize via N2's
+            // existing write-through) for exactly the case where the account ALREADY has a consent record
+            // of its own (typically from N2 itself). So the guest row is retired ONLY on the SAME
+            // condition that it was migrated — the account had NO record yet. C7's residual therefore
+            // narrows to (and remains, unresolved by B12) precisely the case where the account already
+            // has a consent record by the time a link is first established for it — see the checklist row.
+            if (!accountHadConsent) {
+              const guestConsent = await lookupConsent(store, { tenantId, anonId: validatedGuestAnonId });
+              await recordConsent(store, {
+                tenantId,
+                anonId: subject,
+                memoryOrdinary: guestConsent.memoryOrdinary,
+                memorySpecial: guestConsent.memorySpecial,
+                hmacKey: AUDIT_HMAC_SECRET,
+                source: "guest-link-migration",
+              });
+              await retireConsent(store, { tenantId, anonId: validatedGuestAnonId, hmacKey: AUDIT_HMAC_SECRET });
+            }
+
+            // Fact migration — gated on memory actually being LIVE (unlike the link/consent step above).
+            // Uses `body.memorySpecial` directly for the account's Consent-2 gate: by this point nothing
+            // has overwritten it yet (the shopper's OWN explicit recordConsent call is still below), and
+            // it equals exactly what the account's consent2 will read as once that call runs — merge.ts's
+            // own Inv-9 behavior (drop special facts without an "in") is reused completely unchanged.
+            if (memoryService) {
+              await mergeGuestIntoAccount(
+                { vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET },
+                { tenantId, anonId: validatedGuestAnonId, accountId: verifiedShopperId, consent2: body.memorySpecial },
+              );
+            }
+
+            await recordGuestLink(store, { tenantId, guestAnonId: validatedGuestAnonId, accountSubject: subject, hmacKey: AUDIT_HMAC_SECRET });
+          }
+        } catch (e) {
+          // PII-free: the error's CLASS only (mirrors /chat's own guest-merge write-through catch below).
+          // The shopper's OWN consent choice (recorded next, unconditionally) must not be blocked by a
+          // migration-side failure.
+          console.error(`[/consent] guest-link migration error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+        }
+      }
+    }
+
     // `source: "shopper"` — an explicit choice the shopper made, as distinct from the server-derived
-    // guest-merge write on /chat (Finding 2). Required, so no call site can silently misattribute.
+    // guest-merge write on /chat (Finding 2) or the guest-link migration write above. Required, so no
+    // call site can silently misattribute. Always the LAST word on this subject's record for this
+    // request — a fresh choice overwrites whatever the migration above may have just seeded.
     await recordConsent(store, { tenantId, anonId: subject, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial, hmacKey: AUDIT_HMAC_SECRET, source: "shopper" });
 
-    // BLOCK-A (governance review round 6) — DELIBERATELY NOT FIXED HERE. Recorded as checklist residual
-    // C14; the real fix is B12's server-side guest->account link, which does not exist.
+    // BLOCK-A (governance review round 6) — history, kept because the pattern it records is still the
+    // reason B12's fix (above) takes the shape it does. UPDATED (B12): the class of hole this described —
+    // "an authenticated opt-out does not govern that same browser's signed-OUT turns" — is now CLOSED for
+    // a shopper who has called `/consent` while verified with their guest anonId presented (which
+    // establishes the link above); see docs/MEMORY-GO-LIVE-CHECKLIST.md C14 for the precise, narrowed
+    // closure statement. What is NOT true, and was never attempted here: this call site still does not
+    // propagate `body.memoryOrdinary`/`body.memorySpecial` onto the guest subject's OWN record — `subject`
+    // above still resolves to `acct:<shopperId>` only, and a supplied anonId is still IGNORED for that
+    // write, unchanged from before B12. The fix instead lives one layer up (the LINK) and one endpoint
+    // over (`/chat`'s unverified-turn consent lookup) — never inside this write.
     //
-    // The defect: the /chat merge is one-directional, so on an UNVERIFIED turn the subject is the guest
-    // anonId, the acct: row is never consulted, and the US opt-out regime reads an unresolved "unknown"
-    // as ALLOWED — an authenticated opt-out does not govern that same browser's signed-OUT turns (the
-    // shopper token is sessionStorage, 1h TTL, so a new tab reverts them to guest). This PR created the
-    // class: pre-PR the signed-in write landed on the guest row itself.
-    //
-    // Three successive attempts to fix it HERE were each rejected in review, and the pattern is the
-    // point: governing a signed-OUT browser requires trusting a CLIENT-SUPPLIED anonId, which is exactly
-    // what subject-scoped auth exists to stop.
+    // The three rejected shapes, preserved for context (each attempted to make THIS write itself govern
+    // the guest subject, which is exactly what subject-scoped auth exists to prevent):
     //   1. restrictive-only propagation -> made the ordinary signed-in toggle OFF->ON leave memory OFF
     //      while the panel rendered ON, because the manage panel posts only on change (round 7 BLOCK-1 /
     //      B-1); it also left destructive forget-me as the only escape the UI could express, re-creating
@@ -811,7 +913,6 @@ export async function buildServer(opts?: {
     //   3. symmetric propagation removed the trap but broke this PR's founding property — "a supplied
     //      anonId is IGNORED for a verified shopper" — by writing to it, and dissolved the order
     //      semantics the reversal path documents.
-    // Shipping the hole DISCLOSED beats shipping a fix that contradicts the control it is bolted onto.
     return { ok: true };
   });
 
@@ -1084,12 +1185,16 @@ export async function buildServer(opts?: {
       let validatedGuestAnonId: string | undefined;
       let consentRecord: ConsentRecord | undefined;
       if (memorySubject) {
-        const accountRecord = await lookupConsent(store, { tenantId, anonId: memorySubject });
+        // `ownRecord` is THIS turn's served subject's own consent record — the ACCOUNT's for a verified
+        // turn, or the GUEST's for an unverified one (`memorySubject` IS the validated guest anonId then).
+        // Renamed from `accountRecord` (B12) because it is no longer always the account's — see the
+        // unverified branch below, where the roles of "own" vs. "restrict-only" swap.
+        const ownRecord = await lookupConsent(store, { tenantId, anonId: memorySubject });
         validatedGuestAnonId = verifiedShopperId
           ? validateAnonId(typeof body.signals?.anonId === "string" ? body.signals.anonId : undefined)
           : undefined;
         const guestRecord = validatedGuestAnonId ? await lookupConsent(store, { tenantId, anonId: validatedGuestAnonId }) : undefined;
-        const merged = validatedGuestAnonId ? mergeAccountConsent(accountRecord, guestRecord) : accountRecord;
+        const merged = validatedGuestAnonId ? mergeAccountConsent(ownRecord, guestRecord) : ownRecord;
         consentRecord = merged;
 
         // N2 fix (security review round 3, HIGH) — DURABLE write-through of the RESTRICTIVE ("out")
@@ -1101,15 +1206,18 @@ export async function buildServer(opts?: {
         // with the echoed anonId, 1 write once it's gone.
         //
         // SAFE DIRECTION ONLY: this can only ever move a tier's durable value TOWARD "out", never adopt
-        // an "in". `mergeConsentTier` (consent.ts) returns a value DIFFERENT from `accountRecord`'s own
+        // an "in". `mergeConsentTier` (consent.ts) returns a value DIFFERENT from `ownRecord`'s own
         // for a tier if and only if the guest side is "out" and the account wasn't already "out" — a
         // guest "in" is never adopted by the merge itself, so there is no code path here that could ever
         // write a guest-sourced "in" onto the account (that would let anyone borrow a stranger's opt-in
         // merely by holding/guessing their anonId post sign-in). See consent-restrictive-merge.test.ts's
         // "guest 'in' is NEVER adopted" case, which this write-through must not (and does not) affect.
+        // (This whole write-through block is reachable ONLY when `validatedGuestAnonId` is set, which —
+        // see its own derivation above — is only ever non-undefined when `verifiedShopperId` is present,
+        // so `ownRecord` here is always the ACCOUNT's own record, never the guest's.)
         //
         // IDEMPOTENT: the diff check means this only fires on the turn a NEW restriction is discovered —
-        // once written, the next lookup's `accountRecord` already equals `merged`, so there is no diff
+        // once written, the next lookup's `ownRecord` already equals `merged`, so there is no diff
         // and no re-write on every subsequent turn.
         //
         // GATED: only reachable when `memorySubject` exists, i.e. `memoryService` is constructed (the
@@ -1135,7 +1243,7 @@ export async function buildServer(opts?: {
         if (
           validatedGuestAnonId &&
           !kill &&
-          (merged.memoryOrdinary !== accountRecord.memoryOrdinary || merged.memorySpecial !== accountRecord.memorySpecial)
+          (merged.memoryOrdinary !== ownRecord.memoryOrdinary || merged.memorySpecial !== ownRecord.memorySpecial)
         ) {
           try {
             await recordConsent(store, {
@@ -1153,6 +1261,44 @@ export async function buildServer(opts?: {
             // PII-free: the error's CLASS only, never `.message` — a store/PG error can embed the KV key
             // (`acct:<shopperId>`). Matches retention.ts's codified rule and the sweep's own catch below.
             console.error(`[/chat] consent write-through error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+          }
+        }
+
+        // B12 (C14 remedy, docs/MEMORY-GO-LIVE-CHECKLIST.md) — an UNVERIFIED turn: `memorySubject` (and
+        // therefore `ownRecord` above) IS the guest anonId itself, since `verifiedShopperId` is absent.
+        // Without this, an account-level opt-out recorded ONLY via `/consent` while signed in (never
+        // written to the guest row — a supplied anonId is IGNORED for that write, this PR's founding
+        // property) had no way to govern this same browser's signed-OUT turns: the guest row alone reads
+        // "unknown", and the US opt-out regime treats "unknown" as ALLOWED.
+        //
+        // THE LOAD-BEARING CONSTRAINT: this block may only ever affect `consentRecord` (the CONSENT
+        // DECISION for this turn) — it must NEVER touch `memorySubject` itself. `memorySubject` was
+        // already fixed above (memorySubjectId, before this whole `if (memorySubject)` block even began)
+        // and stays the guest anonId for every consumer below: recall (`signals.anonId`), `remember()`,
+        // and the retention sweep. If this ever resolved the subject to the linked ACCOUNT instead,
+        // anyone holding this anonId could read the account's ENTIRE memory on an unverified turn —
+        // escalating C1 from "the victim's guest preferences" to "the victim's whole account". See the
+        // "NO READ ESCALATION" test in guest-account-link.test.ts, which asserts the account's vector
+        // namespace is never queried and no account fact text ever reaches the model on this path.
+        //
+        // `mergeAccountConsent`/`mergeConsentTier` (consent.ts) are reused COMPLETELY UNCHANGED, with the
+        // argument order swapped relative to the verified branch above: the GUEST's own record (`ownRecord`
+        // here) is the "primary" argument (its OWN "in" is honored, same as before this block existed) and
+        // the LINKED ACCOUNT's record is the "restrict-only" argument — so an "out" on EITHER side still
+        // wins, but the linked account's "in" is NEVER adopted for this guest-subject turn (mirrors the
+        // opposite direction's own non-adoption rule in the verified branch's write-through above). This is
+        // a READ-TIME merge only — no durable write-through here, unlike N2 above: the link itself is
+        // already durable (state-postgres), so re-consulting it on every future unverified turn from this
+        // same anonId reproduces the same restrictive result without needing a second durable write.
+        //
+        // Read-only (two `lookupConsent`/`lookupGuestLink` calls against the KV consent/link stores, never
+        // the vector port) — no kill-switch gate is needed here, matching every OTHER read in this same
+        // `if (memorySubject)` block (only the WRITES above/below are `!kill`-gated).
+        if (!verifiedShopperId) {
+          const link = await lookupGuestLink(store, { tenantId, guestAnonId: memorySubject });
+          if (link) {
+            const linkedAccountRecord = await lookupConsent(store, { tenantId, anonId: link.accountSubject });
+            consentRecord = mergeAccountConsent(ownRecord, linkedAccountRecord);
           }
         }
       }

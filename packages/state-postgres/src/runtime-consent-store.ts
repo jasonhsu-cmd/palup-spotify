@@ -40,18 +40,22 @@ export interface RecordConsentInput extends ConsentRecord {
    * brute-forceable (mirrors widget-backend/src/audit.ts's `hashShopperRef` rule and server.ts's own
    * `AUDIT_HMAC_SECRET`). */
   hmacKey?: string;
-  /** WHO caused this record (security review, PR #152 Finding 2). `"shopper"` = an explicit
-   * `POST /consent` the shopper made. `"guest-merge"` = the SERVER derived it: /chat's restrictive
-   * merge discovered a guest `"out"` and wrote it through to the account subject. The two were
+  /** WHO caused this record (security review, PR #152 Finding 2; extended by B12). `"shopper"` = an
+   * explicit `POST /consent` the shopper made. `"guest-merge"` = the SERVER derived it: /chat's
+   * restrictive merge discovered a guest `"out"` and wrote it through to the account subject.
+   * `"guest-link-migration"` (B12) = the SERVER derived it: the FIRST time a verified session's
+   * guest->account link is established (server.ts `/consent`), the guest's PRE-EXISTING consent record
+   * is copied onto a blank account record (never overwriting an account record that already exists),
+   * so the guest side stops being C7's "genuinely unowned" row. All non-`"shopper"` sources were
    * previously byte-indistinguishable in the immutable log, so an operator could not tell a consent
    * change the shopper MADE from one the system INFERRED — and the shopper-facing reversal path is not
-   * even true for the merged case (NN#5 / Inv 6).
+   * even true for either inferred case (NN#5 / Inv 6).
    *
    * REQUIRED, not optional-with-a-default (security review, round 4): defaulting to `"shopper"` would
    * mean a future server-side caller that forgets this field silently ATTRIBUTES ITS OWN WRITE TO THE
    * SHOPPER in the immutable log — the wrong direction to fail for an Inv-6 attribution field. Making it
    * required forces every new call site to state who caused the change. */
-  source: "shopper" | "guest-merge";
+  source: "shopper" | "guest-merge" | "guest-link-migration";
 }
 
 export interface LookupConsentInput {
@@ -95,9 +99,9 @@ export async function recordConsent(
   // that omits it would ship green — and the ternary below would then silently record `actor: "shopper"`
   // for a SERVER-derived write, the exact misattribution this field exists to prevent (security review,
   // PR #152). Fail loudly instead: an omission is a programming error, and a wrong actor in an immutable
-  // Inv-6 log is worse than a rejected write. Both production call sites supply it (server.ts).
-  if (source !== "shopper" && source !== "guest-merge")
-    throw new Error(`recordConsent: 'source' must be "shopper" or "guest-merge" (got ${JSON.stringify(source)}) — it attributes this entry in the immutable audit log`);
+  // Inv-6 log is worse than a rejected write. All production call sites supply it (server.ts).
+  if (source !== "shopper" && source !== "guest-merge" && source !== "guest-link-migration")
+    throw new Error(`recordConsent: 'source' must be "shopper", "guest-merge", or "guest-link-migration" (got ${JSON.stringify(source)}) — it attributes this entry in the immutable audit log`);
   const record: ConsentRecord = { memoryOrdinary, memorySpecial };
   await store.tx({ tenantId }, async (t) => {
     await t.put(MEMORY_CONSENT, anonId, record);
@@ -122,7 +126,62 @@ export async function recordConsent(
               //     facts) as the only escape — actively harmful advice in a field an operator or support
               //     agent follows literally.
               "reversible, but ORDER MATTERS: (1) FIRST neutralise the originating guest subject — either record the desired value on it from a SIGNED-OUT client (no shopper token; non-destructive, nothing is erased), or stop presenting that guest anonId entirely (the widget's forget-me mints a fresh one, which DOES erase the shopper's facts); THEN (2) record the desired value on this account subject while signed in. Doing (2) before (1) is undone by any /chat turn that intervenes while the guest anonId is still presented. See docs/MEMORY-GO-LIVE-CHECKLIST.md C7."
-            : "POST /consent again with a different choice (e.g. 'out') — a fresh choice always overwrites the prior one",
+            : source === "guest-link-migration"
+              ? // B12 — this write only ever fires ONCE per guest->account link (the account had no
+                // consent record of its own at that moment) and, in the one production call site
+                // (server.ts `/consent`), is issued BEFORE that same request's own explicit `"shopper"`
+                // write below it — so a request that carries both an established-for-the-first-time link
+                // AND an explicit consent choice ends with the EXPLICIT choice on record regardless (a
+                // fresh write always overwrites the prior one). Not proven by execution beyond that
+                // ordering guarantee — do not read this as "always inert"; a future call site that invokes
+                // the migration WITHOUT also writing an explicit choice would leave the migrated value
+                // standing until one is made.
+                "reversible: POST /consent (signed in) with a fresh choice overwrites this migrated value like any other consent record"
+              : "POST /consent again with a different choice (e.g. 'out') — a fresh choice always overwrites the prior one",
+      },
+      at,
+    );
+  });
+}
+
+/**
+ * B12 — true iff a consent record has EVER been explicitly written for this subject, distinct from the
+ * fail-closed `{unknown, unknown}` default `lookupConsent` returns both when none exists AND when one
+ * was explicitly recorded with those same tri-state values. Needed so the guest->account consent
+ * migration (server.ts `/consent`) can tell "the account has never recorded a choice" (migrate the
+ * guest's record onto it) from "the account explicitly recorded unknown/unknown" (leave it alone) —
+ * `lookupConsent`'s own return type can't distinguish the two.
+ */
+export async function hasConsentRecord(store: RuntimeStatePort, input: LookupConsentInput): Promise<boolean> {
+  return (await store.get<ConsentRecord>({ tenantId: input.tenantId }, MEMORY_CONSENT, input.anonId)) !== null;
+}
+
+/**
+ * B12 (C7 remedy) — retires (deletes) a subject's consent record entirely. The sole intended caller is
+ * server.ts's `/consent` guest->account link migration, which retires the GUEST row once its value (if
+ * any) has been folded onto the linked account — C7's "genuinely unowned" guest row then has an owner
+ * and stops being a stale record a later turn could resurface. Idempotent: deleting an already-absent
+ * key is a no-op at the store level, but this still audits every call (mirrors erasure.ts's erase.subject
+ * — the retirement itself is the meaningful, governed event, not just its side effect). After this call,
+ * `lookupConsent` for this subject returns the fail-closed default, indistinguishable from "never
+ * recorded" — which is the intended, disclosed effect, not a defect.
+ */
+export async function retireConsent(
+  store: RuntimeStatePort,
+  input: { tenantId: string; anonId: string; hmacKey?: string },
+  at = new Date().toISOString(),
+): Promise<void> {
+  const { tenantId, anonId, hmacKey } = input;
+  await store.tx({ tenantId }, async (t) => {
+    await t.delete(MEMORY_CONSENT, anonId);
+    await t.audit(
+      {
+        actor: "agent:shopper-memory",
+        action: "consent.retire",
+        input: { subjectRef: subjectRef(tenantId, anonId, hmacKey) },
+        decision: "retired",
+        reversalPath:
+          "n/a — retiring (deleting) the record is itself the reversal path, mirroring erasure.ts's erase.subject; a fresh POST /consent against this same anonId later would simply create a new record, indistinguishable from one that was never retired",
       },
       at,
     );
