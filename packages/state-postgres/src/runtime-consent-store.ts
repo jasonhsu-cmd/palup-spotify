@@ -152,6 +152,10 @@ export async function recordConsent(
  * guest's record onto it) from "the account explicitly recorded unknown/unknown" (leave it alone) —
  * `lookupConsent`'s own return type can't distinguish the two.
  */
+// DORMANT — NO PRODUCTION CALLER (combined review). Built for B12's guest-consent migration, which
+// was removed as a data-theft vector; `retireConsent` in particular is a DESTRUCTIVE consent-record
+// delete shipped with zero callers. Kept (not deleted) because the eventual proof-of-anonId-ownership
+// work needs exactly this, but do NOT wire either without that primitive.
 export async function hasConsentRecord(store: RuntimeStatePort, input: LookupConsentInput): Promise<boolean> {
   return (await store.get<ConsentRecord>({ tenantId: input.tenantId }, MEMORY_CONSENT, input.anonId)) !== null;
 }
@@ -166,6 +170,10 @@ export async function hasConsentRecord(store: RuntimeStatePort, input: LookupCon
  * `lookupConsent` for this subject returns the fail-closed default, indistinguishable from "never
  * recorded" — which is the intended, disclosed effect, not a defect.
  */
+// DORMANT — NO PRODUCTION CALLER (combined review). Built for B12's guest-consent migration, which
+// was removed as a data-theft vector; `retireConsent` in particular is a DESTRUCTIVE consent-record
+// delete shipped with zero callers. Kept (not deleted) because the eventual proof-of-anonId-ownership
+// work needs exactly this, but do NOT wire either without that primitive.
 export async function retireConsent(
   store: RuntimeStatePort,
   input: { tenantId: string; anonId: string; hmacKey?: string },

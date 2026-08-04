@@ -805,15 +805,12 @@ export async function buildServer(opts?: {
     // UNVERIFIED-turn path later CONSULTS for its own consent decision (never for the SUBJECT — see that
     // handler's own doc comment; switching the subject there would let anyone holding this anonId read the
     // account's whole memory, escalating C1). Runs BEFORE this call's own `recordConsent` write below, so
-    // "does the account already have a consent record" (used by the consent-migration step) reflects state
-    // PRIOR to this request, not the value this same request is about to set.
-    //
-    // GATING POSTURE: the LINK runs regardless of `memoryServiceEnabled`, matching this endpoint's OWN
+        // GATING POSTURE: the LINK runs regardless of `memoryServiceEnabled`, matching this endpoint's OWN
     // existing posture (reachable whenever WIDGET_AUTH_REQUIRED/kill allow it, independent of the double
     // gate). It touches no vector data at all — the fact migration that once did was REMOVED (see below).
     //
     // IDEMPOTENT: gated on `!existingLink` — the link's PRESENCE is the sole "already migrated" marker.
-    // `recordGuestLink` itself is called LAST (after consent + fact migration below), so a mid-sequence
+    // `recordGuestLink` is the ONLY write in this block (the consent + fact migration it once accompanied were removed), so a
     // failure leaves no link recorded and a later verified turn safely retries it.
     //
     // TRUST NOTE (same class as the already-accepted C1/C8/C10 residuals) — this reachable ONLY once
@@ -858,7 +855,7 @@ export async function buildServer(opts?: {
           // PII-free: the error's CLASS only (mirrors /chat's own guest-merge write-through catch below).
           // The shopper's OWN consent choice (recorded next, unconditionally) must not be blocked by a
           // migration-side failure.
-          console.error(`[/consent] guest-link migration error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+          console.error(`[/consent] guest-link error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
         }
       }
     }

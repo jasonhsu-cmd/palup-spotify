@@ -30,7 +30,7 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
 // a validated anonId they merely obtained (not their own browser's) can still cause a link to be
 // recorded from that anonId to THEIR account, exactly as C8/C10 already accept for consent writes — for
 // the CONSENT decision this is directionally safe (mergeAccountConsent never adopts the linked side's
-// "in"; it can only ever push a decision toward "out"). The FACT migration this link also enables
+// "in"; it can only ever push a decision toward "out"). The FACT migration this link was originally paired with (REMOVED — see server.ts)
 // (server.ts `/consent`, `mergeGuestIntoAccount`) is a materially STRONGER consequence than the
 // pre-existing consent-oracle class, because it moves data ownership rather than only reading/denying —
 // see the note at that call site and docs/MEMORY-GO-LIVE-CHECKLIST.md's C1 row.
@@ -88,11 +88,15 @@ export async function recordGuestLink(
         input: { guestRef: subjectRef(tenantId, guestAnonId, hmacKey), accountRef: subjectRef(tenantId, accountSubject, hmacKey) },
         decision: "linked",
         reversalPath:
-          'n/a — no dedicated unlink endpoint exists in this PR; the link is a narrowing-only input to a ' +
-          'later consent decision (mergeAccountConsent never adopts the linked side\'s "in" — it can only ' +
-          'ever push a decision toward "out"), so nothing unsafe survives it going unreversed. To make it ' +
-          "stop applying, the shopper would need to stop presenting this guest anonId entirely (new device " +
-          "or cleared storage). See docs/MEMORY-GO-LIVE-CHECKLIST.md B12/C14.",
+          "NOT REVERSIBLE — no unlink endpoint exists, /forget does not clear this collection, and the " +
+          "record is first-writer-wins, so a link recorded against the WRONG account cannot be corrected " +
+          "by the rightful account owner. The link is narrowing-only as an input to a later consent " +
+          "decision (mergeAccountConsent never adopts the linked side's \"in\"), but narrowing-only is NOT " +
+          "the same as safe: whoever records the link first chooses which account's consent narrows this " +
+          "guest id's unverified turns, and a link recorded by someone who merely obtained the anonId " +
+          "gives them a durable, unrevocable denial over that shopper's memory. An earlier revision of " +
+          "this very string asserted \"nothing unsafe survives it going unreversed\" — that was FALSE. " +
+          "See docs/MEMORY-GO-LIVE-CHECKLIST.md C15 (link squatting) and B12.",
       },
       at,
     );
