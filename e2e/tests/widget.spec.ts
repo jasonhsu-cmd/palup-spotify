@@ -244,3 +244,118 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
     expect(newAnonId).not.toBe(firstAnonId);
   });
 });
+
+// PR-11c — contextual in-the-moment health-consent prompt (the deferred follow-up to PR-11b). Same
+// mocking strategy as PR-11b's own suite above: the mock-mode backend always returns
+// memoryEnabled:false, so "memory ON" drives the enabled path by intercepting /chat with a faked
+// `consentPrompt: "special"` field, and "memory OFF" runs against the real, unmocked backend.
+test.describe("PR-11c — memory OFF (default, real unmocked backend): the special-consent prompt never appears", () => {
+  test("a health-ish message gets no consent-prompt-special card, disclosures intact", async ({ page }) => {
+    let consentCalls = 0;
+    await page.route("**/consent", (route) => {
+      consentCalls++;
+      return route.continue();
+    });
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("I'm allergic to tree nuts");
+    await page.getByTestId("send").click();
+    await expect(page.getByTestId("agent-msg").last()).toBeVisible();
+    await expect(page.locator('[data-testid="consent-prompt-special"]')).toHaveCount(0);
+    expect(consentCalls).toBe(0);
+    await expect(page.locator("#whStatus")).toContainText("AI-generated");
+  });
+});
+
+test.describe("PR-11c — memory ON (mocked /chat seam): the special-consent prompt", () => {
+  test("renders approved copy B on consentPrompt:'special'; 'Yes' posts memorySpecial='in' to /consent", async ({ page }) => {
+    let consentBody: Record<string, unknown> | null = null;
+    await page.route("**/consent", async (route) => {
+      consentBody = route.request().postDataJSON();
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+    });
+    await page.route("**/chat", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "I'm sorry to hear that — thanks for letting me know.",
+          mode: "support",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          memoryEnabled: true,
+          consentMode: "opt_out",
+          consentPrompt: "special",
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("I'm allergic to tree nuts");
+    await page.getByTestId("send").click();
+
+    const prompt = page.locator('[data-testid="consent-prompt-special"]');
+    await expect(prompt).toBeVisible();
+    await expect(prompt.locator('[data-testid="consent-special-title"]')).toHaveText("Should I remember this to help keep you safe?");
+    await expect(prompt.locator('[data-testid="consent-special-body"]')).toHaveText(
+      "You mentioned some health information. With your permission I can remember it so I can steer you away from products that don't suit you next time. This is health information, so I only keep it if you say yes — kept for 30 days after your last visit, never shared with other stores, and you can delete it anytime.",
+    );
+    await expect(prompt.locator('[data-testid="consent-special-secondary"]')).toHaveText("No, don't keep this");
+    await expect(prompt.locator('[data-testid="consent-special-primary"]')).toHaveText("Yes, remember it");
+
+    await prompt.locator('[data-testid="consent-special-primary"]').click();
+    await expect(prompt).toHaveCount(0);
+
+    await expect.poll(() => consentBody).toBeTruthy();
+    expect(consentBody).toMatchObject({ memorySpecial: "in" });
+    const anonId = (consentBody as { anonId?: string }).anonId as string;
+    expect(anonId).toMatch(/^[A-Z2-7]{16,64}$/);
+  });
+
+  test("'No' posts memorySpecial='out'; the prompt shows at most once per session even across repeated health messages", async ({ page }) => {
+    const consentBodies: Record<string, unknown>[] = [];
+    await page.route("**/consent", async (route) => {
+      consentBodies.push(route.request().postDataJSON());
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
+    });
+    await page.route("**/chat", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "Got it, thanks for sharing.",
+          mode: "support",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          memoryEnabled: true,
+          consentMode: "opt_out",
+          consentPrompt: "special",
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("I'm allergic to tree nuts");
+    await page.getByTestId("send").click();
+    const prompt = page.locator('[data-testid="consent-prompt-special"]');
+    await expect(prompt).toBeVisible();
+
+    // A second health-ish message arrives BEFORE the shopper answers the first prompt — the server
+    // (mocked here) keeps sending consentPrompt:"special" every turn, but the widget must not stack a
+    // second card while the first is still unanswered.
+    await page.getByTestId("chat-input").fill("also I have eczema");
+    await page.getByTestId("send").click();
+    await expect(page.locator('[data-testid="consent-prompt-special"]')).toHaveCount(1);
+
+    await prompt.locator('[data-testid="consent-special-secondary"]').click(); // "No, don't keep this"
+    await expect(page.locator('[data-testid="consent-prompt-special"]')).toHaveCount(0);
+
+    await expect.poll(() => consentBodies.length).toBe(1);
+    expect(consentBodies[0]).toMatchObject({ memorySpecial: "out" });
+  });
+});

@@ -23,7 +23,7 @@ import {
   createInMemoryVectorStore,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject } from "@palup/widget-memory";
+import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject, classifyFact } from "@palup/widget-memory";
 import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -832,6 +832,29 @@ export async function buildServer(opts?: {
       const consentAnonId =
         memoryService && typeof body.signals?.anonId === "string" ? validateAnonId(body.signals.anonId) : undefined;
       const consentRecord = consentAnonId ? await lookupConsent(store, { tenantId, anonId: consentAnonId }) : undefined;
+      // PR-11c — contextual in-the-moment health-consent prompt: the deferred follow-up to PR-11b's
+      // manage-panel-only UX. Ask exactly when it's relevant — THIS turn's message reveals
+      // special-category info — rather than only passively via the manage panel. This is a READ-ONLY
+      // PROMPT SIGNAL: it decides nothing about storage. The actual write still goes through the full
+      // gated distill -> classify -> consent path unchanged (remember()/decideMemoryWrite below); this
+      // flag only tells the widget "ask now". `classifyFact` is the cheap, pure keyword classifier
+      // (widget-memory/src/classifier.ts, reused UNCHANGED, no policy needed — its `.class` field is
+      // policy-independent) — deliberately NOT the model/distiller, so this costs nothing extra even
+      // when memory is live. Fires only when ALL hold:
+      //   1. memoryServiceEnabled — the double gate (flag.ts); false in real production ⇒ always absent.
+      //   2. this subject's recorded memorySpecial is "unknown" — not yet decided (mirrors the
+      //      deriveServingSignals fail-closed default a few lines below: no record ⇒ "unknown").
+      //      Already "in" ⇒ we already have it; already "out" ⇒ they declined — never nag either way.
+      //   3. classifyFact(message).class === "special" — THIS message actually reveals special-category
+      //      (health/allergy/medical) information.
+      // Absent (undefined) otherwise, which `JSON.stringify` (Fastify's default serializer, no route
+      // schema here) drops from the wire response entirely — byte-identical to before this PR when off.
+      const consentPrompt: "special" | undefined =
+        memoryServiceEnabled &&
+        (consentRecord?.memorySpecial ?? "unknown") === "unknown" &&
+        classifyFact(message).class === "special"
+          ? "special"
+          : undefined;
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
         kill: Boolean(kill),
@@ -956,6 +979,7 @@ export async function buildServer(opts?: {
         servedBy: policy.id,
         memoryEnabled: memoryServiceEnabled,
         consentMode: CONSENT_MODE,
+        consentPrompt,
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
