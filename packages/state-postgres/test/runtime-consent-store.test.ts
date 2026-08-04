@@ -55,6 +55,7 @@ describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
       anonId: "SHOPPER1SUBJECTKEY",
       memoryOrdinary: "in",
       memorySpecial: "out",
+      source: "shopper",
     });
     expect(await lookupConsent(store, { tenantId: "acme", anonId: "SHOPPER1SUBJECTKEY" })).toEqual({
       memoryOrdinary: "in",
@@ -64,8 +65,8 @@ describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
 
   it("a fresh choice overwrites the prior one for the same subject", async () => {
     const store = await makeStore();
-    await recordConsent(store, { tenantId: "acme", anonId: "S1", memoryOrdinary: "in", memorySpecial: "in" });
-    await recordConsent(store, { tenantId: "acme", anonId: "S1", memoryOrdinary: "out", memorySpecial: "unknown" });
+    await recordConsent(store, { tenantId: "acme", anonId: "S1", memoryOrdinary: "in", memorySpecial: "in", source: "shopper" });
+    await recordConsent(store, { tenantId: "acme", anonId: "S1", memoryOrdinary: "out", memorySpecial: "unknown", source: "shopper" });
     expect(await lookupConsent(store, { tenantId: "acme", anonId: "S1" })).toEqual({
       memoryOrdinary: "out",
       memorySpecial: "unknown",
@@ -74,7 +75,7 @@ describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
 
   it("is TENANT-SCOPED: tenant A's record is invisible to tenant B for the identical anonId", async () => {
     const store = await makeStore();
-    await recordConsent(store, { tenantId: "tenant-a", anonId: "SHARED-SUBJECT-ID", memoryOrdinary: "in", memorySpecial: "in" });
+    await recordConsent(store, { tenantId: "tenant-a", anonId: "SHARED-SUBJECT-ID", memoryOrdinary: "in", memorySpecial: "in", source: "shopper" });
     expect(await lookupConsent(store, { tenantId: "tenant-a", anonId: "SHARED-SUBJECT-ID" })).toEqual({
       memoryOrdinary: "in",
       memorySpecial: "in",
@@ -88,7 +89,7 @@ describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
 
   it("audits the consent write atomically, without leaking the raw anonId into the log", async () => {
     const store = await makeStore();
-    await recordConsent(store, { tenantId: "acme", anonId: "SUPER-SECRET-ANON-ID", memoryOrdinary: "in", memorySpecial: "out" });
+    await recordConsent(store, { tenantId: "acme", anonId: "SUPER-SECRET-ANON-ID", memoryOrdinary: "in", memorySpecial: "out", source: "shopper" });
     const log = await store.readAudit({ tenantId: "acme" });
     expect(log.map((r) => r.action)).toContain("consent.record");
     const entry = log.find((r) => r.action === "consent.record");
@@ -103,8 +104,8 @@ describe.each(adapters)("runtime-consent-store — %s", (_name, makeStore) => {
   it("hmacKey changes the audited subjectRef for the identical (tenantId, anonId)", async () => {
     const storeA = await makeStore();
     const storeB = await makeStore();
-    await recordConsent(storeA, { tenantId: "acme", anonId: "acct:shopify:acme:12345", memoryOrdinary: "in", memorySpecial: "unknown" });
-    await recordConsent(storeB, { tenantId: "acme", anonId: "acct:shopify:acme:12345", memoryOrdinary: "in", memorySpecial: "unknown", hmacKey: "secret-audit-key" });
+    await recordConsent(storeA, { tenantId: "acme", anonId: "acct:shopify:acme:12345", memoryOrdinary: "in", memorySpecial: "unknown", source: "shopper" });
+    await recordConsent(storeB, { tenantId: "acme", anonId: "acct:shopify:acme:12345", memoryOrdinary: "in", memorySpecial: "unknown", hmacKey: "secret-audit-key", source: "shopper" });
 
     const refFrom = async (store: RuntimeStatePort) => {
       const log = await store.readAudit({ tenantId: "acme" });

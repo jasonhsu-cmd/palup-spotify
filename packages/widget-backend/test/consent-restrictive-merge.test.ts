@@ -268,10 +268,13 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     // this test pinned wording that was itself still inaccurate. Security review proved by execution that
     // NEITHER step alone reverses this entry: /consent alone is re-asserted on the next turn, and dropping
     // the guest anonId alone leaves the account row "out" forever.
-    expect(mergeEntry!.reversalPath).toMatch(/BOTH/);
-    expect(mergeEntry!.reversalPath).toMatch(/POST \/consent/);
-    expect(mergeEntry!.reversalPath).toMatch(/guest anonId/);
-    expect(mergeEntry!.reversalPath).toMatch(/[Ee]ither step alone/);
+    // Assert the PROPERTIES the string must carry, not its prose — earlier versions of this test pinned
+    // wording that was itself inaccurate. The three properties, each backed by an executed test above:
+    // the ORDER is stated, the guest subject must be neutralised, and erasure is NOT the only route.
+    expect(mergeEntry!.reversalPath).toMatch(/ORDER MATTERS/);
+    expect(mergeEntry!.reversalPath).toMatch(/FIRST neutralise the originating guest subject/);
+    expect(mergeEntry!.reversalPath).toMatch(/SIGNED-OUT client/); // the non-destructive remedy is named
+    expect(mergeEntry!.reversalPath).toMatch(/Doing \(2\) before \(1\) is undone/);
     await app.close();
   });
 
@@ -347,6 +350,61 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     });
     expect(later.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled();
+  });
+
+  // GOVERNANCE REVIEW round 5, BLOCK-1 — the recorded reversal path must WORK WHEN FOLLOWED. Three
+  // successive revisions of that audit string were written by REASONING and were each wrong, so this
+  // proves the remedy by execution before the string is rewritten again. Two claims under test:
+  //   (a) ORDER IS LOAD-BEARING — neutralising the account side FIRST fails, because any /chat turn that
+  //       still presents the stale guest anonId re-reads the guest row and re-durabilises "out".
+  //   (b) A NON-DESTRUCTIVE remedy exists — the shopper does NOT have to erase their facts. /consent binds
+  //       to the GUEST subject when no shopper token is presented, so a signed-out client holding the same
+  //       anonId can clear the guest row directly; then opting in as the signed-in shopper sticks.
+  it("BLOCK-1(a) — WRONG ORDER: opting in on the account first is undone by the next turn that still presents the stale guest anonId", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    // Guest "out", then a signed-in echo turn durably writes "out" onto the account.
+    await app.inject({ method: "POST", url: "/consent", payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
+    await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken() }, payload: { sessionId: "ord-1", message: "hi", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN } });
+    upsertSpy.mockClear();
+
+    // STEP (1) ONLY, per the string's stated order: opt in on the ACCOUNT subject.
+    await app.inject({ method: "POST", url: "/consent", headers: { "x-shopper-token": shopperToken() }, payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
+
+    // A turn still presenting the stale guest anonId re-asserts "out" — the opt-in is undone.
+    const turn = await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken() }, payload: { sessionId: "ord-2", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN } });
+    expect(turn.statusCode).toBe(200);
+    expect(upsertSpy).not.toHaveBeenCalled(); // still denied — order (1)->(2) does NOT reverse it
+    await app.close();
+  });
+
+  it("BLOCK-1(b) — NON-DESTRUCTIVE remedy: clear the GUEST row from a signed-out client first, then opt in signed-in — memory works again with NO erasure", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    await app.inject({ method: "POST", url: "/consent", payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
+    await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken() }, payload: { sessionId: "nd-1", message: "hi", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN } });
+    upsertSpy.mockClear();
+
+    // REMEDY step 1 — SIGNED-OUT /consent (no shopper token) binds to the GUEST subject: clear it to "in".
+    await app.inject({ method: "POST", url: "/consent", payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
+    // REMEDY step 2 — signed-IN /consent sets the account subject to "in".
+    await app.inject({ method: "POST", url: "/consent", headers: { "x-shopper-token": shopperToken() }, payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
+
+    // A turn STILL presenting the same stale anonId now writes — nothing was erased to get here.
+    const turn = await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken() }, payload: { sessionId: "nd-2", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN } });
+    expect(turn.statusCode).toBe(200);
+    expect(upsertSpy).toHaveBeenCalled(); // memory works again, WITHOUT forget-me / erasure
+    await app.close();
   });
 
   // C7 (docs/MEMORY-GO-LIVE-CHECKLIST.md) restated accurately for N2: this is a documented, ACCEPTED

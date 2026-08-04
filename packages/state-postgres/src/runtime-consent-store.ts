@@ -102,15 +102,18 @@ export async function recordConsent(
         decision: "recorded",
         reversalPath:
           source === "guest-merge"
-            ? // VERIFIED BY EXECUTION (security review, twice). Neither half works ALONE:
-              //   • `POST /consent {"in"}` while the client still presents the originating guest anonId
-              //     → the next turn re-asserts "out" (the merge re-reads the guest row).
-              //   • Dropping the guest anonId (forget-me's fresh id) WITHOUT re-consenting
-              //     → still denied, because this account row itself stays "out" forever.
-              // Only the CONJUNCTION reverses it. An earlier revision of this string prescribed the second
-              // half alone and was therefore still not a usable reversal path (Inv 6 wants one that works
-              // when followed literally).
-              "reversible only by BOTH: (1) POST /consent with the desired value for this account subject, AND (2) stopping presentation of the originating guest anonId (the widget's forget-me mints a fresh one, at the cost of erasing the shopper's facts). Either step alone leaves the subject denied. See docs/MEMORY-GO-LIVE-CHECKLIST.md C7."
+            ? // VERIFIED BY EXECUTION (governance review round 5 — three earlier revisions of this string
+              // were written by REASONING and were each wrong; these claims are now backed by tests in
+              // consent-restrictive-merge.test.ts, "BLOCK-1(a)" and "BLOCK-1(b)"):
+              //   • ORDER IS LOAD-BEARING. Setting the ACCOUNT subject first does NOT work — the next
+              //     /chat turn that still presents the originating guest anonId re-reads the guest row and
+              //     re-durabilises "out" over it.
+              //   • ERASURE IS NOT REQUIRED. `/consent` binds to the GUEST subject whenever no shopper
+              //     token is presented, so a signed-out client holding the same anonId can clear the guest
+              //     row directly. An earlier revision prescribed forget-me (which erases the shopper's
+              //     facts) as the only escape — actively harmful advice in a field an operator or support
+              //     agent follows literally.
+              "reversible, but ORDER MATTERS: (1) FIRST neutralise the originating guest subject — either record the desired value on it from a SIGNED-OUT client (no shopper token; non-destructive, nothing is erased), or stop presenting that guest anonId entirely (the widget's forget-me mints a fresh one, which DOES erase the shopper's facts); THEN (2) record the desired value on this account subject while signed in. Doing (2) before (1) is undone by the next turn that still presents the guest anonId. See docs/MEMORY-GO-LIVE-CHECKLIST.md C7."
             : "POST /consent again with a different choice (e.g. 'out') — a fresh choice always overwrites the prior one",
       },
       at,
