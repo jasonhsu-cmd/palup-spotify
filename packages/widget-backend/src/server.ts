@@ -1017,6 +1017,9 @@ export async function buildServer(opts?: {
         shopperId: shopperPrincipal.kind === "shopper" ? shopperPrincipal.shopperId : undefined,
         shopperVerified: shopperPrincipal.kind === "shopper" ? shopperPrincipal.verified : undefined,
         consent: consentRecord,
+        // The SAME subject the consent lookup above used — so recall, remember(), the sweep and the
+        // consent gate all key off one namespace (security review F1/F2).
+        memorySubject,
       });
 
       // Canary split: a sticky fraction of THIS tenant's sessions is served by that tenant's canary

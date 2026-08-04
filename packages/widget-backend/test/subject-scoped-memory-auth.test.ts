@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   InMemoryRuntimeStore,
   createInMemoryVectorStore,
@@ -7,6 +7,7 @@ import {
 } from "@palup/platform-ports";
 import { lookupConsent } from "@palup/state-postgres";
 import { subjectNamespace, accountSubjectId } from "@palup/widget-memory";
+import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
 
 // SUBJECT-SCOPED AUTH — the memory subject is now derived from the SERVER-VERIFIED shopper principal
@@ -97,6 +98,65 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     // The victim's fact SURVIVES — this is the whole point of the change.
     const survivors = await vector.query(victimNs, { text: "", k: 10 });
     expect(survivors.map((r) => r.id)).toEqual(["victim-1"]);
+    await app.close();
+  });
+
+
+  // SECURITY REVIEW F1 — the surface the first cut MISSED. Binding /consent, remember() and the sweep
+  // was not enough: the brain's RECALL path reads `memory.recall({ anonId: signals.anonId })`, and
+  // `signals.anonId` was still the raw client value. A verified shopper could therefore supply a
+  // victim's anonId and have the VICTIM's namespace queried and their fact text injected into the model
+  // prompt — i.e. real READ access, which the go-live checklist had asserted did not exist. Worse, the
+  // read-time consent gate was then evaluated against the CALLER's consent record (which the caller
+  // sets themselves) rather than the record belonging to the facts being read (F2).
+  //
+  // No test in the repo combined SHOPPER_AUTH + memoryEnabled + recall, which is exactly why 1166 tests
+  // stayed green with the hole wide open. This is that test.
+  it("THE ATTACK (recall): a verified shopper supplying a victim's anonId never queries the victim's namespace nor leaks their fact text", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const victimNs = subjectNamespace("demo", VICTIM_ANON_ID);
+    await vector.upsert(victimNs, [
+      {
+        id: "victim-secret",
+        text: "shopper is allergic to tree nuts",
+        metadata: { text: "shopper is allergic to tree nuts", class: "ordinary", expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+      },
+    ]);
+    const queried: string[] = [];
+    const origQuery = vector.query.bind(vector);
+    vi.spyOn(vector, "query").mockImplementation(async (ns: string, q: never) => {
+      queried.push(ns);
+      return origQuery(ns, q);
+    });
+    const modelCalls: ModelRequest[] = [];
+    const modelPort: ModelPort = {
+      async complete(req: ModelRequest) {
+        modelCalls.push(req);
+        return { text: "ok", model: "spy" };
+      },
+    };
+
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": attackerToken() },
+      payload: {
+        sessionId: "attack-recall-1",
+        message: "what do you remember about me?",
+        signals: { cart: "empty", anonId: VICTIM_ANON_ID }, // the victim's id, supplied by the attacker
+        widgetToken: DEMO_WIDGET_TOKEN,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+
+    // The victim's namespace must never be read...
+    expect(queried).not.toContain(victimNs);
+    // ...and none of their fact text may reach the model prompt.
+    const everythingSent = modelCalls.flatMap((c) => c.messages.map((m) => m.content)).join(" ");
+    expect(everythingSent).not.toContain("tree nuts");
     await app.close();
   });
 
