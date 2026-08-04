@@ -55,8 +55,8 @@ lives inside policy; anything above a rule goes to a human._
 
 ## 4. Evolution pipeline orchestration (ADR-0003, AGENT-GOVERNANCE)
 
-- Manages `evolution_candidate` through **propose → shadow(0%) → canary(1–5%) → eval gate(auto,
-  blocking) → human approve → promote → monitor**, with **auto-rollback + freeze** on any regression
+- Manages `evolution_candidate` through **propose → eval gate(auto, blocking) → shadow(0%) →
+  canary(1–5%) → human approve → promote → monitor**, with **auto-rollback + freeze** on any regression
   at a live stage and one-click manual rollback. Never skips a stage; **self-improve yes,
   self-deploy never**.
 - **Traffic splitting** for shadow (replay, 0% live) and canary (segmented 1–5%, reversible) is a

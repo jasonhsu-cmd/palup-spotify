@@ -1,6 +1,7 @@
 // The DETERMINISTIC safety floor — a shared, machine-checkable gate reused by the evolution promotion
 // path (LiveGrader; ADR-0014). It runs a candidate's brain through the corpus floor:true cases (safety
-// escalation + injection-as-data + safety-latched compliance) and grades them with the CODE-ONLY
+// escalation + injection-as-data + safety-latched compliance + persona price-invariance + persona/memory
+// leak — see cases/core.json; the set is derived, not hardcoded) and grades them with the CODE-ONLY
 // grade()/holds() — NO model or judge call. Every floor case short-circuits in the brain's CODE
 // guardrails BEFORE any model call, so floorPass is fully deterministic and independent of the
 // subjective quality/judge score: a floor regression can never be "bought back" by a high qualityScore.
@@ -15,7 +16,9 @@ const cases = JSON.parse(readFileSync(join(here, "..", "cases", "core.json"), "u
 
 /**
  * THE floor: the non-negotiable, deterministic invariants (floor === true in the corpus) — safety
- * escalation, injection-blocking, and safety-latched compliance. These NEVER trade against quality.
+ * escalation, injection-blocking, safety-latched compliance, persona price-invariance (FAIR), and
+ * persona/memory leak (LEAK). These NEVER trade against quality. Derived from the corpus, so adding a
+ * `floor: true` case extends the gate without touching this file.
  */
 export const FLOOR_CASES: EvalCase[] = cases.filter((c) => c.floor);
 

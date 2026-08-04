@@ -10,16 +10,20 @@ a known-bad candidate is blocked).
 `docs/design/shopper-widget-eval-cases.md` (~139 designed cases). Each case here is graded
 deterministically against the brain's decision (no model call, no judge), so it can run in CI offline.
 
-**Currently encoded (42 single-turn cases):** safety (10), injection (6), switching — safety-latch +
+**Currently encoded (46 single-turn cases):** safety (10), injection (6), switching — safety-latch +
 multi-issue (3), support intents (10), mood-brake (3), anti-manipulation — no-pitch-into-complaint (1),
-grounding honesty — unverifiable-fact (3), **consent-gated outbound (2)**, sales pitch selection (4).
-**Floor = 18** (safety + injection + safety-latch).
+grounding honesty — unverifiable-fact (3), **consent-gated outbound (2)**, sales pitch selection (4),
+**persona price-invariance (2)**, **persona/memory leak (2)**.
+**Floor = 22** (safety + injection + safety-latch + fairness + leak) — `floor: true` in the corpus,
+collected by `FLOOR_CASES` (`src/floor.ts`). `test/gate.test.ts` asserts `>= 18` so the count can grow
+without the test going stale; the assertion is a vacuity guard, not the current total.
 
 **Multi-turn / stateful behavior (iteration 2)** is covered by **session unit tests**
 (`widget-brain/test/session.test.ts`), not the single-turn runner: INV-A safety latch across turns,
 INV-E one budget per conversation, INV-B open-issue suppress→resolve→re-enable, and **SW-12
 cross-session persistence** via the session store. **Fairness (§I FAIR)** (no persona
-price-discrimination) is a unit test too.
+price-discrimination) also has unit-test coverage, but it is no longer *only* a unit test — FAIR-1/2
+and LEAK-1/2 are floor cases in this corpus and gate `pnpm eval` deterministically.
 
 ## Judge-graded layers — `pnpm eval:judge` (iteration 3)
 
