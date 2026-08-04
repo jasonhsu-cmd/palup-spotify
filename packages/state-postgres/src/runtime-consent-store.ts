@@ -40,7 +40,7 @@ export interface RecordConsentInput extends ConsentRecord {
    * brute-forceable (mirrors widget-backend/src/audit.ts's `hashShopperRef` rule and server.ts's own
    * `AUDIT_HMAC_SECRET`). */
   hmacKey?: string;
-  /** WHO caused this record (security review, PR #152 Finding 2). `"shopper"` (default) = an explicit
+  /** WHO caused this record (security review, PR #152 Finding 2). `"shopper"` = an explicit
    * `POST /consent` the shopper made. `"guest-merge"` = the SERVER derived it: /chat's restrictive
    * merge discovered a guest `"out"` and wrote it through to the account subject. The two were
    * previously byte-indistinguishable in the immutable log, so an operator could not tell a consent
