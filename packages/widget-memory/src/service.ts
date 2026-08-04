@@ -8,8 +8,9 @@ import { consentPermitsFactClass } from "@palup/widget-brain";
 import { classifyFact, type FactClass } from "./classifier.js";
 import { sanitizeFact, createStubDistiller, createModelDistiller, isValidDisposition, type FactDistiller } from "./distiller.js";
 import type { Disposition } from "./disposition.js";
-import { buildMemoryAudit } from "./audit.js";
+import { buildMemoryAudit, subjectRef } from "./audit.js";
 import { ttlForClass, RENEW_MIN_GAP_MS } from "./retention.js";
+import { recordSubject } from "./subject-index.js";
 import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact, FactMetadata } from "./types.js";
 
 // ADR-0015 PR A (T7): wires flag -> consent -> classifier -> distiller -> VectorPort + audit. The
@@ -350,6 +351,26 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
           hmacKey: deps.hmacKey,
         }),
       );
+    }
+    // B4 (2026-08-05) — index this subject so the SCHEDULED sweep can reclaim their expired facts even
+    // if they never chat again (retention.ts `sweepAllSubjects`). Keyed off records actually PERSISTED,
+    // not off the turn happening: a shopper who is opted out, refused, or produced no candidate facts
+    // has nothing stored, so indexing them would put a subject with no data into the sweep's work list.
+    //
+    // BEST-EFFORT BY DESIGN. A failure here must never fail the turn or undo a fact that is already
+    // durably written and audited — the shopper's memory is not damaged by a bookkeeping miss. The
+    // honest cost of that choice: a subject whose index write failed is invisible to the SCHEDULED
+    // sweep, so their expired facts are reclaimed only if they return (the per-turn sweep) — which is
+    // exactly the pre-B4 behaviour, not a regression. TTL-on-read still means nothing expired is ever
+    // served. PII-free signal (error CLASS + hashed subjectRef only), matching retention.ts's rule.
+    if (ordinaryRecords.length > 0 || specialRecords.length > 0) {
+      try {
+        await recordSubject(deps.audit, { tenantId: ctx.tenantId, subject: ctx.anonId, now: clock() });
+      } catch (e) {
+        console.error(
+          `[memory] subject-index write failed tenant=${ctx.tenantId} subjectRef=${subjectRef(ctx.tenantId, ctx.anonId, deps.hmacKey)} error=${e instanceof Error ? e.constructor.name : typeof e} — fact IS stored; this subject will be reclaimed on their own next visit rather than by the scheduled sweep`,
+        );
+      }
     }
     if (refusedSpecial > 0) {
       // Security review finding 6 (ADR-0015 Inv 6 / NN#5 — no silent memory action): a fail-closed

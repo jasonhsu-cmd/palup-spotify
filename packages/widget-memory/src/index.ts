@@ -29,8 +29,10 @@ export type { MemoryServiceDeps } from "./service.js";
 // contract as PR A: nothing here is wired into any serving code path yet, and every handler only ever
 // touches the vector port the caller hands it — no call to any of these functions happens unless a
 // later, separately-gated PR invokes them behind `isMemoryEnabled()`.
-export { ORDINARY_TTL_DAYS, SPECIAL_TTL_DAYS, ttlForClass, sweepExpired } from "./retention.js";
-export type { RetentionDeps } from "./retention.js";
+export { ORDINARY_TTL_DAYS, SPECIAL_TTL_DAYS, ttlForClass, sweepExpired, sweepAllSubjects } from "./retention.js";
+export type { RetentionDeps, SweepAllResult } from "./retention.js";
+export { recordSubject, listSubjects, retireSubject, MEMORY_SUBJECTS } from "./subject-index.js";
+export type { SubjectIndexEntry } from "./subject-index.js";
 
 export { eraseSubject, withdrawConsent1, withdrawConsent2, eraseTenant } from "./erasure.js";
 export type { ErasureDeps, SubjectRef } from "./erasure.js";
