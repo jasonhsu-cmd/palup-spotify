@@ -99,7 +99,13 @@ function lexical(a: string, b: string): number {
   return inter / (ta.size + tb.size - inter);
 }
 
-function scoreRecord(query: VectorQuery, rec: VectorRecord): number {
+/** Score one record against a query — cosine for vector queries, lexical Jaccard for text queries, 0
+ *  when neither modality matches (e.g. an empty-text "list everything" query, or a record with neither
+ *  a vector nor text). EXPORTED (not just an in-memory implementation detail) so every VectorPort
+ *  adapter — Postgres included — ranks with the EXACT SAME function as this oracle: a durable adapter
+ *  that re-scores its own rows in application code with `scoreRecord` is byte-identical in ranking
+ *  behavior to this in-memory one, by construction, not by parallel reimplementation that could drift. */
+export function scoreRecord(query: VectorQuery, rec: VectorRecord): number {
   if (query.vector && rec.vector) return cosine(query.vector, rec.vector);
   if (query.text != null && rec.text != null) return lexical(query.text, rec.text);
   return 0;

@@ -20,11 +20,10 @@ import {
   createEnvSecrets,
   createStoreTelemetry,
   createMeteringModelPort,
-  createInMemoryVectorStore,
   createRedactingModelPort,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, eraseSubject, classifyFact } from "@palup/widget-memory";
-import { createRuntimeStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -194,8 +193,17 @@ export async function buildServer(opts?: {
   // sitting in the store). This is the ONE deliberate exception to "nothing here is touched while off":
   // /forget calls `eraseSubject` directly against this port; every OTHER consumer (recall/remember, via
   // `memoryService`/`memoryPort` below) remains strictly gated on `memoryServiceEnabled` exactly as
-  // before. Constructing the (cheap, in-memory, no-I/O) dev adapter when unused is a no-op.
-  const vectorPort = opts?.vectorPort ?? createInMemoryVectorStore();
+  // before.
+  //
+  // go-live blocker #1 (durable, portable VectorPort adapter): `createVectorStore()` mirrors
+  // `createRuntimeStore()`'s own env-driven selection — a real, durable Postgres-backed store when
+  // DATABASE_URL is set (so cross-visit memory survives a restart and is shared across Cloud Run
+  // instances, and a POST /forget erasure is REAL — ADR-0015 Inv 5), else the same in-memory dev adapter
+  // as before. Constructing it when memory is off remains a no-op either way: the double gate means
+  // nothing here ever calls upsert/query on this port except /forget (see above), and the Postgres
+  // branch's own construction only runs an idempotent CREATE TABLE IF NOT EXISTS migration — the exact
+  // same class of startup-only DDL `store` above already runs unconditionally, not a data read/write.
+  const vectorPort = opts?.vectorPort ?? (await createVectorStore()).store;
   const underTestRunner = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
   const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
   const memoryService = memoryServiceEnabled
