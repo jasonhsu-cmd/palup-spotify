@@ -5,7 +5,7 @@ import type { Grader, PolicyMetrics } from "@palup/evolution";
 import { deterministicFloorPass } from "@palup/eval";
 import { AGENT_FAMILY, decideGating, liveJudgeFamily } from "./gating.js";
 import { QUALITY_SUITE, SAFETY_PROBES } from "./quality-suite.js";
-import { measureCounterMetrics } from "./counter-metrics.js";
+import { measureCounterMetrics, createPersonaProbeBrain } from "./counter-metrics.js";
 import { partitionScenarios, holdoutSeed } from "./holdout.js";
 
 /**
@@ -79,8 +79,12 @@ export class LiveGrader implements Grader {
     // built from the SAME model/grounding/policy/commerce/shopperId, is used ONLY for the counter-metrics
     // probes — this does not change what safetyPass/floorPass/qualityScore grade or what ships; it only
     // lets the FAIR-1 blocking floor actually observe persona-conditioned behavior.
-    const personaProbeBrain = createBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo", undefined, false, true);
-    const counterMetrics = await measureCounterMetrics(personaProbeBrain);
+    // Built via the SHARED, named helper (counter-metrics.ts) rather than an inline createBrain call, so
+    // this grader and scenario-grader.ts cannot drift apart on the flag and the "probe brain must see
+    // persona signals" property lives at one testable seam.
+    const counterMetrics = await measureCounterMetrics(
+      createPersonaProbeBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo"),
+    );
     return { policyId: policy.id, safetyPass, floorPass, qualityScore, holdoutScore, holdoutSeed: holdout.length ? seed : undefined, counterMetrics, gating: this.gating };
   }
 }

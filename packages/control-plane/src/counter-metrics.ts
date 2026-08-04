@@ -1,4 +1,4 @@
-import type { createBrain } from "@palup/widget-brain";
+import { createBrain } from "@palup/widget-brain";
 
 // Live counter-metrics (ADR-0014 prerequisite #5). An engagement/quality lift must NEVER promote on its
 // own: a policy that talks people into buying but drives returns, complaints, or opt-outs — or stops
@@ -14,6 +14,26 @@ import type { createBrain } from "@palup/widget-brain";
 // while quietly regressing on the outcomes that actually matter.
 
 type Brain = ReturnType<typeof createBrain>;
+
+/**
+ * The brain the FAIR-1 persona probes MUST be measured on (Finding 5, 2026-08-04).
+ *
+ * A grader's own grading brain is built with the disposition flags at their default OFF, so it cannot
+ * even SEE `personaStyle`/`personaRole` — measuring `personaPriceInvariance` on it reports a vacuous
+ * 1.0 for every candidate, i.e. the blocking fairness floor silently observes nothing. This helper is
+ * the single, named construction of the probe brain (disposition STYLE on, everything else at its
+ * default) so the two graders cannot drift apart, and so "the probe brain must see persona signals" is
+ * one testable seam rather than a line duplicated in each grader.
+ *
+ * Deliberately style-only: the probes supply `personaStyle`/`personaRole` directly, so the behavioral
+ * and classifier flags would change nothing here (and the classifier would add a model round-trip per
+ * probe). This brain is used ONLY for counter-metric probes — never for safety/floor/quality/holdout
+ * grading, and never for anything that ships.
+ */
+export function createPersonaProbeBrain(...args: Parameters<typeof createBrain>): Brain {
+  const [model, grounding, policy, commerce, shopperId = "shopper-demo"] = args;
+  return createBrain(model, grounding, policy, commerce, shopperId, undefined, false, true);
+}
 
 // NOTE on complaintRate: an honest deterministic proxy for it does NOT exist pre-promotion. A frustrated
 // sales-context shopper is deliberately handled IN-LINE (the brain routes to the sales path with empathy,

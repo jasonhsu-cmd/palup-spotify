@@ -2,7 +2,7 @@ import type { JudgePort, ModelPort } from "@palup/platform-ports";
 import { createBrain, StaticGroundingAdapter, MockCommerceAdapter, type Policy } from "@palup/widget-brain";
 import type { Grader, PolicyMetrics } from "@palup/evolution";
 import { SCENARIOS, rubricFor, type Scenario } from "./scenarios.js";
-import { measureCounterMetrics } from "./counter-metrics.js";
+import { measureCounterMetrics, createPersonaProbeBrain } from "./counter-metrics.js";
 import { partitionScenarios, holdoutSeed } from "./holdout.js";
 
 type Brain = ReturnType<typeof createBrain>;
@@ -43,9 +43,13 @@ export class ScenarioGrader implements Grader {
     // fail the persona-fairness probes, reporting a vacuous 1.0 regardless of the candidate policy. A
     // SEPARATE, disposition-flags-ON brain, built from the SAME model/grounding/policy/commerce/shopperId,
     // is used ONLY for the counter-metrics probes — this does not change what qualityScore grades or what
-    // ships; it only lets the FAIR-1 blocking floor actually observe persona-conditioned behavior.
-    const personaProbeBrain = createBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo", undefined, false, true);
-    const counterMetrics = await measureCounterMetrics(personaProbeBrain);
+    // ships; it only lets the FAIR-1 blocking floor actually observe persona-conditioned behavior. Built
+    // via the SHARED, named helper so this grader and live-grader.ts cannot drift apart on the flag; the
+    // regression is locked by counter-metrics-probe-brain.test.ts, which grades a persona-discriminating
+    // model through THIS grader and requires the fairness floor to actually catch it.
+    const counterMetrics = await measureCounterMetrics(
+      createPersonaProbeBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo"),
+    );
     return {
       policyId: policy.id,
       safetyPass: true,
