@@ -54,7 +54,7 @@ export type { CachingGroundingOpts } from "./grounding-cache.js";
 export type { SecretsPort } from "./secrets-port.js";
 export { createEnvSecrets } from "./secrets-port.js";
 export type { VectorPort, VectorRecord, VectorQuery, VectorMatch } from "./vector-port.js";
-export { createInMemoryVectorStore } from "./vector-port.js";
+export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type {
   CommsPort,
   CommsMessage,

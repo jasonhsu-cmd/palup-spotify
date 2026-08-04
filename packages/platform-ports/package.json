@@ -9,6 +9,7 @@
     "./contract/grounding": "./src/contract/grounding-port.contract.ts",
     "./contract/runtime-state": "./src/contract/runtime-state-port.contract.ts",
     "./contract/secrets": "./src/contract/secrets-port.contract.ts",
-    "./contract/telemetry": "./src/contract/telemetry-port.contract.ts"
+    "./contract/telemetry": "./src/contract/telemetry-port.contract.ts",
+    "./contract/vector": "./src/contract/vector-port.contract.ts"
   }
 }

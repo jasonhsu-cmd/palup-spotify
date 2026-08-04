@@ -1,6 +1,8 @@
 export { PostgresRuntimeStore } from "./postgres-runtime-store.js";
+export { PostgresVectorStore } from "./postgres-vector-store.js";
 export { PgPoolSql, pgPoolSqlFromUrl, type Sql } from "./sql.js";
 export { createRuntimeStore } from "./factory.js";
+export { createVectorStore } from "./vector-factory.js";
 export {
   matchedKill,
   armKill,

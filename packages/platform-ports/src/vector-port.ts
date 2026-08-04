@@ -60,6 +60,34 @@ function requireNamespace(namespace: string): string {
   return namespace;
 }
 
+// C0 controls (U+0000-U+001F), DEL (U+007F), and C1 controls (U+0080-U+009F).
+const CONTROL_CHAR_RE = /[\x00-\x1F\x7F-\x9F]/;
+// An unpaired ("lone") UTF-16 surrogate: a high surrogate not followed by a low one, or a low surrogate
+// not preceded by a high one. A valid surrogate PAIR (e.g. an emoji) is left untouched.
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/**
+ * Rejects a record's `text` up front if it carries a control character or an unpaired UTF-16 surrogate.
+ * Both are bytes a durable engine may not even be able to store byte-for-byte — verified against pglite
+ * (Postgres dialect): a NUL byte THROWS ("invalid byte sequence for encoding UTF8") while a lone
+ * surrogate is silently mangled to U+FFFD on the wire, neither of which the in-memory adapter would ever
+ * exhibit on its own (it just holds the JS string as-is). Exported and called by EVERY adapter's
+ * `upsert` (in-memory included) so a caller that skips app-level sanitization (widget-memory's
+ * `sanitizeFact` already strips these) gets the SAME fail-closed error from every engine, rather than a
+ * cryptic driver-level crash on one and silent acceptance on another — behavior-equivalence (ADR-0001)
+ * for this input class is enforced at the port, not left to each adapter to (mis)handle independently.
+ * Scoped to `record.text` only (the field a shopper's own words land in via the distiller); arbitrary
+ * `metadata` is untouched here.
+ */
+export function requireCleanText(text: string | undefined): void {
+  if (text === undefined) return;
+  if (CONTROL_CHAR_RE.test(text) || LONE_SURROGATE_RE.test(text))
+    throw new Error(
+      "VectorPort: record.text contains a control character or an unpaired UTF-16 surrogate — sanitize " +
+        "before calling upsert (see widget-memory's sanitizeFact)",
+    );
+}
+
 function clone<T>(v: T): T {
   return v === undefined ? v : (JSON.parse(JSON.stringify(v)) as T);
 }
@@ -99,7 +127,13 @@ function lexical(a: string, b: string): number {
   return inter / (ta.size + tb.size - inter);
 }
 
-function scoreRecord(query: VectorQuery, rec: VectorRecord): number {
+/** Score one record against a query — cosine for vector queries, lexical Jaccard for text queries, 0
+ *  when neither modality matches (e.g. an empty-text "list everything" query, or a record with neither
+ *  a vector nor text). EXPORTED (not just an in-memory implementation detail) so every VectorPort
+ *  adapter — Postgres included — ranks with the EXACT SAME function as this oracle: a durable adapter
+ *  that re-scores its own rows in application code with `scoreRecord` is byte-identical in ranking
+ *  behavior to this in-memory one, by construction, not by parallel reimplementation that could drift. */
+export function scoreRecord(query: VectorQuery, rec: VectorRecord): number {
   if (query.vector && rec.vector) return cosine(query.vector, rec.vector);
   if (query.text != null && rec.text != null) return lexical(query.text, rec.text);
   return 0;
@@ -120,6 +154,7 @@ export function createInMemoryVectorStore(): VectorPort {
   return {
     async upsert(namespace, records) {
       requireNamespace(namespace);
+      for (const rec of records) requireCleanText(rec.text);
       let inner = byNamespace.get(namespace);
       if (!inner) {
         inner = Object.create(null) as Record<string, VectorRecord>;
