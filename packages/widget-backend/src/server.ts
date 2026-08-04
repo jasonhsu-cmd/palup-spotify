@@ -790,37 +790,28 @@ export async function buildServer(opts?: {
     // guest-merge write on /chat (Finding 2). Required, so no call site can silently misattribute.
     await recordConsent(store, { tenantId, anonId: subject, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial, hmacKey: AUDIT_HMAC_SECRET, source: "shopper" });
 
-    // BLOCK-A (governance review round 6) — SYMMETRIC PROPAGATION of a restrictive choice.
-    // The /chat merge is one-directional: on an UNVERIFIED turn the subject is the guest `anonId`, the
-    // account row is never consulted, and under the US opt-out regime an unresolved `"unknown"` reads as
-    // ALLOWED. So an authenticated opt-out did NOT govern the same browser's signed-OUT turns — and that
-    // is not an exotic path: the shopper token lives in sessionStorage with a 1h default TTL, so a new
-    // tab or an expiry reverts the shopper to the guest subject while the manage panel still shows "off".
-    // Proven by execution on both branches: this PR CREATED the class (pre-PR the signed-in write landed
-    // on the guest row itself, so it governed those turns).
+    // BLOCK-A (governance review round 6) — DELIBERATELY NOT FIXED HERE. Recorded as checklist residual
+    // C14; the real fix is B12's server-side guest->account link, which does not exist.
     //
-    // Fix: when a VERIFIED shopper records a RESTRICTIVE value and also presents a validated guest
-    // `anonId`, write that `"out"` through to the guest subject too. RESTRICTIVE-ONLY, mirroring the
-    // /chat merge's asymmetry — an `"in"` is never propagated, because the guest `anonId` is
-    // client-supplied and unauthenticated, so propagating a grant would let a signed-in caller enable
-    // memory on a subject they merely named. Adds NO capability: the unauthenticated `/consent` path
-    // already lets anyone holding that `anonId` write `"out"` to it (residual C1/C10), so this reaches
-    // nothing an attacker could not already reach by omitting the token.
-    const guestAnonId = verifiedShopperId ? validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined) : undefined;
-    if (guestAnonId && (body.memoryOrdinary === "out" || body.memorySpecial === "out")) {
-      const guestRow = await lookupConsent(store, { tenantId, anonId: guestAnonId });
-      const propagated = {
-        memoryOrdinary: body.memoryOrdinary === "out" ? ("out" as const) : guestRow.memoryOrdinary,
-        memorySpecial: body.memorySpecial === "out" ? ("out" as const) : guestRow.memorySpecial,
-      };
-      if (propagated.memoryOrdinary !== guestRow.memoryOrdinary || propagated.memorySpecial !== guestRow.memorySpecial) {
-        try {
-          await recordConsent(store, { tenantId, anonId: guestAnonId, ...propagated, hmacKey: AUDIT_HMAC_SECRET, source: "account-out-propagation" });
-        } catch (e) {
-          console.error(`[/consent] out-propagation error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
-        }
-      }
-    }
+    // The defect: the /chat merge is one-directional, so on an UNVERIFIED turn the subject is the guest
+    // anonId, the acct: row is never consulted, and the US opt-out regime reads an unresolved "unknown"
+    // as ALLOWED — an authenticated opt-out does not govern that same browser's signed-OUT turns (the
+    // shopper token is sessionStorage, 1h TTL, so a new tab reverts them to guest). This PR created the
+    // class: pre-PR the signed-in write landed on the guest row itself.
+    //
+    // Three successive attempts to fix it HERE were each rejected in review, and the pattern is the
+    // point: governing a signed-OUT browser requires trusting a CLIENT-SUPPLIED anonId, which is exactly
+    // what subject-scoped auth exists to stop.
+    //   1. restrictive-only propagation -> made the ordinary signed-in toggle OFF->ON leave memory OFF
+    //      while the panel rendered ON, because the manage panel posts only on change (round 7 BLOCK-1 /
+    //      B-1); it also left destructive forget-me as the only escape the UI could express, re-creating
+    //      the harmful advice round 5 removed.
+    //   2. it also failed open silently with no repair path, so one transient error reopened the hole
+    //      (B-2), and it only ever governed the single anonId presented in that one call (B-3).
+    //   3. symmetric propagation removed the trap but broke this PR's founding property — "a supplied
+    //      anonId is IGNORED for a verified shopper" — by writing to it, and dissolved the order
+    //      semantics the reversal path documents.
+    // Shipping the hole DISCLOSED beats shipping a fix that contradicts the control it is bolted onto.
     return { ok: true };
   });
 

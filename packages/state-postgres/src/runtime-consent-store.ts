@@ -51,7 +51,7 @@ export interface RecordConsentInput extends ConsentRecord {
    * mean a future server-side caller that forgets this field silently ATTRIBUTES ITS OWN WRITE TO THE
    * SHOPPER in the immutable log — the wrong direction to fail for an Inv-6 attribution field. Making it
    * required forces every new call site to state who caused the change. */
-  source: "shopper" | "guest-merge" | "account-out-propagation";
+  source: "shopper" | "guest-merge";
 }
 
 export interface LookupConsentInput {
@@ -96,8 +96,8 @@ export async function recordConsent(
   // for a SERVER-derived write, the exact misattribution this field exists to prevent (security review,
   // PR #152). Fail loudly instead: an omission is a programming error, and a wrong actor in an immutable
   // Inv-6 log is worse than a rejected write. Both production call sites supply it (server.ts).
-  if (source !== "shopper" && source !== "guest-merge" && source !== "account-out-propagation")
-    throw new Error(`recordConsent: 'source' must be "shopper", "guest-merge" or "account-out-propagation" (got ${JSON.stringify(source)}) — it attributes this entry in the immutable audit log`);
+  if (source !== "shopper" && source !== "guest-merge")
+    throw new Error(`recordConsent: 'source' must be "shopper" or "guest-merge" (got ${JSON.stringify(source)}) — it attributes this entry in the immutable audit log`);
   const record: ConsentRecord = { memoryOrdinary, memorySpecial };
   await store.tx({ tenantId }, async (t) => {
     await t.put(MEMORY_CONSENT, anonId, record);
@@ -109,7 +109,7 @@ export async function recordConsent(
         input: { subjectRef: subjectRef(tenantId, anonId, hmacKey), memoryOrdinary, memorySpecial, source },
         decision: "recorded",
         reversalPath:
-          source === "guest-merge" || source === "account-out-propagation"
+          source === "guest-merge"
             ? // VERIFIED BY EXECUTION (governance review round 5 — three earlier revisions of this string
               // were written by REASONING and were each wrong; these claims are now backed by tests in
               // consent-restrictive-merge.test.ts, "BLOCK-1(a)" and "BLOCK-1(b)"):
