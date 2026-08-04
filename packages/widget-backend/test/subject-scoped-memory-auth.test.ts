@@ -72,11 +72,28 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     await app.close();
   });
 
-  it("THE ATTACK: POST /forget by a verified shopper supplying a victim's anonId does NOT erase the victim", async () => {
+  // REVISED (security review round 3, N1 — HIGH). This test's ORIGINAL assertion was that a verified
+  // shopper's supplied anonId is ALWAYS ignored by /forget, full stop — proven by the victim's fact
+  // surviving. N1 (round 3) found the flip side of that same rule: it also meant a signed-in shopper's
+  // OWN "forget everything" could never reach their genuine pre-sign-in guest-era facts (the shipped
+  // widget's forgetMe() sends exactly this shape — token + the just-superseded anonId), so /forget
+  // returned `{ok:true}` while erasing nothing, contradicting the UI's "Done — I've cleared what I
+  // remembered." Server-side there is no way to distinguish "my own real guest-era anonId" from "a
+  // stranger's anonId I obtained" — both look identical (a validated, well-formed anonId presented
+  // alongside a verified token) — so N1 requires /forget to erase BOTH namespaces whenever a validated
+  // anonId is presented, accepting that this reopens the scenario this test used to lock closed.
+  //
+  // THIS IS A DELIBERATE, DOCUMENTED TRADE-OFF, not an oversight: the "an ANONYMOUS guest is unchanged"
+  // test right below already proves that ANY caller — with NO shopper token at all — can erase
+  // VICTIM_ANON_ID's data merely by knowing it (the pre-existing, accepted C1 bearer-capability residual,
+  // docs/MEMORY-GO-LIVE-CHECKLIST.md). So a verified shopper who ALSO erases a co-presented anonId is
+  // not granted any capability an unauthenticated caller didn't already have. What is UNCHANGED, and
+  // still verified below: the account subject itself is ALWAYS erased too — a supplied anonId is
+  // additive, never a substitute for it.
+  it("N1 — POST /forget by a verified shopper ALSO erases a co-presented anonId's namespace (no new capability: the unauthenticated guest path already allows this — see 'an ANONYMOUS guest is unchanged' below)", async () => {
     armAuth();
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
-    // The victim has a stored fact under their own guest subject.
     const victimNs = subjectNamespace("demo", VICTIM_ANON_ID);
     await vector.upsert(victimNs, [
       {
@@ -94,10 +111,14 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
       payload: { anonId: VICTIM_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
-    expect(res.statusCode).toBe(200); // the attacker successfully erased… their OWN (empty) subject
-    // The victim's fact SURVIVES — this is the whole point of the change.
+    expect(res.statusCode).toBe(200);
+    // N1: the co-presented namespace is erased too (see the doc comment above for why this is safe/intended).
     const survivors = await vector.query(victimNs, { text: "", k: 10 });
-    expect(survivors.map((r) => r.id)).toEqual(["victim-1"]);
+    expect(survivors).toEqual([]);
+    // UNCHANGED: the primary target is still the ACCOUNT subject, derived server-side — never the
+    // supplied anonId alone. The attacker's own (empty) account subject is erased too (2 audit entries).
+    const log = await store.readAudit({ tenantId: "demo" });
+    expect(log.filter((r) => r.action === "erase.subject").length).toBe(2);
     await app.close();
   });
 

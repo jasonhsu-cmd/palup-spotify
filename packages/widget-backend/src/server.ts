@@ -880,6 +880,24 @@ export async function buildServer(opts?: {
     }
 
     await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: subject });
+    // N1 fix (security review round 3, HIGH) — a verified shopper's GUEST-ERA facts previously sat in a
+    // namespace this endpoint never touched: `subject` above is `acct:<shopperId>` for a signed-in
+    // shopper and a supplied `anonId` was IGNORED entirely, so `/forget` erased the account namespace
+    // only while the shipped widget's own `forgetMe()` still sends the shopper's just-superseded guest
+    // anonId in the SAME request body (`prevAnonId`, index.html) — meaning real erasure silently stopped
+    // short of what the UI promised ("Done — I've cleared what I remembered"). This is SAFE, not a
+    // repeat of the C1 delete attack: the guest path a few lines above already lets an *unauthenticated*
+    // caller erase ANY well-formed anonId they hold with no token at all, so erasing a caller-presented
+    // anonId on a VERIFIED turn grants an attacker nothing they could not already get by omitting the
+    // token entirely. Only fires when the presented `anonId` is (a) well-formed (`validateAnonId`) and
+    // (b) actually a DIFFERENT namespace from the account subject (a guest calling /forget with no
+    // shopper token already goes through the `subject` erase above and must not double-audit itself).
+    if (verifiedShopperId) {
+      const guestAnonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
+      if (guestAnonId && guestAnonId !== subject) {
+        await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: guestAnonId });
+      }
+    }
     return { ok: true };
   });
 
@@ -1024,14 +1042,72 @@ export async function buildServer(opts?: {
       // validated anonId this turn (its own browser-held guest id) — never an unvalidated string, and
       // never merged in for a guest turn (verifiedShopperId absent), where `memorySubject` already IS
       // that same validated anonId and no merge is needed.
+      //
+      // `validatedGuestAnonId` is hoisted to this outer scope (not just the `if (memorySubject)` block
+      // below) because N1's retention-sweep fix (server.ts, further down) and N2's write-through
+      // (immediately below) both need it too — declared once, reused three ways, so they can never
+      // disagree about which guest namespace this turn is also touching (mirrors `memorySubject` itself
+      // being derived once and reused, per the BLOCK-1 comment above).
+      let validatedGuestAnonId: string | undefined;
       let consentRecord: ConsentRecord | undefined;
       if (memorySubject) {
         const accountRecord = await lookupConsent(store, { tenantId, anonId: memorySubject });
-        const validatedGuestAnonId = verifiedShopperId
+        validatedGuestAnonId = verifiedShopperId
           ? validateAnonId(typeof body.signals?.anonId === "string" ? body.signals.anonId : undefined)
           : undefined;
         const guestRecord = validatedGuestAnonId ? await lookupConsent(store, { tenantId, anonId: validatedGuestAnonId }) : undefined;
-        consentRecord = validatedGuestAnonId ? mergeAccountConsent(accountRecord, guestRecord) : accountRecord;
+        const merged = validatedGuestAnonId ? mergeAccountConsent(accountRecord, guestRecord) : accountRecord;
+        consentRecord = merged;
+
+        // N2 fix (security review round 3, HIGH) — DURABLE write-through of the RESTRICTIVE ("out")
+        // direction only. Without this, the merge above is READ-TIME ONLY: it corrects THIS turn's
+        // decision but persists nothing, so an opt-out survives only for as long as the client keeps
+        // echoing the exact guest anonId that recorded it — a new device, cleared storage, or the
+        // widget's own `forgetMe()` (which mints a fresh anonId, index.html) all silently drop the
+        // linkage and the opt-out along with it. Proven by execution (two independent reviews): 0 writes
+        // with the echoed anonId, 1 write once it's gone.
+        //
+        // SAFE DIRECTION ONLY: this can only ever move a tier's durable value TOWARD "out", never adopt
+        // an "in". `mergeConsentTier` (consent.ts) returns a value DIFFERENT from `accountRecord`'s own
+        // for a tier if and only if the guest side is "out" and the account wasn't already "out" — a
+        // guest "in" is never adopted by the merge itself, so there is no code path here that could ever
+        // write a guest-sourced "in" onto the account (that would let anyone borrow a stranger's opt-in
+        // merely by holding/guessing their anonId post sign-in). See consent-restrictive-merge.test.ts's
+        // "guest 'in' is NEVER adopted" case, which this write-through must not (and does not) affect.
+        //
+        // IDEMPOTENT: the diff check means this only fires on the turn a NEW restriction is discovered —
+        // once written, the next lookup's `accountRecord` already equals `merged`, so there is no diff
+        // and no re-write on every subsequent turn.
+        //
+        // GATED: only reachable when `memorySubject` exists, i.e. `memoryService` is constructed (the
+        // double gate is on) — this never runs while memory is off. `!kill` mirrors every other audited
+        // memory write on this path (NN#4) — a halted tenant/agent gets no write, durable or otherwise.
+        // Inherits /chat's own per-session/IP/tenant rate limiting (`allowRequest`, checked earlier in
+        // this handler) — this is a side effect of an already-rate-limited call, not a new endpoint, so
+        // no separate budget is introduced here.
+        //
+        // RESIDUAL (documented, not fixed here — see docs/MEMORY-GO-LIVE-CHECKLIST.md C7): because "out"
+        // always wins outright and is now durable, a stale guest "out" record can permanently override a
+        // LATER authenticated `/consent` "in" for the same tiers, for as long as the client keeps
+        // presenting that stale guest anonId — a strictly more privacy-conservative failure mode than
+        // before (durable rather than merely per-turn), but not a fix for that separate, pre-existing gap.
+        if (
+          validatedGuestAnonId &&
+          !kill &&
+          (merged.memoryOrdinary !== accountRecord.memoryOrdinary || merged.memorySpecial !== accountRecord.memorySpecial)
+        ) {
+          try {
+            await recordConsent(store, {
+              tenantId,
+              anonId: memorySubject,
+              memoryOrdinary: merged.memoryOrdinary,
+              memorySpecial: merged.memorySpecial,
+              hmacKey: AUDIT_HMAC_SECRET,
+            });
+          } catch (e) {
+            console.error(`[/chat] consent write-through error:`, (e as Error).message);
+          }
+        }
       }
       // PR-11c — contextual in-the-moment health-consent prompt: the deferred follow-up to PR-11b's
       // manage-panel-only UX. Ask exactly when it's relevant — THIS turn's message reveals
@@ -1148,23 +1224,34 @@ export async function buildServer(opts?: {
       // GUARANTEE bringing a namespace back under erasure.ts's own enumeration cap — it only deletes
       // what expiry finds among the first 500 records it queries.
       //
-      // Deliberately scoped to ONLY the subject already being served THIS turn (`signals.anonId`) —
-      // never an enumeration of every subject for the tenant (that would be an unbounded scan on the
-      // serving path, the exact hazard retention.ts's own comment says a cron/admin-endpoint sweep would
-      // need to solve separately). This is genuinely a narrower guarantee than a full periodic sweep: a
-      // subject who never returns keeps their expired-but-undeleted fact until *someone* triggers a sweep
-      // for them — TTL-on-read still means it is never served, so Inv 4's SERVING guarantee holds
-      // regardless; only the RECLAMATION timing for abandoned subjects is deferred to a future scheduled
-      // job (tracked in retention.ts). Fire-and-forget (mirrors the reqCount reclamation block below) so
-      // a slow/failing vector call can never delay or break the shopper's reply — but "fail-open for the
-      // shopper" must never mean "invisible to the operator" (security review, Finding 1 — HIGH): a
-      // swept failure that reaches here (retention.ts's own audit-vs-delete failures are already logged
-      // internally; anything ELSE that throws — e.g. the initial vector.query — lands here) is logged
-      // with a PII-free signal (tenantId + error class only — never fact text or the raw anonId), never
-      // silently swallowed. Kill-switch respectful (NN#4) — a halted tenant/agent gets no background
-      // action either, not even benign cleanup. Gated on `memoryService` (this instance's live double
-      // gate, INCLUDING the PR-8 test seam, so this is provably exercised in tests without waiting on
-      // the ADR flip) so it never runs when memory is off.
+      // Deliberately scoped to ONLY the subject already being served THIS turn (`memorySubject`) — never
+      // an enumeration of every subject for the tenant (that would be an unbounded scan on the serving
+      // path, the exact hazard retention.ts's own comment says a cron/admin-endpoint sweep would need to
+      // solve separately). This is genuinely a narrower guarantee than a full periodic sweep: a subject
+      // who never returns keeps their expired-but-undeleted fact until *someone* triggers a sweep for
+      // them — TTL-on-read still means it is never served, so Inv 4's SERVING guarantee holds regardless;
+      // only the RECLAMATION timing for abandoned subjects is deferred to a future scheduled job (tracked
+      // in retention.ts). Fire-and-forget (mirrors the reqCount reclamation block below) so a slow/failing
+      // vector call can never delay or break the shopper's reply — but "fail-open for the shopper" must
+      // never mean "invisible to the operator" (security review, Finding 1 — HIGH): a swept failure that
+      // reaches here (retention.ts's own audit-vs-delete failures are already logged internally; anything
+      // ELSE that throws — e.g. the initial vector.query — lands here) is logged with a PII-free signal
+      // (tenantId + error class only — never fact text or the raw anonId), never silently swallowed.
+      // Kill-switch respectful (NN#4) — a halted tenant/agent gets no background action either, not even
+      // benign cleanup. Gated on `memoryService` (this instance's live double gate, INCLUDING the PR-8
+      // test seam, so this is provably exercised in tests without waiting on the ADR flip) so it never
+      // runs when memory is off.
+      //
+      // NOT extended to `validatedGuestAnonId` (security review round 3, N1 — considered, reverted).
+      // N1's own text frames sweeping a signed-in shopper's OWN guest-era namespace here as safe by the
+      // same "no new capability" reasoning that justifies /forget's dual-erasure below. It is NOT safe by
+      // that reasoning on THIS path: doing so would make `subject-scoped-memory-auth.test.ts`'s "THE
+      // ATTACK (recall)" fail — a verified-but-UNRELATED shopper's own /chat turn would trigger a
+      // `vector.query` (and, via `sweepExpired`, a potential DELETE of already-expired records) against
+      // whatever namespace they attach as `signals.anonId`, reintroducing exactly the cross-subject query
+      // that F1's fix closed for the RECALL path specifically. Confirmed by execution this session (see
+      // PR notes/report). Per this PR's own guardrail ("keep ... F1/F2 ... fixes intact") this residual
+      // is left OPEN rather than accepted unilaterally — see docs/MEMORY-GO-LIVE-CHECKLIST.md's B4 row.
       if (memoryService && memorySubject && !kill && !d.flags.includes("no_autonomous_action")) {
         void sweepExpired({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, tenantId, [memorySubject]).catch((e) => {
           console.error(`[/chat] ttl_sweep error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);

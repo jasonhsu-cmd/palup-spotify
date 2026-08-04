@@ -143,7 +143,7 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     expect(upsertSpy).toHaveBeenCalled();
   });
 
-  it("no anonId supplied this turn -> the account record alone governs (no guest lookup attempted)", async () => {
+  it("no anonId EVER supplied on a signed-in turn, and no guest merge was ever attempted -> the (empty) account record alone governs", async () => {
     armAuth();
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
@@ -151,7 +151,10 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
     const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
 
-    // A guest record with an "out" exists under GUEST_ANON_ID, but this turn supplies NO anonId at all.
+    // A guest record with an "out" exists under GUEST_ANON_ID, but no signed-in turn EVER supplies that
+    // (or any) anonId, so the merge+write-through (N2) never runs — there is nothing to durabilize, and
+    // this is orthogonal to it: the account has no record of its own, so its own "unknown" default
+    // governs under the US opt-out regime (unrelated to the guest's "out", which is simply never consulted).
     await app.inject({
       method: "POST",
       url: "/consent",
@@ -165,7 +168,162 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
       payload: { sessionId: "no-anonid-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
-    // US default region, no account record at all -> opt-out regime allows (unrelated to the guest's out).
     expect(upsertSpy).toHaveBeenCalled();
+  });
+
+  // N2 (HIGH, security review round 3) — the merge above is READ-TIME ONLY: it corrects the turn it runs
+  // on but writes nothing back, so the opt-out survived only as long as the client kept echoing the
+  // EXACT guest anonId that recorded it. Proven by execution: 0 writes with the echoed id, 1 write once
+  // it's gone (new device, cleared storage, or the widget's own forgetMe(), which mints a fresh anonId).
+  // This REPLACES the prior version of this test, which asserted that later write as CORRECT — it
+  // was the void this fix closes, not a feature.
+  it("N2 — a guest opt-out, once merged on a signed-in turn, becomes DURABLE: a LATER signed-in turn with NO guest anonId at all still yields zero writes", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    // 1. As a GUEST, explicitly opt OUT of ordinary memory.
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+
+    // 2. Signs in and this turn STILL echoes the old guest anonId (the browser legitimately still holds
+    //    it) — this is the turn where the merge discovers the guest "out" and (N2) durably writes it
+    //    through to the account record. The write is refused THIS turn too (sanity, already proven by
+    //    BLOCK-1's own test above).
+    const echoedTurn = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "durable-1a", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(echoedTurn.statusCode).toBe(200);
+    expect(upsertSpy).not.toHaveBeenCalled();
+
+    // 3. THE DURABILITY CHECK: a LATER turn — fresh browser / cleared storage / post-forgetMe() — that
+    //    supplies NO anonId at all (so the read-time merge cannot run: there is no guest record to
+    //    consult). Pre-fix this fell back to the account's own never-written "unknown" default, which the
+    //    US opt-out regime reads as ALLOWED (1 write). Post-fix the account record itself durably says
+    //    "out" (written in step 2), so the write is STILL refused.
+    const laterTurn = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "durable-1b", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(laterTurn.statusCode).toBe(200);
+    expect(upsertSpy).not.toHaveBeenCalled();
+
+    // The durable write-through itself is audited (consent.record), not just the (still-silent) refused
+    // fact write — an operator can see the account's consent state actually changed.
+    const log = await store.readAudit({ tenantId: "demo" });
+    expect(log.map((r) => r.action)).toContain("consent.record");
+  });
+
+  it("N2 — a guest 'in' is still NEVER durably adopted either: after the same borrowed-'in' turn, a LATER anonId-less turn behaves exactly as before (still denied)", async () => {
+    armAuth();
+    process.env.MERCHANT_REGION = "eu";
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+
+    // Signed-in turn that echoes the guest anonId — the merge sees guest "in" but (by design) never
+    // adopts it, so there is no diff against the account's own "unknown" and N2's write-through never
+    // fires (no consent.record audit for the account subject at all).
+    await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "borrow-in-durable-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(upsertSpy).not.toHaveBeenCalled();
+
+    // A LATER turn with no anonId at all behaves identically — nothing was durably written, so this is
+    // not "still denied because it's now durable out", it is "still denied because there was never
+    // anything to grant in the first place" (EU fail-closed default).
+    const later = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "borrow-in-durable-2", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(later.statusCode).toBe(200);
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+
+  // C7 (docs/MEMORY-GO-LIVE-CHECKLIST.md) restated accurately for N2: this is a documented, ACCEPTED
+  // residual, not a regression introduced carelessly — the task explicitly requires writing through ONLY
+  // the restrictive ("out") direction, and "out always wins outright" (mergeConsentTier) is what makes a
+  // guest opt-out durable in the first place. The cost of that same rule is that it can ALSO durably
+  // override a later authenticated opt-in for as long as a stale guest "out" record lingers and the
+  // client keeps presenting it. This test exists to make that cost visible and regression-locked, not to
+  // assert it is desirable.
+  it("C7 (restated) — a stale guest 'out' can durably override a LATER authenticated /consent 'in', for as long as the client still presents that guest anonId (accepted residual, not fixed here)", async () => {
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+
+    // 1. Guest opts OUT.
+    await app.inject({
+      method: "POST",
+      url: "/consent",
+      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+
+    // 2. Signs in, echoes the guest anonId once -> N2 durably writes "out" to the account.
+    await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "c7-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+
+    // 3. The SAME shopper then explicitly, authentically opts back IN via /consent while signed in.
+    const optInRes = await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(optInRes.statusCode).toBe(200);
+
+    // 4. A later chat turn that STILL echoes the (now-stale) guest anonId: the merge re-resolves "out"
+    // (guest "out" wins outright over the account's fresh "in") and N2 re-durabilizes it — the shopper's
+    // explicit opt-in is overridden again, this time durably.
+    const overriddenTurn = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "c7-2", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(overriddenTurn.statusCode).toBe(200);
+    expect(upsertSpy).not.toHaveBeenCalled();
+
+    // 5. Unlike pre-N2 (where omitting the anonId would have let the account's fresh "in" govern again),
+    // the override is now DURABLE: even a turn presenting NO guest anonId at all still comes back denied.
+    const noAnonIdTurn = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { "x-shopper-token": shopperToken() },
+      payload: { sessionId: "c7-3", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(noAnonIdTurn.statusCode).toBe(200);
+    expect(upsertSpy).not.toHaveBeenCalled();
   });
 });

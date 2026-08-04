@@ -20,7 +20,10 @@ export interface MergeDeps {
   /** The RuntimeStatePort's audit surface (ADR-0015 Inv 6) — reused as-is, no new audit mechanism. */
   audit: RuntimeStatePort;
   /** MEDIUM finding (security-review remediation, PR #152) — keyed-HMAC key for the audit `subjectRef`
-   * (audit.ts's own doc comment); see ErasureDeps/RetentionDeps/MemoryServiceDeps for the same field. */
+   * (audit.ts's own doc comment); see ErasureDeps/RetentionDeps/MemoryServiceDeps for the same field.
+   * Optional here ONLY so this module (which has no production caller yet — B12) can be unit-tested
+   * without one; `mergeGuestIntoAccount` itself throws outside a test runner when it's omitted (N6,
+   * security review round 3, LOW/latent) — see its own doc comment. */
   hmacKey?: string;
 }
 
@@ -40,6 +43,26 @@ export interface MergeCtx {
  * no-op — nothing left to read, nothing left to erase, nothing gets double-counted in the account.
  */
 export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Promise<{ merged: number }> {
+  // N6 (security review round 3, LOW/latent) — this module has NO production caller today (B12 is the
+  // still-unbuilt wiring); `deps.hmacKey` stays `?:string` on `MergeDeps` above purely so unit tests can
+  // construct it without one. But every audit this function writes targets an `acct:` subject
+  // (`accountSubjectId`, identity.ts) — audit.ts's own rule (mirrors server.ts's `AUDIT_HMAC_SECRET`
+  // pattern, and the SAME rule ErasureDeps/RetentionDeps/MemoryServiceDeps enforce by always being wired
+  // with a real key in production) is that a low-entropy `acct:` subject's audit ref MUST be a keyed
+  // HMAC, never a bare hash, or it is brute-forceable. Silently degrading here would be easy to miss the
+  // day B12 finally wires a real caller. Fail LOUDLY outside a test runner instead — the same "no
+  // config-only silent gap" idiom `flag.ts`/`service.ts` already use for their own test-only seams.
+  // Read PER CALL (not hoisted to module scope) so a test can flip `process.env.VITEST`/`NODE_ENV` and
+  // observe the guard fire, exactly like `flag.ts`'s/`service.ts`'s own equivalent checks.
+  const underTest = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+  if (!deps.hmacKey && !underTest) {
+    throw new Error(
+      "mergeGuestIntoAccount: hmacKey is required outside a test runner — this merge's audit subjectRef " +
+        "targets an acct: subject (identity.ts accountSubjectId), which per audit.ts's own rule must be a " +
+        "KEYED HMAC, never a bare hash (N6, security review round 3). Pass the same key server.ts's " +
+        "AUDIT_HMAC_SECRET already uses for every other memory-audit call site.",
+    );
+  }
   const anonNamespace = subjectNamespace(ctx.tenantId, ctx.anonId);
   const accountNamespace = subjectNamespace(ctx.tenantId, accountSubjectId(ctx.accountId));
 
