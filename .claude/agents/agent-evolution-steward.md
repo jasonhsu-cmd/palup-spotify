@@ -13,7 +13,7 @@ make sure the OpenClaw failure mode cannot recur in PalUp.
 
 On any change to run-time agent behavior or to the pipeline, verify:
 - The change is expressed as a **candidate** that enters at `propose` and walks
-  `shadow → canary(1–5%) → eval gate → human approve → promote → monitor`. No stage is
+  `eval gate → shadow(0%) → canary(1–5%) → human approve → promote → monitor`. No stage is
   skippable in code.
 - Shadow runs at 0% live; canary is capped at 1–5% and reversible.
 - The eval gate is automatic and **blocking** ("nothing ships without passing").

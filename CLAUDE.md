@@ -68,8 +68,10 @@ When a task says "the agent," always confirm **which plane**. If unclear, ask.
    boundary list. If in doubt, it needs a human.
 2. **No self-improving agent ships to 100% of traffic without passing eval gates and a
    human promotion.** The only path to prod is
-   `propose → shadow → canary(1–5%) → eval gate → human approve → promote → monitored`,
-   with automatic rollback on regression. Never bypass a stage.
+   `propose → eval gate → shadow(0%) → canary(1–5%) → human approve → promote → monitored`,
+   with automatic rollback on regression. Never bypass a stage. (The blocking eval gate runs
+   **before** the live stages so no shopper traffic is ever spent on a candidate that fails
+   statically — this matches the engine, which refuses to enter shadow without a prior gate pass.)
 3. **Portability is a hard constraint, not a preference.** Do not use a Google-only API
    where a portable abstraction exists. All cloud access goes through the ports in
    `packages/platform-ports/`. See the `portability-guard` skill.

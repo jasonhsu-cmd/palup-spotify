@@ -26,19 +26,25 @@ pipeline.
 ## 2. The evolution pipeline
 
 ```
-   ┌─────────┐   ┌──────────┐   ┌────────────┐   ┌───────────┐   ┌──────────────┐   ┌─────────┐   ┌─────────┐
-   │ PROPOSE │──▶│  SHADOW  │──▶│ CANARY 1–5%│──▶│ EVAL GATE │──▶│ HUMAN APPROVE│──▶│ PROMOTE │──▶│ MONITOR │
-   └─────────┘   └──────────┘   └────────────┘   └───────────┘   └──────────────┘   └─────────┘   └─────────┘
-                                        │                │                                            │
-                                        └────────────────┴─────────── regression ──▶ AUTO-ROLLBACK ◀──┘
+   ┌─────────┐   ┌───────────┐   ┌──────────┐   ┌─────────────┐   ┌───────────────┐   ┌─────────┐   ┌─────────┐
+   │ PROPOSE │──▶│ EVAL GATE │──▶│  SHADOW  │──▶│ CANARY 1–5% │──▶│ HUMAN APPROVE │──▶│ PROMOTE │──▶│ MONITOR │
+   └─────────┘   └───────────┘   └──────────┘   └─────────────┘   └───────────────┘   └─────────┘   └─────────┘
+                                                       │                                   │             │
+                                                       └────────────────────────┬──────────┴─────────────┘
+                                                                                ▼
+                                                       AUTO-ROLLBACK  (revert to last-known-good + freeze)
 ```
+
+The blocking eval gate runs **first**, before any live stage, so a candidate that fails statically
+never costs shopper traffic. The engine enforces this: `beginAutoOptimize()` refuses to enter shadow
+without a prior gate pass (`packages/evolution/src/engine.ts`).
 
 | Stage | What happens | Who/what gates it | Exit criteria |
 |---|---|---|---|
 | **Propose** | Agent or engineer registers a candidate: new prompt/tool/policy/model + hypothesis + expected metric + rollback plan. | Automatic intake; malformed proposals rejected. | Complete proposal recorded in Evolution Console. |
+| **Eval gate** | Blocking automatic evaluation suite (quality, safety, tone, task success, cost). **"Nothing ships without passing."** Runs before any live stage. | Automatic, blocking. | All required evals pass thresholds. |
 | **Shadow** | Candidate runs on **0% of live traffic**, replaying real inputs; outputs compared to incumbent, never sent to users. | Automatic. | No safety violations; behavioral diff within bounds. |
 | **Canary** | Candidate serves **1–5%** of traffic, segmented and reversible. | Automatic ramp with live guardrail metrics. | Live metrics ≥ incumbent, no guardrail breach for the observation window. |
-| **Eval gate** | Blocking automatic evaluation suite (quality, safety, tone, task success, cost). **"Nothing ships without passing."** | Automatic, blocking. | All required evals pass thresholds. |
 | **Human approve** | A named human reviews the eval results, canary metrics, and boundary impact in the Approval Center and approves/denies. | **Human** (required for behavior change and any boundary crossing). | Explicit approval recorded with the approver's identity. |
 | **Promote** | Change rolls out progressively to 100% behind a flag. | Release policy. | Full rollout stable. |
 | **Monitor** | Post-promotion watch for regression. | Automatic. | Steady-state; candidate becomes incumbent. |

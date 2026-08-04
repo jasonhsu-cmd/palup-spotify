@@ -164,7 +164,7 @@ human-in-the-loop**. PalUp's answer is to make evolution a pipeline with mandato
 Full detail: `docs/AGENT-GOVERNANCE.md`. In one line:
 
 ```
-propose ─▶ shadow (0% live) ─▶ canary 1–5% ─▶ eval gate (auto) ─▶ HUMAN approve ─▶ promote ─▶ monitor ─▶ (auto-rollback on regression)
+propose ─▶ eval gate (auto) ─▶ shadow (0% live) ─▶ canary 1–5% ─▶ HUMAN approve ─▶ promote ─▶ monitor ─▶ (auto-rollback on regression)
 ```
 
 No stage is skippable. The eval gate is automatic and blocking ("nothing ships without
