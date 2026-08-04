@@ -92,6 +92,30 @@ describe("PR-3 — persona-style directives (flag DISPOSITION_STYLE)", () => {
     expect(d.flags.some((f) => f.startsWith("persona:"))).toBe(false); // no persona:bogus_style flag
   });
 
+  // Governance BLOCK closure (Finding 2, 2026-08-04) — audited this PR-3 lookup alongside the personaRole
+  // defect found in brain-persona-role.test.ts: `PERSONA_STYLE_DIRECTIVE[effectivePersonaStyle]` was a
+  // bare index, NOT a guard — an Object.prototype member key ("constructor"/"toString"/"valueOf"/
+  // "hasOwnProperty") resolves through the PROTOTYPE CHAIN to an inherited Function, which is truthy and
+  // would inject raw function source into the prompt AND push a non-string Function into `flags` (the
+  // audit-log surface), crashing any `flags.filter(f => f.startsWith(...))` caller (e.g. control-plane's
+  // priceSurface(), the FAIR-1 metric computation itself). Fixed with an
+  // `Object.prototype.hasOwnProperty.call(TABLE, key)` guard BEFORE indexing.
+  describe("governance BLOCK closure — Finding 2: guarded lookup against the PROTOTYPE CHAIN", () => {
+    const POISON_KEYS = ["constructor", "toString", "valueOf", "hasOwnProperty"] as const;
+
+    it.each(POISON_KEYS)(
+      "personaStyle=%s (an Object.prototype member, not a real PersonaStyle) never injects native code into the prompt, never pushes a non-string flag, and flags.filter(...).startsWith(...) never throws",
+      async (poisonKey) => {
+        const { brain, spy } = spyBrain(true);
+        const d = await brain.decide({ cart: "has_items", personaStyle: poisonKey as never }, "tell me about the serum");
+        expect(sys(spy)).not.toMatch(/\[native code\]/);
+        expect(sys(spy)).not.toMatch(/PERSONA STYLE/);
+        for (const f of d.flags) expect(typeof f).toBe("string");
+        expect(() => d.flags.filter((f) => f.startsWith("persona:"))).not.toThrow();
+      },
+    );
+  });
+
   it("flag OFF (default) — a supplied personaStyle is NEVER consumed: no PERSONA STYLE text, no persona:* flag (ships inert)", async () => {
     const { brain, spy } = spyBrain(false);
     const d = await brain.decide({ cart: "has_items", personaStyle: "deal_seeker" }, "tell me about the serum");

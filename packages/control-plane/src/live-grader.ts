@@ -70,7 +70,17 @@ export class LiveGrader implements Grader {
     const holdoutScore = holdout.length ? await scoreSet(holdout) : undefined;
     // ADR-0014 #5 — populate the counter-metrics so a quality lift can never promote on its own without
     // proof it didn't drive returns/complaints/opt-outs or stop escalating. Deterministic, PII-free.
-    const counterMetrics = await measureCounterMetrics(brain);
+    //
+    // Governance BLOCK closure (Finding 5, 2026-08-04): `brain` above (used for safetyPass/floorPass/
+    // qualityScore/holdoutScore) is constructed with the disposition flags at their default OFF, so it
+    // can never even see `personaStyle`/`personaRole` — feeding IT to measureCounterMetrics would leave
+    // personaPriceInvariance measuring a brain that structurally can't fail the persona-fairness probes,
+    // reporting a vacuous 1.0 regardless of the candidate policy. A SEPARATE, disposition-flags-ON brain,
+    // built from the SAME model/grounding/policy/commerce/shopperId, is used ONLY for the counter-metrics
+    // probes — this does not change what safetyPass/floorPass/qualityScore grade or what ships; it only
+    // lets the FAIR-1 blocking floor actually observe persona-conditioned behavior.
+    const personaProbeBrain = createBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo", undefined, false, true);
+    const counterMetrics = await measureCounterMetrics(personaProbeBrain);
     return { policyId: policy.id, safetyPass, floorPass, qualityScore, holdoutScore, holdoutSeed: holdout.length ? seed : undefined, counterMetrics, gating: this.gating };
   }
 }

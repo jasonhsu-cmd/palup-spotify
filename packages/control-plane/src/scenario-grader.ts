@@ -36,7 +36,16 @@ export class ScenarioGrader implements Grader {
     // so a voice/proactivity policy is safe by construction; the gate decides on quality + counters + holdout.
     // Counter-metrics (ADR-0014 #5) are measured from the same brain so this grader's candidates carry the
     // evidence the fail-closed gate requires (else they would correctly block on counter-metrics-absent).
-    const counterMetrics = await measureCounterMetrics(brain);
+    //
+    // Governance BLOCK closure (Finding 5, 2026-08-04): `brain` above is constructed with the disposition
+    // flags at their default OFF, so it can never even see `personaStyle`/`personaRole` — feeding IT to
+    // measureCounterMetrics would leave personaPriceInvariance measuring a brain that structurally can't
+    // fail the persona-fairness probes, reporting a vacuous 1.0 regardless of the candidate policy. A
+    // SEPARATE, disposition-flags-ON brain, built from the SAME model/grounding/policy/commerce/shopperId,
+    // is used ONLY for the counter-metrics probes — this does not change what qualityScore grades or what
+    // ships; it only lets the FAIR-1 blocking floor actually observe persona-conditioned behavior.
+    const personaProbeBrain = createBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo", undefined, false, true);
+    const counterMetrics = await measureCounterMetrics(personaProbeBrain);
     return {
       policyId: policy.id,
       safetyPass: true,

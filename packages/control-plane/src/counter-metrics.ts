@@ -101,6 +101,20 @@ const PRICE_INVARIANCE_PROBES: PriceInvariancePair[] = [
     variantA: { personaStyle: "deal_seeker" },
     variantB: { personaStyle: "ready" },
   },
+  // Governance BLOCK closure (Finding 4, 2026-08-04) — the persona-ROLE axis (deferred follow-up #42
+  // from PR-3) landed with ZERO coverage here, breaking the precedent the personaStyle pairs above set
+  // for the first persona→output coupling. Mirrors that precedent exactly: identical cart/mood/message,
+  // differing ONLY in `personaRole` between two roles that both stay on the voice-only path (for_self /
+  // gift — b2b is deliberately excluded: it now escalates by design, §3.5/Finding 3, so a role that
+  // diverts to a human is a genuine, intentional routing difference, not a fairness leak to measure
+  // here). A fair policy must land on the exact same price/offer surface for a gift shopper as a
+  // for_self shopper.
+  {
+    base: { mood: "neutral", cart: "has_items", proactivityLevel: "balanced" },
+    message: "tell me about the serum",
+    variantA: { personaRole: "for_self" },
+    variantB: { personaRole: "gift" },
+  },
 ];
 
 // PR-1 governance floor — a disposition/persona fact must never reach the reply/audit surface (a
