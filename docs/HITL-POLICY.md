@@ -83,6 +83,18 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
   security sign-offs and its preconditions met, **human approval is never skipped** for any
   agent behavior/prompt/model change to real users.
 
+> **Shopper-disposition persona layer (`DISPOSITION_STYLE` flag) — NOT yet flipped, no owner assigned
+> (governance BLOCK closure, Finding 12, 2026-08-04).** `packages/widget-brain`'s persona-STYLE
+> (PR-3/5/7/8) and persona-ROLE (PR-3 deferred follow-up) directives both ship behind the SAME
+> `DISPOSITION_STYLE` posture flag, default OFF (inert — no production call site enables it; no
+> `DISPOSITION_STYLE` env read exists anywhere in the repo). The flag now gates TWO accumulated
+> behavior axes (service/guidance STYLE voice, and buyer ROLE voice + the reused b2b escalation rung),
+> added across separate PRs without a single combined-surface review at flip time. Flipping it for any
+> tenant is a run-time agent behavior/prompt change and is governed exactly like every other promotion
+> under §5 above: it requires a named human owner and explicit Approval Center sign-off *before*
+> enablement. **Neither has happened.** No env wiring, ADR, or runbook exists for the flip today — this
+> note exists only to make that gap visible, not to authorize it.
+
 ## 6. How this is enforced in code
 
 - Every agent action is classified against this policy before execution. Boundary-crossing

@@ -3,6 +3,7 @@ import type {
   Decision,
   HistoryTurn,
   MemoryRecallPort,
+  PersonaRole,
   PersonaStyle,
   PitchKind,
   Policy,
@@ -343,6 +344,43 @@ const PERSONA_STYLE_DIRECTIVE: Record<PersonaStyle, string> = {
     "\nPERSONA STYLE - deal seeker: If a merchant-approved promo is already present in the grounded CATALOG/POLICY context, you may surface it honestly and exactly as written. NEVER invent, imply, or promise a discount, coupon, or promo that isn't explicitly grounded there, and never withhold one the shopper genuinely qualifies for.",
   ready:
     "\nPERSONA STYLE - ready to buy: Be efficient. Confirm what they want and help them move to checkout - add no extra pitch, upsell, or friction.",
+};
+
+// ── Persona-ROLE directives (deferred follow-up #42 from PR-3, SAME flag DISPOSITION_STYLE) ─────────
+// Consume a SUPPLIED signals.personaRole — who the shopper is buying for (docs/design/shopper-widget.md
+// §4 Persona: roles = for-self / gift / B2B) — into a benign, code-owned, closed-enum-keyed STYLE
+// directive appended to systemExtra on the clean sales path, exactly like PERSONA_STYLE_DIRECTIVE above.
+// FAIR-1 / Inv 10 is absolute here too: role steers SERVICE/GUIDANCE VOICE ONLY — never selectPitch,
+// pitch, outbound, price, offers, or tiering, so a gift shopper gets the EXACT same pitch surface as a
+// for_self shopper. No price/offer/tier language in any line. No classifier/recall/session fallback yet
+// (mirrors PR-3's own initial scope for personaStyle before PR-5/7/8) — only a caller-SUPPLIED
+// signals.personaRole is consumed here.
+//
+// b2b is DELIBERATELY ABSENT from this table (governance BLOCK closure, Finding 3, 2026-08-04). The
+// original cut of this follow-up shipped a voice-only b2b nudge — "mention a team member can help,
+// never assert escalation itself" — gated ONLY behind the pre-existing hard-escalation guardrail (§3.5
+// below, keyed off B2B/wholesale/bulk TEXT). That let a caller-supplied `personaRole: "b2b"` with no B2B
+// keyword in THIS message resolve to a plain sales reply with escalateToHuman:false, drifting from the
+// documented `B2B → escalate` invariant (docs/design/shopper-widget.md §4; this file's own comment at
+// the top of §3.5; eval case PER-3). Fixed by widening §3.5 itself to ALSO fire on a supplied
+// `personaRole === "b2b"` — reusing that ONE rung's reply/flags/escalateToHuman rather than adding a
+// second, parallel b2b path. That rung always returns before this block is reached whenever it applies,
+// so a b2b role can never resolve through this table; only `for_self`/`gift` — which stay voice-only, by
+// design — are keys here.
+const PERSONA_ROLE_DIRECTIVE: Record<Exclude<PersonaRole, "b2b">, string> = {
+  for_self:
+    "\nPERSONA ROLE - for_self: The shopper is buying for themselves. Use your normal direct, helpful voice - no special framing needed.",
+  gift:
+    "\nPERSONA ROLE - gift: The shopper is buying this as a gift, not for themselves - the recipient, not the shopper, will use it. Ask who it's for (or their skin type/size, if that's uncertain) before assuming a fit, and present options as gift-appropriate.",
+};
+
+// Flag emitted alongside each PERSONA_ROLE_DIRECTIVE entry (persona:* precedent, mirroring the PR-0
+// forward-declared PersonaFlag vocabulary's `persona:role_gift` / `persona:role_self`). No b2b entry
+// here (see above) — the pre-existing guardrail flag `persona:b2b` (§3.5, always co-occurring with a
+// forced escalateToHuman:true) is the ONLY b2b-role flag this file emits now.
+const PERSONA_ROLE_FLAG: Record<Exclude<PersonaRole, "b2b">, string> = {
+  for_self: "persona:role_self",
+  gift: "persona:role_gift",
 };
 
 // ── Persona-style MODEL CLASSIFIER (PR-5, flag DISPOSITION_CLASSIFIER) ────────────────────────────
@@ -891,7 +929,16 @@ export function createBrain(
       // and honest-uncertainty(3) — a real support issue or an unverifiable-fact question still win — and
       // ABOVE sales(4), so a business/bulk inquiry leaves the consumer sales path before any pitch is
       // selected. No price/money commitment is made here; a person handles wholesale/trade terms.
-      if (B2B.test(text)) {
+      //
+      // Governance BLOCK closure (Finding 3, 2026-08-04): a caller-SUPPLIED `signals.personaRole === "b2b"`
+      // (flag-gated on DISPOSITION_STYLE, same as every other persona-role consumer in this file) now ALSO
+      // fires this SAME rung — reusing its one reply/flag-set/escalateToHuman rather than adding a second,
+      // parallel b2b code path. Before this fix, a supplied b2b role with no B2B keyword in THIS message
+      // fell through to a voice-only nudge that never escalated, drifting from the documented invariant
+      // above; a role signal exists for exactly the turn the keyword detector can't see (role known, not
+      // restated this turn), so it must resolve the same way. Flag OFF ⇒ only the TEXT detector runs,
+      // byte-identical to before this PR.
+      if (B2B.test(text) || (dispositionStyleEnabled && signals.personaRole === "b2b")) {
         flags.push("persona:b2b", "offer_human", "no_pitch");
         return {
           mode: "support",
@@ -1022,14 +1069,39 @@ export function createBrain(
       const effectivePersonaStyle =
         signals.personaStyle ?? classifiedPersonaStyle ?? sessionFallbackPersonaStyle(signals.sessionDisposition);
       if (dispositionStyleEnabled && effectivePersonaStyle) {
-        // Guard the lookup: an out-of-enum personaStyle (a mis-wired classifier / un-whitelisted intake)
-        // yields undefined — skip rather than append the literal "undefined" or emit an out-of-vocab
-        // flag. Defense in depth on top of the closed PersonaStyle enum + deriveServingSignals +
-        // classifyPersonaStyle's own whitelist.
-        const directive = PERSONA_STYLE_DIRECTIVE[effectivePersonaStyle];
-        if (directive) {
+        // Guarded lookup (governance BLOCK closure, Finding 2, 2026-08-04): a bare `TABLE[key]` index is
+        // NOT a guard — an out-of-enum key like "constructor"/"toString"/"valueOf"/"hasOwnProperty"
+        // resolves through the PROTOTYPE CHAIN to an inherited Function, which is truthy and would inject
+        // raw function source into the prompt AND push a non-string Function into `flags` (the audit-log
+        // surface), crashing any `flags.filter(f => f.startsWith(...))` caller (e.g. control-plane's
+        // priceSurface()). `hasOwnProperty` is checked FIRST — mirroring classifyPersonaStyle's own
+        // whitelist and findRecalledStyleDirective/sessionFallbackPersonaStyle's guards above — so only an
+        // actual PERSONA_STYLE_DIRECTIVE key is ever trusted. An out-of-enum personaStyle is skipped: no
+        // literal "undefined", no out-of-vocab flag.
+        if (Object.prototype.hasOwnProperty.call(PERSONA_STYLE_DIRECTIVE, effectivePersonaStyle)) {
           flags.push(`persona:${effectivePersonaStyle}`);
-          systemExtra += directive;
+          systemExtra += PERSONA_STYLE_DIRECTIVE[effectivePersonaStyle];
+        }
+      }
+      // Deferred follow-up #42 from PR-3 — a SUPPLIED signals.personaRole adds ONE closed-enum-keyed,
+      // code-owned voice directive to systemExtra, gated on the SAME DISPOSITION_STYLE flag as
+      // personaStyle above (default OFF ⇒ byte-identical to before this PR). FAIR-1 / Inv 10: never
+      // threaded into selectPitch/pitch/outbound/price below — a gift shopper gets the exact same pitch
+      // surface as a for_self shopper. No classifier/recall/session fallback yet — only a caller-supplied
+      // value is consumed (mirrors PR-3's own initial scope for personaStyle).
+      //
+      // b2b never reaches this block while the flag is on (governance BLOCK closure, Finding 3): the §3.5
+      // rung above now also fires on `personaRole === "b2b"` and always returns first. PERSONA_ROLE_DIRECTIVE
+      // has no b2b key, so the guard below would skip it harmlessly even if that invariant ever broke.
+      if (dispositionStyleEnabled && signals.personaRole) {
+        // Guarded lookup (governance BLOCK closure, Finding 2, 2026-08-04 — same defect class as the
+        // personaStyle lookup above): `hasOwnProperty` is checked BEFORE indexing, so an out-of-enum/
+        // prototype-chain personaRole ("constructor"/"toString"/"valueOf"/"hasOwnProperty", or "b2b" —
+        // see above) is skipped rather than resolving to an inherited Function or the literal "undefined".
+        if (Object.prototype.hasOwnProperty.call(PERSONA_ROLE_DIRECTIVE, signals.personaRole)) {
+          const role = signals.personaRole as keyof typeof PERSONA_ROLE_DIRECTIVE;
+          flags.push(PERSONA_ROLE_FLAG[role]);
+          systemExtra += PERSONA_ROLE_DIRECTIVE[role];
         }
       }
       // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL) — a shopper who has asked a

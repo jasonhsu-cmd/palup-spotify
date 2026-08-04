@@ -246,6 +246,12 @@ export interface Signals {
  */
 export type PersonaFlag =
   | "persona:researcher" | "persona:deal_seeker" | "persona:needs_guidance" | "persona:ready"
+  // `persona:role_gift` / `persona:role_self` complete the role vocabulary (deferred follow-up #42 from
+  // PR-3, brain.ts's PERSONA_ROLE_FLAG) for the two roles that stay voice-only. There is deliberately NO
+  // `persona:role_b2b`: governance BLOCK closure (Finding 3, 2026-08-04) made `personaRole === "b2b"`
+  // escalate through the SAME pre-existing guardrail rung the B2B-keyword detector uses (`persona:b2b`,
+  // §3.5 brain.ts, always with `escalateToHuman: true`), rather than shipping a separate voice-only b2b
+  // flag that could (and did, before this fix) drift from the documented "B2B → escalate" invariant.
   | "persona:role_gift" | "persona:role_self"
   | "behavioral:dwell" | "behavioral:hesitation" | "behavioral:repeat_question" | "behavioral:declined" | "behavioral:idle_return" | "behavioral:rage"
   | "disposition:one_strike" | "safety:regulated_claim" | "memory:style_applied";

@@ -5,7 +5,7 @@ import type { Grader, PolicyMetrics } from "@palup/evolution";
 import { deterministicFloorPass } from "@palup/eval";
 import { AGENT_FAMILY, decideGating, liveJudgeFamily } from "./gating.js";
 import { QUALITY_SUITE, SAFETY_PROBES } from "./quality-suite.js";
-import { measureCounterMetrics } from "./counter-metrics.js";
+import { measureCounterMetrics, createPersonaProbeBrain } from "./counter-metrics.js";
 import { partitionScenarios, holdoutSeed } from "./holdout.js";
 
 /**
@@ -70,7 +70,21 @@ export class LiveGrader implements Grader {
     const holdoutScore = holdout.length ? await scoreSet(holdout) : undefined;
     // ADR-0014 #5 — populate the counter-metrics so a quality lift can never promote on its own without
     // proof it didn't drive returns/complaints/opt-outs or stop escalating. Deterministic, PII-free.
-    const counterMetrics = await measureCounterMetrics(brain);
+    //
+    // Governance BLOCK closure (Finding 5, 2026-08-04): `brain` above (used for safetyPass/floorPass/
+    // qualityScore/holdoutScore) is constructed with the disposition flags at their default OFF, so it
+    // can never even see `personaStyle`/`personaRole` — feeding IT to measureCounterMetrics would leave
+    // personaPriceInvariance measuring a brain that structurally can't fail the persona-fairness probes,
+    // reporting a vacuous 1.0 regardless of the candidate policy. A SEPARATE, disposition-flags-ON brain,
+    // built from the SAME model/grounding/policy/commerce/shopperId, is used ONLY for the counter-metrics
+    // probes — this does not change what safetyPass/floorPass/qualityScore grade or what ships; it only
+    // lets the FAIR-1 blocking floor actually observe persona-conditioned behavior.
+    // Built via the SHARED, named helper (counter-metrics.ts) rather than an inline createBrain call, so
+    // this grader and scenario-grader.ts cannot drift apart on the flag and the "probe brain must see
+    // persona signals" property lives at one testable seam.
+    const counterMetrics = await measureCounterMetrics(
+      createPersonaProbeBrain(this.model, this.grounding, policy, this.commerce, "shopper-demo"),
+    );
     return { policyId: policy.id, safetyPass, floorPass, qualityScore, holdoutScore, holdoutSeed: holdout.length ? seed : undefined, counterMetrics, gating: this.gating };
   }
 }

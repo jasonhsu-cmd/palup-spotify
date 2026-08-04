@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import type { ModelPort } from "@palup/platform-ports";
 import { createBrain, MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter, DEFAULT_POLICY, type Policy, type Brain, type Decision, type MemoryRecallPort } from "@palup/widget-brain";
 import { EvolutionEngine, MockGrader, type PolicyMetrics } from "@palup/evolution";
 import { measureCounterMetrics, PERSONA_LEAK_PROBES } from "../src/counter-metrics.js";
@@ -58,6 +59,37 @@ describe("counter-metrics measurement (deterministic behavioral proxies)", () =>
       expect(m.escalationRecall).toBe(1); // includes the new personaRole:"b2b" variants
     });
 
+    // Governance BLOCK closure (Finding 5, 2026-08-04): every real-brain caller of measureCounterMetrics
+    // (live-grader.ts, scenario-grader.ts) constructed its brain with the disposition flags OFF (the
+    // 5-arg createBrain() default), so personaPriceInvariance was measured against a brain that could
+    // never even SEE `personaStyle`/`personaRole` — the two PRICE_INVARIANCE_PROBES pairs were trivially
+    // identical regardless of the candidate policy, and the metric always reported 1.0. This proves the
+    // FIX those two call sites now apply (a SEPARATE, disposition-flags-ON brain fed to
+    // measureCounterMetrics, alongside the unchanged flag-OFF brain used for safety/floor/quality
+    // grading): a REAL createBrain instance with the flag ON actually reaches the persona-directive code
+    // during the invariance probes (not vacuously skipped) — proven here by a spy on the model port
+    // recording an appended PERSONA directive line in the system prompt — while still correctly measuring
+    // fully fair, because that layer is voice-only by construction (FAIR-1).
+    it("Finding 5 closure: a disposition-flags-ON real createBrain actually exercises the persona layer during the invariance probes (not vacuously skipped), and still measures fully fair", async () => {
+      const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
+      const personaBrain = createBrain(
+        { complete: spy },
+        new StaticGroundingAdapter(),
+        DEFAULT_POLICY,
+        new MockCommerceAdapter(),
+        "shopper-demo",
+        undefined, // memory
+        false, // subscriptionSelfServeEnabled
+        true, // dispositionStyleEnabled — the fix this closure requires the probe-only brain to pass
+      );
+      const m = await measureCounterMetrics(personaBrain);
+      expect(m.personaPriceInvariance).toBe(1); // the real code IS fair — flag ON doesn't change that
+      const anySystemPromptCarriesADirective = spy.mock.calls.some(([req]) =>
+        req.messages.some((msg) => msg.role === "system" && /PERSONA (STYLE|ROLE) -/.test(msg.content)),
+      );
+      expect(anySystemPromptCarriesADirective).toBe(true); // the persona layer was genuinely exercised
+    });
+
     it("catches a synthetic candidate that price-discriminates by persona (personaPriceInvariance drops)", async () => {
       // A rogue brain: pitches "promo" (with a discount flag) for a deal_seeker persona, but "cross_sell"
       // (no discount) for everyone else — exactly the price-by-inferred-WTP behavior FAIR-1 forbids.
@@ -73,6 +105,32 @@ describe("counter-metrics measurement (deterministic behavioral proxies)", () =>
             safetyClass: "none",
             flags: dealSeeker ? ["pitch:promo", "discount:20pct"] : ["pitch:cross_sell"],
             model: "rogue-price-discriminator",
+          };
+        },
+      };
+      const m = await measureCounterMetrics(rogue);
+      expect(m.personaPriceInvariance).toBeLessThan(1);
+    });
+
+    // Governance BLOCK closure (Finding 4, 2026-08-04) — before the personaRole pair was added to
+    // PRICE_INVARIANCE_PROBES, a candidate that price-discriminated by ROLE instead of STYLE would have
+    // scored personaPriceInvariance === 1 (a fairness blind spot on the second persona→output coupling,
+    // deferred follow-up #42 from PR-3): this rogue pitches "promo" (with a discount flag) for a gift
+    // buyer but "cross_sell" (no discount) for a for_self buyer — exactly the role-conditioned pricing
+    // FAIR-1 forbids.
+    it("Finding 4 closure: catches a synthetic candidate that price-discriminates by personaROLE (personaPriceInvariance drops)", async () => {
+      const rogue: Brain = {
+        async decide(signals): Promise<Decision> {
+          const gift = (signals as { personaRole?: string }).personaRole === "gift";
+          return {
+            mode: "sales",
+            reply: gift ? "Here's 20% off, just for gifts!" : "This pairs well with your cart.",
+            pitch: gift ? "promo" : "cross_sell",
+            escalateToHuman: false,
+            outbound: false,
+            safetyClass: "none",
+            flags: gift ? ["pitch:promo", "discount:20pct"] : ["pitch:cross_sell"],
+            model: "rogue-role-price-discriminator",
           };
         },
       };
