@@ -22,7 +22,7 @@ import {
   createMeteringModelPort,
   createRedactingModelPort,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, mergeGuestIntoAccount } from "@palup/widget-memory";
+import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent } from "@palup/widget-memory";
 import {
   createRuntimeStore,
   createVectorStore,
@@ -30,8 +30,6 @@ import {
   RUNTIME_AGENT_TYPE,
   recordConsent,
   lookupConsent,
-  hasConsentRecord,
-  retireConsent,
   recordGuestLink,
   lookupGuestLink,
   type Sql,
@@ -810,70 +808,50 @@ export async function buildServer(opts?: {
     // "does the account already have a consent record" (used by the consent-migration step) reflects state
     // PRIOR to this request, not the value this same request is about to set.
     //
-    // GATING POSTURE (say-which-is-which, per the design note): the LINK and the CONSENT migration below
-    // run regardless of `memoryServiceEnabled` — matching this endpoint's OWN existing posture (already
-    // reachable whenever WIDGET_AUTH_REQUIRED/kill allow it, independent of the double gate). The FACT
-    // migration (`mergeGuestIntoAccount`, further below) is separately gated on `memoryService` — it
-    // touches the vector port, which stays untouched while memory is off.
+    // GATING POSTURE: the LINK runs regardless of `memoryServiceEnabled`, matching this endpoint's OWN
+    // existing posture (reachable whenever WIDGET_AUTH_REQUIRED/kill allow it, independent of the double
+    // gate). It touches no vector data at all — the fact migration that once did was REMOVED (see below).
     //
     // IDEMPOTENT: gated on `!existingLink` — the link's PRESENCE is the sole "already migrated" marker.
     // `recordGuestLink` itself is called LAST (after consent + fact migration below), so a mid-sequence
-    // failure leaves no link recorded and a later verified turn safely RETRIES the whole sequence
-    // (`mergeGuestIntoAccount`/`retireConsent` are each independently idempotent — see their own doc
-    // comments) rather than silently stranding a half-migrated guest. This is best-effort, not one atomic
-    // transaction across all of recordGuestLink/hasConsentRecord/recordConsent/retireConsent/
-    // mergeGuestIntoAccount — each of those commits its OWN write+audit atomically (mirrors every other
-    // multi-step memory flow on this branch, e.g. /forget's two separate `eraseSubject` calls).
+    // failure leaves no link recorded and a later verified turn safely retries it.
     //
     // TRUST NOTE (same class as the already-accepted C1/C8/C10 residuals) — this reachable ONLY once
     // `verifiedShopperId` is present, but `validateAnonId` still only proves the presented anonId is
     // well-FORMED, never that THIS shopper owns it. A verified shopper who presents a validated anonId
-    // they merely obtained can cause a link (and the fact migration below) to run against THEIR account —
-    // see guest-link-store.ts's own header and docs/MEMORY-GO-LIVE-CHECKLIST.md's C1 row for why the fact
-    // migration specifically is a materially stronger consequence than the pre-existing consent-oracle
-    // class (it moves data OWNERSHIP, not just a read/deny signal).
+    // they merely obtained can cause a LINK to be recorded against THEIR account. That is bounded to the
+    // same consent-oracle/deny class as C1/C8/C10 — the link can only ever make an unverified turn's
+    // decision MORE restrictive. The fact migration that would have made it a data-OWNERSHIP transfer was
+    // removed for exactly that reason (see below).
     if (verifiedShopperId) {
       const validatedGuestAnonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
       if (validatedGuestAnonId) {
         try {
           const existingLink = await lookupGuestLink(store, { tenantId, guestAnonId: validatedGuestAnonId });
           if (!existingLink) {
-            // "Has none" reflects state BEFORE this request's own write two lines below this block.
-            const accountHadConsent = await hasConsentRecord(store, { tenantId, anonId: subject });
-            // NARROWER THAN "always retire" (must-not-regress finding): migrate-and-retire are ONE
-            // conditional action, not two independent ones. Retiring the guest row UNCONDITIONALLY here
-            // regressed BLOCK-1(a)/(b) and the C7-restated test in consent-restrictive-merge.test.ts —
-            // those depend on a stale guest "out" surviving (and continuing to re-durabilize via N2's
-            // existing write-through) for exactly the case where the account ALREADY has a consent record
-            // of its own (typically from N2 itself). So the guest row is retired ONLY on the SAME
-            // condition that it was migrated — the account had NO record yet. C7's residual therefore
-            // narrows to (and remains, unresolved by B12) precisely the case where the account already
-            // has a consent record by the time a link is first established for it — see the checklist row.
-            if (!accountHadConsent) {
-              const guestConsent = await lookupConsent(store, { tenantId, anonId: validatedGuestAnonId });
-              await recordConsent(store, {
-                tenantId,
-                anonId: subject,
-                memoryOrdinary: guestConsent.memoryOrdinary,
-                memorySpecial: guestConsent.memorySpecial,
-                hmacKey: AUDIT_HMAC_SECRET,
-                source: "guest-link-migration",
-              });
-              await retireConsent(store, { tenantId, anonId: validatedGuestAnonId, hmacKey: AUDIT_HMAC_SECRET });
-            }
-
-            // Fact migration — gated on memory actually being LIVE (unlike the link/consent step above).
-            // Uses `body.memorySpecial` directly for the account's Consent-2 gate: by this point nothing
-            // has overwritten it yet (the shopper's OWN explicit recordConsent call is still below), and
-            // it equals exactly what the account's consent2 will read as once that call runs — merge.ts's
-            // own Inv-9 behavior (drop special facts without an "in") is reused completely unchanged.
-            if (memoryService) {
-              await mergeGuestIntoAccount(
-                { vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET },
-                { tenantId, anonId: validatedGuestAnonId, accountId: verifiedShopperId, consent2: body.memorySpecial },
-              );
-            }
-
+            // CRITICAL — FACT/CONSENT MIGRATION REMOVED. Found by probe before review; the builder had
+            // disclosed the risk in prose ("moves data OWNERSHIP, not just a read/deny signal") and
+            // shipped it anyway, with the suite green at 1231 tests.
+            //
+            // What it allowed, proven by execution: an attacker signed in as THEMSELVES, posting
+            // /consent with a VICTIM's anonId, got 200 and:
+            //     ATTACKER namespace now holds: ["shopper is allergic to tree nuts"]
+            //     VICTIM  namespace now holds: []
+            // The victim's memory — special-category facts included — was MOVED into the attacker's own
+            // account (readable via the attacker's own recall) and destroyed on the victim's side. Theft
+            // plus destruction: strictly worse than the C14 write-when-denied hole B12 exists to close.
+            //
+            // The design error was MINE, in the B12 spec. Recording the link from a VERIFIED session
+            // proves the ACCOUNT is real; it never proves the client-supplied `anonId` BELONGS to that
+            // account. A restrictive consent merge is safe on an unproven id — it can only ever deny. A
+            // MIGRATION is not, because it transfers ownership of data. No proof of anonId ownership
+            // exists anywhere in this system (that IS residual C1), so no amount of care here makes
+            // migration safe; it needs the proof, not better handling.
+            //
+            // KEPT: the link itself, which is what C14 actually needed — /chat's UNVERIFIED-turn path
+            // consults it so a linked account's consent participates RESTRICTIVELY in that turn's
+            // decision, never as the subject. Fact migration and guest-consent-row retirement remain
+            // UNBUILT (checklist B12, C6, C7).
             await recordGuestLink(store, { tenantId, guestAnonId: validatedGuestAnonId, accountSubject: subject, hmacKey: AUDIT_HMAC_SECRET });
           }
         } catch (e) {
