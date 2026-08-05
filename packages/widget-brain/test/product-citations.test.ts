@@ -259,6 +259,24 @@ describe("E2 — the lookup is hasOwnProperty-guarded, so no prototype key resol
     // Even present, it is not tag-shaped, so the extractor never looks it up.
     expect(resolveCitedProductIds("[P__proto__]", map)).toEqual([]);
   });
+
+  it("refuses a WELL-FORMED tag planted on Object.prototype — the guard, not the tag format, is what stops this", () => {
+    // The two defences are independent, and this test is the one that discriminates the SECOND. The tag
+    // FORMAT alone already rejects "[Pconstructor]" (it is not `[P<digits>-<8 hex>]`), so those cases
+    // would pass even with a bare `map[tag]`. This one would NOT: the tag is perfectly well-formed and
+    // absent from the map, and a bare index would walk the prototype chain straight into the attacker's
+    // value. Prototype pollution is a real, reachable vector — this package parses untrusted JSON
+    // elsewhere and brain.ts already carries three hasOwnProperty guards for the same defect class.
+    const planted = "[P1-aaaaaaaa]";
+    const map = {} as Record<string, string>;
+    (Object.prototype as unknown as Record<string, string>)[planted] = "attacker-controlled-id";
+    try {
+      expect(map[planted]).toBe("attacker-controlled-id"); // the pollution really is in effect
+      expect(resolveCitedProductIds(planted, map)).toEqual([]);
+    } finally {
+      delete (Object.prototype as unknown as Record<string, string>)[planted];
+    }
+  });
 });
 
 // ── stripping: a shopper must never see a tag ───────────────────────────────────────────────────
