@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { runModelPortContract } from "@palup/platform-ports/contract";
 import {
   VertexModelAdapter,
+  type EmbedContentFn,
   type GenerateFn,
   type GenRequest,
 } from "../src/vertex-adapter.js";
@@ -12,8 +13,30 @@ const fakeGenerate: GenerateFn = async () => ({
   usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 7 },
 });
 
+// A deterministic fake embedContent call. Content-derived (same text => same vector) so the contract
+// suite's cosine ORDER check is meaningful, and pinned to maxBatch=1 to match the real
+// gemini-embedding-001 cap — so the contract exercises the adapter's CHUNKING path, not a fake shortcut.
+const EMBED_DIM = 16;
+const fakeEmbedContent: EmbedContentFn = async (req) => ({
+  embeddings: req.contents.map((t) => {
+    const v = new Array<number>(EMBED_DIM).fill(0);
+    for (let i = 0; i < t.length; i++) v[(t.charCodeAt(i) * 31 + i) % EMBED_DIM]! += 1;
+    const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1;
+    return { values: v.map((x) => x / norm), statistics: { truncated: false, tokenCount: t.length } };
+  }),
+});
+
 // Contract compliance (ADR-0001): the real adapter satisfies the same port contract as the mock.
-runModelPortContract(() => new VertexModelAdapter(fakeGenerate, { model: "gemini-test" }));
+// B3: the adapter is now built WITH an embedContent transport, so #188's `describe.skipIf(!declaresEmbed)`
+// embed block RUNS here instead of skipping (the "capability ABSENT" block skips instead). The absence
+// case still has a home — vertex-embed.test.ts constructs the adapter without a transport.
+runModelPortContract(
+  () =>
+    new VertexModelAdapter(fakeGenerate, { model: "gemini-test" }, {
+      call: fakeEmbedContent,
+      cfg: { model: "embed-test-1", taskType: "RETRIEVAL_DOCUMENT", maxBatch: 1 },
+    }),
+);
 
 describe("VertexModelAdapter mapping", () => {
   it("splits system messages into systemInstruction and maps assistant->model", async () => {
