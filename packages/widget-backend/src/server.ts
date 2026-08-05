@@ -1333,7 +1333,24 @@ export async function buildServer(opts?: {
       const champion = (await readActiveChampion(store, tenantId)) ?? DEFAULT_POLICY;
       const policy = canary ? canary.policy : champion;
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
-      const session = await createSession(brainFor(tenantId, policy), { sessionId, store: sessions, autoPersist: false });
+      //
+      // `level` comes from the SERVING POLICY (canary's when bucketed, else the promoted champion's) and
+      // is what makes the dial real. It used to be omitted, so `createSession` fell back to "balanced" and
+      // INV-E's pitch budget was permanently 2 no matter what had been promoted — measured 2/2/2 across
+      // cautious/balanced/confident. Because `Policy` carries only `styleDirective` + `proactivityDefault`
+      // (ADR-0014), that inert dial was half of everything the self-improvement pipeline can produce: a
+      // proactivity candidate showed no difference in shadow/canary, passed the gate looking safe, then
+      // changed nothing on promotion.
+      //
+      // Server-derived on purpose. `proactivityLevel` is an autonomy lever, so `deriveServingSignals`
+      // omits it from client input (signals.ts) and this is now the ONLY route by which it is set — a
+      // shopper still cannot widen their own pitch budget.
+      const session = await createSession(brainFor(tenantId, policy), {
+        sessionId,
+        store: sessions,
+        autoPersist: false,
+        level: policy.proactivityDefault,
+      });
       const turnStart = Date.now();
       // In-session multi-turn memory: thread the CLIENT's bounded recent transcript into the model
       // context so a follow-up ("what about the other one?") has its antecedent. It is validated + bounded
