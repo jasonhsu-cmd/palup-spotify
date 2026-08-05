@@ -567,9 +567,9 @@ const EXIT_INTENT_PROMPT =
  * two bounds above and overridable per deployment.
  *
  * Interaction with the vector store's own limits: a corpus is at most `MAX_INDEXED_PRODUCTS` (1000)
- * records and `PostgresVectorStore.query` scans up to `MAX_SCAN_ROWS` (5000) before ranking — so the
- * whole corpus is always scanned and k never approaches either bound. See the E1 note in
- * catalog-retriever.ts's tests for the headroom.
+ * records and `PostgresVectorStore.query` scans up to `MAX_SCAN_ROWS` (5000, in ID ORDER) before ranking
+ * — so the whole corpus is always scanned and that truncation never engages, and k is the slice taken
+ * afterwards. Pinned against the real constants in widget-backend's catalog-retriever.test.ts.
  */
 export const DEFAULT_CATALOG_RETRIEVAL_K = 12;
 
@@ -660,6 +660,7 @@ export function createBrain(
    * noise, and the absence of both is unambiguous.
    */
   const retrieveCandidates = async (
+    retriever: CatalogRetrieverPort,
     ctx: GroundingContext,
     query: string,
     tenantId: string,
@@ -672,7 +673,7 @@ export function createBrain(
     if (ctx.products.length <= k) return undefined;
     let hits;
     try {
-      hits = await catalogRetriever!.retrieve({ tenantId, query, k });
+      hits = await retriever.retrieve({ tenantId, query, k });
     } catch {
       // Fail-safe, in the same shape as classifyPersonaStyle: a corpus that is missing, a pin that
       // disagrees, a provider error or a timeout all land here and all mean "render the full catalog".
@@ -712,7 +713,7 @@ export function createBrain(
     const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
     const retrieved =
       catalogRetrievalEnabled && catalogRetriever && retrieval && ctx && retrieval.query.trim() !== ""
-        ? await retrieveCandidates(ctx, retrieval.query, tenantId, retrieval.flags)
+        ? await retrieveCandidates(catalogRetriever, ctx, retrieval.query, tenantId, retrieval.flags)
         : undefined;
     // In-session multi-turn memory (§6A): thread the client's bounded recent transcript BETWEEN the
     // system message and the CURRENT user turn, so a follow-up like "what about the other one?" has its
@@ -1140,12 +1141,14 @@ export function createBrain(
             : mode === "general"
               ? "\nCOMPETITOR POLICY: Give an honest, GENERAL comparison — what to look for in this category — from general knowledge only. No live web; never assert a specific volatile competitor fact (price/stock) as certain. Never disparage."
               // "full" previously told the model it "may reference a current competitor fact ONLY if you
-              // can cite a source" — but there is NO web/search/retrieval port anywhere in
-              // platform-ports, so no citable current source can exist and the instruction reduced to
-              // "self-certify your own recall". This is the DEFAULT mode, so it shipped to every shopper.
-              // Until Tier 3 (governed web retrieval, docs/design/shopper-widget.md:118-121) is built,
-              // "full" states its real capability. RESTORE the citation allowance in the same PR that
-              // lands a retrieval port — not before.
+              // can cite a source" — but there is NO WEB/SEARCH port anywhere in platform-ports, so no
+              // citable current source can exist and the instruction reduced to "self-certify your own
+              // recall". This is the DEFAULT mode, so it shipped to every shopper. Until Tier 3 (governed
+              // WEB retrieval, docs/design/shopper-widget.md:118-121) is built, "full" states its real
+              // capability. RESTORE the citation allowance in the same PR that lands a WEB retrieval
+              // port — not before, and specifically NOT on the strength of E1: E1's CatalogRetrieverPort
+              // is Tier 1, first-party retrieval over the merchant's OWN catalog. It cites nothing
+              // external and changes nothing here.
               : "\nCOMPETITOR POLICY: You have NO web access or live sources, so you CANNOT cite a current competitor fact - never state one as current or certain, and never imply you looked it up. Give an honest GENERAL comparison from general knowledge (what to look for in this category), ground OUR side from the catalog, and redirect to the shopper's need. Never fabricate a competitor fact and never disparage.";
       }
       // Data residency / consent regime by jurisdiction — compliance enforced in CODE, never a POLICY.

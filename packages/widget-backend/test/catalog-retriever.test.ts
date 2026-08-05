@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_CATALOG_RETRIEVAL_K } from "@palup/widget-brain";
 import {
   InMemoryRuntimeStore,
   createInMemoryVectorStore,
@@ -16,6 +18,8 @@ import {
 import {
   MANIFEST_COLLECTION,
   MANIFEST_KEY,
+  MAX_INDEXED_PRODUCTS,
+  VECTOR_SCAN_ROWS_MIRRORED,
   catalogNamespace,
   catalogRecordId,
   type CatalogManifest,
@@ -164,6 +168,22 @@ describe("E1 — createCatalogRetriever: the query side of the catalog corpus", 
 
   it("names the agent type the composition root must meter this spend under", () => {
     expect(CATALOG_RETRIEVAL_AGENT_TYPE).toBe("catalog-retrieval");
+  });
+
+  it("k and the corpus both stay clear of the vector adapter's id-ORDER row-scan truncation", () => {
+    // postgres-vector-store.ts caps every query() at MAX_SCAN_ROWS with `ORDER BY id LIMIT` — ID ORDER,
+    // NOT RELEVANCE — so a corpus larger than that cap would silently lose whichever records sort late by
+    // id BEFORE anything is scored. Retrieval is the first code that actually RANKS this corpus, so the
+    // headroom matters here in a way it did not on the write side: read the real constant out of the real
+    // file, and pin that a full-size corpus is scanned WHOLE.
+    const src = readFileSync(new URL("../../state-postgres/src/postgres-vector-store.ts", import.meta.url), "utf8");
+    const scanCap = Number(/MAX_SCAN_ROWS = (\d+)/.exec(src)?.[1]);
+    expect(scanCap).toBe(VECTOR_SCAN_ROWS_MIRRORED);
+    // The largest corpus the index job will ever write is well under the scan cap (5x headroom at the
+    // values in force), so every record is scored on every query and the truncation never engages…
+    expect(MAX_INDEXED_PRODUCTS).toBeLessThan(scanCap);
+    // …and k is the slice taken AFTER ranking, orders of magnitude below either bound.
+    expect(DEFAULT_CATALOG_RETRIEVAL_K).toBeLessThan(MAX_INDEXED_PRODUCTS);
   });
 });
 

@@ -95,6 +95,23 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > enablement. **Neither has happened.** No env wiring, ADR, or runbook exists for the flip today — this
 > note exists only to make that gap visible, not to authorize it.
 
+> **Catalog retrieval (`CATALOG_RETRIEVAL` flag) — NOT yet flipped, no owner assigned (E1).**
+> `packages/widget-brain` can narrow the CATALOG block of its system prompt to the top-k candidates a
+> `CatalogRetrieverPort` returns for the shopper's turn, instead of rendering the merchant's whole
+> catalog. That changes **what the agent sees and therefore what it says**, so it is a run-time
+> behaviour/prompt change governed by §5 exactly like any other promotion: eval gate → shadow → canary →
+> **named human approval** → promote. **None of that has happened.**
+> Its inertness is structural, not just a default: the flag defaults OFF, **no `CATALOG_RETRIEVAL` env
+> read exists anywhere in the repo**, and `widget-backend/src/server.ts` **does not construct the
+> retriever at all**, so flipping a flag alone cannot turn it on — enabling it requires a deliberate
+> composition change reviewed as part of the promotion. With it off, the prompt, every `Decision` and
+> every reply are byte-identical to before the change (pinned by
+> `packages/widget-brain/test/retrieval-flag-off.test.ts` against a golden captured on the prior commit).
+> Two things a reviewer must weigh **at flip time**, neither settled here: retrieval **quality** (no
+> recall/latency number in this repo is real — the fakes say nothing about semantic retrieval), and the
+> fact that a narrowed catalog is a **partial** one, mitigated in-prompt by a rule forbidding "we don't
+> carry that" from mere absence but not eliminated.
+
 ## 6. How this is enforced in code
 
 - Every agent action is classified against this policy before execution. Boundary-crossing

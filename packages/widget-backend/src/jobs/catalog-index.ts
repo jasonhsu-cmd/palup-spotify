@@ -37,19 +37,20 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 // READ THIS FIRST — TWO THINGS ABOUT THIS JOB ARE TRUE AND UNCOMFORTABLE.
 //
-// 1. NOTHING READS THIS CORPUS. Semantic retrieval over it is a LATER work item, gated behind the
-//    evolution pipeline (it changes what the shopper agent grounds on, so it is a run-time behavior
-//    change — CLAUDE.md §3.2). Until that lands, a written corpus changes NO shopper-visible behavior.
-//    This file does not pretend otherwise and adds no retrieval helper "ready for later".
+// 1. NOTHING READS THIS CORPUS ON ANY LIVE PATH. E1 built the reader — `createCatalogRetriever`
+//    (../catalog-retriever.ts) and the brain's CATALOG_RETRIEVAL flag — but that flag defaults OFF, there
+//    is no env read for it anywhere in the repo, and `server.ts` does not compose the retriever at all.
+//    Enabling it changes what the shopper agent grounds on, which is a run-time behaviour change needing
+//    the eval gate, shadow, canary and a named human's approval (CLAUDE.md §3.2, HITL-POLICY §5). So a
+//    written corpus STILL changes no shopper-visible behaviour today. (Updated by E1; before it, no
+//    reader existed at all.)
 //
-// 2. NO ADAPTER IN THIS REPO CAN EMBED YET. `ModelPort.embed?()` is OPTIONAL (#188) and the only
-//    implementations that exist are TEST FAKES — searched all of `packages/` for `async embed`: the hits
-//    are platform-ports' own test + fake. The Vertex adapter (`packages/model-vertex`) has no `embed`.
-//    So run against the CURRENT deployment this job reports `no-embed-capability` for every tenant,
-//    writes nothing, and exits NON-ZERO. That is deliberate: a capability ABSENCE is static and free to
-//    detect (`canEmbed`), and an operator who runs an index must be told "this deployment has no
-//    embedding adapter" rather than shown a silent success. The job becomes useful the day an embedding
-//    adapter lands behind the same port — no change here.
+// 2. THE VERTEX ADAPTER CAN EMBED (#192/B3), so a deployment configured for Vertex no longer reports
+//    `no-embed-capability` — this comment said the opposite until E1 corrected it. `ModelPort.embed?()`
+//    is still OPTIONAL (#188): an adapter that cannot embed OMITS it, and this job still reports
+//    `no-embed-capability` and exits NON-ZERO against such a deployment rather than showing a silent
+//    success, because a capability ABSENCE is static and free to detect (`canEmbed`) and an operator who
+//    runs an index deserves to be told which of the two it is.
 //
 // WHY A JOB AND A CLI, not an HTTP route: the argument `retention-sweep.ts` and `kill-switch.ts` already
 // make and this inherits verbatim — widget-backend has NO admin authentication, so an admin route would
@@ -828,7 +829,8 @@ export const CATALOG_USAGE = [
   "",
   "DATABASE_URL must point at the SAME store the deployed backend uses, or the corpus is written to a",
   "per-process store that dies with this process. --reindex REPLACES a corpus (use it after an embedding",
-  "model change). NOTHING READS THIS CORPUS YET — retrieval is a separate, gated work item.",
+  "model or PURPOSE change). NOTHING READS THIS CORPUS ON A LIVE PATH: the retriever exists (E1) but its",
+  "CATALOG_RETRIEVAL flag is off, unwired, and human-promotion-gated.",
 ].join("\n");
 
 /** Split `--flag=value`; a bare `--flag` yields no inline value. */
@@ -974,7 +976,11 @@ async function main(): Promise<void> {
           "port before this job can do anything.",
       );
     }
-    console.log("[catalog] NOTE: nothing reads this corpus yet — semantic retrieval is a separate, gated work item.");
+    console.log(
+      "[catalog] NOTE: nothing reads this corpus on a live path. The retriever exists (E1) but the " +
+        "CATALOG_RETRIEVAL flag is off by default, has no env wiring, and is not composed by the server — " +
+        "enabling it is a human promotion step (HITL-POLICY §5), not a deploy setting.",
+    );
   } catch (e) {
     console.error(`[catalog] FAILED: ${(e as Error).message}`);
     process.exitCode = 1;
