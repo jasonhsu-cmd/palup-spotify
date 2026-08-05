@@ -5,6 +5,16 @@ export {
   PostgresMerchantRegistry,
   type PostgresMerchantRegistryOpts,
 } from "./postgres-merchant-registry.js";
+// B2 store. Exported so C1's OAuth routes can wire it; NOTHING imports it yet (see the file header).
+export {
+  createMerchantCredentialStore,
+  MERCHANT_CRED_KEY_SCOPE,
+  MERCHANT_CRED_COLLECTION,
+  MERCHANT_CRED_RECORD_KEY,
+  type MerchantCredentialStore,
+  type MerchantCredentialStoreOpts,
+  type MerchantCredentialRead,
+} from "./merchant-credential-store.js";
 export { PgPoolSql, pgPoolSqlFromUrl, type Sql } from "./sql.js";
 export { createRuntimeStore } from "./factory.js";
 export { createVectorStore } from "./vector-factory.js";

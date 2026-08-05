@@ -170,11 +170,30 @@ describe.each(adapters)("merchant-credential-store — %s", (_name, makeStore) =
     expect(await store.read("tenant-a")).toEqual({ status: "found", token: TOKEN });
   });
 
+  // The same relocation, under the WORST realistic misconfiguration: an operator provisioned both
+  // merchants with the IDENTICAL raw secret. Both of the file's isolation mechanisms are in play (HKDF
+  // mixes the tenantId into the derived key, and the aad names the tenant), so this test does not isolate
+  // WHICH one refused — it asserts that the combination does, which is the property that matters.
+  it("…and still cannot, when both merchants were provisioned with the IDENTICAL raw key material", async () => {
+    const state = await makeStore();
+    const shared = "one-secret-an-operator-pasted-twice";
+    const store = createMerchantCredentialStore(
+      state,
+      cryptoFor({ "tenant-a": { [CRED_KEY_NAME]: shared }, "tenant-b": { [CRED_KEY_NAME]: shared } }),
+    );
+    await store.put("tenant-a", TOKEN, { actor: "operator:install-flow" });
+    await state.put({ tenantId: "tenant-b" }, MERCHANT_CRED_COLLECTION, MERCHANT_CRED_RECORD_KEY, await rawRow(state, "tenant-a"));
+    expect(await store.read("tenant-b")).toEqual({ status: "unreadable", reason: "undecryptable" });
+    expect(await store.read("tenant-a")).toEqual({ status: "found", token: TOKEN });
+  });
+
   it("is TENANT-SCOPED: without any copying, merchant A's credential is simply not there for merchant B", async () => {
     const state = await makeStore();
     const store = createMerchantCredentialStore(state, standardCrypto());
     await store.put("tenant-a", TOKEN, { actor: "operator:install-flow" });
+    expect(await store.read("tenant-a")).toEqual({ status: "found", token: TOKEN }); // …and it IS there for A
     expect(await store.read("tenant-b")).toEqual({ status: "missing" });
+    expect(await state.readAudit({ tenantId: "tenant-b" })).toEqual([]); // not even the audit crosses over
   });
 
   it("the DEFAULT-scope (memory) key can neither write nor read a credential — no cross-scope fallback", async () => {
@@ -227,7 +246,9 @@ describe.each(adapters)("merchant-credential-store — %s", (_name, makeStore) =
   it("refuses a blank token instead of storing a credential that looks configured but cannot work", async () => {
     const state = await makeStore();
     const store = createMerchantCredentialStore(state, standardCrypto());
-    await expect(store.put("tenant-a", "   ", { actor: "operator:install-flow" })).rejects.toThrow(/non-blank/i);
+    await expect(store.put("tenant-a", "   ", { actor: "operator:install-flow" })).rejects.toThrow(
+      /refusing to store a blank credential/i,
+    );
     expect(await store.read("tenant-a")).toEqual({ status: "missing" });
     expect(await state.readAudit({ tenantId: "tenant-a" })).toEqual([]);
   });
