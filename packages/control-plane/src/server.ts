@@ -13,7 +13,7 @@ import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT, DEFAULT_CANARY_POWER } from "./canary-controller.js";
 import { applyCanaryVerdict } from "./canary-reaction.js";
-import { promoteToServing } from "./champion-promoter.js";
+import { promoteToServing, monitorServing } from "./champion-promoter.js";
 import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, type KillScope, type KillEntry } from "@palup/state-postgres";
 import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices, type RuntimeStatePort } from "@palup/platform-ports";
 
@@ -245,7 +245,18 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   });
   app.post("/api/monitor", async (req) => {
     const b = (req.body ?? {}) as { qualityScore?: number; safetyPass?: boolean };
-    return act(() => engine.monitor({ qualityScore: Number(b.qualityScore ?? 0.4), safetyPass: b.safetyPass !== false }));
+    // Was `engine.monitor(...)` — IN-MEMORY ONLY. On a detected regression it reverted this process's
+    // champion and left the DURABLE serving champion untouched, so shoppers kept getting the regressing
+    // policy while this dashboard reported a successful rollback. `monitorServing` reverts the store
+    // first (and freezes the auto-promote fast-lane), then advances the engine; on a healthy observation
+    // it records the serving champion as the durable known-good baseline, which is what makes a
+    // beyond-depth-1 delayed rollback possible at all.
+    return act(async () => {
+      await monitorServing(engine, runtimeStore, PROMOTE_TENANT, {
+        qualityScore: Number(b.qualityScore ?? 0.4),
+        safetyPass: b.safetyPass !== false,
+      });
+    });
   });
 
   // --- Real self-improvement loop: the durable improvement timeline + an interactive live round. ---

@@ -2,7 +2,7 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
 import type { Policy } from "@palup/widget-brain";
 import type { Champion, EvolutionEngine } from "@palup/evolution";
 import { matchedKill, RUNTIME_AGENT_TYPE, freezeAutoPromote, freezeAutoPromoteTx, AUTO_PROMOTE_WINDOW_MS } from "@palup/state-postgres";
-import { readKnownGood } from "./known-good-baseline.js";
+import { readKnownGood, recordKnownGood } from "./known-good-baseline.js";
 
 // The control-plane WRITE half of promote→serving (the READ half is widget-backend/champion.ts). A
 // HUMAN-approved, gate-passed promotion is persisted to the SHARED RuntimeStatePort so EVERY serving
@@ -150,6 +150,75 @@ export async function rollbackServing(
   const until = Number.isNaN(nowMs) ? at : new Date(nowMs + AUTO_PROMOTE_WINDOW_MS).toISOString();
   await freezeAutoPromote(store, tenantId, until, `rollback: ${reason}`, at);
   return restored;
+}
+
+export interface MonitorServingResult {
+  rolledBack: boolean;
+  /** "quality-regression" | "safety-regression" | "no-revert-target", or absent when healthy. */
+  reason?: string;
+  /** True when the revert used the durable known-good baseline because the engine's depth-1
+   * prevChampion was already spent. */
+  viaBaseline?: boolean;
+  /** True when a healthy observation confirmed the serving champion as the known-good baseline. */
+  confirmedKnownGood?: boolean;
+}
+
+/**
+ * THE MONITOR → ROLLBACK WIRING (ADR-0003's "automatic rollback on regression").
+ *
+ * WHY THIS EXISTS: the only wired monitor route called `engine.monitor()`, which rolls back the engine's
+ * IN-MEMORY champion and nothing else. The durable serving champion — the row widget-backend reads on
+ * every /chat turn — was never reverted, so after a detected regression shoppers kept getting the
+ * regressing policy while the dashboard showed a successful rollback. `rollbackServing` (durable revert
+ * + fast-lane freeze) existed, was tested, and had NO caller. So did `recordKnownGood`, which left the
+ * baseline permanently null and made `delayedRollbackToBaseline` capable only of throwing.
+ *
+ * ORDER OF PREFERENCE on a regression:
+ *   1. the engine's depth-1 previous champion (`rollbackServing`) — the immediate, expected target;
+ *   2. failing that, the durable known-good baseline (`delayedRollbackToBaseline`) — reachable when the
+ *      depth-1 target is already spent, which is precisely the case that used to throw;
+ *   3. neither ⇒ report `no-revert-target` and change nothing. Deliberately NOT an exception: a monitor
+ *      that throws on the one path where it has nothing to do would take out the observation loop.
+ *
+ * ON A HEALTHY OBSERVATION the serving champion is recorded as the durable known-good baseline — the
+ * "survived its observation window" confirmation `recordKnownGood` was written for, and what makes (2)
+ * above reachable at all. Serving is never touched on a healthy observation.
+ *
+ * HONEST LIMITATION: `observed` is supplied by the caller. The wired route takes it from the request
+ * body, so this reacts to a REPORTED regression, not a measured one. Measuring live quality is the
+ * auto-optimize orchestrator's job and it is dormant. This wiring is what makes a regression signal
+ * actually reach shoppers once something real produces it.
+ */
+export async function monitorServing(
+  engine: EvolutionEngine,
+  store: RuntimeStatePort,
+  tenantId: string,
+  observed: { qualityScore: number; safetyPass: boolean },
+  at = new Date().toISOString(),
+): Promise<MonitorServingResult> {
+  const verdict = engine.regressionVerdict(observed);
+
+  if (!verdict.regressed) {
+    // Survived the observation ⇒ this champion becomes the safe target for a later delayed rollback.
+    // Only meaningful once something is actually being served; with an empty serving slot there is no
+    // confirmed champion to record.
+    const serving = await servingChampion(store, tenantId);
+    if (!serving) return { rolledBack: false };
+    await recordKnownGood(store, tenantId, serving.policy, at, "survived monitor observation");
+    return { rolledBack: false, confirmedKnownGood: true };
+  }
+
+  if (engine.getPreviousChampion()) {
+    await rollbackServing(engine, store, tenantId, verdict.reason!, at);
+    return { rolledBack: true, reason: verdict.reason };
+  }
+
+  if (await readKnownGood(store, tenantId)) {
+    await delayedRollbackToBaseline(store, tenantId, verdict.reason!, at);
+    return { rolledBack: true, reason: verdict.reason, viaBaseline: true };
+  }
+
+  return { rolledBack: false, reason: "no-revert-target" };
 }
 
 /**
