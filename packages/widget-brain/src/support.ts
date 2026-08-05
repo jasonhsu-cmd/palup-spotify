@@ -478,14 +478,14 @@ export async function handleSupport(
     }
     case "billing":
       flags.push("escalate");
-      return { reply: `Let me look into that — I can see the charges on your order, but I won't guess about a possible duplicate. Anything involving a disputed charge I route to a person so it's reviewed properly and no money is adjusted without a person confirming. I'm connecting you now.`, escalate: true, flags };
+      return { reply: `Let me look into that — I can see the charges on your order, but I won't guess about a possible duplicate. Anything involving a disputed charge I route to a person so it's reviewed properly and no money is adjusted without a person confirming. I've flagged it for them now.`, escalate: true, flags };
     case "how_to":
       return { reply: `Good question — for retinol most people start about 2 nights a week and build up as their skin adjusts; use a pea-sized amount on dry skin and wear SPF the next day. If you have a skin condition or you're unsure, it's best to check with a dermatologist.`, escalate: false, flags };
     case "ingredients":
       return { reply: `Let me confirm from our catalog rather than guess. If this is about an allergy I want to be careful — I can't guarantee a product is safe for a specific allergy, so if you're concerned it's worth checking the full ingredient list with your doctor.`, escalate: false, flags };
     case "escalate_stuck":
       flags.push("escalate");
-      return { reply: `I'm sorry this hasn't been sorted out — I don't want to keep you going in circles. I'm connecting you with a person who can help right now; they'll take it from here.`, escalate: true, flags };
+      return { reply: `I'm sorry this hasn't been sorted out — I don't want to keep you going in circles. I've flagged this for a person on our team to take from here, and if it's urgent it's worth contacting the store directly too.`, escalate: true, flags };
     default: {
       // D1 — use conversation CONTEXT instead of dead-ending on a generic "share your order number".
       const issues = (context?.openIssues ?? []).filter(Boolean);
@@ -515,15 +515,21 @@ export async function handleSupport(
         flags.push("replacement_routed", "escalate");
         return { reply: `Absolutely — I'll get a replacement sent for the damaged item. I can't ship it from here myself, so I've flagged it for a member of our team to send a new one out (no charge, and no need to return the damaged one unless they ask). They'll confirm the shipment with you.`, escalate: true, flags };
       }
-      // A person is already on it (this session) → bridge, don't restart from scratch (hold-until-human).
+      // An escalation is already pending (this session) → bridge, don't restart from scratch
+      // (hold-until-human). HONEST WORDING: this used to assert "A member of our team is still looking
+      // into this for you and will follow up shortly" — a statement of fact about a human the agent has
+      // no way to know anything about. Nothing delivers an escalation to a person (it becomes an audit
+      // row nobody reads), so the only knowable fact is that the issue is still flagged and open.
       if (escalationPending) {
         flags.push("escalate");
-        return { reply: `A member of our team is still looking into this for you and will follow up shortly — thanks for hanging in there. I'll stay with you in the meantime; is there anything else I can help with while you wait?`, escalate: true, flags };
+        return { reply: `This is still flagged for our team and still open on my side — thanks for hanging in there. I'll stay with you in the meantime; is there anything else I can help with while you wait?`, escalate: true, flags };
       }
-      // Frustrated or a clear complaint, unresolved → acknowledge and get a person; never just ask for info.
+      // Frustrated or a clear complaint, unresolved → acknowledge and flag it for a person; never just ask
+      // for info. ("I've connected you with a member of our team" claimed a live channel that does not
+      // exist — see the escalationPending note above.)
       if (complaint) {
         flags.push("escalate");
-        return { reply: `${empathy || "I'm sorry this has been a hassle — "}I don't want to make you repeat yourself. I've connected you with a member of our team who can look into this right away and make it right.`, escalate: true, flags };
+        return { reply: `${empathy || "I'm sorry this has been a hassle — "}I don't want to make you repeat yourself. I've flagged this for a member of our team who can look into it and make it right.`, escalate: true, flags };
       }
       // Unresolved issue(s) on file → resume them BY NAME (all of them, when compound) so the shopper sees
       // we remember every open thread, not just the first (both-issues-tracked across turns).
@@ -531,7 +537,7 @@ export async function handleSupport(
         flags.push("escalate");
         const named = openIssuesList.map(humanizeIssue).join(" and your ");
         const multi = openIssuesList.length > 1;
-        return { reply: `I still have your ${named} open and a member of our team is on ${multi ? "them" : "it"} — I haven't forgotten ${multi ? "either" : "it"}, and they'll follow up shortly. Is there anything I can help with in the meantime?`, escalate: true, flags };
+        return { reply: `I still have your ${named} open and flagged for our team — I haven't forgotten ${multi ? "either" : "it"}. Is there anything I can help with in the meantime?`, escalate: true, flags };
       }
       // An order was named earlier this chat → keep it in play instead of re-asking which one.
       if (priorOrderRef) {

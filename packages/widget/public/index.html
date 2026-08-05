@@ -467,7 +467,13 @@
     forget.textContent = "Forget everything about me";
     forget.onclick = () => forgetMe();
     const helper = document.createElement("div"); helper.className = "mm-helper"; helper.setAttribute("data-testid", "manage-memory-helper");
-    helper.textContent = "Turning something off stops new saving; \"Forget everything\" deletes what's stored now and resets your anonymous ID. This never affects your orders or account.";
+    // SCOPED ON PURPOSE. "Forget everything" calls POST /forget -> `eraseSubject`
+    // (widget-memory/src/erasure.ts), which deletes ONE vector namespace: the preferences and notes on
+    // this panel. It does NOT delete the store's own chat log, which keeps the message and reply text
+    // (widget-backend/src/canary.ts `logTraffic`) and cannot even be keyed by this anonymous ID — there
+    // is no anonId->sessionId link — so no wording change could make a total-erasure claim true. Saying
+    // so is the honest version of a button labelled "Forget everything about me".
+    helper.textContent = "Turning something off stops new saving; \"Forget everything\" deletes the preferences and notes here and resets your anonymous ID. The store's own chat log of this conversation isn't part of that, and none of it affects your orders or account.";
     const confirmation = document.createElement("div"); confirmation.className = "mm-confirm"; confirmation.setAttribute("data-testid", "manage-memory-confirmation"); confirmation.hidden = true;
     wrap.append(h, rowOrdinary, rowSpecial, forget, helper, confirmation);
     // The shopper's OWN data-rights panel — it belongs in the shopper tools row, not the demo drawer.
@@ -477,8 +483,15 @@
     $("#tools").appendChild(wrap);
   }
 
+  // "Done — I've cleared what I remembered" is a COMPLETION claim, so it may only be shown when the
+  // server actually confirmed the erasure. It used to be shown unconditionally: the `fetch` result was
+  // discarded (a 500 does not throw) and the catch only covered a network failure, so a shopper whose
+  // erasure FAILED was told it had succeeded. Worse, the local anonId was rotated regardless — which
+  // threw away the only key that could ever have erased those facts, turning a retryable failure into a
+  // permanent one. Now the rotation and the confirmation are both gated on a real `ok`.
   async function forgetMe(){
     const prevAnonId = memState.anonId;
+    let erased = false;
     try {
       await ensureToken(false);
       const headers = { "content-type": "application/json" };
@@ -489,8 +502,20 @@
       // panel then confirmed success. The widget already holds `shopperToken` (ADR-0018 sign-in) and
       // already sends it on /chat — this was the one call site it was missing from.
       if (shopperToken) headers["x-shopper-token"] = shopperToken;
-      if (prevAnonId) await fetch("/forget", { method: "POST", headers, body: JSON.stringify({ anonId: prevAnonId }) });
-    } catch { /* best-effort — the local reset below still gives the shopper a fresh identity */ }
+      if (prevAnonId){
+        const r = await fetch("/forget", { method: "POST", headers, body: JSON.stringify({ anonId: prevAnonId }) });
+        erased = r.ok;
+      }
+    } catch { /* network failure — `erased` stays false and the shopper is told so below */ }
+    if (!erased){
+      // Keep the id, the consent state and the panel exactly as they were: nothing was erased, so
+      // pretending otherwise would both lie and strand the data. The shopper can simply try again.
+      const cFail = document.querySelector('[data-testid="manage-memory-confirmation"]');
+      // Deliberately does not name a cause: this covers a network failure, a non-ok response, and the
+      // (unreachable today — onChatMeta mints the id before it builds this panel) no-id case alike.
+      if (cFail){ cFail.hidden = false; cFail.textContent = "I couldn't clear what I remembered just now — nothing was deleted. Please try again."; }
+      return;
+    }
     memState = { anonId: mintAnonId(), consentShown: false, consent1: "unknown", consent2: "unknown" };
     saveMemState();
     // The previous subject's effective state is now stale — this is a BRAND-NEW anonId whose consent is
@@ -619,9 +644,6 @@
     if (on && !t){ t = document.createElement("div"); t.id="typing"; t.className="typing"; t.innerHTML='<span class="sr-only">Assistant is typing…</span><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i>'; msgs.appendChild(t); msgs.scrollTop=msgs.scrollHeight; }
     else if (!on && t){ t.remove(); }
   }
-  // Latched human take-over: once a reply escalates, the widget stops presenting as AI and shows a
-  // "connecting you with a person" state for the rest of the session (persists even if a later reply
-  // doesn't escalate). The real two-way agent channel (WebSocket) is a separate, larger piece.
   // INV-D resume offer. Uses role="status" so a screen reader hears it after the reply without stealing
   // focus, and the same muted token as the other system lines so it reads as an aside, not a message.
   function addResumeOffer(text){
@@ -630,13 +652,33 @@
     el.textContent = text;
     msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
   }
+  // Latched ESCALATION notice: once a reply escalates, the widget shows — for the rest of the session —
+  // what escalation actually did, and nothing more.
+  //
+  // WHAT IT USED TO SAY, and why every word of it was false: "Connecting you with a person… A team
+  // member is joining this chat. You can keep typing — your messages are saved and they'll see the whole
+  // conversation." There is no live-agent channel to join: `signals.handoff` — the ONLY input that means
+  // "a human took over" (widget-brain/src/types.ts, consumed in session.ts) — has NO production
+  // producer; widget-backend/src/signals.ts never accepts it from the client and no route sets it, so
+  // the only writers in the repo are tests. No transcript is kept for a human either (the server
+  // persists CONTROL state only; this client's copy is per-tab sessionStorage). And nothing delivers the
+  // escalation to anyone: it becomes an audit row (widget-backend/src/audit.ts) that no console reads.
+  //
+  // WHAT IS TRUE, and is all this now claims: the turn is flagged for a person. That flag is real — the
+  // `escalate` flag on the decision and its immutable audit row — so the reassurance survives, without
+  // inventing a channel. The shopper is also told plainly that nobody will join, because a shopper who
+  // believes a human is arriving will sit and wait for one.
+  //
+  // The header keeps its AI DISCLOSURE. It used to be REPLACED with "Connecting you with a person"
+  // while every following reply was still AI-generated — the one moment a shopper is most likely to
+  // think they reached a human was the one moment we stopped saying they hadn't.
   function enterHandoff(){
     if (handedOff) return; handedOff = true;
     const el = document.createElement("div"); el.className = "handoff"; el.setAttribute("role","status"); el.setAttribute("data-testid","handoff");
-    el.innerHTML = "<b>Connecting you with a person…</b><br>A team member is joining this chat. You can keep typing — your messages are saved and they'll see the whole conversation.";
+    el.innerHTML = "<b>I've flagged this for a person</b><br>I've marked this conversation for the store's team. No one can join this chat, so if it's urgent please contact the store directly — you can keep talking to me here in the meantime.";
     msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
     document.querySelector(".wh").classList.add("handoff-mode");
-    $("#whStatus").textContent = "Connecting you with a person";
+    $("#whStatus").textContent = "AI assistant · flagged for a person";
   }
   function offline(){
     const el = document.createElement("div"); el.className = "system"; el.setAttribute("role","status"); el.setAttribute("data-testid","offline");

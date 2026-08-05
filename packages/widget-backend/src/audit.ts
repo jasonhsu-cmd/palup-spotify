@@ -52,6 +52,13 @@ function actionFor(d: Decision): string {
   if (d.flags.includes("sub_paused")) return "subscription.pause.autonomous";
   if (d.flags.includes("sub_resumed")) return "subscription.resume.autonomous";
   if (d.flags.includes("sub_skip_undone")) return "subscription.unskip.autonomous";
+  // P6 — a DSAR ("delete my data") gets its OWN action rather than the generic escalation below. The
+  // shopper is told "I've recorded your request" (widget-brain/src/brain.ts's data-rights rung) and this
+  // row is the whole of that claim, so it has to be findable AS a data-rights request: an erasure request
+  // carries a statutory response clock (GDPR Art. 12(3) / CCPA), and it used to be indistinguishable from
+  // a shipping complaint in the log. Checked BEFORE the money/escalation branches: a DSAR turn also
+  // carries `escalate`, which would otherwise win and hide it.
+  if (d.flags.includes("data_rights_erasure")) return "data_rights.erasure_requested";
   if (d.flags.some((f) => f.endsWith("_routed") || f === "refund_hitl")) return "money_action.routed_to_human";
   if (d.flags.includes("giveaway_declined")) return "giveaway.declined";
   if (d.flags.includes("ai_disclosure")) return "ai_identity.disclosed";
@@ -69,6 +76,13 @@ function reversalPathFor(d: Decision): string {
   if (reversalFlag) {
     const method = reversalFlag.slice("reversal:".length);
     return `autonomous action is reversible via CommercePort.${method} for this shopper's own subscription`;
+  }
+  // P6 — a DSAR row records a REQUEST; no data was erased on this turn (the agent has no erasure
+  // execution path), so the honest reversal path is that the request itself can be withdrawn. Saying
+  // "handed to a human via escalation" here would repeat, inside the audit trail, the same unbacked
+  // delivery claim this change removed from the shopper-facing reply.
+  if (d.flags.includes("data_rights_erasure")) {
+    return "nothing erased yet — this row records the shopper's erasure REQUEST; the shopper may withdraw it";
   }
   return d.escalateToHuman ? "handed to a human via escalation" : "n/a — reply only, no state-changing action";
 }
