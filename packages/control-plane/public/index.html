@@ -132,7 +132,23 @@
   function actionButtons(c){
     if (busy) return "";
     if (c.status==="proposed") return `<button class="primary" data-act="evaluate" data-id="${c.policy.id}" data-testid="evaluate-${c.policy.id}">Evaluate</button>`;
-    if (c.status==="awaiting_approval") return `<button class="primary" data-act="approve" data-id="${c.policy.id}" data-testid="approve-${c.policy.id}">Approve</button> <button data-act="reject" data-id="${c.policy.id}">Reject</button>`;
+    // §3 NN#2 — shadow → canary are now REQUIRED before a human promotion (promoteToServing refuses
+    // without both markers). They are surfaced as explicit, ordered steps rather than walked silently:
+    // this dashboard's whole purpose is that the governed loop be OBSERVABLE, and a stage the operator
+    // cannot see is one they cannot be accountable for.
+    //
+    // The figures posted below are DEMO/ATTESTED values, not measurements — nothing in this plane
+    // measures live shadow/canary traffic yet (that machinery is in the dormant auto-optimize
+    // orchestrator). The button labels say "attest" for exactly that reason. Replace with real measured
+    // figures when that lands; do NOT relabel these as measured before then.
+    if (c.status==="awaiting_approval") {
+      const stage = c.auto && c.auto.stage;
+      const reject = `<button data-act="reject" data-id="${c.policy.id}">Reject</button>`;
+      if (!stage) return `<button class="primary" data-act="stage" data-id="${c.policy.id}" data-testid="stage-${c.policy.id}">Begin staging</button> ${reject}`;
+      if (stage==="eval-passed") return `<button class="primary" data-stage="shadow" data-id="${c.policy.id}" data-testid="shadow-${c.policy.id}">Attest shadow (0%)</button> ${reject}`;
+      if (stage==="shadowed") return `<button class="primary" data-stage="canary" data-id="${c.policy.id}" data-testid="canary-${c.policy.id}">Attest canary (1-5%)</button> ${reject}`;
+      return `<button class="primary" data-act="approve" data-id="${c.policy.id}" data-testid="approve-${c.policy.id}">Approve</button> ${reject}`;
+    }
     if (c.status==="approved") return `<button class="primary" data-act="promote" data-id="${c.policy.id}" data-testid="promote-${c.policy.id}">Promote</button>`;
     return "";
   }
@@ -254,7 +270,16 @@
     if (b.id==="regress"){ lastState = await post("/api/monitor",{qualityScore:0.4}); render(lastState); return; }
     if (b.id==="kill"){ lastState = await post(lastState && lastState.killed ? "/api/unkill":"/api/kill"); render(lastState); return; }
     if (b.id==="tel-refresh"){ refreshTelemetry(); return; }
-    const act = b.dataset.act, id = b.dataset.id;
+    const act = b.dataset.act, id = b.dataset.id, stage = b.dataset.stage;
+    // Stage attestations carry a body and a sub-path, so they dispatch separately from the plain
+    // /api/<act>/<id> actions. The THRESHOLDS these are judged against live server-side (shared with the
+    // auto lane) — only the observed figures travel, so no client value can loosen a stage's bar.
+    if (stage){
+      const body = stage==="shadow"
+        ? { n: 200, delta: 0.02 }
+        : { n: 500, delta: 0.06, elapsedMs: 25*60*60*1000 };
+      lastState = await post(`/api/stage/${id}/${stage}`, body); render(lastState); return;
+    }
     if (act){ lastState = await post(`/api/${act}/${id}`); render(lastState); }
   });
   // Operator-token field: restore from localStorage, persist on edit.

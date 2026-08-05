@@ -74,6 +74,19 @@ export async function promoteToServing(
   if (rec.automated || !rec.approvedBy || rec.approvedBy === "auto-loop") {
     throw new Error(`${candidateId} was not HUMAN-approved (approver=${rec.approvedBy ?? "none"}) — the human promote→serving path refuses an automated approval`);
   }
+  // NN #2, the STAGE half — "the only path to prod is propose → shadow → canary → eval gate → human
+  // approve → promote… never bypass a stage" (CLAUDE.md §3; ARCHITECTURE.md:170; AGENT-GOVERNANCE.md:19;
+  // governance-subsystems.md:60; ADR-0003). Until now this function checked kill + approved + human and
+  // NEVER a stage marker, so this — the ONLY lane an operator can actually drive — walked straight to
+  // 100% of live traffic. The stage machine existed and was well-tested, but keyed off `rec.auto`, which
+  // only the DORMANT auto lane ever created. `humanPromotable` re-derives from the individual shadow and
+  // canary markers (not the stage label), so a hand-set label cannot fake a stage.
+  const staged = engine.humanPromotable(candidateId);
+  if (!staged.ok) {
+    throw new Error(
+      `cannot promote ${candidateId} to serving: ${staged.reasons.join(", ")} — a human promotion must still walk shadow and canary (CLAUDE.md §3 NN#2)`,
+    );
+  }
   const fromId = engine.getChampion().policy.id;
   const cfg: ServingChampion = { policy: rec.policy, promotedFrom: fromId, promotedAt: at, approvedBy: rec.approvedBy };
   // Durable serving write FIRST (put + audit atomically). Engine untouched until this commits.

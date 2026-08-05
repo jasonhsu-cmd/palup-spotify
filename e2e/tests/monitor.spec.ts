@@ -20,6 +20,13 @@ test("self-improvement loop is observable and governed via the dashboard", async
   await expect(page.getByTestId("status-cand-aggressive")).toContainText("blocked");
   await expect(page.getByTestId("status-cand-warm-concise")).toContainText("awaiting");
 
+  // §3 NN#2 — shadow → canary are REQUIRED before a human promotion, and they are ordered: each button
+  // only appears once the prior stage has passed, so this sequence IS the enforcement being exercised
+  // through the UI. Before this, approve → promote went straight to 100% of traffic.
+  await page.getByTestId("stage-cand-warm-concise").click();
+  await page.getByTestId("shadow-cand-warm-concise").click();
+  await page.getByTestId("canary-cand-warm-concise").click();
+
   // Human approves + promotes -> champion changes (no self-promotion path exists).
   await page.getByTestId("approve-cand-warm-concise").click();
   await page.getByTestId("promote-cand-warm-concise").click();

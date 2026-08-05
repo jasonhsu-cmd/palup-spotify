@@ -29,6 +29,10 @@ const statusOf = (b: StateBody, id: string) => b.candidates.find((c) => c.policy
 async function ready(app: Awaited<ReturnType<typeof buildServer>>, approve: boolean) {
   await app.inject({ method: "POST", url: "/api/seed", headers: AUTH });
   await app.inject({ method: "POST", url: `/api/evaluate/${CAND}`, headers: AUTH });
+  // §3 NN#2 — staging is now a precondition of promotion, so the regression guard must walk it too.
+  await app.inject({ method: "POST", url: `/api/stage/${CAND}`, headers: AUTH });
+  await app.inject({ method: "POST", url: `/api/stage/${CAND}/shadow`, headers: AUTH, payload: { n: 200, delta: 0.02 } });
+  await app.inject({ method: "POST", url: `/api/stage/${CAND}/canary`, headers: AUTH, payload: { n: 500, delta: 0.06, elapsedMs: 25 * 60 * 60 * 1000 } });
   if (approve) await app.inject({ method: "POST", url: `/api/approve/${CAND}`, headers: AUTH });
 }
 

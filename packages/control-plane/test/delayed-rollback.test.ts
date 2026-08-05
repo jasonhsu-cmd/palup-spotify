@@ -36,6 +36,10 @@ describe("delayed-signal rollback to a durable known-good baseline (ADR-0014 #10
     // NOT A) — so depth-1 could only revert C→DEFAULT, never back to the known-good A.
     engine.propose(P("C"));
     await engine.evaluate("C");
+    // §3 NN#2 staging is now required before any human promotion reaches serving.
+    engine.beginStaging("C");
+    engine.recordShadow("C", { n: 200, delta: 0.02, at: "2026-07-02T00:00:00Z" }, { maxRegression: 0.05 });
+    engine.recordCanary("C", { n: 500, delta: 0.02, elapsedMs: 3_600_000, at: "2026-07-02T01:00:00Z" }, { minN: 100, minWindowMs: 600_000, minDelta: -0.01 });
     engine.approve("C", "jane.operator");
     await promoteToServing(engine, "C", store, "acme");
     expect((await servingChampion(store, "acme"))?.policy.id).toBe("C");
