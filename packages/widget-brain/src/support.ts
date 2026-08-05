@@ -154,6 +154,42 @@ export async function handleSupport(
 ): Promise<SupportResult> {
   const intent = classifySupportIntent(message, Boolean(selfServe?.enabled));
   const flags = ["mode_support", "no_pitch", `support:${intent}`];
+
+  // FIXTURE-DATA GUARD — a claim about THIS shopper's account may never come from demo data.
+  //
+  // This was live and shopper-facing, not latent: widget-backend's composition root returns
+  // `new MockCommerceAdapter()` unconditionally and the brain's fallback shopper id is "shopper-demo",
+  // which is the id that OWNS the fixtures — so the ownership check below PASSED and the widget replied
+  // "I've confirmed order #1042 is on your account — it's in transit." Two other branches said the same
+  // thing in different words (address_change: the identical sentence; billing: "I can see the charges on
+  // your order"). All three were false statements about a real person's account.
+  //
+  // SCOPE — account claims only, deliberately not the whole support path. `policy_q`, `how_to`,
+  // `ingredients`, `escalate_stuck` and `general` state MERCHANT-level or general facts, not facts about
+  // this shopper, so they still answer; that also keeps every SUP-* eval case routing to support. The
+  // gated set is every intent that reads an order or subscription.
+  //
+  // WHY REFUSE RATHER THAN SAY "I couldn't find it": that phrasing asserts a successful search that
+  // returned nothing, which is its own falsehood and would send the shopper hunting for an order number
+  // that was never going to work. Say plainly that we cannot look it up, and route to a human.
+  //
+  // REMOVING THIS GUARD IS NOT THE FIX — shipping a real adapter is. A live adapter leaves
+  // `isFixtureData` absent and nothing here triggers.
+  const ACCOUNT_DATA_INTENTS: ReadonlySet<SupportIntent> = new Set([
+    "order_status", "return", "refund", "exchange", "cancel_order", "lost_package",
+    "wrong_item", "damaged", "address_change", "billing", "cancel_subscription", "skip_subscription",
+  ]);
+  if (commerce.isFixtureData === true && ACCOUNT_DATA_INTENTS.has(intent)) {
+    flags.push("account_lookup_unavailable", "escalate");
+    return {
+      reply:
+        "I can't look up your order or account details here yet — I don't have access to them, and I won't guess. " +
+        "Let me bring in a member of our team who can pull that up for you right away.",
+      escalate: true,
+      flags,
+    };
+  }
+
   const policy = await commerce.getPolicy();
   const orderId = extractOrderId(message);
   // Acknowledge frustration before stating a status (recognize-frustration): from the mood signal OR

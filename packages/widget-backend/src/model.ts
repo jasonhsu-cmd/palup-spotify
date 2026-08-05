@@ -44,5 +44,13 @@ export function createGroundingPort(
 // whether this IS a real/live adapter — false here, so the guard is a tested no-op for this slice. A
 // future live-adapter PR sets isLive:true and the guard's fail-closed check activates automatically.
 export function createCommercePort(): { port: CommercePort; isLive: boolean } {
-  return { port: new MockCommerceAdapter(), isLive: false };
+  // `fixtureData: true` is what stops the support path from stating DEMO order/account facts to real
+  // shoppers. Without it this composition root was serving "I've confirmed order #1042 is on your
+  // account" — a confident false claim about a real person's account — because the brain's fallback
+  // shopper id is the very id that owns the fixtures, so the ownership check passed.
+  //
+  // KEEP THIS SET for as long as this returns the mock. A live adapter should simply not pass the flag
+  // (it is not fixture data), at which point the guard in support.ts stops firing on its own.
+  // Regression-locked by widget-backend/test/commerce-fixture-marker.test.ts.
+  return { port: new MockCommerceAdapter({ fixtureData: true }), isLive: false };
 }

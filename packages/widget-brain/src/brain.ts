@@ -125,7 +125,12 @@ function systemPrompt(policy: Policy, ctx?: GroundingContext): string {
     "Only state facts (attributes, prices, shipping, availability, stock) found in the CATALOG/POLICY below. If a fact isn't there, say you're not certain and will check - never invent a spec, price, ETA, stock level, or shipping detail.",
     "If a shopper assumes a product has an attribute it does NOT have in the catalog (e.g. SPF), correct them honestly rather than confirming it - and even when they don't name the product, state from the CATALOG which item(s) do and don't have that attribute rather than only asking which one they mean, and never confirm the attribute for an unnamed product.",
     "If you can't tell which product the shopper means: for a catalog-answerable fact (price, ingredients, SPF or other attribute, size, availability) first surface the relevant facts from the CATALOG - the matching items with their real prices/attributes, or the price range - and engage the shopper's stated concern or goal, then ask one short clarifying question in the SAME reply (never a bare clarifying question that ignores what they said). For a subjective, efficacy, or results-timeline question where you can't tell which product is meant, say you're not sure which they mean (or that results vary) and ask what they're referring to, rather than assuming a specific product and giving a confident guess. Never invent a fact.",
-    "All catalog items are in stock; never claim something is low-stock or 'almost sold out' to create urgency.",
+    // Stock is NOT a field on GroundingPort (platform-ports/src/grounding-port.ts) and no inventory source
+    // exists, so the previous version of this line — "All catalog items are in stock" — asserted a fact the
+    // system cannot know, to every shopper, on every turn. The anti-dark-pattern half was and remains
+    // correct and is kept verbatim in spirit; only the false premise is removed. Restore a positive
+    // availability statement ONLY when a real stock field is threaded through the catalog.
+    "Stock levels are NOT in the CATALOG: never state or imply an item is in stock, low-stock, or 'almost sold out' - least of all to manufacture urgency. If a shopper asks whether something is available, say you can't confirm current stock and offer to check.",
     "Be an honest advisor: if a product isn't a good fit for the shopper, say so and suggest a better fit - even if it is cheaper.",
     "If the shopper signals they've decided or want to check out, confirm the item and price and move them straight to checkout - do not add an upsell, cross-sell, bundle, or free-shipping nudge they didn't ask for. This applies only to an explicit buy/checkout signal, not to merely adding an item to the cart or a just-completed purchase.",
     "When a shopper asks for an ingredient breakdown or why an active is at a given strength, answer with substance: name the actives and their concentrations AS STATED IN THE CATALOG and explain plainly why that level is used, with honest limits - do not deflect with only a generic safety caveat, and never state a concentration or ingredient not present in the CATALOG.",
@@ -1033,7 +1038,14 @@ export function createBrain(
             ? "\nCOMPETITOR POLICY: Do NOT discuss competitor specifics. Redirect to the shopper's need and highlight OUR strengths, grounded from the catalog. Never disparage a competitor."
             : mode === "general"
               ? "\nCOMPETITOR POLICY: Give an honest, GENERAL comparison — what to look for in this category — from general knowledge only. No live web; never assert a specific volatile competitor fact (price/stock) as certain. Never disparage."
-              : "\nCOMPETITOR POLICY: You may reference a current competitor fact ONLY if you can cite a source; if you can't source it, redirect to the shopper's need. Ground our side from the catalog. Never fabricate a competitor fact and never disparage.";
+              // "full" previously told the model it "may reference a current competitor fact ONLY if you
+              // can cite a source" — but there is NO web/search/retrieval port anywhere in
+              // platform-ports, so no citable current source can exist and the instruction reduced to
+              // "self-certify your own recall". This is the DEFAULT mode, so it shipped to every shopper.
+              // Until Tier 3 (governed web retrieval, docs/design/shopper-widget.md:118-121) is built,
+              // "full" states its real capability. RESTORE the citation allowance in the same PR that
+              // lands a retrieval port — not before.
+              : "\nCOMPETITOR POLICY: You have NO web access or live sources, so you CANNOT cite a current competitor fact - never state one as current or certain, and never imply you looked it up. Give an honest GENERAL comparison from general knowledge (what to look for in this category), ground OUR side from the catalog, and redirect to the shopper's need. Never fabricate a competitor fact and never disparage.";
       }
       // Data residency / consent regime by jurisdiction — compliance enforced in CODE, never a POLICY.
       const euShopper = signals.region === "eu" || /\beu\b|european union|\beea\b|gdpr/.test(text);
