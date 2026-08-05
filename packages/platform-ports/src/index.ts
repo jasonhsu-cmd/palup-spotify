@@ -3,7 +3,13 @@ export type {
   ModelRequest,
   ModelResponse,
   ModelMessage,
+  EmbedRequest,
+  EmbedResponse,
 } from "./model-port.js";
+// Value exports for the OPTIONAL embed capability: the capability guard a caller uses to tell "this
+// adapter cannot embed" from "the embedding call failed", and the two shared fail-closed validators every
+// embedding adapter calls (mirrors VectorPort's exported requireCleanText).
+export { canEmbed, requireEmbedInputs, requireEmbedAlignment } from "./model-port.js";
 export type {
   GroundingPort,
   GroundingContext,
