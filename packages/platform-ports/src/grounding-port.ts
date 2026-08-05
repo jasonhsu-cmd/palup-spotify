@@ -17,6 +17,23 @@ export interface Product {
    * list rather than guessing — but is never a safety guarantee (cross-contact still applies).
    */
   ingredients?: string[];
+  /**
+   * Whether the product can be bought right now. OPTIONAL and THREE-STATE on purpose:
+   *   true      -> confirmed purchasable
+   *   false     -> confirmed not purchasable
+   *   undefined -> UNKNOWN (this adapter/source does not report it) => the agent must say it cannot
+   *                confirm. Absent must never read as "available"; see the CATALOG rule in brain.ts.
+   *
+   * Deliberately a BOOLEAN, not a stock count. Shopify's Storefront API exposes both
+   * `Product.availableForSale: Boolean!` ("Indicates if at least one product variant is available for
+   * sale") and `ProductVariant.quantityAvailable: Int` — but the latter is documented as requiring extra
+   * token access, and a stock NUMBER is precisely the raw material for manufactured urgency ("only 2
+   * left!"), which §8a invariant 11 forbids and which a self-improving sales agent would be tempted to
+   * reach for. Not carrying the number makes that fabrication impossible rather than merely against the
+   * rules, and keeps the adapter inside its stated least-privilege boundary (no inventory scope).
+   * Verified against shopify.dev Storefront API 2026-07 docs, retrieved 2026-08-05.
+   */
+  availableForSale?: boolean;
 }
 
 export interface StorePolicy {

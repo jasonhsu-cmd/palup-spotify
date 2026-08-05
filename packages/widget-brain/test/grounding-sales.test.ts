@@ -19,12 +19,27 @@ describe("grounding / honesty system prompt", () => {
     expect(s).toMatch(/never invent a spec, price, ETA/);
     expect(s).toMatch(/correct them honestly/);
     expect(s).toMatch(/ask one short clarifying question in the SAME reply/);
-    // The anti-urgency rule is unchanged in substance; the sentence around it lost a false premise.
-    // It used to open "All catalog items are in stock" — an unconditional factual assertion made to every
-    // shopper on every turn, while GroundingPort carries no stock field at all. Both halves asserted here
-    // so neither can quietly regress: the prohibition must survive, and the false claim must not return.
-    expect(s).toMatch(/never state or imply an item is in stock, low-stock, or 'almost sold out'/);
+    // AVAILABILITY — three requirements, asserted separately so none can regress behind the others.
+    //
+    // History: this line once opened "All catalog items are in stock" — an unconditional factual claim
+    // made to every shopper on every turn while GroundingPort carried no stock field at all (#157 removed
+    // it). #157 replaced it with a blanket ban on ever discussing availability, which was honest but meant
+    // the agent could not answer the most ordinary pre-purchase question. Availability is now genuinely
+    // GROUNDED (Product.availableForSale), so the ban is deliberately narrowed to what remains unknowable.
+    //
+    // What must hold now:
+    //  1. the original false claim never returns;
+    //  2. availability may be stated ONLY from an explicit catalog line — never inferred from listing;
+    //  3. stock LEVELS and urgency remain forbidden outright, INCLUDING when an item is available (the
+    //     tempting case, and the one a conversion-maximising candidate would reach for — §8a inv 11).
+    // The previous single-regex assertion would have passed even if the anti-urgency clause had been
+    // dropped, as long as that one phrase survived; these three cannot be satisfied by wording alone.
     expect(s).not.toMatch(/All catalog items are in stock/);
+    expect(s).toMatch(/state it ONLY from an item's explicit 'Availability:' line/);
+    expect(s).toMatch(/never infer availability from the item merely being listed/);
+    expect(s).toMatch(/STOCK LEVELS are never in the CATALOG/);
+    expect(s).toMatch(/never use availability to manufacture urgency or scarcity/);
+    expect(s).toMatch(/not even when an item IS available/);
   });
 
   it("injects the chosen pitch directive into the model prompt (RC1: pitch now reaches the model)", async () => {
