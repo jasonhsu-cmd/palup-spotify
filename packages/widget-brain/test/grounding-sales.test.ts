@@ -19,7 +19,12 @@ describe("grounding / honesty system prompt", () => {
     expect(s).toMatch(/never invent a spec, price, ETA/);
     expect(s).toMatch(/correct them honestly/);
     expect(s).toMatch(/ask one short clarifying question in the SAME reply/);
-    expect(s).toMatch(/never claim something is low-stock/);
+    // The anti-urgency rule is unchanged in substance; the sentence around it lost a false premise.
+    // It used to open "All catalog items are in stock" — an unconditional factual assertion made to every
+    // shopper on every turn, while GroundingPort carries no stock field at all. Both halves asserted here
+    // so neither can quietly regress: the prohibition must survive, and the false claim must not return.
+    expect(s).toMatch(/never state or imply an item is in stock, low-stock, or 'almost sold out'/);
+    expect(s).not.toMatch(/All catalog items are in stock/);
   });
 
   it("injects the chosen pitch directive into the model prompt (RC1: pitch now reaches the model)", async () => {
@@ -86,7 +91,12 @@ describe("competitor-mode handling", () => {
   const cases = [
     { mode: "off" as const, expect: /Do NOT discuss competitor specifics/ },
     { mode: "general" as const, expect: /GENERAL comparison/ },
-    { mode: "full" as const, expect: /cite a source/ },
+    // "full" used to say the model "may reference a current competitor fact ONLY if you can cite a
+    // source". No web/search/retrieval port exists in platform-ports, so no citable current source can
+    // exist and that reduced to self-certification — shipped to every shopper, since "full" is the
+    // DEFAULT mode. It now states its real capability. Restore a citation assertion here in the same PR
+    // that lands a retrieval port (Tier 3, docs/design/shopper-widget.md:118-121).
+    { mode: "full" as const, expect: /NO web access or live sources/ },
   ];
   for (const c of cases) {
     it(`mode ${c.mode}: sets flag + injects the right policy`, async () => {

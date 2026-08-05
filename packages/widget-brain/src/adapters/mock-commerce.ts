@@ -28,6 +28,21 @@ interface SubState {
 }
 
 export class MockCommerceAdapter implements CommercePort {
+  /**
+   * Whether THIS instance should be treated as demo fixtures rather than a real commerce system
+   * (CommercePort.isFixtureData → support.ts's account-data guard).
+   *
+   * Set at the COMPOSITION ROOT, not hardcoded on the class, and the distinction is the whole point:
+   * as a TEST DOUBLE this adapter legitimately stands in for a real one, and ~45 tests exercise real
+   * support/subscription logic through it. Marking the class itself would have gated those too, which
+   * says nothing true about production. What is actually wrong is widget-backend handing demo data to
+   * real shoppers — so widget-backend's `createCommercePort()` is where the mark belongs, and a test
+   * there asserts it stays set.
+   */
+  readonly isFixtureData?: boolean;
+  constructor(opts?: { fixtureData?: boolean }) {
+    this.isFixtureData = opts?.fixtureData;
+  }
   private subscriptions: Record<string, SubState> = {
     "shopper-demo": { active: true, consecutiveSkips: 0, paused: false, nextDeliverySkipped: false },
   };

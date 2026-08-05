@@ -62,6 +62,21 @@ export interface SubscriptionActionResult {
 }
 
 export interface CommercePort {
+  /**
+   * TRUE when this adapter serves DEMO/FIXTURE data rather than the merchant's real commerce system.
+   *
+   * Support branches that would state a fact about the SHOPPER'S OWN ACCOUNT must refuse and route to a
+   * human when this is set (widget-brain/src/support.ts). A fixture order confirmed as "on your account"
+   * is not a harmless placeholder — it is a confident false claim about someone's account, and it was
+   * reaching real shoppers: the composition root returns the mock unconditionally and the brain's default
+   * shopper id is the very id that owns the fixtures, so the ownership check PASSED against demo data.
+   *
+   * Absent or false means a real adapter, and nothing is gated. Deliberately separate from the
+   * `isLive` marker returned alongside the port by widget-backend's `createCommercePort()`: that one
+   * gates ADR-0016 subscription EXECUTION, this one gates STATING account facts. They answer different
+   * questions and a future adapter could be live-but-seeded or fixture-but-executing.
+   */
+  readonly isFixtureData?: boolean;
   getOrder(orderId: string): Promise<Order | null>;
   /** The shopper's most recent order — used when they ask "where's my order?" with no number. */
   getRecentOrder(shopperId: string): Promise<Order | null>;
