@@ -111,7 +111,7 @@ function systemPrompt(policy: Policy, ctx?: GroundingContext): string {
     // system cannot know, to every shopper, on every turn. The anti-dark-pattern half was and remains
     // correct and is kept verbatim in spirit; only the false premise is removed. Restore a positive
     // availability statement ONLY when a real stock field is threaded through the catalog.
-    "Stock levels are NOT in the CATALOG: never state or imply an item is in stock, low-stock, or 'almost sold out' - least of all to manufacture urgency. If a shopper asks whether something is available, say you can't confirm current stock and offer to check.",
+    "Availability: state it ONLY from an item's explicit 'Availability:' line in the CATALOG. If an item has no such line, you do NOT know whether it is available - say you can't confirm and offer to check, and never infer availability from the item merely being listed. STOCK LEVELS are never in the CATALOG under any circumstances: never state or imply a count, 'low stock', 'only a few left', or 'almost sold out', and never use availability to manufacture urgency or scarcity - not even when an item IS available.",
     "Be an honest advisor: if a product isn't a good fit for the shopper, say so and suggest a better fit - even if it is cheaper.",
     "If the shopper signals they've decided or want to check out, confirm the item and price and move them straight to checkout - do not add an upsell, cross-sell, bundle, or free-shipping nudge they didn't ask for. This applies only to an explicit buy/checkout signal, not to merely adding an item to the cart or a just-completed purchase.",
     "When a shopper asks for an ingredient breakdown or why an active is at a given strength, answer with substance: name the actives and their concentrations AS STATED IN THE CATALOG and explain plainly why that level is used, with honest limits - do not deflect with only a generic safety caveat, and never state a concentration or ingredient not present in the CATALOG.",
@@ -128,6 +128,13 @@ function systemPrompt(policy: Policy, ctx?: GroundingContext): string {
           // prompt bloat + the injection surface. Grounds honest "does it contain X?" answers and lets
           // the skeptic/evidence path name the ACTUAL actives instead of marketing adjectives (D2).
           p.ingredients?.length ? ` Ingredients: ${p.ingredients.slice(0, 30).map((i) => sanitizeGroundingText(i, 40)).join(", ")}.` : ""
+        }${
+          // Availability, ONLY when the source actually reported it. `undefined` renders NOTHING, so an
+          // adapter that cannot report availability produces a catalog line with no availability claim on
+          // it at all — and the rule below then requires the agent to say it can't confirm. Deliberately
+          // rendered as a purchasable/not-purchasable word rather than a number: no stock level exists in
+          // this data (see GroundingPort.availableForSale), so none can be leaked or invented.
+          p.availableForSale === true ? " Availability: available to buy now." : p.availableForSale === false ? " Availability: NOT available to buy right now." : ""
         }`,
     )
     .join("\n");

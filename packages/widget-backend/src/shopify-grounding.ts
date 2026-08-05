@@ -25,6 +25,8 @@ export interface StorefrontProductNode {
   description?: string;
   tags?: string[];
   priceRange?: { minVariantPrice?: { amount?: string; currencyCode?: string } };
+  /** `Product.availableForSale: Boolean!` — see the GroundingPort field for why not `quantityAvailable`. */
+  availableForSale?: boolean;
 }
 
 /** Storefront query response (the fields this adapter requests). */
@@ -62,6 +64,10 @@ export function mapStorefrontToContext(tenantId: string, data: StorefrontData): 
     description: bound(n.description, MAX_DESC),
     price: formatPrice(n.priceRange?.minVariantPrice),
     tags: (n.tags ?? []).slice(0, MAX_TAGS),
+    // Only carried when Shopify actually returned a boolean. A missing/non-boolean value stays
+    // UNDEFINED rather than collapsing to false, because "unknown" and "not purchasable" are different
+    // claims to make to a shopper and the prompt handles them differently.
+    availableForSale: typeof n.availableForSale === "boolean" ? n.availableForSale : undefined,
   }));
   const policy: StorePolicy = {
     returns: bound(data.shop?.refundPolicy?.body, MAX_DESC),
@@ -84,7 +90,7 @@ const SHOP_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
 const STOREFRONT_QUERY = `query PalUpGrounding($first: Int!) {
   shop { name refundPolicy { body } shippingPolicy { body } }
   products(first: $first) {
-    nodes { id title description tags priceRange { minVariantPrice { amount currencyCode } } }
+    nodes { id title description tags availableForSale priceRange { minVariantPrice { amount currencyCode } } }
   }
 }`;
 
