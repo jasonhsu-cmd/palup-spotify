@@ -32,19 +32,48 @@ export function parseStoreDomains(raw: string | undefined = process.env.SHOPIFY_
   return map;
 }
 
+export interface ResolveShopifyStoreOpts {
+  /**
+   * D1 — the registry-backed shop-domain resolver (`MerchantResolver.shopDomainFor`, merchant-resolver.ts).
+   * When supplied it REPLACES the `domains` map entirely, because the resolver already contains the
+   * `SHOPIFY_STORES` fallback plus the two things the raw map cannot express: a registry row WINS over a
+   * stale env entry, and a REVOKED merchant resolves to nothing at all rather than to their old env host.
+   *
+   * Optional so the callers that must stay byte-identical do: `jobs/catalog-index.ts` (which enumerates
+   * `SHOPIFY_STORES` because `MerchantRegistryPort` has no enumeration operation — see merchant-resolver.ts's
+   * header) passes nothing and behaves exactly as before D1.
+   */
+  shopDomainFor?: (tenantId: string) => Promise<string | undefined>;
+}
+
 /**
  * Resolve a tenant's Shopify credentials, or undefined if the store isn't FULLY configured (missing
  * domain or missing token). Tenant-isolated: the token is fetched via the tenant-scoped SecretsPort and
- * the domain via an own-property lookup. Never logs the token.
+ * the domain via an own-property lookup (or, under D1, through the merchant resolver). Never logs the token.
+ *
+ * THE TOKEN IS STILL `SecretsPort`, AND THAT IS THE WHOLE ANSWER TO "where does the Storefront token come
+ * from". D1 moved the DOMAIN to the registry and deliberately did NOT move the CREDENTIAL: B2's encrypted
+ * `MerchantCredentialStore` (#186) holds the delegate token an install obtains, but serving does not read it.
+ * There is exactly ONE source of truth for the token — `shopify_storefront_token` in `PALUP_SECRETS`,
+ * hand-provisioned per tenant. THE CONSEQUENCE, so nobody has to discover it: a merchant who installs
+ * through C1's OAuth flow now resolves a shop DOMAIN (from their registry row) but has no
+ * `shopify_storefront_token`, so `resolveShopifyStore` returns undefined and their shoppers get the built-in
+ * FIXTURE catalog, not their own products. Reading B2 here is D2.
  */
 export async function resolveShopifyStore(
   tenantId: string,
   secrets: SecretsPort,
   domains: Record<string, string> = parseStoreDomains(),
+  opts: ResolveShopifyStoreOpts = {},
 ): Promise<ShopifyStoreCreds | undefined> {
-  if (!tenantId || !Object.hasOwn(domains, tenantId)) return undefined;
-  const shopDomain = domains[tenantId];
+  if (!tenantId) return undefined;
+  const shopDomain = opts.shopDomainFor
+    ? await opts.shopDomainFor(tenantId)
+    : Object.hasOwn(domains, tenantId)
+      ? domains[tenantId]
+      : undefined;
+  if (!shopDomain) return undefined;
   const accessToken = await secrets.get(tenantId, SHOPIFY_TOKEN_SECRET);
-  if (!shopDomain || !accessToken) return undefined; // not fully configured → caller uses fixtures
+  if (!accessToken) return undefined; // not fully configured → caller uses fixtures
   return { shopDomain, accessToken };
 }

@@ -21,17 +21,31 @@ export function createModelPort(): { port: ModelPort; name: string } {
 // mirrors isVertexConfigured() for the model port, but per-tenant. Wrapped in the caching + degradation
 // layer (per-tenant TTL cache, hard timeouts, stale-while-error, fail-closed safe-empty). The whole
 // thing stays behind GroundingPort. During rollout no tenant has Shopify creds ⇒ everyone gets fixtures.
+//
+// D1 — the SHOP DOMAIN now comes through the merchant resolver (`opts.shopDomainFor`), so a revoked
+// merchant's catalog can no longer be pulled into a prompt from a stale `SHOPIFY_STORES` entry. The TOKEN
+// is unchanged: still `SecretsPort` (see resolveShopifyStore's own doc comment for why, and for what that
+// means for a merchant who installs through C1).
 export function createGroundingPort(
   store: RuntimeStatePort,
   secrets: SecretsPort,
-  opts: { shopifyFetch?: StorefrontFetch } = {}, // injectable for tests; defaults to the live Storefront call
+  opts: {
+    shopifyFetch?: StorefrontFetch; // injectable for tests; defaults to the live Storefront call
+    /** D1: registry-first shop-domain resolution. Absent ⇒ the pre-D1 `SHOPIFY_STORES`-only path. */
+    shopDomainFor?: (tenantId: string) => Promise<string | undefined>;
+  } = {},
 ): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
   const router: GroundingPort = {
     async getContext(tenantId: string): Promise<GroundingContext> {
       // tenantId here is the SERVER-DERIVED request tenant (threaded from the verified widget token via
       // the brain) — never client input, so one merchant can never resolve another's store creds.
-      const creds = await resolveShopifyStore(tenantId, secrets);
+      const creds = await resolveShopifyStore(
+        tenantId,
+        secrets,
+        undefined,
+        opts.shopDomainFor ? { shopDomainFor: opts.shopDomainFor } : {},
+      );
       if (creds) return createShopifyGroundingAdapter(creds, opts.shopifyFetch).getContext(tenantId);
       return fixtures.getContext(tenantId);
     },

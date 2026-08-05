@@ -45,6 +45,7 @@ import {
   type CallbackResult,
 } from "./customer-account-flow.js";
 import { parseStoreDomains } from "./merchant-store.js";
+import { createMerchantResolver } from "./merchant-resolver.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE, DELEGATE_SCOPES_DEFAULT } from "./shopify-install-identity.js";
 import {
   registerShopifyInstallRoutes,
@@ -234,11 +235,13 @@ export async function buildServer(opts?: {
    * `PostgresMerchantRegistry` over the SAME pool the runtime store opened, when DATABASE_URL is set. */
   merchantRegistry?: MerchantRegistryPort;
   /**
-   * C1 — encrypted per-merchant credential custody for the delegate token. NOT CONSTRUCTED IN PRODUCTION
-   * YET: the only implementation is B2's `createMerchantCredentialStore` (#186), which is unmerged, so
-   * today this arrives only from a test. Absent ⇒ the install routes are NOT REGISTERED (see the gate
-   * below). That is deliberate, not an oversight: an install that minted a delegate token and then had
-   * nowhere to store it would leave a live Shopify credential with no custody and no revocation path.
+   * C1 — encrypted per-merchant credential custody for the delegate token. CORRECTED (this said "NOT
+   * CONSTRUCTED IN PRODUCTION YET … #186 is unmerged"; B2 landed and the composition root below now builds
+   * `createMerchantCredentialStore` unconditionally, so this seam is a TEST OVERRIDE, not the only source).
+   * A missing sink ⇒ the install routes are NOT REGISTERED (see the gate below). That is deliberate, not an
+   * oversight: an install that minted a delegate token and then had nowhere to store it would leave a live
+   * Shopify credential with no custody and no revocation path. NOTE (D1): serving still does not READ this
+   * store — the Storefront token comes from `SecretsPort` (merchant-store.ts). That is D2.
    */
   merchantCredentials?: MerchantCredentialSink;
   /**
@@ -282,7 +285,24 @@ export async function buildServer(opts?: {
   // Per-merchant grounding needs the store (cache) + secrets (Shopify creds), so it is built here (not
   // module-level). Construct secrets in the composition root after config load (per the slice-2 review).
   const secrets = createEnvSecrets();
-  const grounding = createGroundingPort(store, secrets);
+  // ── D1 — the merchant registry, and the resolver that is now the ONLY way the serving path decides
+  // which merchant a request belongs to and whether it may still be served. See merchant-resolver.ts for
+  // the precedence rule, what stayed on env, and why. HOISTED HERE (it used to be constructed ~300 lines
+  // below, next to the C1 install gate) for one concrete reason: `createGroundingPort` needs
+  // `shopDomainFor`, so the resolver must exist before it. Reuses the pool the runtime store already
+  // opened — never a second `pg.Pool` (the same HIGH finding that made `createVectorStore` share
+  // `runtimeResult.sql`). No durable registry ⇒ `undefined` ⇒ the resolver is pure env and every path below
+  // behaves exactly as it did before D1, which is what keeps `pnpm backend`, the e2e suite and the eval
+  // corpus unchanged.
+  const merchantRegistry: MerchantRegistryPort | undefined =
+    opts?.merchantRegistry ?? (runtimeResult.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : undefined);
+  const merchants = createMerchantResolver({
+    store,
+    ...(merchantRegistry ? { registry: merchantRegistry } : {}),
+    embedKeys: EMBED_KEYS,
+    storeDomains: () => parseStoreDomains(),
+  });
+  const grounding = createGroundingPort(store, secrets, { shopDomainFor: (t) => merchants.shopDomainFor(t) });
   // Hoisted ABOVE `createMemoryService` below (it used to be declared much later, alongside
   // `shopperIdentity`) so the memory service can be constructed with a real `hmacKey` from the start —
   // security-review remediation MEDIUM finding, PR #152: a `acct:` subject's audit `subjectRef` must be
@@ -429,7 +449,9 @@ export async function buildServer(opts?: {
   // `WIDGET_AUTH_REQUIRED` is computed once, at the very top of this function (before the fail-fast boot
   // guard) — reused here unchanged.
   // `EMBED_KEYS` is resolved once, at the very top of this function (alongside the other fail-fast boot
-  // guards) — see `resolveEmbedKeys`.
+  // guards) — see `resolveEmbedKeys`. Since D1 NO ROUTE READS IT DIRECTLY: it is handed to
+  // `createMerchantResolver` above as the named FALLBACK behind the merchant registry, and every embed-key
+  // lookup goes through `merchants.resolveEmbedKey`.
   const widgetIdentity = createWidgetTokenIdentity(WIDGET_TOKEN_SECRET);
   // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
   // F4 (startup precondition): SHOPPER_AUTH is only ever HONORED when WIDGET_AUTH_REQUIRED is ALSO on —
@@ -539,10 +561,20 @@ export async function buildServer(opts?: {
   // ── C1 — Shopify app install (OAuth authorization code grant → delegate access token) ──────────────
   //
   // WHAT THIS DOES AND DOES NOT DO. It records an install in `pl_merchant` (B1) and custodies the
-  // merchant's delegate token (B2). It does NOT make the merchant servable: every tenancy read on the
-  // serving path above still comes from env vars (EMBED_KEYS, parseStoreDomains, MERCHANT_REGION,
-  // MERCHANT_GROUNDING_MODE) and the Storefront token still comes from `resolveShopifyStore`'s SecretsPort
-  // lookup. Cutting those over is D1/D2. See routes/shopify-install.ts's header for the full list.
+  // merchant's delegate token (B2).
+  //
+  // UPDATED BY D1 — this paragraph used to end "It does NOT make the merchant servable", and that is no
+  // longer true. Since D1, an installed merchant's IDENTITY is live: `/widget/token` mints for their registry
+  // `embedKey` with no env change (merchant-resolver.ts), `/chat` re-checks their `status` every turn, and
+  // grounding resolves their shop domain from their row. What is STILL not live, precisely:
+  //   • their STOREFRONT TOKEN. Serving reads `shopify_storefront_token` from `SecretsPort`
+  //     (merchant-store.ts) — NOT B2's encrypted delegate credential — so a self-installed merchant's
+  //     shoppers get the FIXTURE catalog until an operator provisions that secret. That is D2.
+  //   • `MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` are still process-wide env (see the
+  //     SHOPIFY_INSTALL_REGION mismatch warning below), so an installed merchant is SERVED with this
+  //     process's residency, not the one recorded on their row.
+  //   • the catalog-index and retention-sweep jobs still enumerate `SHOPIFY_STORES`, because
+  //     `MerchantRegistryPort` has no enumeration operation (C3's finding, still open).
   //
   // FULLY-CONFIGURED-OR-ABSENT, the same posture as CAA_ENABLED: every precondition below is individually
   // load-bearing and a missing one means the routes are never registered (404), not that they half-work.
@@ -572,6 +604,22 @@ export async function buildServer(opts?: {
     const r = process.env.SHOPIFY_INSTALL_REGION;
     return r === "us" || r === "eu" || r === "uk" || r === "other" ? r : undefined; // no silent default
   })();
+  // D1 — the one residency gap the cutover does NOT close, made observable instead of silent.
+  // `SHOPIFY_INSTALL_REGION` is the residency an installing merchant's registry row is RECORDED with;
+  // `MERCHANT_REGION` is the residency every merchant is actually SERVED with (it feeds `signals.region`
+  // and, through it, `CONSENT_MODE`). D1 cut identity and servability over to the registry but left
+  // `region`/`groundingMode` on process-wide env — see merchant-resolver.ts's header for why — so these two
+  // CAN disagree, and a disagreement is exactly the residency-by-unset-env-var the legal review flagged
+  // (merchant-registry-port.ts:89-91). Warn, don't hard-gate: refusing to boot would take a serving
+  // deployment down over a mismatch that predates this PR and harms nobody until a merchant installs.
+  if (SHOPIFY_INSTALL_REGION && SHOPIFY_INSTALL_REGION !== MERCHANT_REGION) {
+    console.warn(
+      `[config] SHOPIFY_INSTALL_REGION=${SHOPIFY_INSTALL_REGION} but MERCHANT_REGION=${MERCHANT_REGION}. ` +
+        `A merchant installing through /shopify/install is RECORDED as "${SHOPIFY_INSTALL_REGION}" but is ` +
+        `SERVED as "${MERCHANT_REGION}" (consentMode "${CONSENT_MODE}"), because D1 left region on ` +
+        `process-wide env. Set both to the same value until per-merchant region lands (D2).`,
+    );
+  }
   const SHOPIFY_INSTALL_SCOPES = process.env.SHOPIFY_INSTALL_SCOPES || INSTALL_SCOPES_DEFAULT;
   const SHOPIFY_DELEGATE_SCOPES = (process.env.SHOPIFY_DELEGATE_SCOPES ?? DELEGATE_SCOPES_DEFAULT.join(","))
     .split(",")
@@ -579,10 +627,8 @@ export async function buildServer(opts?: {
     .filter(Boolean);
   // Read at boot for the GATE only (an unprovisioned secret must make the feature absent, not 500 later).
   const shopifyAppSecretPresent = Boolean(await secrets.get(SHOPIFY_APP_SECRET_SCOPE, SHOPIFY_APP_CLIENT_SECRET_NAME));
-  // Reuses the pool the runtime store already opened (never a second pg.Pool — the same HIGH finding that
-  // made createVectorStore share `runtimeResult.sql`).
-  const merchantRegistry: MerchantRegistryPort | undefined =
-    opts?.merchantRegistry ?? (runtimeResult.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : undefined);
+  // `merchantRegistry` is now constructed MUCH EARLIER (alongside the D1 merchant resolver, which needs
+  // it before `createGroundingPort`) — reused here unchanged.
   // B2's store satisfies `MerchantCredentialSink` STRUCTURALLY (`put(tenantId, token, {actor})`), so this is
   // an assignment with no adapter. `createAesGcmCrypto(secrets)` is the same CryptoPort construction
   // widget-memory uses; the `merchant-cred` key scope keeps a memory-key compromise from exposing merchant
@@ -675,7 +721,13 @@ export async function buildServer(opts?: {
   // `store`/`vector` surface which adapter is actually live (security review, MEDIUM — same rationale as
   // the [boot] log line above): "postgres" in every real deploy (DATABASE_URL set), "memory" only in
   // local/dev/test, "injected" only under a test that supplies its own store/vectorPort.
-  app.get("/health", async () => ({ ok: true, model: modelName, store: runtimeResult.kind, vector: vectorResult.kind }));
+  // `merchants` (D1) surfaces WHERE tenancy is resolved from, for the same reason `store`/`vector` surface
+  // which adapter is live: "registry+env" in a real deploy (a durable registry, with the named
+  // `WIDGET_EMBED_KEYS` fallback still armed for merchants that have no row — e.g. staging's `demo`), "env"
+  // in local/dev/e2e (no DATABASE_URL ⇒ no registry). It is the FLAG half of requirement 3: the fallback is
+  // never silent, and an operator can confirm the posture without reading the deploy workflow. Non-secret —
+  // it names a mode, never a key, a tenant or a domain.
+  app.get("/health", async () => ({ ok: true, model: modelName, store: runtimeResult.kind, vector: vectorResult.kind, merchants: merchants.resolutionMode }));
 
   app.get("/", async (_req, reply) => {
     reply.type("text/html").send(widgetHtml);
@@ -697,13 +749,20 @@ export async function buildServer(opts?: {
     } catch {
       /* fail-open: minting is cheap and the /chat model path is separately capped */
     }
+    // D1 — THE CUTOVER POINT. The tenant now comes from the MERCHANT REGISTRY first and the
+    // `WIDGET_EMBED_KEYS` env map only as a named, logged, audited fallback (merchant-resolver.ts holds the
+    // whole precedence rule). Every one of the four non-`ok` outcomes ends in the SAME 401 with the SAME
+    // body: a revoked merchant, an unknown key, a blank key and an unreadable registry must not be
+    // distinguishable from outside, or this endpoint becomes an oracle for which merchants exist and which
+    // were suspended (the same reason C1's callback has one uniform refusal — routes/shopify-install.ts:467).
+    // The server-side log and the audit chain are where the distinction lives.
     const key = (req.query as { key?: string })?.key;
-    const merchantId = typeof key === "string" ? EMBED_KEYS[key] : undefined;
-    if (typeof merchantId !== "string" || !WIDGET_TOKEN_SECRET) {
+    const resolved = await merchants.resolveEmbedKey(key, "embed-key-mint");
+    if (resolved.kind !== "ok" || !WIDGET_TOKEN_SECRET) {
       reply.code(401);
       return { error: "invalid or unconfigured embed key" };
     }
-    return { token: mintWidgetToken(WIDGET_TOKEN_SECRET, merchantId, WIDGET_TOKEN_TTL_SECONDS), expiresInSeconds: WIDGET_TOKEN_TTL_SECONDS };
+    return { token: mintWidgetToken(WIDGET_TOKEN_SECRET, resolved.tenantId, WIDGET_TOKEN_TTL_SECONDS), expiresInSeconds: WIDGET_TOKEN_TTL_SECONDS };
   });
 
   // ADR-0017 T2/T4 — mint a shopper session token from a verified Shopify App-Proxy request. Reached via
@@ -740,17 +799,35 @@ export async function buildServer(opts?: {
       reply.code(500);
       return { error: "shopper auth not configured" };
     }
-    // shop-domain -> tenant reverse lookup (the forward map, tenant -> domain, is the same registry
-    // model.ts's grounding router already reuses for Storefront creds — see merchant-store.ts).
-    const domains = parseStoreDomains();
+    // D1 — no shopper session is minted on a store that is no longer served. 404 (not 401): the feature is
+    // absent for this merchant, exactly as it is when SHOPPER_AUTH is off, and the shopper learns nothing
+    // about why. A widget token minted before the revocation is what makes this check necessary — it stays
+    // cryptographically valid for up to WIDGET_TOKEN_TTL_SECONDS.
+    if ((await merchants.servability(merchantPrincipal.merchantId, "shopper-session")).kind !== "servable") {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    // shop-domain -> tenant reverse lookup, now through the resolver (registry first, `SHOPIFY_STORES` as
+    // the named fallback). A ONE-ENTRY map on purpose: `verifyShopifyAppProxyShopper` only ever accepts a
+    // `shop` that resolves to `expectedTenant` (shopify-shopper-identity.ts:132-133), so resolving just THIS
+    // tenant's own host is behaviourally identical for the accept case and strictly narrower otherwise — no
+    // other merchant's domain is even in the map to be matched. `resolveTenant` is sync by contract, so the
+    // async lookup happens here, once, rather than pushing async into that verifier.
+    const expectedDomain = await merchants.shopDomainFor(merchantPrincipal.merchantId);
     const reverseDomains: Record<string, string> = Object.create(null); // null-proto: no __proto__ pollution
-    for (const [tenant, domain] of Object.entries(domains)) if (domain) reverseDomains[domain] = tenant;
+    if (expectedDomain) reverseDomains[expectedDomain.toLowerCase()] = merchantPrincipal.merchantId;
     // Preserve repeated-key arrays (Shopify signs them comma-joined) so a legitimately-signed request
     // isn't rejected; non-string junk is dropped. Semantic fields are still single-value-guarded downstream.
     const params = normalizeAppProxyQuery(req.query as Record<string, unknown>);
     const principal = await verifyShopifyAppProxyShopper(params, {
       expectedTenant: merchantPrincipal.merchantId,
-      resolveTenant: (shop) => (Object.hasOwn(reverseDomains, shop) ? reverseDomains[shop] : undefined),
+      // Lowercased on both sides: hosts are case-insensitive and the registry stores a canonical lowercase
+      // form (postgres-merchant-registry.ts:220-222). Strictly bounded either way — the verifier still
+      // requires the result to equal `expectedTenant`.
+      resolveTenant: (shop) => {
+        const host = shop.toLowerCase();
+        return Object.hasOwn(reverseDomains, host) ? reverseDomains[host] : undefined;
+      },
       secrets,
     });
     if (principal.kind !== "shopper") return { shopper: null }; // browsing, not logged in — not an error
@@ -776,25 +853,41 @@ export async function buildServer(opts?: {
       /* fail-open: minting is cheap and the token exchange is separately bounded */
     }
     // Establish the merchant tenant. A window.open navigation (the widget sign-in, task 10) can't set an
-    // Authorization header, so accept the publishable embed key via ?key= (resolved through EMBED_KEYS,
-    // exactly like /widget/token) OR a Bearer widget token (fetch callers). The embed key is publishable
+    // Authorization header, so accept the publishable embed key via ?key= (resolved through the merchant
+    // resolver, exactly like /widget/token) OR a Bearer widget token (fetch callers). The embed key is publishable
     // and only NAMES the tenant — the OAuth state/PKCE + the shop's own auth protect the flow.
+    // D1 — the `?key=` branch goes through the SAME resolver `/widget/token` uses (registry first, env as
+    // the named fallback, revoked ⇒ refused), and the Bearer branch gets the per-request servability check,
+    // so neither transport can start an OAuth flow for a merchant that is no longer served.
     const keyParam = (req.query as { key?: string })?.key;
     let tenant: string | undefined;
-    if (typeof keyParam === "string" && Object.hasOwn(EMBED_KEYS, keyParam)) {
-      tenant = EMBED_KEYS[keyParam];
+    if (typeof keyParam === "string" && keyParam) {
+      const resolved = await merchants.resolveEmbedKey(keyParam, "customer-login");
+      if (resolved.kind === "ok") tenant = resolved.tenantId;
+      // A revoked/unknown/unreadable key deliberately does NOT fall through to the Bearer branch: falling
+      // through would let a caller who presents a revoked key AND a stale token slip past the refusal.
+      if (resolved.kind !== "ok") {
+        reply.code(401);
+        return { error: "unauthenticated" };
+      }
     } else {
       const authHeader = req.headers["authorization"];
       const widgetToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
       const merchantPrincipal = await widgetIdentity.authenticate(widgetToken);
-      if (merchantPrincipal.kind === "merchant") tenant = merchantPrincipal.merchantId;
+      if (merchantPrincipal.kind === "merchant") {
+        if ((await merchants.servability(merchantPrincipal.merchantId, "customer-login")).kind !== "servable") {
+          reply.code(401);
+          return { error: "unauthenticated" };
+        }
+        tenant = merchantPrincipal.merchantId;
+      }
     }
     if (!tenant) {
       reply.code(401);
       return { error: "unauthenticated" };
     }
-    const domains = parseStoreDomains();
-    const shopDomain = Object.hasOwn(domains, tenant) ? domains[tenant] : undefined;
+    // Registry-first shop domain (`undefined` covers both "revoked" and "not configured" — both mean 404).
+    const shopDomain = await merchants.shopDomainFor(tenant);
     if (!shopDomain) {
       reply.code(404);
       return { error: "not found" }; // no store mapped for this tenant
@@ -1257,6 +1350,41 @@ export async function buildServer(opts?: {
     if (!allowed) {
       reply.code(429);
       return { reply: "You're sending messages a little too fast — give me a moment and try again.", mode: "support", pitch: "none", escalate: false, flags: ["rate_limited"], memoryEnabled: memoryServiceEnabled, consentMode: CONSENT_MODE };
+    }
+
+    // ── D1 — REVOCATION, ENFORCED ON EVERY TURN. This is the property that did not exist before this PR.
+    //
+    // A widget token is a signed bearer credential with its own TTL (WIDGET_TOKEN_TTL_SECONDS, default 1h),
+    // so gating only the MINT would leave an uninstalled merchant served for up to an hour after C2's
+    // `app/uninstalled` webhook revoked them — and, before D1, forever, because nothing on this path read
+    // `pl_merchant` at all. So the registry is re-checked here, per turn.
+    //
+    // A DENY-LIST, NOT AN ALLOWLIST (merchant-resolver.ts's header argues this at length): a tenant with NO
+    // registry row keeps being served, because that is the `demo` tenant the eval corpus, the e2e suite and
+    // the staging smoke gate run against, plus every hand-configured merchant. Only a row that says
+    // NOT-`active` refuses.
+    //
+    // PLACED AFTER the rate limiters (so an unauthenticated flood cannot spend unbounded registry reads) and
+    // BEFORE the try/catch below (so a registry fault surfaces as this explicit 403 rather than being
+    // absorbed by the generic model-error handler, which returns 200). Fails CLOSED on a registry error —
+    // see the resolver header for why, and for what that costs.
+    const servable = await merchants.servability(tenantId, "chat");
+    if (servable.kind !== "servable") {
+      reply.code(403);
+      return {
+        // Shopper-facing copy: it says what is true (this assistant is not available here) and promises
+        // nothing — no human, no export, no erasure (shopper-promise-guard.ts's claim classes).
+        reply: "This shopping assistant isn't available on this store right now.",
+        mode: "support",
+        pitch: "none",
+        escalate: false,
+        // Two DISTINGUISHABLE flags, because they are different operator problems: a deliberate revocation
+        // versus a registry we could not read. Neither is distinguishable to the shopper, whose reply text is
+        // identical.
+        flags: [servable.kind === "revoked" ? "merchant_inactive" : "merchant_unresolved"],
+        memoryEnabled: memoryServiceEnabled,
+        consentMode: CONSENT_MODE,
+      };
     }
 
     try {
