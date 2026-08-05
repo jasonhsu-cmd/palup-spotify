@@ -254,6 +254,22 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
         `/shopify/callback reactivates it the same way. Never delete the row.)`,
     }));
 
+  /**
+   * Audited ONLY when a durable registry is actually wired.
+   *
+   * The distinction is the difference between noise and a governance fact. With NO registry (local dev,
+   * `pnpm backend`, the e2e suite, any deployment without `DATABASE_URL`) env is not a "fallback" at all —
+   * it is the ONLY tenancy mechanism that exists, and recording "resolved from env" on the first turn of
+   * every such process says nothing an operator did not already know from `GET /health` reporting
+   * `merchants: "env"`. WITH a registry wired, the same event means something specific and worth a durable
+   * row: *this deployment has a merchant registry and is still serving somebody from config* — the exact
+   * state that needs either a real install or a deliberate decision to keep the config entry.
+   *
+   * Requirement 3 ("never silent") is satisfied independently of this, by the `[merchant]` log line and the
+   * `/health` mode — both of which fire in BOTH postures. This narrowing removes audit noise; it does not
+   * remove observability. It is also what keeps `widget-tenant.test.ts`'s exact per-tenant audit counts
+   * (`:38`, `:75`) meaningful rather than adjusted to fit a new writer.
+   */
   const auditEnvFallback = (tenantId: string, surface: ResolutionSurface, variable: string): Promise<void> =>
     auditOnce(tenantId, `env:${surface}`, () => ({
       actor: "system:merchant-resolver",
@@ -349,7 +365,7 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
             `logged because a fallback nobody can see is how #169 happened.`,
         ),
       );
-      void auditEnvFallback(envTenant, surface, "WIDGET_EMBED_KEYS");
+      if (registry) void auditEnvFallback(envTenant, surface, "WIDGET_EMBED_KEYS");
       const out: TenantResolution = { kind: "ok", tenantId: envTenant, source: "env" };
       if (s.kind === "servable" && s.record) out.record = s.record;
       return out;

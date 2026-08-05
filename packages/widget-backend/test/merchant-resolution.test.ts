@@ -227,6 +227,17 @@ describe("D1 (3) precedence + fallback are EXPLICIT and OBSERVABLE (never silent
     await app.close();
   });
 
+  it("does NOT audit the env fallback when no registry is wired — that is noise, not a governance fact", async () => {
+    // With no registry, env is not a "fallback", it is the only mechanism there is: recording it on the
+    // first turn of every dev/e2e process says nothing `/health` does not already say. The LOG LINE and the
+    // /health mode still fire, so requirement 3 ("never silent") holds in both postures. This also keeps
+    // widget-tenant.test.ts's exact per-tenant audit counts (:38, :75) meaningful.
+    const { app, store } = await serve(); // no registry
+    await mint(app, "demo-embed-key");
+    expect((await store.readAudit({ tenantId: "demo" })).map((a) => a.action)).not.toContain("merchant.resolved_from_env");
+    await app.close();
+  });
+
   it("/health names the resolution mode, so an operator can see the fallback is armed", async () => {
     const { app } = await serve(await activeRegistry());
     expect((await app.inject({ method: "GET", url: "/health" })).json()).toMatchObject({ merchants: "registry+env" });
