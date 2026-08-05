@@ -1,7 +1,7 @@
 export { VertexModelAdapter } from "./vertex-adapter.js";
 export {
   DEFAULT_EMBED_MODEL,
-  DEFAULT_EMBED_TASK_TYPE,
+  DEFAULT_EMBED_TASK_TYPES,
   maxBatchForEmbedModel,
 } from "./vertex-adapter.js";
 export type {

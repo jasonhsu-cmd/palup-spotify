@@ -38,7 +38,7 @@ describe("canEmbed — 'cannot embed' and 'embedding failed' are different facts
     const port = fakeEmbeddingPort();
     expect(canEmbed(port)).toBe(true);
     if (!canEmbed(port)) throw new Error("guard did not narrow");
-    const res = await port.embed({ texts: ["ceramide cream"] }); // no `!`, no cast
+    const res = await port.embed({ texts: ["ceramide cream"], purpose: "document" }); // no `!`, no cast
     expect(res.vectors).toHaveLength(1);
   });
 
@@ -52,66 +52,67 @@ describe("canEmbed — 'cannot embed' and 'embedding failed' are different facts
       },
     };
     expect(canEmbed(flaky)).toBe(true); // capability is declared…
-    await expect(flaky.embed?.({ texts: ["x"] })).rejects.toThrow(/503/); // …and the call rejects
+    await expect(flaky.embed?.({ texts: ["x"], purpose: "document" })).rejects.toThrow(/503/); // …and the call rejects
   });
 });
 
 // ── batching + partial failure ─────────────────────────────────────────────────────────────────────
 describe("requireEmbedInputs — a batch is validated before any provider spend", () => {
   it("rejects an empty batch (there is no honest dimension to report for zero texts)", () => {
-    expect(() => requireEmbedInputs([])).toThrow(/at least one text/i);
+    expect(() => requireEmbedInputs({ texts: [], purpose: "document" })).toThrow(/at least one text/i);
   });
 
   it("rejects a blank/whitespace-only item, naming its index so the caller can fix that item", () => {
-    expect(() => requireEmbedInputs(["ceramide cream", "   "])).toThrow(/index 1/);
+    expect(() => requireEmbedInputs({ texts: ["ceramide cream", "   "], purpose: "document" })).toThrow(/index 1/);
   });
 
   it("rejects the WHOLE batch, so a bad item can never become a silent hole in the corpus", () => {
     const texts = ["a", "b", "c", "d", "e", "f", "g", "", "i"];
     // Item 7 is bad. Fail closed on all nine rather than indexing eight and losing one silently.
-    expect(() => requireEmbedInputs(texts)).toThrow(/index 7/);
+    expect(() => requireEmbedInputs({ texts, purpose: "document" })).toThrow(/index 7/);
   });
 
   it("accepts a batch of many texts — batching is the point (250 products, not 250 HTTP calls)", () => {
-    expect(() => requireEmbedInputs(Array.from({ length: 250 }, (_, i) => `product ${i}`))).not.toThrow();
+    expect(() => requireEmbedInputs({ texts: Array.from({ length: 250 }, (_, i) => `product ${i}`), purpose: "document" })).not.toThrow();
   });
 
   it("rejects a non-array / non-string input rather than coercing it", () => {
-    expect(() => requireEmbedInputs(undefined as unknown as string[])).toThrow(/array/i);
-    expect(() => requireEmbedInputs([42 as unknown as string])).toThrow(/index 0/);
+    expect(() => requireEmbedInputs({ texts: undefined, purpose: "document" } as unknown as EmbedRequest)).toThrow(/array/i);
+    expect(() => requireEmbedInputs({ texts: [42 as unknown as string], purpose: "document" })).toThrow(/index 0/);
   });
 });
 
 describe("requireEmbedAlignment — vectors[i] belongs to texts[i], or nobody gets a corpus", () => {
-  const ok = { vectors: [[1, 2], [3, 4]], dimension: 2, model: "fake" };
+  const req: EmbedRequest = { texts: ["a", "b"], purpose: "document" };
+  const ok: EmbedResponse = { vectors: [[1, 2], [3, 4]], dimension: 2, model: "fake", purpose: "document" };
 
   it("passes an aligned response", () => {
-    expect(() => requireEmbedAlignment(["a", "b"], ok)).not.toThrow();
+    expect(() => requireEmbedAlignment(req, ok)).not.toThrow();
   });
 
   it("REJECTS a truncated batch (the `first: 250` failure class, at the port)", () => {
-    const short = { vectors: [[1, 2]], dimension: 2, model: "fake" };
-    expect(() => requireEmbedAlignment(["a", "b"], short)).toThrow(/2 texts.*1 vector/i);
+    const short: EmbedResponse = { vectors: [[1, 2]], dimension: 2, model: "fake", purpose: "document" };
+    expect(() => requireEmbedAlignment(req, short)).toThrow(/2 texts.*1 vector/i);
   });
 
   it("rejects extra vectors too — a longer answer is just as misaligned", () => {
-    const long = { vectors: [[1, 2], [3, 4], [5, 6]], dimension: 2, model: "fake" };
-    expect(() => requireEmbedAlignment(["a", "b"], long)).toThrow(/2 texts.*3 vector/i);
+    const long: EmbedResponse = { vectors: [[1, 2], [3, 4], [5, 6]], dimension: 2, model: "fake", purpose: "document" };
+    expect(() => requireEmbedAlignment(req, long)).toThrow(/2 texts.*3 vector/i);
   });
 
   it("rejects mixed dimensions within one response (a corpus of two shapes ranks as garbage)", () => {
-    const mixed = { vectors: [[1, 2], [3, 4, 5]], dimension: 2, model: "fake" };
-    expect(() => requireEmbedAlignment(["a", "b"], mixed)).toThrow(/dimension/i);
+    const mixed: EmbedResponse = { vectors: [[1, 2], [3, 4, 5]], dimension: 2, model: "fake", purpose: "document" };
+    expect(() => requireEmbedAlignment(req, mixed)).toThrow(/dimension/i);
   });
 
   it("rejects a `dimension` field that disagrees with the vectors it describes", () => {
-    const lying = { vectors: [[1, 2], [3, 4]], dimension: 768, model: "fake" };
-    expect(() => requireEmbedAlignment(["a", "b"], lying)).toThrow(/dimension/i);
+    const lying: EmbedResponse = { vectors: [[1, 2], [3, 4]], dimension: 768, model: "fake", purpose: "document" };
+    expect(() => requireEmbedAlignment(req, lying)).toThrow(/dimension/i);
   });
 
   it("rejects an empty or non-finite vector (a zero/NaN vector scores 0 against everything)", () => {
-    expect(() => requireEmbedAlignment(["a"], { vectors: [[]], dimension: 0, model: "fake" })).toThrow(/dimension/i);
-    expect(() => requireEmbedAlignment(["a"], { vectors: [[1, Number.NaN]], dimension: 2, model: "fake" })).toThrow(/finite/i);
+    expect(() => requireEmbedAlignment({ texts: ["a"], purpose: "document" }, { vectors: [[]], dimension: 0, model: "fake", purpose: "document" })).toThrow(/dimension/i);
+    expect(() => requireEmbedAlignment({ texts: ["a"], purpose: "document" }, { vectors: [[1, Number.NaN]], dimension: 2, model: "fake", purpose: "document" })).toThrow(/finite/i);
   });
 });
 
@@ -120,7 +121,7 @@ describe("EmbedResponse provenance — dimension + model, so a corpus cannot sil
   it("reports the dimension it actually produced, alongside the model that produced it", async () => {
     const port = fakeEmbeddingPort({ dimension: 4, model: "fake-embedding-4d" });
     if (!canEmbed(port)) throw new Error("fake should embed");
-    const res = await port.embed({ texts: ["ceramide cream", "zinc sunscreen"] });
+    const res = await port.embed({ texts: ["ceramide cream", "zinc sunscreen"], purpose: "document" });
     expect(res.dimension).toBe(4);
     expect(res.vectors.every((v) => v.length === 4)).toBe(true);
     expect(res.model).toBe("fake-embedding-4d");
@@ -132,7 +133,7 @@ describe("EmbedResponse provenance — dimension + model, so a corpus cannot sil
     const indexedWith = { model: "fake-embedding-4d", dimension: 4 };
     const port = fakeEmbeddingPort({ dimension: 8, model: "fake-embedding-8d" });
     if (!canEmbed(port)) throw new Error("fake should embed");
-    const res = await port.embed({ texts: ["ceramide cream"] });
+    const res = await port.embed({ texts: ["ceramide cream"], purpose: "document" });
     expect(res.dimension).not.toBe(indexedWith.dimension); // caller's own refusal condition
     expect(res.model).not.toBe(indexedWith.model);
   });
@@ -141,8 +142,8 @@ describe("EmbedResponse provenance — dimension + model, so a corpus cannot sil
     const silent = fakeEmbeddingPort();
     const metered = fakeEmbeddingPort({ usage: true });
     if (!canEmbed(silent) || !canEmbed(metered)) throw new Error("fakes should embed");
-    expect((await silent.embed({ texts: ["abc"] })).usage).toBeUndefined(); // never a fabricated 0
-    expect((await metered.embed({ texts: ["abc"] })).usage).toEqual({ inputTokens: 3 });
+    expect((await silent.embed({ texts: ["abc"], purpose: "document" })).usage).toBeUndefined(); // never a fabricated 0
+    expect((await metered.embed({ texts: ["abc"], purpose: "document" })).usage).toEqual({ inputTokens: 3 });
   });
 });
 
@@ -156,12 +157,12 @@ describe("createRedactingModelPort — embed inputs get the same egress guardrai
       },
       async embed(req) {
         seen.push(req);
-        return { vectors: req.texts.map(() => [1, 0]), dimension: 2, model: "spy-embed" };
+        return { vectors: req.texts.map(() => [1, 0]), dimension: 2, model: "spy-embed", purpose: req.purpose };
       },
     };
     const port = createRedactingModelPort(inner);
     if (!canEmbed(port)) throw new Error("redacting port must forward the embed capability");
-    await port.embed({ texts: ["note: card 4111 1111 1111 1111", "ceramide cream"], tenantId: "acme" });
+    await port.embed({ texts: ["note: card 4111 1111 1111 1111", "ceramide cream"], purpose: "document", tenantId: "acme" });
     expect(seen[0]?.texts[0]).toBe("note: card [redacted-card]");
     expect(seen[0]?.texts[1]).toBe("ceramide cream");
     expect(seen[0]?.tenantId).toBe("acme"); // attribution preserved
@@ -181,12 +182,12 @@ describe("createRedactingModelPort — embed inputs get the same egress guardrai
       }
       async embed(req: EmbedRequest): Promise<EmbedResponse> {
         // Reads `this` — a decorator that forwarded an UNBOUND method reference would throw here.
-        return { vectors: req.texts.map(() => new Array<number>(this.dim).fill(0.5)), dimension: this.dim, model: "class-embed" };
+        return { vectors: req.texts.map(() => new Array<number>(this.dim).fill(0.5)), dimension: this.dim, model: "class-embed", purpose: req.purpose };
       }
     }
     const port = createRedactingModelPort(new ClassAdapter());
     if (!canEmbed(port)) throw new Error("capability lost");
-    expect((await port.embed({ texts: ["x"] })).dimension).toBe(3);
+    expect((await port.embed({ texts: ["x"], purpose: "document" })).dimension).toBe(3);
   });
 });
 
@@ -199,7 +200,7 @@ describe("createMeteringModelPort — embedding spend is metered at the same cho
       now: () => (t += 25),
     });
     if (!canEmbed(port)) throw new Error("metering port must forward the embed capability");
-    const res = await port.embed({ texts: ["abc", "de"] });
+    const res = await port.embed({ texts: ["abc", "de"], purpose: "document" });
     expect(res.vectors).toHaveLength(2); // passthrough
     expect(events).toHaveLength(1);
     expect(events[0]?.tenantId).toBe("unknown"); // no tenant on the request → never cross-tenant
@@ -212,7 +213,7 @@ describe("createMeteringModelPort — embedding spend is metered at the same cho
   it("attributes the event to the request tenant", async () => {
     const { events, port: telemetry } = spyTelemetry();
     const port = createMeteringModelPort(fakeEmbeddingPort({ usage: true }), telemetry);
-    await port.embed?.({ texts: ["abc"], tenantId: "acme" });
+    await port.embed?.({ texts: ["abc"], purpose: "document", tenantId: "acme" });
     expect(events[0]?.tenantId).toBe("acme");
   });
 
@@ -227,7 +228,7 @@ describe("createMeteringModelPort — embedding spend is metered at the same cho
       },
     };
     const port = createMeteringModelPort(boom, telemetry);
-    await expect(port.embed?.({ texts: ["x"], tenantId: "acme" })).rejects.toThrow(/503/);
+    await expect(port.embed?.({ texts: ["x"], purpose: "document", tenantId: "acme" })).rejects.toThrow(/503/);
     expect(events).toHaveLength(0);
   });
 
@@ -241,7 +242,7 @@ describe("createMeteringModelPort — embedding spend is metered at the same cho
       },
     };
     const port = createMeteringModelPort(fakeEmbeddingPort(), throwing);
-    const res = await port.embed?.({ texts: ["x"], tenantId: "acme" });
+    const res = await port.embed?.({ texts: ["x"], purpose: "document", tenantId: "acme" });
     expect(res?.vectors).toHaveLength(1);
   });
 
@@ -259,7 +260,7 @@ describe("createMeteringModelPort — embedding spend is metered at the same cho
     const { events, port: telemetry } = spyTelemetry();
     const stacked = createRedactingModelPort(createMeteringModelPort(fakeEmbeddingPort({ usage: true }), telemetry));
     expect(canEmbed(stacked)).toBe(true);
-    const res = await stacked.embed?.({ texts: ["card 4111 1111 1111 1111"], tenantId: "acme" });
+    const res = await stacked.embed?.({ texts: ["card 4111 1111 1111 1111"], purpose: "document", tenantId: "acme" });
     expect(res?.vectors).toHaveLength(1);
     expect(events).toHaveLength(1);
     expect(events[0]?.event.model).toBe("fake-embedding-1");

@@ -16,7 +16,7 @@ export function fakeEmbeddingPort(opts: { dimension?: number; usage?: boolean; m
       return { text: "ok", model: opts.model ?? "fake-embedding-1" };
     },
     async embed(req: EmbedRequest): Promise<EmbedResponse> {
-      requireEmbedInputs(req.texts); // every adapter calls this — one shared fail-closed rule
+      requireEmbedInputs(req); // every adapter calls this — one shared fail-closed rule
       const vectors = req.texts.map((t) => {
         const v = new Array<number>(dimension).fill(0);
         for (let i = 0; i < t.length; i++) {
@@ -29,9 +29,12 @@ export function fakeEmbeddingPort(opts: { dimension?: number; usage?: boolean; m
         vectors,
         dimension,
         model: opts.model ?? "fake-embedding-1",
+        // A fake has no asymmetric behaviour to fake, so it honours the request by echoing it. What that
+        // exercises is the CONTRACT (the caller can always read back which side it got), not a provider.
+        purpose: req.purpose,
         ...(opts.usage ? { usage: { inputTokens: req.texts.join(" ").length } } : {}),
       };
-      requireEmbedAlignment(req.texts, res); // adapters self-check before returning
+      requireEmbedAlignment(req, res); // adapters self-check before returning
       return res;
     },
   };

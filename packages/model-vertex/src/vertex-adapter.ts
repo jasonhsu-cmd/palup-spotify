@@ -1,6 +1,7 @@
 import {
   requireEmbedAlignment,
   requireEmbedInputs,
+  type EmbedPurpose,
   type EmbedRequest,
   type EmbedResponse,
   type ModelPort,
@@ -137,8 +138,14 @@ export type EmbedContentFn = (req: VertexEmbedRequest) => Promise<VertexEmbedRes
 export interface VertexEmbedConfig {
   /** Embedding model id. Reported on `EmbedResponse.model`, so it is also the price-table key. */
   model: string;
-  /** Provider task type ([E2]/[E3]). Adapter-internal — see the PORT GAP note on `DEFAULT_EMBED_TASK_TYPE`. */
-  taskType: string;
+  /**
+   * Provider task type PER PORTABLE PURPOSE ([E2]/[E3]) — the mapping that keeps `RETRIEVAL_DOCUMENT` /
+   * `RETRIEVAL_QUERY` on this side of the port while `EmbedRequest.purpose` says only "document"/"query".
+   * A MAP rather than a single value because retrieval is asymmetric ([E3]): one value cannot express a
+   * pair, and B3's stopgap — "a query path must construct a SECOND adapter" — was the shape of that
+   * limitation, not a design.
+   */
+  taskTypes: Readonly<Record<EmbedPurpose, string>>;
   /** Texts per PROVIDER request. The port's batch is chunked to this and reassembled in order. */
   maxBatch: number;
   /** Optional `outputDimensionality` ([E2]). Left unset => the model's full-length vector ([E1]). */
@@ -174,26 +181,30 @@ export interface VertexEmbedding {
 export const DEFAULT_EMBED_MODEL = "gemini-embedding-001";
 
 /**
- * Default task type: `RETRIEVAL_DOCUMENT` — correct for the only caller that exists, the catalog INDEX
- * job (widget-backend/src/jobs/catalog-index.ts), which embeds a CORPUS.
+ * The purpose -> task type mapping, and THE FIX FOR THE PORT GAP B3 REPORTED.
  *
- * ⚠️ THIS IS A KNOWN PORT GAP, not a solved problem. `EmbedRequest` carries `texts` only (model-port.ts:57
- * — #188 deliberately left `purpose: "document" | "query"` out and flagged it "for the PR that implements
- * the Vertex adapter", i.e. this one). But [E3] is explicit that retrieval is ASYMMETRIC: "you must use
- * different task types to generate embeddings for your corpus and your queries", and [E2] says an unset
- * task_type defaults to RETRIEVAL_QUERY — so a corpus embedded with no task type would silently get the
- * QUERY treatment.
+ * B3 shipped a single `taskType` defaulting to `RETRIEVAL_DOCUMENT` and said plainly what it could not
+ * fix: [E3] is explicit that retrieval is ASYMMETRIC ("you must use different task types to generate
+ * embeddings for your corpus and your queries"), [E2] says an unset `task_type` DEFAULTS TO
+ * RETRIEVAL_QUERY, and both sides report the same `EmbedResponse.model` — so a caller's
+ * `{model, dimension}` pin could not catch a corpus embedded on the wrong side. Its verdict was that the
+ * PORT needed a portable `purpose` before any query-side embedding shipped. E1 is query-side embedding,
+ * so `EmbedRequest.purpose` now exists (model-port.ts) and this table is its provider mapping.
  *
- * What this file can and cannot fix: it can stop the default from being wrong for the corpus (that is
- * this constant). It CANNOT make a future query-side path safe, because both sides would report the same
- * `EmbedResponse.model`, so the caller's `{model, dimension}` pin (catalog-index.ts:483-499) would NOT
- * catch the mismatch. Encoding the task type into the port-visible `model` string WOULD make it catchable
- * — and is exactly the Google concept the port must not carry, plus it would split the price table in
- * two. So the gap is reported, not papered over: the port needs a portable `purpose` field before any
- * query-side embedding ships. Until then a query path must construct a SECOND adapter with
- * `PALUP_EMBED_TASK_TYPE=RETRIEVAL_QUERY` and must not reuse this instance.
+ * Two properties this table exists to guarantee:
+ *  1. A TASK TYPE IS ALWAYS SENT. "Unset" is never a state this adapter can be in, so [E2]'s
+ *     default-to-RETRIEVAL_QUERY can never silently apply to a corpus.
+ *  2. ONE ADAPTER SERVES BOTH SIDES. B3's stopgap ("construct a SECOND adapter with
+ *     PALUP_EMBED_TASK_TYPE=RETRIEVAL_QUERY and do not reuse this instance") is retired — a second
+ *     instance would also have meant two price-table keys for one model and two credential paths.
+ *
+ * The values are Google's, from [E3]; the KEYS are the port's portable vocabulary. Nothing here crosses
+ * the port: `EmbedResponse` reports `purpose`, never a task type (ADR-0001, CLAUDE.md §3.3).
  */
-export const DEFAULT_EMBED_TASK_TYPE = "RETRIEVAL_DOCUMENT";
+export const DEFAULT_EMBED_TASK_TYPES: Readonly<Record<EmbedPurpose, string>> = Object.freeze({
+  document: "RETRIEVAL_DOCUMENT",
+  query: "RETRIEVAL_QUERY",
+});
 
 /**
  * Texts the PROVIDER accepts in one request, per model — the documented cap, with a deliberately
@@ -306,8 +317,17 @@ export class VertexModelAdapter implements ModelPort {
   private async embedBatch(embedding: VertexEmbedding, req: EmbedRequest): Promise<EmbedResponse> {
     const { call, cfg } = embedding;
     // BEFORE any provider spend, and with the PORT's validator rather than a restatement of the rule, so
-    // every adapter fails identically on a blank/empty batch (model-port.ts:109).
-    requireEmbedInputs(req.texts);
+    // every adapter fails identically on a blank/empty batch AND on a purpose outside the vocabulary.
+    requireEmbedInputs(req);
+
+    // Resolve the provider task type from the portable purpose. `Object.hasOwn` before indexing, so a
+    // purpose that somehow slipped the validator can never resolve through the prototype chain to an
+    // inherited member and be stamped onto a request as a task type.
+    if (!Object.hasOwn(cfg.taskTypes, req.purpose))
+      throw new Error(`vertex: no task type configured for embed purpose ${JSON.stringify(req.purpose)}`);
+    const taskType = cfg.taskTypes[req.purpose];
+    if (!taskType)
+      throw new Error(`vertex: the task type configured for embed purpose ${JSON.stringify(req.purpose)} is blank`);
 
     const chunkSize = Math.max(1, Math.floor(cfg.maxBatch));
     const vectors: number[][] = [];
@@ -323,7 +343,7 @@ export class VertexModelAdapter implements ModelPort {
         model: cfg.model,
         contents: chunk,
         config: {
-          taskType: cfg.taskType,
+          taskType,
           autoTruncate: cfg.autoTruncate ?? false,
           ...(cfg.outputDimensionality === undefined
             ? {}
@@ -394,11 +414,14 @@ export class VertexModelAdapter implements ModelPort {
       vectors,
       dimension,
       model: cfg.model,
+      // What was ACTUALLY applied: `taskType` above is `cfg.taskTypes[req.purpose]`, so reporting the
+      // request's purpose here is a statement about this call, not an echo of an unread field.
+      purpose: req.purpose,
       ...(tokensKnown ? { usage: { inputTokens } } : {}),
     };
     // The port's own result validator, not a second copy of the rule: one vector per text, all of the
-    // reported dimension, every component finite (model-port.ts:133). Adapter and contract cannot drift.
-    requireEmbedAlignment(req.texts, out);
+    // reported dimension, every component finite, and the purpose echoed. Adapter and contract cannot drift.
+    requireEmbedAlignment(req, out);
     return out;
   }
 }
