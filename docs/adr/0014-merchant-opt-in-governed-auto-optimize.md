@@ -122,6 +122,17 @@ today's hooks would ship real bypasses. Each is a separate governed (human-merge
     lagging return/complaint harm surfaces (retain a known-good baseline beyond depth-1); low-traffic
     tenants stay on the human path. *(both, high/medium)*
 
+    *Status 2026-08-05 — the baseline half is CLOSED; the measurement half is not.* `recordKnownGood`
+    previously had **no non-test caller**, so the baseline was permanently null and
+    `delayedRollbackToBaseline` — the only mechanism that can revert further than the engine's depth-1
+    `prevChampion` — could do nothing but throw. `monitorServing` (`champion-promoter.ts`) now records
+    the serving champion as known-good on a healthy observation, and falls back to that baseline when a
+    regression arrives with the depth-1 target already spent. Both halves are route-covered.
+    **Still open:** the observation that drives it is caller-supplied (`POST /api/monitor` takes it from
+    the request body), so this reacts to a *reported* regression, not a *measured* one, and the
+    per-tenant minimum-traffic/observation window is still unenforced. Measuring live quality is the
+    orchestrator's job and it remains dormant.
+
 ## Enablement precondition (must be met + recorded before any real merchant flag flips)
 
 Even after all the above land, the fast-lane stays dormant until, evidenced and signed by

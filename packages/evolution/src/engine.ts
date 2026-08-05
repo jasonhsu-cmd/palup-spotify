@@ -348,15 +348,47 @@ export class EvolutionEngine {
     return this.champion;
   }
 
-  /** Post-promotion monitor: auto-rollback if observed quality regresses below the previous champion. */
+  /**
+   * READ-ONLY regression verdict for an observation. Mutates nothing and writes no log entry, so a
+   * caller that needs to act DURABLY (control-plane `monitorServing`) can decide first and revert the
+   * serving store before touching engine state.
+   *
+   * A safety failure always regresses. A quality regression is measured against the PREVIOUS champion —
+   * the bar the current one had to beat — so with no previous champion there is nothing to regress
+   * against and only safety can trip it.
+   */
+  regressionVerdict(observed: { qualityScore: number; safetyPass: boolean }): { regressed: boolean; reason?: string } {
+    if (!observed.safetyPass) return { regressed: true, reason: "safety-regression" };
+    // The bar is the PREVIOUS champion's score — the one the current champion had to beat to ship. Once
+    // that is spent (a rollback nulls prevChampion, depth-1), fall back to the CURRENT champion's own
+    // recorded score: "you are performing worse than you graded at the gate" is still a real regression,
+    // and it is the only bar left. Without this fallback a post-rollback regression read as HEALTHY —
+    // the monitor went blind exactly when a second problem was most likely, and would then have recorded
+    // the regressing champion as the known-good baseline.
+    const bar = (this.prevChampion ?? this.champion).metrics.qualityScore;
+    if (observed.qualityScore < bar) return { regressed: true, reason: "quality-regression" };
+    return { regressed: false };
+  }
+
+  /**
+   * Post-promotion monitor: auto-rollback if observed quality regresses below the previous champion.
+   *
+   * IN-MEMORY ONLY — this rolls back THIS PROCESS'S champion and nothing else. It does NOT revert the
+   * durable serving champion (CHAMPION/active), which is what widget-backend actually reads per turn,
+   * and it does not freeze the auto-promote fast-lane. Calling it on a regression therefore leaves
+   * shoppers on the regressing policy while every dashboard reports a successful rollback — which is
+   * exactly what shipped, because this was the only monitor the wired route called.
+   *
+   * PRODUCTION CODE MUST USE control-plane `monitorServing`, which reverts the store first and then
+   * advances the engine. This remains for the offline demo (evolution/src/demo.ts) and for callers that
+   * genuinely only want in-memory state.
+   */
   monitor(observed: { qualityScore: number; safetyPass: boolean }): { rolledBack: boolean; reason?: string } {
-    const regressed =
-      !observed.safetyPass || (this.prevChampion && observed.qualityScore < this.prevChampion.metrics.qualityScore);
+    const verdict = this.regressionVerdict(observed);
     this.log("monitor", "observe", this.champion.policy.id, observed);
-    if (regressed && this.prevChampion) {
-      const reason = !observed.safetyPass ? "safety-regression" : "quality-regression";
-      this.rollback(reason);
-      return { rolledBack: true, reason };
+    if (verdict.regressed && this.prevChampion) {
+      this.rollback(verdict.reason!);
+      return { rolledBack: true, reason: verdict.reason };
     }
     return { rolledBack: false };
   }
