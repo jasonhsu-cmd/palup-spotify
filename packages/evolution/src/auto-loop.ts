@@ -63,7 +63,11 @@ function weakest(metrics: PolicyMetrics, k = 3): Weakness[] {
  * Governance is unchanged: the gate + (optionally) a human approval still guard every promotion.
  */
 export class AutoLoop {
-  private readonly d: Required<Omit<AutoLoopDeps, "log" | "killCheck">> & { log: (m: string) => void; killCheck?: AutoLoopDeps["killCheck"] };
+  // Only the four fields defaulted in the constructor are guaranteed present; the previous
+  // `Required<Omit<...>>` also claimed rateLimitCheck/recordPromotion/changeScreen were always set,
+  // which the `...deps` spread never guaranteed -- the type was simply wrong.
+  private readonly d: AutoLoopDeps &
+    Required<Pick<AutoLoopDeps, "candidatesPerRound" | "minDelta" | "autoApprove">> & { log: (m: string) => void };
   constructor(deps: AutoLoopDeps) {
     this.d = {
       candidatesPerRound: 2,

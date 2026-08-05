@@ -12,7 +12,7 @@ import type { RuntimeStatePort } from "@palup/platform-ports";
  * the fuller fix once the ingress proxy depth is known.)
  */
 export function clientIpKey(xForwardedFor: string | undefined, fallback: string): string {
-  const first = String(xForwardedFor ?? "").split(",")[0].trim();
+  const first = (String(xForwardedFor ?? "").split(",")[0] ?? "").trim();
   if (first.length > 0 && first.length <= 45 && /^[0-9a-fA-F:.]+$/.test(first)) return first;
   const fb = String(fallback ?? "").trim();
   return fb.length > 0 && fb.length <= 45 ? fb : "unknown";

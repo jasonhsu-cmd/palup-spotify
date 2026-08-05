@@ -151,7 +151,9 @@ export class InMemoryRuntimeStore implements RuntimeStatePort {
   }
 
   private commitAudit(t: TenantData, entry: AuditInput, at: string): AuditRecord {
-    const prevHash = t.audit.length ? t.audit[t.audit.length - 1].hash : AUDIT_GENESIS_HASH;
+    // `.at(-1)?.hash ?? GENESIS` is the same logic as the previous `length ? [length-1].hash : GENESIS`,
+    // expressed so the compiler can see the empty case. Mirrored in evolution/src/engine.ts's own chain.
+    const prevHash = t.audit.at(-1)?.hash ?? AUDIT_GENESIS_HASH;
     const base: Omit<AuditRecord, "hash"> = {
       seq: t.audit.length + 1,
       at,

@@ -73,7 +73,7 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
       "SELECT value FROM rs_kv WHERE tenant_id=$1 AND collection=$2 AND key=$3 AND (expires_at IS NULL OR expires_at > now())",
       [t, collection, key],
     );
-    return rows.length ? rows[0].value : null;
+    return rows[0]?.value ?? null;
   }
 
   async put<T>(ctx: RuntimeStateCtx, collection: string, key: string, value: T, opts?: PutOpts): Promise<void> {
@@ -120,14 +120,14 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
        RETURNING (value->>'count')::int AS count`,
       [t, key, windowSeconds],
     );
-    return Number(rows[0].count);
+    return Number(rows[0]?.count ?? 0);
   }
 
   async sweepExpired(): Promise<number> {
     const { rows } = await this.sql.query<{ n: string }>(
       "WITH d AS (DELETE FROM rs_kv WHERE expires_at IS NOT NULL AND expires_at <= now() RETURNING 1) SELECT count(*)::text AS n FROM d",
     );
-    return Number(rows[0].n);
+    return Number(rows[0]?.n ?? 0);
   }
 
   async trimStream(ctx: RuntimeStateCtx, stream: string, keepLast: number): Promise<number> {
@@ -138,7 +138,7 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
        SELECT count(*)::text AS n FROM d`,
       [t, stream, Math.max(0, keepLast)],
     );
-    return Number(rows[0].n);
+    return Number(rows[0]?.n ?? 0);
   }
 
   private async appendVia<T>(sql: Sql, tenantId: string, stream: string, entry: T): Promise<number> {
@@ -149,7 +149,7 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
       "INSERT INTO rs_stream (tenant_id, stream, entry) VALUES ($1,$2,$3) RETURNING seq",
       [tenantId, stream, JSON.stringify(entry)],
     );
-    return Number(rows[0].seq);
+    return Number(rows[0]?.seq ?? 0);
   }
 
   async append<T>(ctx: RuntimeStateCtx, stream: string, entry: T): Promise<number> {
@@ -178,8 +178,8 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
       "SELECT seq, hash FROM rs_audit WHERE tenant_id=$1 ORDER BY seq DESC LIMIT 1",
       [tenantId],
     );
-    const prevHash = rows.length ? rows[0].hash : AUDIT_GENESIS_HASH;
-    const seq = (rows.length ? Number(rows[0].seq) : 0) + 1;
+    const prevHash = rows[0]?.hash ?? AUDIT_GENESIS_HASH;
+    const seq = Number(rows[0]?.seq ?? 0) + 1;
     const base: Omit<AuditRecord, "hash"> = {
       seq,
       at,
@@ -261,7 +261,7 @@ export class PostgresRuntimeStore implements RuntimeStatePort {
             "SELECT value FROM rs_kv WHERE tenant_id=$1 AND collection=$2 AND key=$3 AND (expires_at IS NULL OR expires_at > now())",
             [t, collection, key],
           );
-          return rows.length ? rows[0].value : null;
+          return rows[0]?.value ?? null;
         },
         put: (collection, key, value, opts) => this.putVia(txSql, t, collection, key, value, opts),
         delete: async (collection, key) => {

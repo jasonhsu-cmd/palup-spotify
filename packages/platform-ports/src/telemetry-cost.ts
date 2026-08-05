@@ -56,12 +56,16 @@ export function deriveCostUsd(rollup: TelemetryRollup, prices: ModelPriceTable):
   const unpricedModels: string[] = [];
   let totalUsd = 0;
   for (const [model, agg] of Object.entries(rollup.byModel)) {
-    if (!Object.hasOwn(prices, model)) {
+    // `Object.hasOwn` is load-bearing, not decoration: `prices` is parsed from JSON, so a model named
+    // e.g. "constructor" would otherwise resolve to `Object.prototype.constructor` — truthy, and then
+    // `.inputPer1M` is undefined and every cost silently becomes NaN. Folding the guard into the lookup
+    // keeps that protection while giving the compiler a value it can narrow.
+    const p = Object.hasOwn(prices, model) ? prices[model] : undefined;
+    if (!p) {
       unpricedModels.push(model);
       byModel[model] = { inputTokens: agg.inputTokens, outputTokens: agg.outputTokens, costUsd: 0 };
       continue;
     }
-    const p = prices[model];
     const costUsd = (agg.inputTokens / 1_000_000) * p.inputPer1M + (agg.outputTokens / 1_000_000) * p.outputPer1M;
     byModel[model] = { inputTokens: agg.inputTokens, outputTokens: agg.outputTokens, costUsd };
     totalUsd += costUsd;

@@ -58,8 +58,10 @@ const FIXTURES: Record<string, GroundingContext> = { demo: AURIA, northwind: NOR
 
 export class StaticGroundingAdapter implements GroundingPort {
   async getContext(tenantId: string): Promise<GroundingContext> {
-    if (Object.hasOwn(FIXTURES, tenantId)) {
-      const fx = FIXTURES[tenantId];
+    // `Object.hasOwn` folded into the lookup — it stays load-bearing (a tenantId of "constructor" must
+    // not resolve to a prototype member) while giving the compiler a value it can narrow.
+    const fx = Object.hasOwn(FIXTURES, tenantId) ? FIXTURES[tenantId] : undefined;
+    if (fx) {
       // Return a per-call copy so a downstream mutation of ctx can't corrupt the shared module fixture.
       return { tenantId, brandName: fx.brandName, products: fx.products.map((p) => ({ ...p })), policy: { ...fx.policy } };
     }

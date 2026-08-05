@@ -1,0 +1,23 @@
+{
+  // Solution file for `tsc -b`. Its absence is why `pnpm typecheck` and `pnpm build` — both
+  // `tsc -b` — failed with TS5083 ("Cannot read file '.../tsconfig.json'") and exited 1 on every
+  // invocation. CI never ran either, so no stage in this repo type-checked anything: vitest runs
+  // through esbuild, which transpiles without checking, and there is no linter.
+  //
+  // `files: []` is deliberate — this project compiles nothing itself, it only orders the graph.
+  // Every package with TypeScript is referenced below; `packages/widget` is excluded because it is
+  // `public/index.html` and a package.json, with no .ts at all.
+  "files": [],
+  "references": [
+    { "path": "packages/platform-ports/tsconfig.json" },
+    { "path": "packages/widget-brain/tsconfig.json" },
+    { "path": "packages/model-vertex/tsconfig.json" },
+    { "path": "packages/widget-memory/tsconfig.json" },
+    { "path": "packages/state-postgres/tsconfig.json" },
+    { "path": "packages/widget-backend/tsconfig.json" },
+    { "path": "packages/judge/tsconfig.json" },
+    { "path": "packages/evolution/tsconfig.json" },
+    { "path": "packages/eval/tsconfig.json" },
+    { "path": "packages/control-plane/tsconfig.json" }
+  ]
+}

@@ -115,13 +115,19 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
   const restored = opts.sessionId && opts.store ? await opts.store.load(opts.sessionId) : undefined;
   const state: SessionState = restored
     ? {
-        escalationPending: false,
-        resumeOffered: false,
         ...restored,
         openIssues: [...restored.openIssues],
-        // PR-4 fields listed AFTER the spread (not before, unlike escalationPending/resumeOffered above)
-        // so a pre-PR-4 persisted record — which predates these fields and so lacks them — still
-        // backfills a safe default via `??`, without TS flagging a dead "specified more than once" write.
+        // EVERY backfilled field is listed AFTER the spread with `??`, uniformly. A persisted record
+        // written before a field existed lacks the key entirely, so the `??` supplies the default.
+        //
+        // `escalationPending`/`resumeOffered` used to sit BEFORE the spread instead. That worked at
+        // runtime for the same reason — a missing key does not overwrite — but because `SessionState`
+        // declares both as REQUIRED, the compiler saw the spread as always clobbering them and flagged
+        // two dead writes (TS2783). The previous comment here acknowledged the split and chose the
+        // `??` form for the PR-4 fields only; this just applies it to all five, which is
+        // behaviour-identical and type-honest.
+        escalationPending: restored.escalationPending ?? false,
+        resumeOffered: restored.resumeOffered ?? false,
         pitchDeclined: restored.pitchDeclined ?? false,
         repeatQuestionCount: restored.repeatQuestionCount ?? 0,
         rageCount: restored.rageCount ?? 0,

@@ -74,6 +74,9 @@ export async function promoteToServing(
   if (rec.automated || !rec.approvedBy || rec.approvedBy === "auto-loop") {
     throw new Error(`${candidateId} was not HUMAN-approved (approver=${rec.approvedBy ?? "none"}) — the human promote→serving path refuses an automated approval`);
   }
+  // Captured after the guard above so the narrowing survives into the tx closure (TS does not carry
+  // control-flow narrowing of a property across a callback boundary).
+  const approver = rec.approvedBy;
   // NN #2, the STAGE half — "the only path to prod is propose → shadow → canary → eval gate → human
   // approve → promote… never bypass a stage" (CLAUDE.md §3; ARCHITECTURE.md:170; AGENT-GOVERNANCE.md:19;
   // governance-subsystems.md:60; ADR-0003). Until now this function checked kill + approved + human and
@@ -94,7 +97,7 @@ export async function promoteToServing(
     await t.put(CHAMPION, ACTIVE_KEY, cfg);
     await t.audit(
       {
-        actor: rec.approvedBy, // the recorded HUMAN approver, never a caller-supplied string
+        actor: approver, // the recorded HUMAN approver, never a caller-supplied string
         action: "champion.promote",
         input: { tenantId, candidateId, from: fromId, to: rec.policy.id },
         decision: `promoted ${rec.policy.id} to serving`,

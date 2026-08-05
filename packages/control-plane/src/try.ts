@@ -44,7 +44,7 @@ async function grade(message: string, reply: string): Promise<{ score: number; l
   const v = await judge.grade({
     rubric: rubricFor(s),
     transcript: `Shopper: ${message}\nAssistant: ${reply}`,
-    criteria: CRIT.map((c) => ({ id: c, description: CRITERIA[c] })),
+    criteria: CRIT.map((c) => ({ id: c, description: CRITERIA[c] ?? c })),
   });
   const passed = v.results.filter((r) => r.pass).length;
   return { score: passed / CRIT.length, line: v.results.map((r) => `${r.pass ? "✓" : "✗"}${r.id}`).join(" ") };
@@ -113,8 +113,9 @@ async function route(line: string): Promise<"continue" | "quit"> {
     const tl = await loop.run(Number(process.env.EVOLVE_ROUNDS ?? 2));
     champion = engine.getChampion();
     brain = createBrain(agent, grounding, champion.policy, commerce, "shopper-demo");
-    const net = ((tl[tl.length - 1].qualityAfter - tl[0].qualityAfter) * 100).toFixed(0);
-    console.log(`\n=== improvement on your scenarios: ${(tl[0].qualityAfter * 100).toFixed(0)}% → ${(tl[tl.length - 1].qualityAfter * 100).toFixed(0)}% (${Number(net) >= 0 ? "+" : ""}${net} pts) ===`);
+    const tlFirst = tl.at(0), tlLast = tl.at(-1);
+    const net = tlFirst && tlLast ? ((tlLast.qualityAfter - tlFirst.qualityAfter) * 100).toFixed(0) : "0";
+    console.log(`\n=== improvement on your scenarios: ${((tlFirst?.qualityAfter ?? 0) * 100).toFixed(0)}% → ${((tlLast?.qualityAfter ?? 0) * 100).toFixed(0)}% (${Number(net) >= 0 ? "+" : ""}${net} pts) ===`);
     console.log(`champion is now "${champion.policy.label}". Keep chatting — replies use the improved agent. (/timeline for detail)\n`);
     return "continue";
   }

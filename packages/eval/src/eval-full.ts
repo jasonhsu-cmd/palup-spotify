@@ -128,9 +128,9 @@ async function main() {
   // Aggregate by layer.
   const byLayer: Record<string, { pass: number; total: number }> = {};
   for (const r of results) {
-    byLayer[r.layer] ??= { pass: 0, total: 0 };
-    byLayer[r.layer].total++;
-    if (r.pass) byLayer[r.layer].pass++;
+    const agg = (byLayer[r.layer] ??= { pass: 0, total: 0 });
+    agg.total++;
+    if (r.pass) agg.pass++;
   }
   console.log("per-layer pass rate:");
   for (const [layer, s] of Object.entries(byLayer).sort()) {

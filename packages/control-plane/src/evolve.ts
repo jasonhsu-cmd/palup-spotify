@@ -76,8 +76,9 @@ async function main() {
     const q = e.qualityBefore !== undefined ? `${(e.qualityBefore * 100).toFixed(0)}% → ${(e.qualityAfter * 100).toFixed(0)}%` : `${(e.qualityAfter * 100).toFixed(0)}%`;
     console.log(`  round ${e.round} [${e.event}] quality ${q}  ${e.note ?? ""}`);
   }
-  const first = timeline[0];
-  const last = timeline[timeline.length - 1];
+  const first = timeline.at(0);
+  const last = timeline.at(-1);
+  if (!first || !last) return; // guarded above; keeps the reads below type-safe without an assertion
   const gain = (last.qualityAfter - first.qualityAfter) * 100;
   console.log(`\nNet quality change: ${gain >= 0 ? "+" : ""}${gain.toFixed(0)} pts (${(first.qualityAfter * 100).toFixed(0)}% → ${(last.qualityAfter * 100).toFixed(0)}%)`);
   console.log(`Final champion: ${engine.getChampion().policy.id} — "${engine.getChampion().policy.label}"`);

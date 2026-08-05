@@ -53,7 +53,7 @@ export class EvolutionEngine {
     // to the prior entry's hash (genesis sentinel for the first), so any in-place edit, reorder, or
     // mid-chain removal is detectable by verifyAuditChain. Mirrors the runtime-state audit chain
     // (packages/platform-ports/src/in-memory-runtime-store.ts) EXACTLY: same canonicalize + sha256.
-    const prevHash = this.audit.length ? this.audit[this.audit.length - 1].hash : AUDIT_GENESIS_HASH;
+    const prevHash = this.audit.at(-1)?.hash ?? AUDIT_GENESIS_HASH;
     const base: Omit<AuditEntry, "hash"> = { seq: this.next(), prevHash, actor, action, target, detail };
     this.audit.push({ ...base, hash: hashAuditEntry(base) });
   }
