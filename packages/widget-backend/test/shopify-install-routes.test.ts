@@ -1,8 +1,15 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createHmac } from "node:crypto";
-import { InMemoryRuntimeStore, createInMemoryMerchantRegistry } from "@palup/platform-ports";
+import { InMemoryRuntimeStore, createInMemoryMerchantRegistry, createAesGcmCrypto, createEnvSecrets, keyScopeSecretName } from "@palup/platform-ports";
 import type { AuditRecord, MerchantRegistryPort, RuntimeStatePort } from "@palup/platform-ports";
-import { armKill, disarmKill } from "@palup/state-postgres";
+import {
+  armKill,
+  disarmKill,
+  createMerchantCredentialStore,
+  MERCHANT_CRED_COLLECTION,
+  MERCHANT_CRED_KEY_SCOPE,
+  MERCHANT_CRED_RECORD_KEY,
+} from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE } from "../src/shopify-install-identity.js";
 import {
@@ -95,7 +102,7 @@ interface Harness {
  */
 async function harness(
   over: Record<string, string | undefined> = {},
-  seams: { registry?: MerchantRegistryPort; sink?: MerchantCredentialSink | null; store?: RuntimeStatePort } = {},
+  seams: { registry?: MerchantRegistryPort | null; sink?: MerchantCredentialSink | null; store?: RuntimeStatePort } = {},
 ): Promise<Harness> {
   process.env.SHOPIFY_APP_CLIENT_ID = CLIENT_ID;
   process.env.SHOPIFY_INSTALL_REDIRECT_URI = REDIRECT_URI;
@@ -104,7 +111,7 @@ async function harness(
   for (const [k, v] of Object.entries(over)) v === undefined ? delete process.env[k] : (process.env[k] = v);
 
   const store = seams.store ?? new InMemoryRuntimeStore();
-  const registry = seams.registry ?? createInMemoryMerchantRegistry();
+  const registry = seams.registry === null ? undefined : (seams.registry ?? createInMemoryMerchantRegistry());
   const sink = recordingSink();
   const fetchCalls: string[] = [];
   let impl: (url: string, init?: RequestInit) => unknown = (url) => {
@@ -136,9 +143,10 @@ async function harness(
     store,
     installFetch,
     merchantRegistry: registry,
+    // `null` ⇒ do NOT inject, so the composition root's REAL B2 store is used (see the "real custody" tests).
     merchantCredentials: seams.sink === null ? undefined : (seams.sink ?? sink),
   });
-  return { app, store, registry, sink, fetchCalls, setFetch: (fn) => (impl = fn) };
+  return { app, store, registry: registry as MerchantRegistryPort, sink, fetchCalls, setFetch: (fn) => (impl = fn) };
 }
 
 function cookieFrom(res: { headers: Record<string, unknown> }): string {
@@ -240,11 +248,11 @@ describe("C1 gating — the install feature is inert unless FULLY configured", (
     expect((await h.app.inject({ method: "GET", url: `/shopify/install?${qs({ shop: SHOP, timestamp: "1" })}` })).statusCode).toBe(404);
   });
 
-  it("404 when NO CREDENTIAL CUSTODY is wired — we refuse to complete an install we cannot store a token for", async () => {
-    // This is the live production state while B2 (#186) is unmerged: no credential store ⇒ the feature is
-    // OFF rather than half-working. An install that obtained a delegate token and then dropped it would be
-    // a credential created at Shopify with no custody and no revocation path.
-    const h = await harness({}, { sink: null });
+  it("404 when there is no durable merchant registry — an in-memory one would forget every install", async () => {
+    // DATABASE_URL is unset under test, so no PostgresMerchantRegistry can be built; without the injected
+    // seam the feature must be OFF rather than accepting installs into a registry that dies with the
+    // process (the same failure `kill-switch.ts` refuses: a store nobody else can see).
+    const h = await harness({}, { registry: null });
     expect((await h.app.inject({ method: "GET", url: `/shopify/install?${qs({ shop: SHOP, timestamp: "1" })}` })).statusCode).toBe(404);
     expect((await h.app.inject({ method: "GET", url: `/shopify/callback?${qs({ shop: SHOP, timestamp: "1", code: "c", state: "s" })}` })).statusCode).toBe(404);
   });
@@ -785,6 +793,57 @@ describe("C1 the public routes are rate-limited like every sibling", () => {
       }
     }
     expect(sawLimit, "the install route must be per-IP rate limited").toBe(true);
+  });
+});
+
+describe("C1 real custody — the composition root wires B2's ENCRYPTED store, not a stub", () => {
+  /** The per-tenant key B2 needs for the `merchant-cred` scope, provisioned for the installing tenant. */
+  function secretsWithCredKey(): string {
+    return JSON.stringify({
+      [SHOPIFY_APP_SECRET_SCOPE]: { [SHOPIFY_APP_CLIENT_SECRET_NAME]: APP_SECRET },
+      "acme-store": { [keyScopeSecretName("MEMORY_ENCRYPTION_KEY", MERCHANT_CRED_KEY_SCOPE)]: "acme-credential-key-material" },
+    });
+  }
+
+  it("stores the delegate token ENCRYPTED under the merchant-cred scope, and it reads back", async () => {
+    const h = await harness({ PALUP_SECRETS: secretsWithCredKey() }, { sink: null });
+    const { state, cookie } = await begin(h);
+    expect((await callback(h, { state, cookie })).statusCode).toBe(200);
+
+    // The raw KV row holds no plaintext token, and carries B2's v2 SCOPED envelope.
+    const row = await h.store.get<{ c: string }>({ tenantId: "acme-store" }, MERCHANT_CRED_COLLECTION, MERCHANT_CRED_RECORD_KEY);
+    expect(row).toBeTruthy();
+    expect(JSON.stringify(row)).not.toContain(DELEGATE_TOKEN);
+    expect(row!.c.startsWith(`v2:${MERCHANT_CRED_KEY_SCOPE}:`)).toBe(true);
+
+    // …and the real store reads the real token back for the tenant that owns it, only.
+    const readable = createMerchantCredentialStore(h.store, createAesGcmCrypto(createEnvSecrets(secretsWithCredKey())));
+    expect(await readable.read("acme-store")).toEqual({ status: "found", token: DELEGATE_TOKEN });
+    expect(await readable.read("beta-store")).toEqual({ status: "missing" }); // tenant-scoped
+  });
+
+  it("B2's own credential.store audit record lands on the same tenant chain, and carries no token", async () => {
+    const h = await harness({ PALUP_SECRETS: secretsWithCredKey() }, { sink: null });
+    const { state, cookie } = await begin(h);
+    await callback(h, { state, cookie });
+    const log = await auditFor(h.store, "acme-store");
+    expect(log.find((r) => r.action === "credential.store"), "B2 must have audited the credential write").toBeTruthy();
+    expect(log.find((r) => r.action === "merchant.registered")).toBeTruthy();
+    expectNoSecrets(JSON.stringify(log), "the audit log");
+    expect((await h.store.verifyAudit({ tenantId: "acme-store" })).ok).toBe(true);
+  });
+
+  it("a merchant with NO encryption key provisioned is REFUSED — no row, no plaintext, no half-install", async () => {
+    // The per-tenant key cannot be checked at boot (the tenant is unknown until install), so this is where
+    // the failure must surface. B2 encrypts BEFORE opening its transaction, so nothing at all is written.
+    const h = await harness({}, { sink: null }); // app secret only; no merchant-cred key
+    const { state, cookie } = await begin(h);
+    const res = await callback(h, { state, cookie });
+    expect(res.statusCode).toBe(502);
+    expectNoSecrets(res.body, "the failure body");
+    expect(await h.registry.lookupByShopDomain(SHOP, { includeInactive: true })).toBeNull();
+    expect(await h.store.get({ tenantId: "acme-store" }, MERCHANT_CRED_COLLECTION, MERCHANT_CRED_RECORD_KEY)).toBeNull();
+    expect(await auditFor(h.store, "acme-store")).toEqual([]); // nothing audited either
   });
 });
 

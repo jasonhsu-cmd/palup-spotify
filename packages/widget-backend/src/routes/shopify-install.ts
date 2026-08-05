@@ -38,13 +38,14 @@ import {
 // That is more than one reviewable PR, so it is deliberately not attempted here. Do not read this file as
 // "merchants can onboard themselves now"; read it as "the install is recorded, revocably and auditably".
 //
-// AND IT IS INERT IN PRODUCTION TODAY. `deps.credentials` is REQUIRED (see below) and its only
-// implementation, B2's `createMerchantCredentialStore`, is on an unmerged branch (#186). The composition
-// root therefore cannot build one, so `registerShopifyInstallRoutes` is never called in production and both
-// routes are absent. The wiring, for when #186 lands, is one expression in server.ts — see the comment
-// there. Refusing to complete the flow without custody is the deliberate choice: an install that obtained a
-// delegate token and then dropped it would have created a live Shopify credential with no custody, no
-// audit and no revocation path.
+// WHAT IT DOES DO, AND IT IS REAL. `deps.credentials` is REQUIRED, and it is B2's
+// `createMerchantCredentialStore` (#186), wired in server.ts: the delegate token is encrypted at rest under
+// a per-(tenant, `merchant-cred` scope) key and its write is audited atomically inside B2's own
+// transaction. Requiring custody rather than treating it as optional is deliberate — an install that
+// obtained a delegate token and then had nowhere to put it would have created a live Shopify credential
+// with no custody, no audit and no revocation path. So: no custody ⇒ the routes are not registered at all.
+// The routes go live in a deployment the moment its five preconditions are set (see server.ts); they are
+// absent, not half-working, until then.
 // ****************************************************************************************************
 //
 // WHERE PENDING INSTALLS LIVE. An APP-SCOPED RuntimeState collection, the same mechanism and the same
@@ -82,11 +83,11 @@ const APP_CTX = { tenantId: INSTALL_APP_SCOPE } as const;
 
 /**
  * What C1 needs from credential custody, expressed as the NARROWEST possible interface rather than by
- * importing B2's type. Two reasons: (1) #186 is unmerged, so importing its type would make this file
- * un-compilable on `main`; (2) C1 legitimately needs only `put` — it never reads a credential back, and a
- * dependency that could read every merchant's token would be more privilege than the install flow requires.
- * B2's `MerchantCredentialStore` satisfies this STRUCTURALLY (`put(tenantId, token, {actor})`), so the
- * composition-root wiring is an assignment with no adapter.
+ * importing B2's `MerchantCredentialStore` type: this flow needs only `put`. It never reads a credential
+ * back, so a dependency that could read every merchant's token would be more privilege than the install
+ * flow requires (least privilege, NN#6) — and a narrower type means a future change that starts reading
+ * credentials here has to widen this interface deliberately rather than inheriting the capability.
+ * B2's store satisfies this STRUCTURALLY, so the composition-root wiring is an assignment, no adapter.
  */
 export interface MerchantCredentialSink {
   put(tenantId: string, token: string, opts: { actor: string }): Promise<void>;

@@ -18,12 +18,13 @@ import {
   mintShopperToken,
   shopperIdTenant,
   createEnvSecrets,
+  createAesGcmCrypto,
   createStoreTelemetry,
   createMeteringModelPort,
   createRedactingModelPort,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, PostgresMerchantRegistry, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, PostgresMerchantRegistry, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -555,15 +556,15 @@ export async function buildServer(opts?: {
   //   • a durable MerchantRegistryPort — DATABASE_URL must be set. An in-memory registry is deliberately
   //     NOT accepted: it would forget every install on the next cold start while reporting success, which
   //     is the same class of failure `kill-switch.ts` refuses (a store nobody else can see).
-  //   • credential custody — see `opts.merchantCredentials`. UNAVAILABLE IN PRODUCTION TODAY (#186 is
-  //     unmerged), so in production this whole block resolves to "off" and the routes do not exist.
-  //     WHEN #186 MERGES, the wiring is one expression here and nothing else changes:
-  //         const merchantCredentials = opts?.merchantCredentials
-  //           ?? createMerchantCredentialStore(store, createAesGcmCrypto(secrets));
-  //     (`createMerchantCredentialStore` from @palup/state-postgres, `createAesGcmCrypto` from
-  //     @palup/platform-ports over the SAME composition-root `secrets` above; it needs the per-tenant key
-  //     `MEMORY_ENCRYPTION_KEY__merchant-cred` provisioned in PALUP_SECRETS — reported for docs/DEPLOY.md
-  //     rather than edited here, since that file is contended.)
+  //   • credential custody — B2's `createMerchantCredentialStore` (#186), built over the SAME
+  //     composition-root `secrets` and the SAME runtime store, so the delegate token is encrypted at rest
+  //     under a per-(tenant, scope) key and its write is audited atomically inside B2's own transaction.
+  //     It needs the per-tenant key `MEMORY_ENCRYPTION_KEY__merchant-cred` provisioned in `PALUP_SECRETS`
+  //     for each installing merchant. That key CANNOT be checked at boot (it is per-tenant, and the tenant
+  //     is unknown until a merchant installs), so a missing one surfaces at install time as a refusal:
+  //     `CryptoPort.encrypt` throws, B2 writes nothing at all, and the callback returns 502 having created
+  //     no row and no credential. Fail-closed, and the honest place for the failure — reported for
+  //     docs/DEPLOY.md (contended, so not edited here).
   const SHOPIFY_APP_CLIENT_ID = process.env.SHOPIFY_APP_CLIENT_ID;
   const SHOPIFY_INSTALL_REDIRECT_URI = process.env.SHOPIFY_INSTALL_REDIRECT_URI;
   const SHOPIFY_INSTALL_REGION: MerchantRegion | undefined = (() => {
@@ -581,7 +582,12 @@ export async function buildServer(opts?: {
   // made createVectorStore share `runtimeResult.sql`).
   const merchantRegistry: MerchantRegistryPort | undefined =
     opts?.merchantRegistry ?? (runtimeResult.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : undefined);
-  const merchantCredentials: MerchantCredentialSink | undefined = opts?.merchantCredentials;
+  // B2's store satisfies `MerchantCredentialSink` STRUCTURALLY (`put(tenantId, token, {actor})`), so this is
+  // an assignment with no adapter. `createAesGcmCrypto(secrets)` is the same CryptoPort construction
+  // widget-memory uses; the `merchant-cred` key scope keeps a memory-key compromise from exposing merchant
+  // credentials (crypto-port key separation).
+  const merchantCredentials: MerchantCredentialSink | undefined =
+    opts?.merchantCredentials ?? createMerchantCredentialStore(store, createAesGcmCrypto(secrets));
   const SHOPIFY_INSTALL_ENABLED = Boolean(
     SHOPIFY_APP_CLIENT_ID &&
       SHOPIFY_INSTALL_REDIRECT_URI &&
