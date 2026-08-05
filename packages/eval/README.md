@@ -45,15 +45,19 @@ DIFFERENT family (proposer≠evaluator, enforced by `crossFamilyGuard`).
 - **You still need GCP creds either way** (`GOOGLE_CLOUD_PROJECT` + ADC): the *agent being judged* runs
   on real Gemini, so the harness exits if Vertex isn't configured. `ANTHROPIC_API_KEY` replaces Model
   Garden only for the **judge**, not the whole harness. Not part of the offline CI gate.
-- **Honesty:** both Claude adapters (`anthropic-api.ts`, `anthropic-vertex.ts`) are marked
-  `⚠️ UNVERIFIED-LIVE` — wired but never run against a real key / Model-Garden access. Treat the first
-  `JUDGE_FAMILY=anthropic` run as the actual verification.
+- **Verified live (2026-08-05).** The **direct-API** path is no longer unverified — it is what gates
+  `main` today. `.github/workflows/eval-quality.yml:51-52` supplies `JUDGE_FAMILY: anthropic` +
+  `ANTHROPIC_API_KEY`, the repo variable `JUDGE_ENABLED` has been `true` since 2026-07-31, and runs
+  `30978482497` / `30934171910` / `30882069347` each graded the full 190-case corpus (75% / 73% / 74%
+  overall, 0 floor fails). The **Claude-on-Vertex** fallback remains `⚠️ UNVERIFIED-LIVE` — nothing has
+  exercised it, because the direct-API branch is preferred whenever `ANTHROPIC_API_KEY` is set
+  (`src/judge-run.ts:48-49`, `src/eval-full.ts:71-73`).
 
 ## Still needs work (tracked)
 
 | Layer | Status |
 |---|---|
-| Cross-family gating live | mechanism built + advisory verified; **gating** unverified live — both Claude judges (direct-API via `ANTHROPIC_API_KEY`, and Claude-on-Vertex via Model Garden) are wired but `⚠️ UNVERIFIED-LIVE` until run against a real key / access |
+| Cross-family gating live | **DONE via the direct API** — gating on `main` since 2026-07-31 (`JUDGE_ENABLED=true`, `eval-quality.yml`); see the verified-live note above. The Claude-**on-Vertex** fallback is still `⚠️ UNVERIFIED-LIVE` (never exercised — direct-API wins whenever the key is set) |
 | Full free-form multi-turn dialog trees | session tests + TC-1 cover the key invariants; exhaustive trees still need broader scenario coverage |
 
 Each row is a real gap, tracked — not silently "passing."
