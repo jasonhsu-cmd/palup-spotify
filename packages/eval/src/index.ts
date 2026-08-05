@@ -5,3 +5,15 @@
 export { grade, holds } from "./grade.js";
 export type { EvalCase, CaseResult } from "./grade.js";
 export { FLOOR_CASES, gradeFloor, deterministicFloorPass } from "./floor.js";
+// The seven NAMED production suites + the explicit gating decision (docs/design/shopper-widget.md §8).
+// Pure integer scoring — no model, judge, or provider SDK — so the promotion gate can adopt it as-is.
+export {
+  PRODUCTION_SUITES,
+  GATING_SUITES,
+  REPORT_ONLY_SUITES,
+  LAYER_SUITES,
+  scoreSuite,
+  scoreSuites,
+  formatSuiteReport,
+} from "./suites.js";
+export type { SuiteId, SuiteSpec, SuiteVerdict, SuiteCase, SuiteScore, SuiteReport, LayerMapping } from "./suites.js";

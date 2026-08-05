@@ -18,6 +18,7 @@ import {
   crossFamilyGuard,
 } from "@palup/judge";
 import { createCaseMeter, caseReportFields, aggregate, formatRunMetrics } from "./metrics.js";
+import { scoreSuites, formatSuiteReport, liveSuiteCases, liveMeasurements } from "./suites.js";
 
 interface FullCase {
   id: string;
@@ -157,7 +158,9 @@ async function main() {
 
   // §8 cost + latency: roll the per-call events up in corpus order (deterministic) and PRINT them.
   // This is reporting, not gating — the run's exit code below is unchanged and depends only on the
-  // safety/injection floor, exactly as before. Thresholds are a later PR's decision.
+  // safety/injection floor, exactly as before. The threshold DECISION is now stated in suites.ts: both
+  // suites stay ungated because the spec's 85/88 are 0-100 scores with no defined scoring function, and
+  // inventing one would manufacture false assurance.
   const metrics = aggregate(
     results.flatMap((r: any) => r.events ?? []),
     results.reduce((n: number, r: any) => n + (r.turns ?? 0), 0),
@@ -166,12 +169,44 @@ async function main() {
   );
   console.log(`\n${formatRunMetrics(metrics)}`);
 
+  // §8's SEVEN NAMED PRODUCTION SUITES, scored from this run (suites.ts). REPORT ONLY on this path:
+  //   • What blocks here is UNCHANGED — the safety/injection floor check below, exactly as before.
+  //   • The case-rate suites are judge-graded, and the committed live baseline (.github/eval-baseline.json)
+  //     records observed rates far below the spec's numbers (e.g. identity 0.30, support 0.30,
+  //     grounding 0.50). Enforcing accuracy ≥92 / compliance =100 on the live judge today would block every
+  //     run, and whether that gap is agent quality or judge strictness is not established. So the numbers
+  //     are PRINTED with a loud verdict — never silently defaulted to a pass — and the deterministic
+  //     gate (`pnpm eval`, src/run.ts) is where the same suites actually block.
+  //   • `floor` is derived from FLOOR_LAYERS, the same set this script already gates on, so the safety
+  //     suite's verdict and the exit code below read the one mechanism (no parallel gate to drift).
+  const suiteReport = scoreSuites(liveSuiteCases(results, FLOOR_LAYERS), { measurements: liveMeasurements(metrics) });
+  console.log(
+    `\n${formatSuiteReport(suiteReport, { enforced: false })}\n  (what DOES gate this run: the safety/injection floor — ${floorFails.length} fail(s).)`,
+  );
+
   const dir = join(here, "..", "..", "..", "reports");
   mkdirSync(dir, { recursive: true });
   // `events` is stripped alongside the transcript: the per-call detail is bulky and the per-case
   // latencyMs/tokens/modelCalls totals derived from it stay on every row.
   const lean = results.map(({ transcript, criteria, message, signals, events, ...r }: any) => r);
-  writeFileSync(join(dir, "full-eval-report.json"), JSON.stringify({ total: results.length, passed, byLayer, metrics, floorFails: floorFails.map((r) => r.id), results: lean }, null, 2));
+  writeFileSync(
+    join(dir, "full-eval-report.json"),
+    JSON.stringify(
+      {
+        total: results.length,
+        passed,
+        byLayer,
+        metrics,
+        // The named suites as scored on THIS path, each row carrying `gating` + `blocking` so a reader can
+        // see which verdicts were enforced (none here) rather than having to infer it.
+        suites: { enforced: false, enforcedBy: "safety/injection floor (unchanged)", ...suiteReport },
+        floorFails: floorFails.map((r) => r.id),
+        results: lean,
+      },
+      null,
+      2,
+    ),
+  );
   console.log("report: reports/full-eval-report.json");
   // EVAL_DETAIL: dump transcripts + per-criterion judge reasons (the evidence for diagnosing weak layers).
   if (process.env.EVAL_DETAIL) {
