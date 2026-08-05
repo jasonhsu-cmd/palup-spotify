@@ -10,6 +10,7 @@
     "./contract/runtime-state": "./src/contract/runtime-state-port.contract.ts",
     "./contract/secrets": "./src/contract/secrets-port.contract.ts",
     "./contract/crypto": "./src/contract/crypto-port.contract.ts",
+    "./contract/merchant-registry": "./src/contract/merchant-registry-port.contract.ts",
     "./contract/telemetry": "./src/contract/telemetry-port.contract.ts",
     "./contract/vector": "./src/contract/vector-port.contract.ts"
   }
