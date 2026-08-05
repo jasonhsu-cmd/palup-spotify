@@ -492,7 +492,10 @@ describe("C1 the happy path — install → callback → delegateAccessTokenCrea
     expect(again.tenantId).toBe(rec.tenantId);
     expect(again.status).toBe("active");
     expect(again.embedKey).toBe(rec.embedKey); // the storefront snippet keeps working
-    expect(again.statusReason).toBeUndefined(); // the stale uninstall reason is cleared
+    // The stale uninstall reason must not survive as the justification for being ACTIVE. `statusReason`
+    // documents the CURRENT status (merchant-registry-port.ts:81-82), so it is REPLACED, not cleared.
+    expect(again.statusReason).not.toBe("test uninstall");
+    expect(again.statusReason).toMatch(/install/i);
     expect(h.sink.puts).toHaveLength(2); // a fresh delegate credential each time
   });
 
