@@ -189,26 +189,6 @@
     // (widget-backend/src/signals.ts — the shopper never sets an autonomy lever).
     return { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
   }
-  // In-session, per-tab conversation memory (docs/design/shopper-widget.md §3.2, §6A) — the fix for
-  // "the widget doesn't remember". We persist the sessionId + a bounded recent transcript in
-  // sessionStorage so a RELOAD continues the same conversation and the model keeps its multi-turn
-  // context. Per-tab only: durable, cross-visit per-customer recall is a separate, consent-gated
-  // subsystem (out of scope). No transcript is ever stored server-side.
-  const HISTORY_LIMIT = 8;                    // keep + send only the last N turns (the server re-bounds)
-  const SS_KEY = "palup.widget.session.v1";
-  function loadPersisted(){
-    try { const raw = sessionStorage.getItem(SS_KEY); const o = raw ? JSON.parse(raw) : null; if (o && typeof o === "object") return o; } catch {}
-    return null;
-  }
-  const persisted = loadPersisted();
-  const sessionId = (persisted && typeof persisted.sessionId === "string" && persisted.sessionId)
-    || (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
-  let transcript = Array.isArray(persisted && persisted.history)
-    ? persisted.history.filter((t) => t && (t.role === "user" || t.role === "agent") && typeof t.content === "string").slice(-HISTORY_LIMIT)
-    : [];
-  function persistSession(){ try { sessionStorage.setItem(SS_KEY, JSON.stringify({ sessionId, history: transcript.slice(-HISTORY_LIMIT) })); } catch {} }
-  function recentHistory(){ return transcript.slice(-HISTORY_LIMIT); }   // PRIOR turns sent as `history`
-  function recordTurn(userMsg, agentReply){ transcript.push({ role: "user", content: userMsg }, { role: "agent", content: agentReply }); transcript = transcript.slice(-HISTORY_LIMIT); persistSession(); }
   let handedOff = false, lastSend = null;
 
   // Merchant tenant identity: the publishable embed key ships in this snippet; the widget mints a
@@ -223,6 +203,73 @@
     } catch { /* backend may not require it yet; /chat falls back during rollout */ }
     return widgetToken;
   }
+
+  // --- Conversation continuity: the client half of the server's conversation CONTROL state ---------
+  // Two deliberately DIFFERENT lifetimes, because the id and the transcript are not the same kind of
+  // thing (docs/design/shopper-widget.md §6A):
+  //
+  //   sessionId  → localStorage, namespaced per embed key. This is the key the SERVER files this
+  //     conversation's control state under (widget-backend/src/server.ts `t.put("session", sessionId,
+  //     session.state, …)`): the INV-A safety latch, INV-B open_issues, and the INV-E pitch budget.
+  //     It used to live in sessionStorage, which is scoped to the tab and destroyed when the tab
+  //     closes — so a shopper who reported an adverse reaction (safety latched, all pitching
+  //     suppressed) closed the tab, came back, minted a BRAND-NEW sessionId, and the server filed them
+  //     as a stranger: latch, open issues and spent pitch budget all gone, and the agent resumed
+  //     selling to them. Verified by execution before this change; the same three turns against the
+  //     mock backend returned mode=safety/pitch=none under one sessionId and
+  //     mode=sales/pitch=guided_rec under a fresh one. §6A is explicit that the latch is "cleared only
+  //     by a human/escalation resolution" (INV-A, eval case SW-8's ✘ agent_self_clears_safety) and that
+  //     open_issues "persists across sessions" (SW-12). A tab close is neither of those things.
+  //
+  //   transcript → sessionStorage, per tab, deliberately NOT durable. It is shopper-visible CONTENT —
+  //     often the very health disclosure that latched safety — and it is replayed to the model as
+  //     `history`. On a shared/kiosk device a durable copy would both sit readable in localStorage
+  //     indefinitely and re-inject one person's messages into the next person's inference. The server
+  //     draws exactly this line for itself: history "is NEVER written to SessionState … no shopper
+  //     transcript persisted" (widget-brain/src/session.ts), state stays control-only. The client now
+  //     matches it — control state durable, content ephemeral. The cost is only scrollback: after a tab
+  //     close the shopper sees the ordinary greeting, exactly as today. The AGENT's state is unchanged
+  //     and not faked — it is still latched and it still refuses to sell.
+  //
+  // NO client-side expiry, on purpose. The SERVER owns this conversation's lifetime
+  // (SESSION_TTL_SECONDS, 48h sliding, re-stamped every turn), and once its record is gone this id is
+  // inert (createSession builds fresh state for an unknown id). A client-side TTL would be a second,
+  // shorter way out of the safety latch — a weakening — so there isn't one.
+  const HISTORY_LIMIT = 8;                                      // keep + send only the last N turns (the server re-bounds)
+  const CONV_KEY = "palup.widget.conversation.v1." + EMBED_KEY;  // localStorage — the opaque id, nothing else
+  const SS_KEY = "palup.widget.transcript.v1." + EMBED_KEY;      // sessionStorage — the transcript, per tab
+  // Pre-namespacing key, read once as a fallback: a conversation that was live when this shipped keeps
+  // its id, and therefore its latch, instead of the rollout itself handing out a clean slate.
+  const SS_KEY_LEGACY = "palup.widget.session.v1";
+  // The store is named, not passed: `localStorage` THROWS on property access in Safari private mode and
+  // when storage is disabled, so the access itself has to sit inside the try.
+  function readJSON(area, key){
+    try {
+      const raw = (area === "local" ? localStorage : sessionStorage).getItem(key);
+      const o = raw ? JSON.parse(raw) : null;
+      if (o && typeof o === "object") return o;
+    } catch {}
+    return null;
+  }
+  const readSid = (o) => (o && typeof o.sessionId === "string" && o.sessionId) || null;
+  const sessionId = readSid(readJSON("local", CONV_KEY))
+    || readSid(readJSON("session", SS_KEY_LEGACY))
+    || (crypto.randomUUID && crypto.randomUUID()) || String(Math.random());
+  // The transcript is adopted ONLY when it belongs to the session we actually restored. Without that
+  // check, a shopper who clears localStorage (their own reset) would open a brand-new server-side
+  // conversation while still replaying the OLD transcript into it as `history`.
+  const priorTranscript = readJSON("session", SS_KEY) || readJSON("session", SS_KEY_LEGACY);
+  let transcript = priorTranscript && readSid(priorTranscript) === sessionId && Array.isArray(priorTranscript.history)
+    ? priorTranscript.history.filter((t) => t && (t.role === "user" || t.role === "agent") && typeof t.content === "string").slice(-HISTORY_LIMIT)
+    : [];
+  function persistSession(){
+    // Independently best-effort: a storage failure must only cost continuity, never the chat. With
+    // neither area available the session is simply in-memory for this page load.
+    try { localStorage.setItem(CONV_KEY, JSON.stringify({ sessionId })); } catch {}
+    try { sessionStorage.setItem(SS_KEY, JSON.stringify({ sessionId, history: transcript.slice(-HISTORY_LIMIT) })); } catch {}
+  }
+  function recentHistory(){ return transcript.slice(-HISTORY_LIMIT); }   // PRIOR turns sent as `history`
+  function recordTurn(userMsg, agentReply){ transcript.push({ role: "user", content: userMsg }, { role: "agent", content: agentReply }); transcript = transcript.slice(-HISTORY_LIMIT); persistSession(); }
 
   // --- PR-11b — durable, resettable anon id + shopper consent UX (ADR-0015 Inv 8) ----------------
   // Fully INERT until a /chat response confirms `memoryEnabled:true` (the server's own double-gated
@@ -644,7 +691,9 @@
   } else {
     add("Hi! I'm Auria's assistant — ask me about a product or your order.", "agent");
   }
-  persistSession(); // stamp the sessionId now so a reload before the first turn still continues this session
+  // Stamp the sessionId now, so a reload OR a closed tab before the first turn still continues this
+  // conversation rather than opening a second one the server can't connect to the first.
+  persistSession();
 </script>
 </body>
 </html>
