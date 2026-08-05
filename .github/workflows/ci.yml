@@ -1,11 +1,23 @@
 name: ci
 
-# Mirrors build-automation.md §3c: unit/port-contract → self-improvement eval gate →
+# Mirrors build-automation.md §3c: typecheck → unit/port-contract → self-improvement eval gate →
 # application E2E. No auto-deploy: promotion to prod is a human action (locked decision §1).
 on:
+  # `main` only, NOT "**". Previously every PR produced TWO identical runs (one `push` on the branch,
+  # one `pull_request`), which halved effective runner concurrency and made "which run is authoritative?"
+  # ambiguous for anything reading check results. The `pull_request` run is strictly better evidence:
+  # actions/checkout on that event checks out refs/pull/N/merge — the head ALREADY MERGED WITH base —
+  # whereas the branch `push` run tests the head in isolation. PRs are covered by `pull_request`; main is
+  # covered here. A branch with no PR gets no CI, which is intended: work reaches main only via a PR.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+# One run per PR (or per ref). A force-push supersedes its own in-flight run instead of competing with
+# it for a runner. Safe because every consumer treats a `cancelled` conclusion as NOT green.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-test-gate:
@@ -20,6 +32,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # FIRST, because it is the cheapest step and because until now it did not exist: `tsc -b` failed
+      # with TS5083 on every invocation ever (there was no root tsconfig) and CI never called it, while
+      # `pnpm test` runs through esbuild, which transpiles without type-checking. There is no linter. So
+      # NO stage in this repo type-checked anything, and the semantic conflict — PR A renames an export,
+      # PR B adds a caller, both textually disjoint, both green — was entirely ungated.
+      - name: Typecheck
+        run: pnpm typecheck
       - name: Unit + port-contract tests
         run: pnpm test
       - name: Self-improvement eval gate (safety floor + no-regression)
