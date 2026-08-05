@@ -24,6 +24,10 @@ describe("/api/promote writes durable serving (ADR-0014 T4g)", () => {
       expect(await servingChampion(store, "demo")).toBeNull(); // nothing served yet
       await app.inject({ method: "POST", url: "/api/seed", headers: AUTH });
       await app.inject({ method: "POST", url: `/api/evaluate/${CAND}`, headers: AUTH });
+      // §3 NN#2 — walk shadow → canary through the operator staging routes before promoting.
+      await app.inject({ method: "POST", url: `/api/stage/${CAND}`, headers: AUTH });
+      await app.inject({ method: "POST", url: `/api/stage/${CAND}/shadow`, headers: AUTH, payload: { n: 200, delta: 0.02 } });
+      await app.inject({ method: "POST", url: `/api/stage/${CAND}/canary`, headers: AUTH, payload: { n: 500, delta: 0.06, elapsedMs: 25 * 60 * 60 * 1000 } });
       await app.inject({ method: "POST", url: `/api/approve/${CAND}`, headers: AUTH });
       const res = await app.inject({ method: "POST", url: `/api/promote/${CAND}`, headers: AUTH });
       expect(JSON.parse(res.body).error).toBeUndefined();

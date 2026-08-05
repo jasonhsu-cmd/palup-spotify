@@ -11,7 +11,7 @@ import { AGENT_FAMILY, decideGating, liveJudgeFamily } from "./gating.js";
 import { ScenarioGrader } from "./scenario-grader.js";
 import { ModelProposer } from "./model-proposer.js";
 import { SCENARIOS } from "./scenarios.js";
-import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT } from "./canary-controller.js";
+import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT, DEFAULT_CANARY_POWER } from "./canary-controller.js";
 import { applyCanaryVerdict } from "./canary-reaction.js";
 import { promoteToServing } from "./champion-promoter.js";
 import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, type KillScope, type KillEntry } from "@palup/state-postgres";
@@ -174,6 +174,55 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       await promoteToServing(engine, (req.params as { id: string }).id, runtimeStore, PROMOTE_TENANT);
     }),
   );
+  // --- The HUMAN lane's staging surface (CLAUDE.md §3 NN#2: shadow → canary before any promotion) ---
+  //
+  // These exist because `promoteToServing` now REQUIRES both stage markers. Without them the human lane
+  // would have no lawful path at all — the stage machine was previously reachable only from the dormant
+  // auto lane, so enforcing it without adding these would have "closed" the hole by permanently breaking
+  // the only promotion route an operator can drive. Fixing a governance gap by disabling the feature is
+  // not a fix.
+  //
+  // HONEST LIMITATION, and it is a real one: the numbers below are OPERATOR-SUPPLIED, not measured by
+  // this service. The machinery that actually measures shadow/canary against live traffic lives in the
+  // auto-optimize orchestrator, which is dormant and not deployed. So these routes record an ATTESTATION
+  // that a stage was run, attributable and audited — not proof that it was. That is strictly better than
+  // no stage at all (which is what shipped before) and strictly worse than measured staging. It is the
+  // same posture /api/monitor already has. Wire these to real measurement before enabling auto-optimize.
+  //
+  // THRESHOLDS ARE SERVER-SIDE, deliberately: they are the SAME constants the auto lane uses
+  // (DEFAULT_CANARY_POWER, and auto-optimize.ts's shadow bounds). If the request body could set them, an
+  // operator could pass maxRegression: 999 and "pass" any stage — which would reintroduce the hole in a
+  // form that looks compliant in the audit log.
+  const HUMAN_SHADOW_BOUNDS = { maxRegression: 0.05, maxImprovement: 0.5 } as const;
+  app.post("/api/stage/:id", async (req) =>
+    act(async () => {
+      await assertRuntimeNotKilled();
+      engine.beginStaging((req.params as { id: string }).id);
+    }),
+  );
+  app.post("/api/stage/:id/shadow", async (req) =>
+    act(async () => {
+      await assertRuntimeNotKilled();
+      const b = (req.body ?? {}) as { n?: number; delta?: number };
+      engine.recordShadow(
+        (req.params as { id: string }).id,
+        { n: Number(b.n), delta: Number(b.delta), at: new Date().toISOString() },
+        HUMAN_SHADOW_BOUNDS,
+      );
+    }),
+  );
+  app.post("/api/stage/:id/canary", async (req) =>
+    act(async () => {
+      await assertRuntimeNotKilled();
+      const b = (req.body ?? {}) as { n?: number; delta?: number; elapsedMs?: number };
+      engine.recordCanary(
+        (req.params as { id: string }).id,
+        { n: Number(b.n), delta: Number(b.delta), elapsedMs: Number(b.elapsedMs), at: new Date().toISOString() },
+        DEFAULT_CANARY_POWER,
+      );
+    }),
+  );
+
   // BUILD-TIME plane kill: halts candidate approvals/promotions in the evolution pipeline.
   app.post("/api/kill", async () => act(() => engine.kill("operator")));
   app.post("/api/unkill", async () => act(() => engine.unkill()));

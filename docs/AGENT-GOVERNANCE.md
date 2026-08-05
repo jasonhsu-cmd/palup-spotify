@@ -18,6 +18,21 @@ pipeline.
    nothing until Accepted with security sign-off.)
 2. **Gates are mandatory and ordered.** Every change walks the same path. Stages are never
    skipped, even for "obvious" improvements.
+
+   *Enforcement status (2026-08-05).* This was, until now, enforced only on the **auto-optimize**
+   lane. The stage machine (`recordShadow` → `recordCanary` → `autoPromotable`, `packages/evolution/
+   src/engine.ts`) keyed entirely off a record that only `beginAutoOptimize` created, so the **human**
+   lane — `propose → evaluate → approve → promoteToServing`, the only lane an operator can actually
+   drive — reached 100% of live traffic with no shadow and no canary. `promoteToServing` now requires
+   both markers via `engine.humanPromotable`, and `POST /api/stage/:id{,/shadow,/canary}` give that
+   lane a lawful path to walk.
+
+   **Known limitation, stated rather than implied:** the human lane's stage figures are
+   **operator-attested, not measured** — the machinery that measures shadow/canary against live
+   traffic lives in the auto-optimize orchestrator, which is dormant and not deployed. So the log
+   records an attributable claim that a stage was run, not proof that it was. Thresholds are
+   server-side constants (shared with the auto lane) precisely so the attestation cannot be passed by
+   choosing lax bounds. Wire these to real measurement before enabling auto-optimize.
 3. **Humans own the boundary.** Any promotion that changes agent behavior, or that crosses
    a money/model/business-model line, is a human decision (`docs/HITL-POLICY.md`).
 4. **Everything is reversible and logged.** No change ships without a defined rollback and

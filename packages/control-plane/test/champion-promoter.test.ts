@@ -23,6 +23,13 @@ const mkEngine = () =>
 const readyCandidate = async (engine: EvolutionEngine) => {
   engine.propose(P("cand"));
   await engine.evaluate("cand"); // gate passes → awaiting_approval
+  // §3 NN#2 — a human promotion must ALSO walk shadow → canary (promoteToServing now requires both
+  // markers). Folded into the shared setup so every case here exercises the LAWFUL path; the refusal
+  // cases below still fail for their own reason, because kill / status / human-approver are all checked
+  // before the stage markers are consulted.
+  engine.beginStaging("cand");
+  engine.recordShadow("cand", { n: 200, delta: 0.02, at: "2026-08-05T00:00:00Z" }, { maxRegression: 0.05 });
+  engine.recordCanary("cand", { n: 500, delta: 0.02, elapsedMs: 3_600_000, at: "2026-08-05T01:00:00Z" }, { minN: 100, minWindowMs: 600_000, minDelta: -0.01 });
 };
 
 describe("promote→serving bridge (ADR-0003: only a human-approved promotion reaches serving)", () => {

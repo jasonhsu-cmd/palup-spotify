@@ -217,9 +217,31 @@ export class EvolutionEngine {
   // serving write (serveAutoChampion) refuses unless autoPromotable() re-derives ok. This forecloses the
   // PR #125 failure class (self-approval reaching the 100% slot skipping shadow/canary) at the engine.
 
+  /**
+   * Enter the STAGED promotion path (shadow → canary). LANE-NEUTRAL: the human lane calls this directly;
+   * the auto lane goes through `beginAutoOptimize`, which adds its own stricter preconditions on top.
+   *
+   * WHY THIS EXISTS: the stage machine below was reachable only via `beginAutoOptimize`, so it governed
+   * only the DORMANT auto lane. The human lane — propose → gate → approve → promoteToServing — walked
+   * straight to 100% of live traffic with no shadow and no canary, violating CLAUDE.md §3 NN#2 and the
+   * "no stage is skippable" absolute repeated in four other documents. Staging is now expressible for
+   * both lanes, and `humanPromotable` (below) requires it.
+   */
+  beginStaging(id: string): CandidateRecord {
+    if (this.killed) throw new Error("kill switch is ON — staging halted");
+    const rec = this.require(this.candidates.get(id), id);
+    if (rec.status !== "awaiting_approval") throw new Error(`cannot begin staging for ${id} in status ${rec.status} (needs a gate pass)`);
+    if (rec.gate?.pass !== true) throw new Error(`cannot begin staging for ${id} — gate did not pass`);
+    rec.auto = { stage: "eval-passed" };
+    this.log("engine", "staging_begin", id, {});
+    return rec;
+  }
+
   /** Enter the auto-optimize lane. The ONLY entry, and the single place that demands a POSITIVE
    * cross-family gating grade (gating===true) — engine.gate() passes gating===undefined (the offline
-   * MockGrader opt-out), which must NEVER auto-promote to shoppers. */
+   * MockGrader opt-out), which must NEVER auto-promote to shoppers. Builds on `beginStaging`; the
+   * `gating: true` marker it adds is what `autoPromotable` requires and `humanPromotable` does not, so
+   * opening staging to the human lane cannot widen the auto lane. */
   beginAutoOptimize(id: string): CandidateRecord {
     if (this.killed) throw new Error("kill switch is ON — auto-optimize halted");
     const rec = this.require(this.candidates.get(id), id);
@@ -229,6 +251,33 @@ export class EvolutionEngine {
     rec.auto = { stage: "eval-passed", gating: true };
     this.log("engine", "auto_begin", id, { gating: true });
     return rec;
+  }
+
+  /**
+   * READ-ONLY: may this candidate be promoted to SERVING by a human? The human-lane counterpart of
+   * `autoPromotable`, and the guard `promoteToServing` (control-plane) consults before the durable write.
+   *
+   * Requires ALL of: a passed gate, a HUMAN approval (not "auto-loop", not automated), and BOTH stage
+   * markers passed. Re-derived from the individual markers rather than the `stage` label, exactly like
+   * `autoPromotable`, so a hand-set label cannot fake a stage.
+   *
+   * Deliberately does NOT require `metrics.gating === true`. `gate()` accepts `gating === undefined`
+   * (the offline MockGrader path), and requiring a positive live-judge grade here would make the human
+   * lane unusable wherever the judge is unconfigured. That asymmetry is the point: the auto lane has no
+   * human in it, so it carries the stricter bar. Whether a human promotion should also require a
+   * positive live grade is a policy question for the named owner.
+   */
+  humanPromotable(id: string): { ok: boolean; reasons: string[] } {
+    const reasons: string[] = [];
+    const rec = this.candidates.get(id);
+    if (!rec) return { ok: false, reasons: ["unknown-candidate"] };
+    if (this.killed) reasons.push("kill-switch-on");
+    if (rec.status !== "approved") reasons.push(`status-${rec.status}`);
+    if (rec.automated || !rec.approvedBy || rec.approvedBy === "auto-loop") reasons.push("not-human-approved");
+    if (rec.gate?.pass !== true) reasons.push("gate-not-passed");
+    if (rec.auto?.shadow?.pass !== true) reasons.push("shadow-not-passed");
+    if (rec.auto?.canary?.pass !== true) reasons.push("canary-not-passed");
+    return { ok: reasons.length === 0, reasons };
   }
 
   /** Record the shadow (0%) result. Advances to "shadowed" ONLY if the engine-derived pass holds (finite
