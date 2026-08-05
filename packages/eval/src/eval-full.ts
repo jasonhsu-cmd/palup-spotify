@@ -17,6 +17,7 @@ import {
   isAnthropicApiConfigured,
   crossFamilyGuard,
 } from "@palup/judge";
+import { createCaseMeter, caseReportFields, aggregate, formatRunMetrics } from "./metrics.js";
 
 interface FullCase {
   id: string;
@@ -45,7 +46,14 @@ async function main() {
   const agentFamily = "gemini";
   const grounding = new StaticGroundingAdapter();
   const commerce = new MockCommerceAdapter();
-  const brain = createBrain(createVertexAdapter(), grounding, DEFAULT_POLICY, commerce, "shopper-demo");
+  // §8 `cost`/`latency` suites — MEASUREMENT ONLY (no threshold here; see metrics.ts). The adapter is
+  // built once; each case then gets its OWN metering decorator around it (createCaseMeter) and its own
+  // brain over that port, so the concurrency pool below cannot cross-attribute one case's tokens or
+  // latency to another. createBrain is a pure factory (brain.ts — it allocates closures, does no I/O),
+  // so one brain per case is free, and NOTHING in the brain or in any port changed to make this work.
+  // Deliberately NOT metered: the judge's own calls. These figures are the AGENT's serving cost/latency,
+  // which is what the production suites are about — folding the grader in would inflate both.
+  const model = createVertexAdapter();
   const ctx = await grounding.getContext("demo");
   // The judge must be given the SAME first-party facts the agent grounds on — otherwise it cannot
   // verify a grounded claim and reads it as a guess (SX-01: an ingredient-grounded allergy answer was
@@ -80,6 +88,11 @@ async function main() {
 
   // Grade one case (per-case isolation: an agent/judge error counts as a fail, never aborts the run).
   const gradeCase = async (c: any) => {
+    // Per-case meter + brain over the metered port (see the comment at `model` above).
+    const meter = createCaseMeter(model);
+    const brain = createBrain(meter.port, grounding, DEFAULT_POLICY, commerce, "shopper-demo");
+    const turns = c.turns?.length ?? 1; // shopper turns — the denominator for tokens/turn
+    const measured = () => caseReportFields(meter, turns);
     try {
       let transcript: string;
       if (c.turns?.length) {
@@ -102,10 +115,11 @@ async function main() {
       }
       const v = await judge.grade({ rubric: `${c.rubric}\n\n${groundTruth}`, transcript, criteria: c.criteria });
       process.stdout.write(`${v.pass ? "✅" : "❌"} ${c.id} `);
-      return { id: c.id, layer: c.layer, pass: v.pass, score: v.score, fails: v.results.filter((r) => !r.pass).map((r) => r.id), message: c.message ?? c.turns?.join(" | "), signals: c.signals ?? {}, transcript, criteria: v.results };
+      return { id: c.id, layer: c.layer, pass: v.pass, score: v.score, fails: v.results.filter((r) => !r.pass).map((r) => r.id), message: c.message ?? c.turns?.join(" | "), signals: c.signals ?? {}, transcript, criteria: v.results, ...measured() };
     } catch (e) {
       process.stdout.write(`⚠️ ${c.id} `);
-      return { id: c.id, layer: c.layer, pass: false, score: 0, fails: [`error: ${(e as Error).message}`], message: c.message, signals: c.signals ?? {}, transcript: "(error)", criteria: [] };
+      // An errored case still reports whatever WAS measured before it failed (partial, honest — not zero).
+      return { id: c.id, layer: c.layer, pass: false, score: 0, fails: [`error: ${(e as Error).message}`], message: c.message, signals: c.signals ?? {}, transcript: "(error)", criteria: [], ...measured() };
     }
   };
 
@@ -141,10 +155,23 @@ async function main() {
   const floorFails = results.filter((r) => FLOOR_LAYERS.has(r.layer) && !r.pass);
   console.log(`\nOVERALL: ${passed}/${results.length} (${Math.round((passed / results.length) * 100)}%) | floor fails: ${floorFails.length} [${floorFails.map((r) => r.id).join(", ")}]`);
 
+  // §8 cost + latency: roll the per-call events up in corpus order (deterministic) and PRINT them.
+  // This is reporting, not gating — the run's exit code below is unchanged and depends only on the
+  // safety/injection floor, exactly as before. Thresholds are a later PR's decision.
+  const metrics = aggregate(
+    results.flatMap((r: any) => r.events ?? []),
+    results.reduce((n: number, r: any) => n + (r.turns ?? 0), 0),
+    undefined,
+    { tokensIncomplete: results.some((r: any) => r.tokensIncomplete) },
+  );
+  console.log(`\n${formatRunMetrics(metrics)}`);
+
   const dir = join(here, "..", "..", "..", "reports");
   mkdirSync(dir, { recursive: true });
-  const lean = results.map(({ transcript, criteria, message, signals, ...r }: any) => r);
-  writeFileSync(join(dir, "full-eval-report.json"), JSON.stringify({ total: results.length, passed, byLayer, floorFails: floorFails.map((r) => r.id), results: lean }, null, 2));
+  // `events` is stripped alongside the transcript: the per-call detail is bulky and the per-case
+  // latencyMs/tokens/modelCalls totals derived from it stay on every row.
+  const lean = results.map(({ transcript, criteria, message, signals, events, ...r }: any) => r);
+  writeFileSync(join(dir, "full-eval-report.json"), JSON.stringify({ total: results.length, passed, byLayer, metrics, floorFails: floorFails.map((r) => r.id), results: lean }, null, 2));
   console.log("report: reports/full-eval-report.json");
   // EVAL_DETAIL: dump transcripts + per-criterion judge reasons (the evidence for diagnosing weak layers).
   if (process.env.EVAL_DETAIL) {
