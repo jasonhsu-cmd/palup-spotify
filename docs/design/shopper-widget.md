@@ -253,7 +253,17 @@ surface.
   (collapsed launcher / open panel / proactive greeting), AI-disclosure UI treatment ("AI assistant ·
   replies are AI-generated"), and a usable embedded panel on a stand-in storefront (now live on
   staging).
-- **Still open:** "Powered by PalUp" badge, appearance/theming, **accessibility**, the **human
+- **Accessibility — automated coverage now exists (PR-P12), a screen-reader pass does not.**
+  `e2e/tests/a11y.spec.ts` runs axe-core 4.12.1 at **WCAG 2.2 AA** (tags
+  `wcag2a,wcag2aa,wcag21a,wcag21aa,wcag22aa` — 70 of its 105 rules) over 12 widget states in both
+  colour schemes, plus focus management, a keyboard-only round trip, live-region structure, focus-ring
+  contrast, and `prefers-reduced-motion`. It rides the blocking `Application E2E` CI gate. **Still
+  open:** **no screen reader has been run against this widget** (VoiceOver/NVDA/JAWS), so announcement
+  quality, focus-ORDER sensibility, and whether labels are *comprehensible* are all unverified; SC
+  1.4.11 is measured for the two focus rings only, not for input/control boundaries; and the
+  one-character avatar monogram sits at 4.02:1 pending a logotype-exemption decision. See the PR for
+  the full list of what axe structurally cannot see.
+- **Still open:** "Powered by PalUp" badge, appearance/theming, the **human
   take-over handoff** UX, offline mode, and low-latency **transport (WebSocket, `<120ms` load)** —
   see `comms-and-messaging.md` §10 for the transport starting point.
 - **basic-mode-at-cap (invariant 14) is now ENFORCED, its UX is not.** The decision layer honours all

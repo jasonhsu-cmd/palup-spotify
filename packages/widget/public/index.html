@@ -6,9 +6,18 @@
 <title>Auria — Shopper Assistant</title>
 <style>
   :root{
-    --brand:#4f46e5; --brand-ink:#ffffff; --bg:#eef1f6; --panel:#ffffff; --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --radius:18px;
+    /* a11y (PR-P12): --muted was #64748b, which is 4.20:1 on --bg and 4.15:1 on the .handoff tint —
+       both below the SC 1.4.3 (AA) 4.5:1 floor for this file's 11-13px secondary text. #475569 is a
+       hex this file already used (.badge) and clears 5.6:1 on the darkest point of the body gradient
+       and 7.5:1 on --panel. No new colour introduced. */
+    --brand:#4f46e5; --brand-ink:#ffffff; --bg:#eef1f6; --panel:#ffffff; --fg:#0f172a; --muted:#475569; --line:#e2e8f0; --radius:18px;
     --palup:#0c4a3c;
     --brand-glow:var(--brand); --agent:#f1f5f9; --user:var(--brand); --safe:#fff5f5; --safeln:#fecdd3;
+    /* Brand colour for TEXT/focus rings drawn on --panel. Distinct from --brand (a fill colour, used
+       behind --brand-ink) because --brand is only 2.79:1 on the dark --panel: brand-as-fill and
+       brand-as-text cannot be the same value in both schemes. Resolves via --brand-glow, so it is
+       --brand in light and #818cf8 in dark with no new hex on either side. */
+    --brand-text:var(--brand-glow);
     --shadow:0 18px 50px rgba(15,23,42,.18);
   }
   @media (prefers-color-scheme: dark){ :root{
@@ -24,7 +33,10 @@
       radial-gradient(1100px 500px at 80% -10%, color-mix(in srgb, var(--brand-glow) 12%, transparent), transparent),
       var(--bg); }
   .sr-only{ position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0 }
-  @media (prefers-reduced-motion: reduce){ .msg{ animation:none } .typing i{ animation:none; opacity:.6 } #launcher:active{ transform:none } }
+  /* NOTE: the prefers-reduced-motion block lives at the END of this stylesheet, not here. It used to
+     sit on this line — ABOVE `.msg{animation:pop}` and `.typing i{animation:blink}` — and since a
+     media query adds no specificity, those later rules simply won and the whole override was dead
+     code: reduced-motion users got the full animation. Keep it last. */
   /* faux storefront so the widget reads as "embedded" */
   .store{ max-width:960px; margin:0 auto; padding:40px 20px 120px; }
   .store h1{ font-size:26px; margin:.2em 0 } .store p{ color:var(--muted); max-width:60ch }
@@ -37,7 +49,7 @@
   #launcher{ position:fixed; right:22px; bottom:22px; width:58px; height:58px; border-radius:50%;
     background:var(--brand); color:var(--brand-ink); border:0; cursor:pointer; box-shadow:var(--shadow); font-size:24px; display:grid; place-items:center; z-index:40 }
   #launcher:active{ transform:scale(.96) }
-  #launcher:focus-visible{ outline:2px solid color-mix(in srgb,var(--brand) 55%,transparent); outline-offset:2px }
+  #launcher:focus-visible{ outline:2px solid var(--brand-text); outline-offset:2px }
 
   /* widget panel */
   #widget{ position:fixed; right:22px; bottom:22px; width:390px; max-width:calc(100vw - 24px); height:min(620px, calc(100vh - 40px));
@@ -48,11 +60,21 @@
   .wh.handoff-mode{ background:#0f766e }
   .avatar{ width:34px; height:34px; border-radius:50%; background:color-mix(in srgb, var(--brand-ink) 22%, transparent); display:grid; place-items:center; font-weight:700 }
   .wh .t{ line-height:1.15 } .wh .t b{ font-size:15px } .wh .t small{ opacity:.85; font-size:12px }
+  /* The 85% white subtitle is 5.0:1 on the indigo header but only 4.41:1 on the teal handoff header —
+     under the SC 1.4.3 floor, on the one line that tells the shopper a human is joining. Full opacity
+     there takes it to 5.5:1. Scoped to the handoff state so the normal header keeps its hierarchy. */
+  .wh.handoff-mode .t small{ opacity:1 }
   .wh .sp{ flex:1 } .wh button{ background:transparent; border:0; color:var(--brand-ink); cursor:pointer; font-size:16px; opacity:.9; padding:4px }
   .wh button:focus-visible{ outline:2px solid var(--brand-ink); outline-offset:2px }
 
-  #messages{ flex:1; overflow-y:auto; padding:16px 14px; display:flex; flex-direction:column; gap:10px; background:
-    linear-gradient(var(--panel),var(--panel)); }
+  /* `background` was `linear-gradient(var(--panel),var(--panel))` — a flat colour written as a
+     gradient. It rendered identically, but it made axe's contrast check unable to resolve the
+     backdrop of EVERY message bubble and of .handoff, so real contrast failures inside the log came
+     back as "incomplete" instead of as violations. Declared as the flat colour it always was. */
+  #messages{ flex:1; overflow-y:auto; padding:16px 14px; display:flex; flex-direction:column; gap:10px; background:var(--panel); }
+  /* The log scrolls, so it must be reachable and scrollable by keyboard (SC 2.1.1) — hence the
+     tabindex="0" + aria-label on the element. Inset outline: the panel clips overflow. */
+  #messages:focus-visible{ outline:2px solid var(--brand-text); outline-offset:-2px }
   .msg{ max-width:82%; padding:9px 13px; border-radius:15px; white-space:pre-wrap; word-wrap:break-word; animation:pop .18s ease }
   @keyframes pop{ from{opacity:0; transform:translateY(4px)} to{opacity:1} }
   .user{ align-self:flex-end; background:var(--user); color:var(--brand-ink); border-bottom-right-radius:5px }
@@ -65,7 +87,7 @@
   .handoff{ align-self:stretch; max-width:100%; text-align:center; color:var(--muted); font-size:12.5px; padding:9px 12px; margin:4px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:color-mix(in srgb,var(--brand) 9%,transparent) }
   .handoff b{ color:var(--fg) }
   .system{ align-self:stretch; max-width:100%; text-align:center; color:var(--muted); font-size:12.5px; padding:7px 12px }
-  .system .retry{ margin-left:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand); border-radius:8px; padding:2px 10px; cursor:pointer; font:inherit; font-size:12px }
+  .system .retry{ margin-left:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand-text); border-radius:8px; padding:2px 10px; cursor:pointer; font:inherit; font-size:12px }
   .typing{ align-self:flex-start; background:var(--agent); padding:12px 14px; border-radius:15px; border-bottom-left-radius:5px }
   .typing i{ display:inline-block; width:7px; height:7px; margin:0 2px; border-radius:50%; background:var(--muted); animation:blink 1.2s infinite both }
   .typing i:nth-child(2){ animation-delay:.2s } .typing i:nth-child(3){ animation-delay:.4s }
@@ -83,12 +105,12 @@
      by ensureManagePanel). Permanently OUTSIDE the demo drawer: these are real shopper UI and must work
      with no operator/demo affordance present at all. */
   #tools{ border-top:1px solid var(--line); padding:10px 14px; display:flex; flex-direction:column; align-items:flex-start; gap:8px; background:var(--panel) }
-  #tools #signin{ font-size:12px; padding:3px 9px; border-radius:7px; border:1px solid var(--line); background:var(--panel); color:var(--brand); cursor:pointer; font:inherit }
-  #tools #signin:focus-visible{ outline:2px solid var(--brand); outline-offset:1px }
+  #tools #signin{ font-size:12px; padding:3px 9px; border-radius:7px; border:1px solid var(--line); background:var(--panel); color:var(--brand-text); cursor:pointer; font:inherit }
+  #tools #signin:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
 
   form{ display:flex; gap:8px; padding:12px 14px; border-top:1px solid var(--line) }
   #in{ flex:1; padding:11px 14px; border:1px solid #94a3b8; border-radius:12px; background:var(--panel); color:var(--fg); font:inherit }
-  #in:focus{ outline:2px solid var(--brand); outline-offset:1px }
+  #in:focus{ outline:2px solid var(--brand-text); outline-offset:1px }
   form button{ padding:0 16px; border:0; border-radius:12px; background:var(--brand); color:var(--brand-ink); cursor:pointer; font-weight:600 }
   form button:disabled{ opacity:.5 }
   /* Powered-by PalUp attribution (third-party mark; merchant identity stays in the header) */
@@ -103,15 +125,28 @@
   .consent [data-testid="consent-body"]{ color:var(--muted); font-size:12.5px; margin-bottom:10px }
   .consent-actions{ display:flex; gap:8px; justify-content:flex-end }
   .consent-actions button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
-  .consent-actions button:focus-visible{ outline:2px solid var(--brand); outline-offset:1px }
+  .consent-actions button:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
   .consent-actions button[data-testid="consent-primary"]{ background:var(--brand); border-color:var(--brand); color:var(--brand-ink); font-weight:600 }
   .manage-memory{ width:100%; border-top:1px solid var(--line); margin-top:4px; padding-top:8px; display:flex; flex-direction:column; gap:7px }
   .manage-memory > b{ font-size:12.5px }
   .mm-row{ display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--fg); cursor:pointer }
-  .manage-memory button[data-testid="manage-memory-forget"]{ align-self:flex-start; font:inherit; font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand); cursor:pointer }
+  .manage-memory button[data-testid="manage-memory-forget"]{ align-self:flex-start; font:inherit; font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand-text); cursor:pointer }
   .mm-helper{ font-size:11.5px; color:var(--muted) }
   .mm-confirm{ font-size:12px; color:var(--fg) }
   .mm-confirm[hidden]{ display:none }
+
+  /* ---- prefers-reduced-motion — MUST STAY LAST IN THIS STYLESHEET -------------------------------
+     A media query contributes no specificity, so this block only wins by being declared after the
+     animations it cancels (`.msg{animation:pop}`, `.typing i{animation:blink}`). It previously sat
+     near the top of the file, above both, which made it dead code: a shopper with reduced motion
+     configured still got every bubble pop and the blinking typing dots. Vestibular safety, so it is
+     covered by an E2E test that also asserts the animations DO run without the preference — proving
+     this block, and not a missing animation, is what switches them off. Add new animations ABOVE. */
+  @media (prefers-reduced-motion: reduce){
+    .msg{ animation:none }
+    .typing i{ animation:none; opacity:.6 }
+    #launcher:active{ transform:none }
+  }
 </style>
 </head>
 <body>
@@ -137,7 +172,11 @@
       <button id="gear" title="Demo controls" aria-label="Demo controls" aria-expanded="false" aria-controls="drawer" hidden>⚙︎</button>
       <button id="min" title="Minimize" aria-label="Minimize">—</button>
     </div>
-    <div id="messages" data-testid="messages" role="log" aria-live="polite" aria-describedby="whStatus"></div>
+    <!-- tabindex="0" + aria-label: the log scrolls (overflow-y:auto) and its content is not focusable,
+         so without a tab stop a keyboard-only shopper could not scroll back through the conversation
+         at all (SC 2.1.1 Keyboard; axe `scrollable-region-focusable`). A focusable region needs a
+         name of its own, hence aria-label — aria-describedby alone gave it a description and no name. -->
+    <div id="messages" data-testid="messages" role="log" tabindex="0" aria-label="Conversation with the assistant" aria-live="polite" aria-describedby="whStatus"></div>
     <!-- DEMO/OPERATOR dials — ?palupDebug=1 only. `cart` deliberately keeps its has_items default so the
          demo page still exercises the cart pitches; that default is exactly why this must never ship to a
          shopper, whose requests now carry NO mood/cart/proactivityLevel at all. -->
