@@ -1,0 +1,187 @@
+[
+  {
+    "id": "sales-plain",
+    "status": 200,
+    "body": "{\"reply\":\"Our vitamin-C serum is fragrance-free and patch-tested; most shoppers use it once daily.\",\"mode\":\"sales\",\"pitch\":\"guided_rec\",\"escalate\":false,\"outbound\":false,\"flags\":[\"pitch:guided_rec\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "model_call",
+        "agentType": "shopper",
+        "model": "mock-1",
+        "inputTokens": 42,
+        "outputTokens": 88
+      },
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "sales",
+        "pitch": "guided_rec",
+        "escalate": false
+      }
+    ]
+  },
+  {
+    "id": "sales-cart",
+    "status": 200,
+    "body": "{\"reply\":\"Our vitamin-C serum is fragrance-free and patch-tested; most shoppers use it once daily.\",\"mode\":\"sales\",\"pitch\":\"cross_sell\",\"escalate\":false,\"outbound\":false,\"flags\":[\"pitch:cross_sell\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "model_call",
+        "agentType": "shopper",
+        "model": "mock-1",
+        "inputTokens": 35,
+        "outputTokens": 88
+      },
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "sales",
+        "pitch": "cross_sell",
+        "escalate": false
+      }
+    ]
+  },
+  {
+    "id": "sales-buy-signal",
+    "status": 200,
+    "body": "{\"reply\":\"The gentle cleanser is sulfate-free and suits sensitive skin.\",\"mode\":\"sales\",\"pitch\":\"none\",\"escalate\":false,\"outbound\":false,\"flags\":[\"buy_signal\",\"no_pitch\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "model_call",
+        "agentType": "shopper",
+        "model": "mock-1",
+        "inputTokens": 22,
+        "outputTokens": 61
+      },
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "sales",
+        "pitch": "none",
+        "escalate": false
+      }
+    ]
+  },
+  {
+    "id": "sales-page-context",
+    "status": 200,
+    "body": "{\"reply\":\"Happy to help! Tell me a bit about what you're looking for and I'll point you the right way.\",\"mode\":\"sales\",\"pitch\":\"guided_rec\",\"escalate\":false,\"outbound\":false,\"flags\":[\"pitch:guided_rec\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "model_call",
+        "agentType": "shopper",
+        "model": "mock-1",
+        "inputTokens": 32,
+        "outputTokens": 92
+      },
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "sales",
+        "pitch": "guided_rec",
+        "escalate": false
+      }
+    ]
+  },
+  {
+    "id": "safety-reaction",
+    "status": 200,
+    "body": "{\"reply\":\"As an AI assistant, I'm really sorry — that doesn't sound right and I wouldn't brush it off. I'm not able to give medical advice on a reaction, so if it continues or worries you the right step is to check with a doctor. I've flagged this for a person on our team too.\",\"mode\":\"safety\",\"pitch\":\"none\",\"escalate\":true,\"outbound\":false,\"flags\":[\"safety:product_safety\",\"no_pitch\",\"escalate\",\"safety:reaction\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "safety",
+        "pitch": "none",
+        "escalate": true
+      }
+    ]
+  },
+  {
+    "id": "injection",
+    "status": 200,
+    "body": "{\"reply\":\"I can't do that — but I'm happy to help with product questions, your order, or a recommendation.\",\"mode\":\"smalltalk\",\"pitch\":\"none\",\"escalate\":false,\"outbound\":false,\"flags\":[\"injection_blocked\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "smalltalk",
+        "pitch": "none",
+        "escalate": false
+      }
+    ]
+  },
+  {
+    "id": "support-order",
+    "status": 200,
+    "body": "{\"reply\":\"I've confirmed order #1042 is on your account — it's in transit — arriving in about 2 days.\",\"mode\":\"support\",\"pitch\":\"none\",\"escalate\":false,\"outbound\":false,\"flags\":[\"mode_support\",\"no_pitch\",\"support:order_status\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "support",
+        "pitch": "none",
+        "escalate": false
+      }
+    ]
+  },
+  {
+    "id": "giveaway",
+    "status": 200,
+    "body": "{\"reply\":\"I'm really sorry — I hear you, and I don't want to leave you stuck. I'm not able to authorize a free product myself, but I can bring in a member of our team who can look at your situation and help. Would that be okay?\",\"mode\":\"support\",\"pitch\":\"none\",\"escalate\":true,\"outbound\":false,\"flags\":[\"giveaway_declined\",\"escalate\",\"no_autonomous_action\",\"no_pitch\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "support",
+        "pitch": "none",
+        "escalate": true
+      }
+    ]
+  },
+  {
+    "id": "proactive-no-cart",
+    "status": 200,
+    "body": "{\"reply\":\"\",\"mode\":\"smalltalk\",\"pitch\":\"none\",\"escalate\":false,\"outbound\":false,\"flags\":[\"proactive:exit_intent\",\"no_cart\",\"no_pitch\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "smalltalk",
+        "pitch": "none",
+        "escalate": false
+      }
+    ]
+  },
+  {
+    "id": "proactive-pitch",
+    "status": 200,
+    "body": "{\"reply\":\"Happy to help! Tell me a bit about what you're looking for and I'll point you the right way.\",\"mode\":\"sales\",\"pitch\":\"cart_recovery\",\"escalate\":false,\"outbound\":false,\"flags\":[\"proactive:exit_intent\",\"pitch:cart_recovery\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "telemetry": [
+      {
+        "kind": "model_call",
+        "agentType": "shopper",
+        "model": "mock-1",
+        "inputTokens": 265,
+        "outputTokens": 92
+      },
+      {
+        "kind": "turn",
+        "agentType": "shopper",
+        "servedBy": "champion-v0",
+        "mode": "sales",
+        "pitch": "cart_recovery",
+        "escalate": false
+      }
+    ]
+  }
+]

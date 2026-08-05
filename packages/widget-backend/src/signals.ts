@@ -1,4 +1,4 @@
-import type { Signals, Consent } from "@palup/widget-brain";
+import type { Signals, CartLineItemRef, Consent } from "@palup/widget-brain";
 import { validateAnonId } from "@palup/widget-memory";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
@@ -9,6 +9,72 @@ import { validateAnonId } from "@palup/widget-memory";
 
 const MOODS = new Set<string>(["frustrated", "upset", "anxious", "confused", "skeptical", "neutral", "satisfied"]);
 const CARTS = new Set<string>(["empty", "has_items", "high_value"]);
+
+// ── E4: cart line items ──────────────────────────────────────────────────────────────────────────
+//
+// THE TRUST PROBLEM, stated before the bounds so the bounds read as consequences rather than magic
+// numbers. `signals.cart` is a three-value enum today; E4 lets the client describe WHAT is in the cart so
+// the agent can reason about it. Richer input is more spoofable input, and this file exists precisely
+// because "client input must not grant treatment" (header above). So the accepted shape is the narrowest
+// one that still answers the question:
+//
+//   • IDS AND QUANTITIES ONLY. Every other field the client attaches — a title, a price, a line total, a
+//     currency, a "value" hint — is DROPPED here and never seen again. The brain then resolves each id
+//     against the merchant's LIVE catalog and drops what is not there, so the only TEXT about the cart
+//     that ever reaches the prompt is the merchant's own, sanitized and fenced exactly like the CATALOG
+//     block. There is no field a shopper can put prose into, which is a stronger property than escaping
+//     one would be.
+//   • THE CART STATE IS RE-DERIVED, NOT ACCEPTED. When a list is supplied it OVERRIDES the client's own
+//     `cart` enum, and the derivation has exactly two reachable outputs: `empty` and `has_items`.
+//     `high_value` needs PRICES, prices are not a field the client can send, and this layer has no
+//     catalog to look one up in — so a `high_value` treatment is UNREACHABLE from line items by
+//     construction, not by validation. (cart-signals-trust.test.ts asserts that over hostile payloads.)
+//   • QUANTITIES ARE DROPPED, NEVER CLAMPED. Clamping 10_000 to 99 would tell the agent a quantity the
+//     shopper never had; dropping the line is the honest failure, and the prompt then declares itself a
+//     partial view (brain.ts's CART_PARTIAL_RULE).
+//
+// WHAT THIS DOES **NOT** CLOSE, stated rather than implied: the PRE-EXISTING bare `cart: "high_value"`
+// enum is still accepted from a client that sends no line items (`CARTS` above, unchanged). That is
+// behaviourally inert today — `selectPitch` and the exit-intent `hasCart` check in widget-brain/src/
+// brain.ts treat `has_items` and `high_value` identically, verified by execution — but it is a real,
+// separate gap. It is deliberately not fixed here: tightening it would change flag-OFF behaviour and
+// break the byte-identical bar this wave ships under.
+
+/** Ids a real storefront produces: Shopify gids (`gid://shopify/Product/123`), handles, numeric strings. */
+const CART_PRODUCT_ID = /^[A-Za-z0-9._:/-]{1,128}$/;
+/** Enough lines for a genuinely large basket; small enough that the prompt cannot be inflated by one. */
+export const MAX_CART_LINE_ITEMS = 30;
+/** A per-line quantity a real cart reaches. Above it we drop the line rather than believe or clamp it. */
+export const MAX_CART_LINE_QUANTITY = 99;
+
+/**
+ * Validate + BOUND an untrusted `cartItems` payload. Returns `undefined` when the client sent no array at
+ * all (⇒ the pre-existing coarse-enum path is untouched), and an array — possibly EMPTY, when everything
+ * was rejected — when it did. Never throws.
+ */
+function sanitizeCartItems(raw: unknown): CartLineItemRef[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: CartLineItemRef[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (out.length >= MAX_CART_LINE_ITEMS) break;
+    if (!entry || typeof entry !== "object") continue;
+    const rawId = (entry as { productId?: unknown }).productId;
+    const quantity = (entry as { quantity?: unknown }).quantity;
+    if (typeof rawId !== "string") continue;
+    const productId = rawId.trim();
+    if (!CART_PRODUCT_ID.test(productId)) continue;
+    if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity < 1 || quantity > MAX_CART_LINE_QUANTITY) continue;
+    // Dedupe keeps the FIRST occurrence rather than summing: summing would report a quantity the shopper
+    // never had on any line, which is inventing data rather than sanitizing it. A `Set` is used instead
+    // of an object map so no client string is ever an object key.
+    if (seen.has(productId)) continue;
+    seen.add(productId);
+    // REBUILT, never spread: only these two fields survive, whatever else the client attached.
+    out.push({ productId, quantity });
+  }
+  return out;
+}
 
 export interface ServingSignalContext {
   /** The verified tenant/merchant this request serves (from the widget token, server-side). */
@@ -57,14 +123,39 @@ export interface ServingSignalContext {
    * client-validated behavior applies, keeping the inert path byte-identical.
    */
   memorySubject?: string;
+  /**
+   * E4 — the CART_LINE_ITEMS posture flag, at this layer. Default OFF (and `server.ts` does not pass it),
+   * so `signals.cartItems` is not even PARSED in production: the returned object has no `cartItems` key
+   * and `cart` keeps its pre-E4 behaviour exactly. Gated here as well as in the brain because parsing
+   * client input is itself an attack surface, and because turning this on changes what `cart` means for a
+   * request that carries line items — a run-time behaviour change governed by docs/HITL-POLICY.md §5.
+   */
+  cartLineItemsEnabled?: boolean;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
   const r = (raw ?? {}) as Signals;
+  // E4 — `undefined` when the flag is off OR the client sent no array; an array (possibly empty) when it
+  // did. The distinction matters: `undefined` leaves the pre-existing enum path alone, while `[]` is a
+  // POSITIVE statement that the cart is empty.
+  const cartItems = ctx.cartLineItemsEnabled ? sanitizeCartItems((r as { cartItems?: unknown }).cartItems) : undefined;
   return {
     // Accepted shopper/UI context — only when a valid enum value.
     mood: typeof r.mood === "string" && MOODS.has(r.mood) ? r.mood : undefined,
-    cart: typeof r.cart === "string" && CARTS.has(r.cart) ? r.cart : undefined,
+    // E4 — a supplied line-item list RE-DERIVES this and overrides whatever the client claimed. Only two
+    // outputs are reachable from it, so a shopper cannot manufacture `high_value` out of a cart payload;
+    // see the trust note above `sanitizeCartItems`, including what this deliberately does NOT close.
+    cart: cartItems
+      ? cartItems.length > 0
+        ? "has_items"
+        : "empty"
+      : typeof r.cart === "string" && CARTS.has(r.cart)
+        ? r.cart
+        : undefined,
+    // SPREAD, so the key is ABSENT (not present-and-undefined) whenever the flag is off — the same
+    // discipline `Decision.recommendedProducts` uses, and what keeps an `Object.keys` consumer and a
+    // strict-equal fixture unchanged while E4 is unwired.
+    ...(cartItems ? { cartItems } : {}),
     // Agent-initiated proactive UI trigger (§4 Behavioral: exit-intent) — non-trust-bearing UI context
     // like mood/cart, accepted ONLY as the known enum. It can only route to a MORE restrained proactive
     // cart_recovery on the clean sales path; every server cap still holds (precedence ladder, mood brake,

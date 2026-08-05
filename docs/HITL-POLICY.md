@@ -141,6 +141,66 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 >     last-touch attribution, which **ADR-0007 §2 and `docs/PRICING.md` §2 forbid as a fee basis**. Any
 >     use of it in the outcome ledger would itself be a money/business-model boundary crossing.
 
+> **Product cards (`PRODUCT_CARDS` flag) — NOT yet flipped, no owner assigned (E3).**
+> `packages/widget-brain` can attach the display fields (title, price, three-state availability) of each
+> product a reply CITED to `Decision.recommendedProductCards`, and `packages/widget-backend` forwards
+> both that and E2's `recommendedProducts` onto the `/chat` response, plus
+> `TelemetryEvent.recommendedProductIds` onto the per-turn telemetry row. The widget renders the cards as
+> an aside below the reply. That puts **new content on a shopper's screen**, so it is a run-time
+> behaviour change governed by §5 exactly like any other promotion: eval gate → shadow → canary →
+> **named human approval** → promote. **None of that has happened.**
+> Its inertness is structural: the flag defaults OFF, **no `PRODUCT_CARDS` env read exists anywhere in the
+> repo**, and although `server.ts` **is** changed here (E2 deferred this and E3 cannot), the change is two
+> spreads of functions that return `{}` unless the `Decision` already carries cited products — which this
+> composition root cannot produce, because its `createBrain` call still passes seven positional arguments
+> and never reaches either flag. Byte-identical when off is proven **twice**: at the brain, by re-running
+> E1's 37-probe golden (`widget-brain/test/cards-cart-flag-off.test.ts`), and **on the wire**, by
+> `widget-backend/test/chat-wire-flag-off.test.ts` against a golden of the verbatim `/chat` response bytes
+> and telemetry rows captured on the commit before this implementation existed.
+> Three things a reviewer must weigh **at flip time**, none settled here:
+> (1) **It is not a billing basis** — the same prohibition as E2's ids, now with a second consumer. A
+>     `recommended → clicked → purchased` chain off `recommendedProductIds` is last-touch attribution,
+>     which **ADR-0007 §2 and `docs/PRICING.md` §2 forbid as a fee basis**; introducing one would itself
+>     be a money/business-model boundary crossing. `rollupEvents` deliberately does not aggregate the
+>     field, so no headline number can appear by accident.
+> (2) **The cards UNDER-DISPLAY and the telemetry UNDER-COUNTS**, inheriting every limit of the citation
+>     mechanism: a model that recommends in prose without copying its tag yields nothing, and citations
+>     are minted only on the clean sales path, so a proactive exit-intent turn reports nothing at all. A
+>     shopper seeing three cards has been shown what the reply *cited*, not what it recommended.
+> (3) **The label is deliberately weaker than the field name.** The prompt rule tags anything the model
+>     "recommends, names, or discusses", so a product the agent talked the shopper *out* of is in the
+>     list. The heading therefore reads "Mentioned in this reply", never "Recommended for you", and a
+>     card is neither a link nor an add-to-cart (`Product` carries no url and this system has no
+>     checkout). Any reviewer widening that copy is making a **capability claim** and owns it.
+
+> **Cart line items (`CART_LINE_ITEMS` flag) — NOT yet flipped, no owner assigned (E4).**
+> `packages/widget-brain` can render what is actually in the shopper's cart into its system prompt as a
+> fenced DATA block, instead of knowing only the coarse `"empty" | "has_items" | "high_value"` enum. That
+> changes **what the agent sees and therefore what it says**, so it is governed by §5 exactly like any
+> other promotion: eval gate → shadow → canary → **named human approval** → promote. **None of that has
+> happened.**
+> Its inertness is structural at **two** layers, and deliberately so: the brain flag defaults OFF, the
+> `deriveServingSignals` gate (`ctx.cartLineItemsEnabled`) defaults OFF **and `server.ts` does not pass
+> it**, so a client-posted `signals.cartItems` is not even parsed in production. **No `CART_LINE_ITEMS`
+> env read exists anywhere in the repo.** Byte-identical when off is proven in the strong form: E1's
+> golden is re-run with `signals.cartItems` **supplied on every probe**, which shows the signal is
+> ignored rather than merely absent.
+> Three things a reviewer must weigh **at flip time**, none settled here:
+> (1) **Cart contents are client-supplied** — no port in this repo exposes a cart. The mitigation is that
+>     the accepted shape is ids and quantities only (no field a shopper can put prose into), every id is
+>     resolved against the merchant's live catalog and dropped if absent, and the cart STATE is
+>     re-derived server-side with only `empty`/`has_items` reachable, so a `high_value` treatment cannot
+>     be manufactured from line items. What this does **not** close: the pre-existing bare
+>     `cart: "high_value"` enum a client can still send with no line items — behaviourally inert today
+>     (`selectPitch` treats it identically to `has_items`) but a real, separate gap, left alone because
+>     tightening it would change flag-off behaviour.
+> (2) **A resolved cart is a PARTIAL view.** An unresolvable id is dropped, so the prompt declares itself
+>     incomplete and forbids reasoning from absence — #180's lesson, mitigated in-prompt but not
+>     eliminated.
+> (3) **Nothing here measures whether it helps.** No real model has been run against a cart block; the
+>     tests use a recording model whose reply is fixed. Whether richer cart context improves the reply,
+>     or merely lengthens the prompt, is unknown until the eval gate runs on a real model.
+
 ## 6. How this is enforced in code
 
 - Every agent action is classified against this policy before execution. Boundary-crossing
