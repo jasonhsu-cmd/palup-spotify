@@ -89,6 +89,13 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 //     `Domain = 'X-Shopify-Shop-Domain'`, `WebhookId = 'X-Shopify-Webhook-Id'`,
 //     `ApiVersion = 'X-Shopify-API-Version'`, `EventId = 'X-Shopify-Event-Id'`.
 //   • `safeCompare` compares only after `buffA.length === buffB.length`, then a constant-time loop.
+//   • webhooks/validate.ts — `checkWebhooksHeaders` treats FIVE headers as REQUIRED on every delivery via
+//     `getRequiredHeader(...)`: `hmac`, `topic`, `domain` (= `X-Shopify-Shop-Domain`), `apiVersion` and
+//     `webhookId`; any missing one is `MissingHeaders`. That is the (Shopify-authored) evidence that
+//     `X-Shopify-Shop-Domain` is present on EVERY topic including `app/uninstalled`, which is what makes
+//     `APP_UNINSTALLED_SHOP_SOURCE` viable rather than a guess. It is still an UNSIGNED header — the HMAC
+//     covers the body only — so "always present" is not "authenticated"; see that constant for the bound.
+//     https://raw.githubusercontent.com/Shopify/shopify-app-js/main/packages/apps/shopify-api/lib/webhooks/validate.ts
 //
 // WHAT IS *NOT* VERIFIED, stated rather than implied:
 //   • NO GOLDEN VECTOR. `shopify-webhook-identity` is tested against an independent transcription of

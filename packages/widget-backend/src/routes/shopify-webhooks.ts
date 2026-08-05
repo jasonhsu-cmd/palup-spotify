@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { AuditInput, MerchantRecord, MerchantRegistryPort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
+import type { MerchantRecord, MerchantRegistryPort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
 import { buildShopifyShopperId } from "@palup/platform-ports";
 import { accountSubjectId, eraseSubject, listSubjects, retireSubject } from "@palup/widget-memory";
 import { clientIpKey } from "../rate-limit.js";
@@ -175,13 +175,28 @@ type Refusal =
   | "wrong_payload_shape"
   | "bad_shop"
   | "no_shop_header"
-  | "bad_customer_id"
-  | "no_data_request_id"
   | "rate_limited"
   | "internal_error";
 
-/** A delivery we accept (200) but that changed nothing, because there is nothing here to change. */
-type Ack = "unknown_shop" | "already_handled" | "halted_deferred" | "recorded_not_fulfilled" | "applied";
+/**
+ * An outcome we ACKNOWLEDGE with 200 ([W2]: "Confirm that you've received the request by responding with a
+ * 200 series status code"). Each of these means something different and the audit log distinguishes them —
+ * the one thing none of them may mean is "silently ignored":
+ *   `applied`                 the action ran (see each handler for what "the action" actually covers).
+ *   `recorded_not_fulfilled`  the obligation is durably recorded; we cannot fulfil it. (data_request)
+ *   `halted_deferred`         a kill switch stopped a DESTRUCTIVE act; the obligation is recorded + dated.
+ *   `unidentifiable_subject`  the payload named no subject we could validate; nothing erased, nothing
+ *                             guessed, obligation audited as unmet.
+ *   `already_handled`         a duplicate delivery of an id we already acted on ([W1]'s dedup recipe).
+ *   `unknown_shop`            no registry row for this shop, so there is genuinely nothing here to act on.
+ */
+type Ack =
+  | "unknown_shop"
+  | "already_handled"
+  | "halted_deferred"
+  | "recorded_not_fulfilled"
+  | "unidentifiable_subject"
+  | "applied";
 
 function logRefusal(topic: string, reason: Refusal): void {
   // Topic is a fixed literal chosen by the ROUTE, never read from the request — so this line cannot be
@@ -465,6 +480,17 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
     // `keepLast: 0` removes every entry of the tenant's traffic stream. This is the ONE thing in the repo
     // that can erase the traffic log the #185 review flagged as unreachable — unreachable PER SHOPPER
     // (no anonId→sessionId link), but reachable PER TENANT, which is exactly this topic's scope.
+    //
+    // VERIFICATION CAVEAT, stated rather than implied. `keepLast: 0` is proven to empty the stream on the
+    // IN-MEMORY adapter (test: "empties the traffic log"). On the POSTGRES adapter it is NOT verified by
+    // any test in this repo — `trimStream` has no coverage in postgres-runtime-store.test.ts or the shared
+    // RuntimeStatePort contract (grepped both). Reading the SQL
+    // (state-postgres/src/postgres-runtime-store.ts:133-143), `LIMIT 0` makes the `keep` CTE empty and
+    // `seq NOT IN (<empty>)` is TRUE for every row, so it should delete all of them — but "should, by
+    // reading" is not "does, by test", and this is a legally-relevant erasure on the adapter production
+    // actually runs. It could not be verified from here: pglite is a dependency of @palup/state-postgres
+    // and is not resolvable from widget-backend, and adding it would change pnpm-lock.yaml. Reported as a
+    // required follow-up (a `trimStream` case in the shared port contract, which both adapters run).
     await deps.store.trimStream({ tenantId }, "traffic", 0);
   } catch {
     /* counted only in the log; the audit row above already refuses to claim completeness */
@@ -489,17 +515,51 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
 async function handleCustomerRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<Ack | { refused: Refusal }> {
   const shopDomain = bodyShopDomain(v.body);
   if (!shopDomain) return { refused: "bad_shop" };
-  const customerId = customerIdOf(v.body);
-  if (!customerId) return { refused: "bad_customer_id" };
   const existing = await resolveTenant(deps, shopDomain);
   if (!existing) return "unknown_shop";
   const tenantId = existing.tenantId;
-  const shopperId = buildShopifyShopperId(tenantId, customerId);
-  // A tenant id outside `[a-z0-9-]+` cannot produce a sound namespaced shopper id, so there is no subject
-  // to erase and guessing one would be worse than refusing.
-  if (!shopperId) return { refused: "bad_customer_id" };
-  const subject = accountSubjectId(shopperId);
   if (await alreadyHandled(deps, tenantId, "customers/redact", v.webhookId)) return "already_handled";
+
+  // The customer id is validated, NEVER coerced: `customerIdOf` refuses anything that is not a
+  // non-negative safe integer, and `buildShopifyShopperId` re-checks both components against `\d+` /
+  // `[a-z0-9-]+`. A value either names a subject exactly or names none.
+  //
+  // BUT AN UNIDENTIFIABLE SUBJECT IS ACKNOWLEDGED (200), NOT REFUSED (400) — corrected on re-reading [W2].
+  // These are MANDATORY topics: a 4xx is an error to Shopify, which "retries 8 times over the next 4
+  // hours" and then deletes an Admin-API-configured subscription. A body we cannot parse a subject out of
+  // will not parse on the retry either, so a 400 burns all 8 attempts and can cost the app its compliance
+  // subscription — while STILL not erasing anything. So the honest outcome is: acknowledge, erase nothing,
+  // and write an audit row saying we could not identify a subject. That is a 200 that means RECORDED, not
+  // one that means IGNORED. (The cross-topic-replay defence is unaffected: it lives in
+  // `matchesPayloadShape`, which still 400s, and runs before this.)
+  const customerId = customerIdOf(v.body);
+  const shopperId = customerId ? buildShopifyShopperId(tenantId, customerId) : undefined;
+  if (!shopperId) {
+    await deps.store.audit(
+      { tenantId },
+      {
+        actor: "system:shopify-webhook",
+        action: "customer.redact_unidentifiable",
+        // No `customer` field of any kind is recorded — we could not validate it, so it is exactly the
+        // sort of value that must not enter an immutable log.
+        input: { tenantId, shopDomain, topic: "customers/redact" },
+        decision: {
+          complete: false,
+          erased: [],
+          reason: "the payload's customer.id was absent or not a non-negative integer, so no subject could be named; nothing was erased and nothing was guessed",
+          notErased: CUSTOMER_REDACT_RESIDUAL,
+        },
+        reversalPath:
+          `n/a — nothing was changed. This is an UNMET obligation: identify the customer from Shopify's ` +
+          `webhook delivery log in the Partner Dashboard, then erase by hand. Acknowledged rather than ` +
+          `refused so Shopify's retries (and the compliance subscription) are not burned on a body that ` +
+          `would fail identically every time.`,
+      },
+    );
+    await markHandled(deps, tenantId, "customers/redact", v.webhookId);
+    return "unidentifiable_subject";
+  }
+  const subject = accountSubjectId(shopperId);
 
   const ref = subjectRef(shopperId, deps.auditHmacKey);
   const dueBy = new Date(deps.now() + DATA_REQUEST_DUE_DAYS * 86_400_000).toISOString();
@@ -572,18 +632,24 @@ async function handleCustomerRedact(deps: ShopifyWebhookDeps, v: Verified): Prom
 async function handleDataRequest(deps: ShopifyWebhookDeps, v: Verified): Promise<Ack | { refused: Refusal }> {
   const shopDomain = bodyShopDomain(v.body);
   if (!shopDomain) return { refused: "bad_shop" };
-  const requestId = dataRequestIdOf(v.body);
-  if (!requestId) return { refused: "no_data_request_id" };
-  const customerId = customerIdOf(v.body);
-  if (!customerId) return { refused: "bad_customer_id" };
   const existing = await resolveTenant(deps, shopDomain);
   if (!existing) return "unknown_shop";
   const tenantId = existing.tenantId;
-  const shopperId = buildShopifyShopperId(tenantId, customerId);
-  if (!shopperId) return { refused: "bad_customer_id" };
   if (await alreadyHandled(deps, tenantId, "customers/data_request", v.webhookId)) return "already_handled";
 
-  const ref = subjectRef(shopperId, deps.auditHmacKey);
+  // Same correction as `customers/redact`, and it costs even less here because this handler is
+  // acknowledged-only either way: an id we cannot validate does not refuse the delivery (which would burn
+  // Shopify's retries on a mandatory topic and risk the compliance subscription), it degrades the RECORD.
+  // Nothing unvalidated is ever written; the record simply says it has no reference.
+  const requestId = dataRequestIdOf(v.body);
+  const customerId = customerIdOf(v.body);
+  const shopperId = customerId ? buildShopifyShopperId(tenantId, customerId) : undefined;
+  const ref = shopperId
+    ? subjectRef(shopperId, deps.auditHmacKey)
+    : "unidentifiable (the payload's customer.id was absent or not a non-negative integer)";
+  // The KV key. `data_request.id` is the natural one; without it, fall back to the delivery id so the
+  // obligation is still enumerable rather than dropped. Both are validated/opaque, never free text.
+  const recordKey = requestId ?? (v.webhookId ? `delivery:${v.webhookId}` : undefined);
   const receivedAt = new Date(deps.now()).toISOString();
   const dueBy = new Date(deps.now() + DATA_REQUEST_DUE_DAYS * 86_400_000).toISOString();
   const reason =
@@ -596,21 +662,29 @@ async function handleDataRequest(deps: ShopifyWebhookDeps, v: Verified): Promise
     {
       actor: "system:shopify-webhook",
       action: "data_request.acknowledged",
-      input: { tenantId, shopDomain, topic: "customers/data_request", dataRequestId: requestId, subjectRef: ref },
-      decision: { fulfilled: false, recorded: true, reason, dueBy, whereTheDataWouldBe: ["the account-scoped memory namespace (empty today: memory is double-gated off)", "the per-tenant traffic log (redacted message + reply, hashed sessionId)"] },
+      input: { tenantId, shopDomain, topic: "customers/data_request", dataRequestId: requestId ?? null, subjectRef: ref },
+      decision: {
+        fulfilled: false,
+        recorded: recordKey !== undefined,
+        reason,
+        dueBy,
+        whereTheDataWouldBe: ["the account-scoped memory namespace (empty today: memory is double-gated off)", "the per-tenant traffic log (redacted message + reply, hashed sessionId)"],
+      },
       reversalPath:
         `n/a — nothing was changed or disclosed. This records an OPEN obligation. Read the open list with ` +
         `RuntimeStatePort.list({tenantId:"${tenantId}"}, "${DATA_REQUEST_COLLECTION}"). There is no ` +
         `deployed console or CLI that lists it yet — reported as a follow-up, not built here.`,
     },
   );
-  await deps.store.put(
-    { tenantId },
-    DATA_REQUEST_COLLECTION,
-    requestId,
-    { dataRequestId: requestId, tenantId, shopDomain, subjectRef: ref, receivedAt, dueBy, fulfilled: false },
-    // NO ttlSeconds, deliberately: an unmet legal obligation must not disappear on its own.
-  );
+  if (recordKey !== undefined) {
+    await deps.store.put(
+      { tenantId },
+      DATA_REQUEST_COLLECTION,
+      recordKey,
+      { dataRequestId: requestId ?? null, tenantId, shopDomain, subjectRef: ref, receivedAt, dueBy, fulfilled: false },
+      // NO ttlSeconds, deliberately: an unmet legal obligation must not disappear on its own.
+    );
+  }
   await markHandled(deps, tenantId, "customers/data_request", v.webhookId);
   return "recorded_not_fulfilled";
 }

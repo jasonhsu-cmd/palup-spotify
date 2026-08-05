@@ -608,14 +608,36 @@ describe("C2 — customers/redact erases the one thing it can reach, and says wh
     expect((await auditFor(h.store, TENANT)).filter((r) => r.action === "customer.redact_applied")).toHaveLength(1);
   });
 
-  it("a non-numeric customer id is refused rather than coerced into a namespace", async () => {
+  it("a non-numeric customer id is never COERCED into a namespace — nothing is erased", async () => {
     const h = await harness();
     await seedMerchant(h.registry);
-    for (const id of ["../../etc", "1::2", "", null, {}]) {
+    // A namespace an attacker-shaped id could have reached if the id were interpolated rather than validated.
+    await h.vector.upsert(subjectNamespace(TENANT, ACCOUNT_SUBJECT), [{ id: "mine", text: "my fact" }]);
+    for (const id of ["../../etc", "1::2", "", " 191167 ", "191167x", -1, 1.5, null, {}]) {
       const raw = customerRedactBody({ customer: { id, email: CUSTOMER_EMAIL } });
-      const res = await h.post(WEBHOOK_ROUTES.customersRedact, { raw, topic: "customers/redact" });
-      expect(res.statusCode, `customer.id=${JSON.stringify(id)} must be refused`).toBe(400);
+      await h.post(WEBHOOK_ROUTES.customersRedact, { raw, topic: "customers/redact" });
+      expect(
+        await h.vector.query(subjectNamespace(TENANT, ACCOUNT_SUBJECT), { text: "", k: 10 }),
+        `customer.id=${JSON.stringify(id)} must not erase anything`,
+      ).toHaveLength(1);
     }
+  });
+
+  it("an unidentifiable customer is ACKNOWLEDGED (200) and audited as unmet — not 400", async () => {
+    // A 4xx on a MANDATORY topic burns Shopify's 8 retries on a body that would fail identically each
+    // time, and an Admin-API-configured subscription is deleted after 8 consecutive failures. So the
+    // obligation is recorded instead of the subscription being risked.
+    const h = await harness();
+    await seedMerchant(h.registry);
+    const raw = customerRedactBody({ customer: { id: "not-a-number", email: CUSTOMER_EMAIL } });
+    const res = await h.post(WEBHOOK_ROUTES.customersRedact, { raw, topic: "customers/redact" });
+    expect(res.statusCode).toBe(200);
+    const rec = (await auditFor(h.store, TENANT)).find((r) => r.action === "customer.redact_unidentifiable");
+    expect(rec, "an unmet erasure obligation must be visible in the audit chain").toBeTruthy();
+    expect((rec!.decision as { erased?: unknown[] }).erased).toEqual([]);
+    // The unvalidated value must not have entered the immutable log.
+    expect(JSON.stringify(rec)).not.toContain("not-a-number");
+    expectNothingLeaked(JSON.stringify(rec), "the unidentifiable-subject audit row");
   });
 
   it("an ARMED KILL SWITCH stops the destructive act and records the obligation", async () => {
