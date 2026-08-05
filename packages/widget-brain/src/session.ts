@@ -157,7 +157,18 @@ export interface SessionOptions {
 }
 
 export async function createSession(brain: Brain, opts: SessionOptions = {}): Promise<Session> {
-  const level = opts.level ?? "balanced";
+  // Two DIFFERENT things, deliberately kept apart.
+  //
+  // `budgetLevel` sizes INV-E's one-per-conversation pitch budget and must always resolve to something.
+  //
+  // `explicitLevel` is what (if anything) we STAMP onto the signals we hand the brain. It used to be
+  // `opts.level ?? "balanced"` — always defined — so `send()` always set `signals.proactivityLevel`, and
+  // brain.ts's `signals.proactivityLevel ?? policy.proactivityDefault` fallback was DEAD CODE on every
+  // request that went through a Session. Leaving it undefined when the caller gave no level is what makes
+  // that fallback reachable, so a policy's own dial is honoured instead of being silently overwritten
+  // with "balanced".
+  const budgetLevel: ProactivityLevel = opts.level ?? "balanced";
+  const explicitLevel = opts.level;
   const restored = opts.sessionId && opts.store ? await opts.store.load(opts.sessionId) : undefined;
   const state: SessionState = restored
     ? {
@@ -214,7 +225,7 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
       // Merge carried state INTO signals so the stateless brain sees the latch + open issues.
       const merged: Signals = {
         ...signals,
-        proactivityLevel: signals.proactivityLevel ?? level,
+        proactivityLevel: signals.proactivityLevel ?? explicitLevel,
         safetyLatched: state.safetyLatched || Boolean(signals.safetyLatched),
         openIssues: [...state.openIssues, ...(signals.openIssues ?? [])],
         // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL, consumed only in brain.ts) —
@@ -302,7 +313,7 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
 
       // INV-E: one budget across the whole conversation; switching modes never refills it.
       if (d.pitch !== "none") {
-        if (state.pitchesUsed >= BUDGET[level]) {
+        if (state.pitchesUsed >= BUDGET[budgetLevel]) {
           d = {
             ...d,
             pitch: "none",
