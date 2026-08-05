@@ -238,12 +238,20 @@ describe("E3 — the cards UNDER-DISPLAY, and that is a known defect, not a bug 
   });
 
   it("the under-display limit is written where a consumer of the field will read it", () => {
+    // The DOC COMMENT attached to the field declaration itself — not somewhere else in the file — so a
+    // developer who hovers `recommendedProductCards` in an editor is told before they use it.
     const here = dirname(fileURLToPath(import.meta.url));
     const types = readFileSync(join(here, "..", "src", "types.ts"), "utf8");
-    const doc = types.slice(types.indexOf("recommendedProductCards"));
-    // Named on the type itself, next to the field, in the two ways it misleads.
-    expect(types).toMatch(/UNDER-DISPLAY|LOWER BOUND|lower bound/);
-    expect(doc.slice(0, 4000)).toMatch(/not a billing basis|NOT A BILLING BASIS/i);
+    const decl = types.indexOf("recommendedProductCards?: RecommendedProductCard[];");
+    expect(decl, "the field declaration").toBeGreaterThan(-1);
+    const doc = types.slice(Math.max(0, decl - 3000), decl); // the preceding jsdoc block
+    expect(doc).toMatch(/UNDER-DISPLAYS|under-displays|lower bound/);
+    expect(doc).toMatch(/without copying its tag produces no card/i); // the exact way it under-displays
+    expect(doc).toMatch(/not a billing basis/i);
+    expect(doc).toMatch(/ADR-0007/);
+    expect(doc).toMatch(/PRICING\.md/);
+    // …and the honest label the data supports, so a later renderer cannot quietly upgrade the claim.
+    expect(doc).toMatch(/MENTIONED, not[\s*]+"recommended for you"/); // tolerant of the comment's line wrap
   });
 });
 

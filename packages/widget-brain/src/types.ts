@@ -187,6 +187,57 @@ export interface CatalogRetrieverPort {
   retrieve(ctx: { tenantId: string; query: string; k: number }): Promise<RetrievedProduct[]>;
 }
 
+/**
+ * E3 — ONE cited product, in the shape the widget renders as a card. Behind the PRODUCT_CARDS posture
+ * flag; see `Decision.recommendedProductCards`.
+ *
+ * WHERE THE FIELDS COME FROM, which is the whole safety argument. Every value here is copied from the
+ * exact `Product` object `systemPrompt` rendered into this turn's CATALOG block, through the SAME
+ * `sanitizeGroundingText` caps that produced the prompt line — never from the retrieval corpus (which
+ * stores ids only, deliberately, so a stale price is physically unquotable — see `CatalogRetrieverPort`),
+ * never from a second `getContext` call, and never from the client. So a card cannot show a price the
+ * model was not told, cannot outlive the turn that produced it, and cannot disagree with the reply.
+ *
+ * DELIBERATELY NO URL, and no "add to cart". `Product` (platform-ports/src/grounding-port.ts) carries no
+ * link, and this system has no cart or checkout capability at all — a card that offered either would be
+ * a shopper-facing claim about something that does not exist (the class of defect #185 removed and
+ * `widget-backend/test/shopper-promise-guard.ts` now guards).
+ */
+export interface RecommendedProductCard {
+  /** The merchant's own product id — the same value that appears in `Decision.recommendedProducts`. */
+  productId: string;
+  /** The merchant's title, sanitized and capped exactly as the CATALOG line renders it. */
+  title: string;
+  /** The merchant's DISPLAY price string, e.g. "$34" — copied, never parsed, computed or converted. */
+  price: string;
+  /**
+   * THREE-STATE, mirroring `Product.availableForSale` and the CATALOG rule the model reads:
+   *   true      -> confirmed purchasable
+   *   false     -> confirmed not purchasable (the card still renders — the reply named the product, so
+   *                dropping the card would leave the reply and the cards disagreeing)
+   *   ABSENT    -> the source does not report it, so NOTHING may be said. The key is omitted rather than
+   *                set to undefined, so no renderer can read "absent" as "available".
+   */
+  availableForSale?: boolean;
+}
+
+/**
+ * E4 — ONE line in the shopper's cart, as the client reports it. Behind the CART_LINE_ITEMS posture flag.
+ *
+ * IDS AND QUANTITIES ONLY, and that is the trust boundary rather than a simplification. Cart contents are
+ * CLIENT-SUPPLIED (no port in this repo exposes a cart), so this type deliberately has no field a shopper
+ * could put prose into: no title, no price, no line total, no currency. `productId` is resolved against
+ * the merchant's LIVE catalog and DROPPED when it is not there, so every word about the cart that reaches
+ * the prompt is the MERCHANT's own text, sanitized and fenced exactly like the CATALOG block.
+ *
+ * `quantity` is the one number the client owns. It is bounded server-side (`deriveServingSignals`) and is
+ * never used to price anything — which is what makes a `high_value` treatment unmanufacturable from here.
+ */
+export interface CartLineItemRef {
+  productId: string;
+  quantity: number;
+}
+
 export interface Signals {
   mood?: Mood;
   relationship?: Relationship;
@@ -194,6 +245,20 @@ export interface Signals {
   /** Support issues currently open (INV-B: any open issue suppresses sales). */
   openIssues?: string[];
   cart?: "empty" | "has_items" | "high_value";
+  /**
+   * E4 — WHAT is actually in the cart, not merely that there is one. Behind the CART_LINE_ITEMS posture
+   * flag; consumed ONLY on the clean sales path, and only to render a fenced DATA block resolved against
+   * the merchant's live catalog (see `CartLineItemRef` for why the type is this narrow).
+   *
+   * SERVER-SANITISED, never trusted verbatim: `deriveServingSignals` (widget-backend/src/signals.ts) is
+   * the only origin — it bounds the id charset/length, drops (never clamps) an out-of-range quantity,
+   * caps the line count, deduplicates, and strips every other field the client attached. It also
+   * RE-DERIVES `cart` above from this list, overriding whatever enum the client claimed, so a supplied
+   * list can only ever yield `empty` or `has_items`.
+   *
+   * Absent ⇒ the pre-existing coarse-enum behaviour is untouched.
+   */
+  cartItems?: CartLineItemRef[];
   /** True once a safety event has latched this conversation (INV-A). */
   safetyLatched?: boolean;
   /** Marketing consent per channel; drives outbound gating (TCPA/CAN-SPAM). Also carries the two
@@ -355,4 +420,31 @@ export interface Decision {
    * product cards, link-outs, per-product eval grading, merchant-facing "what did it suggest" reporting.
    */
   recommendedProducts?: string[];
+  /**
+   * PRODUCT CARDS (E3) — the same cited products as `recommendedProducts`, in the same order, with the
+   * display fields a widget needs to render a card. Behind the PRODUCT_CARDS posture flag: OMITTED
+   * entirely (not `[]`, not `undefined`-valued) whenever the flag is off or nothing resolved, so the
+   * flag-off `Decision` and the /chat wire shape are unchanged.
+   *
+   * Every field is copied from the `Product` object this turn's CATALOG block actually rendered, through
+   * the same sanitizer — see `RecommendedProductCard` for why that is load-bearing rather than an
+   * implementation detail.
+   *
+   * IT UNDER-DISPLAYS, exactly as `recommendedProducts` UNDER-REPORTS, because it is derived from it and
+   * inherits every limit: a model that names a product in prose without copying its tag produces no card,
+   * and citations are minted only on the clean sales path, so a proactive exit-intent turn shows none at
+   * all. A shopper seeing three cards has NOT been shown "the three products the agent recommended" —
+   * they have been shown the ones it cited. Both limits are pinned by tests
+   * (widget-brain/test/product-cards.test.ts), not left to a comment.
+   *
+   * ALSO WEAKER THAN ITS NAME. The prompt rule asks the model to tag any product it "recommends, names,
+   * or discusses" (citations.ts `CATALOG_CITATION_RULE`), so a product the agent talked the shopper OUT
+   * of is in here too. Any shopper-facing label over these cards must therefore say MENTIONED, not
+   * "recommended for you" — pinned by an E2E assertion on the heading.
+   *
+   * NOT A BILLING BASIS — the same prohibition as `recommendedProducts` above, and for the same reason:
+   * a `recommended -> clicked -> purchased` chain off these ids is last-touch attribution, which
+   * ADR-0007 §2 and docs/PRICING.md §2 forbid as a fee basis.
+   */
+  recommendedProductCards?: RecommendedProductCard[];
 }
