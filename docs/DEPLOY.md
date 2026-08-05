@@ -57,6 +57,98 @@ green.
 > `WIDGET_EMBED_KEYS={"demo-embed-key":"demo","<their-embed-key>":"<their-tenant>"}` — and give them that
 > embed key + their own tenant id/store creds; no code change. Dropping the whole variable no longer
 > degrades quietly: the revision fails its health check and the deploy goes red.
+>
+> **D1 — `WIDGET_EMBED_KEYS` is now a FALLBACK, not the source of truth.** Since D1 the serving path
+> resolves a merchant through the **merchant registry** (`pl_merchant`) first and only falls back to this
+> variable. The paragraph above still describes how the variable behaves; what changed is its *rank*. The
+> full rule lives in `packages/widget-backend/src/merchant-resolver.ts`; the operator-relevant summary:
+>
+> | situation | what happens |
+> |---|---|
+> | the registry has an **active** row for the embed key | that tenant is served. The env map is not consulted. |
+> | the registry has a row and it is **not** `active` | **refused (401/403)** — a stale `WIDGET_EMBED_KEYS` entry can **not** resurrect a revoked merchant |
+> | the registry **could not be read** (query threw) | **refused** — an unreadable registry is not an absent row. Costs availability during a DB fault, on purpose |
+> | the registry has **no row** for that key (or no `DATABASE_URL` ⇒ no registry) | the `WIDGET_EMBED_KEYS` entry is used — **logged** (`[merchant] tenant "…" resolved from the WIDGET_EMBED_KEYS ENV FALLBACK …`) and, when a registry exists, **audited once per tenant per hour** as `merchant.resolved_from_env` |
+> | neither | 401 |
+>
+> **This is how staging's `demo` tenant keeps working**: no `pl_merchant` row names `demo`, so it resolves
+> through the fallback and the post-deploy smoke gate (`?key=demo-embed-key` → live `/chat`) passes
+> unchanged. It is a *named* fallback, not a silent one — `GET /health` now reports
+> `"merchants":"registry+env"` (a durable registry with the fallback armed) or `"merchants":"env"`
+> (local/dev, no `DATABASE_URL`).
+>
+> **Revocation is now real, and it is enforced per turn.** A widget token is a bearer credential with its
+> own TTL (`WIDGET_TOKEN_TTL_SECONDS`, default 1h), so `/chat` re-checks `pl_merchant.status` on **every**
+> request — a merchant set `uninstalled` (by the `app/uninstalled` webhook or by the CLI below) stops being
+> served immediately, not when their last token expires. Before D1 they were served forever.
+> `POST /forget` and `POST /consent` are deliberately **not** gated: erasure and consent withdrawal must
+> outlive the install.
+>
+> **How to revoke or restore a merchant** (no HTTP route exists — see *How to halt the live agent* for why):
+> ```bash
+> pnpm exec tsx packages/widget-backend/src/jobs/merchant.ts status --tenant <tenantId> --status uninstalled
+> pnpm exec tsx packages/widget-backend/src/jobs/merchant.ts status --tenant <tenantId> --status active   # reverse
+> ```
+> Revocation is a **status, never a delete** — the row, its `embedKey` and its `createdAt` survive, so an
+> already-deployed storefront snippet works again on reactivation.
+>
+> **What D1 did NOT cut over** (so nobody assumes it did):
+> - **The Storefront token is still `SecretsPort`.** Serving reads `shopify_storefront_token` from
+>   `PALUP_SECRETS` — *not* the encrypted delegate credential an install stores. **A merchant who installs
+>   themselves therefore gets the built-in FIXTURE catalog, not their own products,** until an operator
+>   provisions that secret for their tenant. There is exactly one source of truth for the token today.
+> - **`MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` are still process-wide env.** A merchant is *recorded*
+>   with `SHOPIFY_INSTALL_REGION` but *served* with `MERCHANT_REGION`. If those disagree the backend logs a
+>   `[config] SHOPIFY_INSTALL_REGION=… but MERCHANT_REGION=…` warning at boot — **set both to the same
+>   value.**
+> - **The catalog-index and retention-sweep jobs still enumerate `SHOPIFY_STORES`,** so a self-installed
+>   merchant is invisible to them. This is not a deferral by preference: `MerchantRegistryPort` has no
+>   enumeration operation at all, so migrating those jobs needs a new port method.
+
+## Shopify app install + compliance webhooks (C1/C2, D1)
+
+**Both feature sets are absent-or-fully-configured** — a missing precondition means the routes are never
+registered (**404**), never half-working. They have **separate** gates on purpose: letting the OAuth
+redirect URI lapse must not stop honouring GDPR erasure for merchants who already installed.
+
+**Install routes** (`GET /shopify/install` → `GET /shopify/callback`) need **all** of:
+
+| setting | kind | notes |
+|---|---|---|
+| `SHOPIFY_APP_CLIENT_ID` | env | the app's OAuth client id — not a secret, it ships in the URL |
+| `SHOPIFY_INSTALL_REDIRECT_URI` | env | must **also** be registered as an allowed redirect URL on the Shopify app |
+| `SHOPIFY_INSTALL_REGION` | env | `us`\|`eu`\|`uk`\|`other`. **Required, no default** — an unset var must not make a residency decision. Keep it equal to `MERCHANT_REGION` (see above) |
+| `SHOPIFY_INSTALL_SCOPES` | env, optional | defaults to `unauthenticated_read_product_listings` |
+| `SHOPIFY_DELEGATE_SCOPES` | env, optional | comma-separated; must be covered by what the merchant granted |
+| `shopify_app_client_secret` | **secret** | in `PALUP_SECRETS` under the **app-scoped** pseudo-tenant `__shopify_app__`: `{"__shopify_app__":{"shopify_app_client_secret":"…"}}` |
+| `DATABASE_URL` | secret | an in-memory registry is refused — it would forget every install on the next cold start while reporting success |
+
+**Compliance webhooks** need only the last two (`shopify_app_client_secret` + `DATABASE_URL`), because
+Shopify signs webhook HMACs with the same app client secret — **no new env var, no new secret**:
+
+- `POST /shopify/webhooks/customers/data_request`
+- `POST /shopify/webhooks/customers/redact`
+- `POST /shopify/webhooks/shop/redact`
+- `POST /shopify/webhooks/app/uninstalled` ← the topic that makes revocation real (see D1 above)
+
+`AUDIT_HMAC_SECRET` is **optional** and defaults to `SHOPPER_TOKEN_SECRET`. It is the keyed-HMAC key for
+audit `subjectRef`s, so a low-entropy numeric customer id is never recorded as a bare hash. Provision it
+separately only if you want key separation from the shopper-token secret.
+
+**Two KV collections** these add to `rs_kv` (no migration — the runtime store's own table):
+`shopify_webhook_seen` (delivery dedup, TTL'd) and `shopify_data_requests` (the `customers/data_request`
+record). Pending installs live in `shopify_install_pending` under the reserved tenant `__shopify_app__`.
+
+**A per-merchant encryption key is required at install time and cannot be checked at boot** (the tenant is
+unknown until someone installs): `MEMORY_ENCRYPTION_KEY__merchant-cred`, per tenant, in the same
+`PALUP_SECRETS` map. Without it the delegate token cannot be encrypted, so the callback **refuses** —
+502, no row, no credential, nothing stored in the clear. Its rotation slot is
+`MEMORY_ENCRYPTION_KEY__merchant-cred_previous` and it follows the **same two-step procedure** as
+`MEMORY_ENCRYPTION_KEY` (below): copy current → `_previous`, put new at the base name. Two honest limits
+carried over: nothing re-encrypts existing rows for you (a row moves to the new key only when it is
+written again — i.e. on re-install), and rotating the merchant's **token** is a different operation from
+rotating the **key**. The `__merchant-cred` scope exists so that a compromise of `MEMORY_ENCRYPTION_KEY`
+does **not** expose stored merchant credentials.
 
 ## How to halt the live agent
 
@@ -168,11 +260,34 @@ deployed** by `deploy-staging.yml`, so the CLI above is the only path that works
 - **Connection:** Cloud Run attaches the instance with `--add-cloudsql-instances` and connects over the
   unix socket (`host=/cloudsql/<conn>`). The runtime SA has `roles/cloudsql.client` + `secretAccessor`
   on the URL secret.
-- **Schema:** auto-created on boot — TWO idempotent migrations run against the SAME shared connection
+- **Schema:** auto-created on boot — THREE idempotent migrations run against the SAME shared connection
   pool (state-postgres's `createRuntimeStore()`/`createVectorStore()` share one `pg.Pool` per process; see
-  the vector-factory doc comment): `PostgresRuntimeStore.migrate()` (`rs_kv`/`rs_stream`/`rs_audit`) and
-  `PostgresVectorStore.migrate()` (`vp_records` — the durable cross-visit-memory table, ADR-0015). No
-  manual migration for either.
+  the vector-factory doc comment): `PostgresRuntimeStore.migrate()` (`rs_kv`/`rs_stream`/`rs_audit`),
+  `PostgresVectorStore.migrate()` (`vp_records` — the durable cross-visit-memory table, ADR-0015), and
+  `PostgresMerchantRegistry.migrate()` (`pl_merchant` — see below; runs only when the Shopify install or
+  webhook routes are enabled). No manual migration for any of them.
+- **`pl_merchant` privileges (the merchant registry, B1) — not yet applied to any instance as far as this
+  doc's own history shows; verify against the live instance before relying on this.** `palup_app` needs
+  `SELECT`, `INSERT` and `UPDATE`. It does **not** need `DELETE`: revocation is a *status change*, never a
+  row delete (the adapter issues no `DELETE` at all — deleting the row would strand the tenant's sessions,
+  consent records, audit chain and memory namespaces in namespaces nothing can resolve), so withholding
+  `DELETE` is a cheap, real guard rather than a formality.
+  ```sql
+  GRANT SELECT, INSERT, UPDATE ON pl_merchant TO palup_app;   -- deliberately NO DELETE
+  ```
+  **This is a CROSS-TENANT table by design** — it is the one read that happens *before* a tenant is known
+  (embed key / shop domain → tenant), so unlike `rs_kv` it has no `tenant_id` predicate to scope by and RLS
+  is not applicable in the same way. The isolation guarantees are instead enforced by two **unique
+  indexes** the migration creates, on `lower(shop_domain)` and on `embed_key`. Those are the security
+  boundary, not a tidiness measure: without them a duplicate row makes a reverse lookup return whichever
+  row the planner emitted first — a silent, non-deterministic **wrong-tenant** resolution on a live shopper
+  request. If duplicate rows already exist, `migrate()` cannot build the index and **boot fails loudly**,
+  which is the intended outcome.
+- **Since D1 this table is on the serving hot path.** Every `/widget/token` mint and every `/chat` turn
+  reads it (see the D1 note above). Two operational consequences: (a) a `pl_merchant` outage now refuses
+  mints and turns rather than degrading quietly — that is deliberate, so a database fault cannot resurrect
+  a revoked merchant; (b) the reads are single-row lookups on unique indexes, but they are per-request, so
+  they count against the shared-core Cloud SQL tier's connection budget alongside the kill-switch read.
 - **Audit immutability (#19):** `rs_audit` is INSERT/SELECT-only for `palup_app` (applied on staging;
   UPDATE/DELETE denied — verified). Re-apply for any new instance via
   `scripts/setup-audit-immutability.sql` (run as `postgres` through the Cloud SQL proxy). The backend
@@ -217,6 +332,15 @@ deployed** by `deploy-staging.yml`, so the CLI above is the only path that works
      records outlive a bare 30 days from rotation). Only then remove `_previous`. Watch for
      `recall.dropped` audit entries during the window — a non-zero count means records were written under
      a key that is no longer reachable.
+
+  **The same two steps apply to `MEMORY_ENCRYPTION_KEY__merchant-cred`** (the per-merchant delegate-credential
+  key — see *Shopify app install + compliance webhooks* above), whose rotation slot is
+  `MEMORY_ENCRYPTION_KEY__merchant-cred_previous`. The `__merchant-cred` suffix is a **key scope**: it is
+  what makes the two keys rotate independently, so a `MEMORY_ENCRYPTION_KEY` compromise does not expose
+  stored merchant credentials. One difference in the failure mode, worth knowing before you rotate: an
+  unreadable *memory* key drops a fact and audits `recall.dropped`, whereas an unreadable *credential* is
+  reported as `unreadable` and is **never** silently treated as "this merchant has no credential" — so the
+  symptom is a loud refusal, not a merchant quietly falling back to fixtures.
 
 ## Shopify grounding (M2, ADR-0012)
 
