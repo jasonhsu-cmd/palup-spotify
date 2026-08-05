@@ -27,7 +27,9 @@ export interface SupportContext {
 const ESCALATION_RE = /connecting you with a person|member of our team|handed it to|loop in a person|connect you with a person|a person who can help/i;
 function lastOrderRefInHistory(history?: HistoryTurn[]): string | undefined {
   for (let i = (history?.length ?? 0) - 1; i >= 0; i--) {
-    const m = history![i].content.match(/#(\d{3,})/);
+    // Optional-chained rather than `history![i]` — the loop bound already makes `history` non-empty, so
+    // this drops a non-null assertion without changing behaviour.
+    const m = history?.[i]?.content.match(/#(\d{3,})/);
     if (m) return `#${m[1]}`;
   }
   return undefined;

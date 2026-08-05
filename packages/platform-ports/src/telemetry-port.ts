@@ -48,7 +48,10 @@ const STREAM = "telemetry"; // per-tenant append stream on the RuntimeStatePort
 function percentile(sortedAsc: number[], p: number): number | null {
   if (sortedAsc.length === 0) return null;
   const idx = Math.min(sortedAsc.length - 1, Math.floor((p / 100) * sortedAsc.length));
-  return sortedAsc[idx];
+  // `?? null` cannot fire — the empty guard above plus the `length - 1` clamp put `idx` in range for
+  // every `p`. It is here because `noUncheckedIndexedAccess` types the read as `number | undefined` and
+  // the honest way to reconcile that with the `number | null` return is a widening, not an assertion.
+  return sortedAsc[idx] ?? null;
 }
 
 export function rollupEvents(tenantId: string, events: TelemetryEvent[]): TelemetryRollup {

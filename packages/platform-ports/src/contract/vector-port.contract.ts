@@ -20,9 +20,9 @@ export function runVectorPortContract(makeAdapter: () => VectorPort | Promise<Ve
       ]);
       const hits = await v.query("tenant-a", { vector: [1, 0, 0], k: 3 });
       expect(hits.map((h) => h.id)).toEqual(["r1", "r2", "r3"]);
-      expect(hits[0].score).toBeGreaterThan(hits[1].score);
-      expect(hits[1].score).toBeGreaterThan(hits[2].score);
-      expect(hits[0].metadata).toEqual({ title: "exact" });
+      expect(hits[0]!.score).toBeGreaterThan(hits[1]!.score);
+      expect(hits[1]!.score).toBeGreaterThan(hits[2]!.score);
+      expect(hits[0]!.metadata).toEqual({ title: "exact" });
     });
 
     it("honors k — returns only the top-k nearest", async () => {
@@ -68,8 +68,8 @@ export function runVectorPortContract(makeAdapter: () => VectorPort | Promise<Ve
       await v.upsert("t", [{ id: "a", vector: [0, 1, 0], metadata: { rev: 2 } }]);
       const hits = await v.query("t", { vector: [0, 1, 0], k: 10 });
       expect(hits).toHaveLength(1); // not two rows for the same id
-      expect(hits[0].id).toBe("a");
-      expect(hits[0].metadata).toEqual({ rev: 2 });
+      expect(hits[0]!.id).toBe("a");
+      expect(hits[0]!.metadata).toEqual({ rev: 2 });
     });
 
     it("round-trips metadata INCLUDING a nested disposition array (widget-memory's FactMetadata shape)", async () => {
@@ -84,7 +84,7 @@ export function runVectorPortContract(makeAdapter: () => VectorPort | Promise<Ve
       };
       await v.upsert("subject-x", [{ id: "fact-1", text: metadata.text, metadata }]);
       const [hit] = await v.query("subject-x", { text: "", k: 10 });
-      expect(hit.metadata).toEqual(metadata); // deep nested structure preserved, not flattened/stringified
+      expect(hit!.metadata).toEqual(metadata); // deep nested structure preserved, not flattened/stringified
     });
 
     it("deleteById removes only the given ids (missing ids are ignored)", async () => {
@@ -171,9 +171,9 @@ export function runVectorPortContract(makeAdapter: () => VectorPort | Promise<Ve
       const v = await makeAdapter();
       await v.upsert("t", [{ id: "a", vector: [1, 0], metadata: { n: 1 } }]);
       const first = await v.query("t", { vector: [1, 0], k: 1 });
-      (first[0].metadata as { n: number }).n = 999;
+      (first[0]!.metadata as { n: number }).n = 999;
       const second = await v.query("t", { vector: [1, 0], k: 1 });
-      expect(second[0].metadata).toEqual({ n: 1 });
+      expect(second[0]!.metadata).toEqual({ n: 1 });
     });
   });
 }

@@ -249,13 +249,14 @@ export function verifyIdToken(idToken: string, opts: VerifyIdTokenOptions): IdTo
     const parts = idToken.split(".");
     if (parts.length !== 3) return null;
     const [h, p, s] = parts;
+    if (!h || !p || !s) return null; // the length check above does not narrow a destructure
     const header = JSON.parse(Buffer.from(h, "base64url").toString("utf8")) as { alg?: string; kid?: string };
     if (header.alg !== "RS256" || !header.kid) return null; // only RS256 with a kid — no `none`, no HS256 (alg confusion)
     const jwk = opts.jwks.keys.find((k) => k.kid === header.kid && k.kty === "RSA");
     if (!jwk) return null; // unknown kid ⇒ fail closed
     let pub;
     try {
-      pub = createPublicKey({ key: jwk as unknown as import("node:crypto").JsonWebKey, format: "jwk" });
+      pub = createPublicKey({ key: jwk as unknown as JsonWebKey, format: "jwk" });
     } catch {
       return null;
     }

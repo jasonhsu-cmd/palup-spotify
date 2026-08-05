@@ -17,3 +17,7 @@ playwright-report/
 
 # Claude Code agent worktrees (transient; never repo content)
 .claude/worktrees/
+
+# `tsc -b` incremental state — a build artifact, one per referenced project. Newly generated now
+# that a root tsconfig exists and `tsc -b` actually runs (it never did before).
+*.tsbuildinfo

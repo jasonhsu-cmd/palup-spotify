@@ -33,6 +33,10 @@ export type {
   RuntimeStateTx,
   AuditInput,
   AuditRecord,
+  // `PutOpts` was declared and used on the port's own `put` signature but never re-exported here, so
+  // `state-postgres`'s adapter — which must type an identical signature — imported a member the barrel
+  // did not provide. Never caught because nothing type-checked.
+  PutOpts,
 } from "./runtime-state-port.js";
 export { AUDIT_GENESIS_HASH } from "./runtime-state-port.js";
 export { InMemoryRuntimeStore } from "./in-memory-runtime-store.js";

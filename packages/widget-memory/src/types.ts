@@ -40,7 +40,7 @@ export interface RecalledFact {
  * read by retention.ts/erasure.ts/merge.ts, T8-T10). Kept here — not in service.ts — so those modules
  * can depend on the shape without ever importing service.ts itself (avoids a cycle: service.ts imports
  * `ttlForClass` from retention.ts). */
-export interface FactMetadata {
+export type FactMetadata = {
   text: string;
   class: FactClass;
   expiresAt: string; // ISO-8601

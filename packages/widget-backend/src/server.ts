@@ -1375,10 +1375,13 @@ export async function buildServer(opts?: {
       // the governed state (pitch budget / safety latch) can never advance without its audit on a
       // mid-turn store failure. Both live under the serving tenant. "session" matches session-store.ts.
       const auditEntry = buildAuditInput({ sessionId, messageLength: message.length, servedBy: policy.id, decision: d, killScope: kill?.scope });
-      let auditRec: { seq: number; hash: string; at: string } | null = null;
-      await store.tx(serving, async (t) => {
+      // RETURNED from the tx rather than assigned to an outer `let`: TypeScript does not model the
+      // callback as having run, so it narrowed the outer variable to `null` and the anchor line below
+      // then read `.seq`/`.hash`/`.at` off type `never` — three errors, and the compiler was right that
+      // it could not prove the assignment happened. Returning the value makes the dependency explicit.
+      const auditRec = await store.tx(serving, async (t) => {
         await t.put("session", sessionId, session.state, { ttlSeconds: SESSION_TTL_SECONDS });
-        if (auditEntry) auditRec = await t.audit(auditEntry);
+        const rec = auditEntry ? await t.audit(auditEntry) : null;
         // ADR-0017 T8 — identity-resolution audit (PII-safe, F7 keyed HMAC): only for a turn where the
         // shopper resolved to a server-verified principal (no noise for the anonymous common case,
         // mirrors the governance-relevant-only policy above). AUDIT_HMAC_SECRET is guaranteed configured
@@ -1388,6 +1391,7 @@ export async function buildServer(opts?: {
             buildIdentityAuditInput({ shopperId: shopperPrincipal.shopperId, source: shopperPrincipal.source, tenantId, hmacKey: AUDIT_HMAC_SECRET }),
           );
         }
+        return rec;
       });
       // External audit-chain anchor (#19 head-anchor): emit the chain head to stdout → Cloud Logging
       // captures it immutably, OUTSIDE the DB's mutable surface. Reconciling these anchors against

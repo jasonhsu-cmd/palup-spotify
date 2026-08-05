@@ -163,7 +163,7 @@ export function runRuntimeStatePortContract(makeAdapter: () => RuntimeStatePort 
       input.orderId = "9999"; // mutate the caller's object after committing
       expect((await s.verifyAudit(A)).ok).toBe(true); // stored record + its hash are unaffected
       const [rec] = await s.readAudit(A);
-      expect((rec.input as { orderId: string }).orderId).toBe("1042");
+      expect((rec!.input as { orderId: string }).orderId).toBe("1042");
     });
 
     it("verifyAudit with a trusted head anchor detects truncation/rewrite", async () => {
