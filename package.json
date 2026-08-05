@@ -30,6 +30,7 @@
     "typecheck": "tsc -b --pretty"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.48.0",
     "@types/node": "^26.1.2",
     "@types/pg": "^8.20.3",
