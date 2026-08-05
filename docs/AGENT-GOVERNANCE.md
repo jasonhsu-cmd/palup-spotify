@@ -35,6 +35,24 @@ pipeline.
    choosing lax bounds. Wire these to real measurement before enabling auto-optimize.
 3. **Humans own the boundary.** Any promotion that changes agent behavior, or that crosses
    a money/model/business-model line, is a human decision (`docs/HITL-POLICY.md`).
+
+   *Enforcement status (2026-08-05).* The control-plane had authentication but no **identity**: any
+   valid bearer token authenticated as the literal string `"operator"`, so every governance action was
+   attributed to one anonymous name and the audit chain was cryptographically sound but semantically
+   anonymous. Operators can now be **named** (`OPERATOR_TOKENS`, a JSON map of operatorId → token; the
+   legacy single `OPERATOR_TOKEN` still works and still resolves to `"operator"`), the approver of
+   record is the operator who actually approved, and a **two-person rule** refuses a promotion by the
+   same operator who approved it.
+
+   **Known limits, stated rather than implied.** (a) The two-person rule needs two people: it is
+   enforced only when **≥2 distinct operators are configured**, because with one shared token every
+   operator *is* `"operator"` and the rule would either block every promotion or be meaningless.
+   Whether it is active is reported at `GET /api/state.twoPersonPromote` — an observable state, not a
+   silent default. The current deployment configures one token, so it is **inactive there today**.
+   (b) These are still shared bearer tokens, not per-person SSO/passkey credentials — a token can be
+   passed between people, so this raises the bar without proving who was at the keyboard.
+   (c) There is still **no step-up** on approve, promote, or on arming/disarming the kill switch, while
+   the merchant opt-in route does require one. That gap is unchanged by this increment.
 4. **Everything is reversible and logged.** No change ships without a defined rollback and
    an audit-log entry.
 

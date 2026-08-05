@@ -62,6 +62,24 @@ export async function promoteToServing(
   store: RuntimeStatePort,
   tenantId: string,
   at = new Date().toISOString(),
+  opts?: {
+    /**
+     * The operator performing THIS promotion. When supplied, a TWO-PERSON RULE applies: they must not be
+     * the same operator who approved the candidate.
+     *
+     * The plane already refused an AUTOMATED approval (no self-deployment). What it could not refuse was
+     * one human doing both halves — approve, then promote — which, with a single shared OPERATOR_TOKEN
+     * and a hardcoded approver string, meant one credential carried a policy change to 100% of shoppers
+     * with no second pair of eyes.
+     *
+     * OPTIONAL BY DESIGN, and the honesty is in the caller: a two-person rule needs two people, and with
+     * one shared token every operator IS "operator", so enforcing it unconditionally would block every
+     * promotion in the current deployment. The control-plane therefore supplies this only when >= 2
+     * distinct operators are configured, and exposes whether it is active as
+     * `GET /api/state.twoPersonPromote` — an observable state rather than a silent default.
+     */
+    promotedBy?: string;
+  },
 ): Promise<Champion> {
   // NN #4 — fail closed on the SHARED three-scope kill registry (not just engine.isKilled()).
   const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
@@ -90,6 +108,14 @@ export async function promoteToServing(
       `cannot promote ${candidateId} to serving: ${staged.reasons.join(", ")} — a human promotion must still walk shadow and canary (CLAUDE.md §3 NN#2)`,
     );
   }
+  // TWO-PERSON RULE — see `opts.promotedBy`. Compared against the approver RECORDED ON THE CANDIDATE
+  // (engine.approve bound it), never a caller-supplied approver string, so a caller cannot name a
+  // different approver to slip past their own approval.
+  if (opts?.promotedBy && opts.promotedBy === rec.approvedBy) {
+    throw new Error(
+      `${candidateId} was approved by ${rec.approvedBy} — the same operator cannot also promote it to serving (two-person rule)`,
+    );
+  }
   const fromId = engine.getChampion().policy.id;
   const cfg: ServingChampion = { policy: rec.policy, promotedFrom: fromId, promotedAt: at, approvedBy: rec.approvedBy };
   // Durable serving write FIRST (put + audit atomically). Engine untouched until this commits.
@@ -99,7 +125,10 @@ export async function promoteToServing(
       {
         actor: approver, // the recorded HUMAN approver, never a caller-supplied string
         action: "champion.promote",
-        input: { tenantId, candidateId, from: fromId, to: rec.policy.id },
+        // `promotedBy` records WHO PUSHED IT, distinct from who approved it. Both names matter: the
+        // audit previously attributed the whole transition to the literal string "operator", so an
+        // investigator could tell that a promotion happened but never which person did either half.
+        input: { tenantId, candidateId, from: fromId, to: rec.policy.id, promotedBy: opts?.promotedBy },
         decision: `promoted ${rec.policy.id} to serving`,
         reversalPath: "rollbackServing",
       },
