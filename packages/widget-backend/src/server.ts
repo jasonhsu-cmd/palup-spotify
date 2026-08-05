@@ -1368,6 +1368,21 @@ export async function buildServer(opts?: {
       // (support.ts's order lookups) is checked against the principal that reached /chat this turn,
       // never a stale/shared one (AsyncLocalStorage keeps concurrent requests from bleeding together).
       const d = await withRequestPrincipal(shopperPrincipal, () => session.send(message, signals, history));
+
+      // §6 INV-D — "Context continuity, offered not pushed": once the detour is genuinely over, offer to
+      // resume the preserved browsing topic ONCE, as help rather than a re-pitch.
+      //
+      // THIS CALL IS THE FIX. `session.resumeOffer()` existed, was unit-tested, and had NO PRODUCTION
+      // CALLER — so the offer INV-D specifies had never reached a shopper. Every gate stays inside
+      // resumeOffer() (at most once; never while an issue is open, safety is latched, an escalation is
+      // pending, or the mood is negative), so wiring it up loosens nothing; it only makes the existing
+      // conservative logic reachable.
+      //
+      // MUST run AFTER send() — send() is what advances browsingContext and clears/records openIssues, so
+      // asking before it would gate on the previous turn's state. And it must run BEFORE the tx below,
+      // because resumeOffer() sets `resumeOffered = true` and that write has to be committed with the rest
+      // of the session state, or a retry would offer again and break the once-only guarantee.
+      const resumeOffer = session.resumeOffer();
       // PR-8 — persist persona/preference memory from THIS turn, POST-decision, on the clean (successful)
       // /chat path only: this line is only reached after a decision was actually computed, never on the
       // early-return validation paths above (input_rejected/unauthenticated/rate_limited) or the
@@ -1517,6 +1532,12 @@ export async function buildServer(opts?: {
         consentMode: CONSENT_MODE,
         consentPrompt,
         memoryActive,
+        // A SEPARATE field from `reply`, deliberately: INV-D says offered, not pushed, so the shopper's
+        // actual answer is never diluted and the widget can render this as a distinct, ignorable
+        // affordance. Omitted (not null, not "") when there is nothing to resume, so a truthiness check in
+        // the widget cannot render an empty bubble. JSON.stringify drops it, keeping the wire response
+        // byte-identical to before on every turn that has no offer.
+        resumeOffer,
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
