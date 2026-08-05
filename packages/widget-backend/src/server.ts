@@ -23,7 +23,7 @@ import {
   createRedactingModelPort,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -1129,6 +1129,11 @@ export async function buildServer(opts?: {
       //   • openIssues / safetyLatched — sourced ONLY from persisted session state, never client-injected.
       //   • kill — armed state comes from the operator registry (server); the shopper can neither arm nor bypass it.
       const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
+      // §8a inv 14 basic-mode-at-cap — read alongside the kill check, from the SAME shared store, so a cap
+      // set by the control plane (where spend is actually measured) propagates to every serving instance.
+      // Deliberately a separate registry from `kill`: a kill halts and hands off, while at cap the shopper
+      // must keep being served. See state-postgres/src/cost-cap-registry.ts.
+      const costCap = await matchedCostCap(store, { tenantId });
       // PR-11a (ADR-0015 T12) — look up this subject's server-recorded memory-consent BEFORE deriving
       // signals, using the SAME validated anonId deriveServingSignals will itself derive from
       // body.signals.anonId (validateAnonId is pure/idempotent, so validating it here too is safe and
@@ -1276,6 +1281,7 @@ export async function buildServer(opts?: {
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
         kill: Boolean(kill),
+        atCap: Boolean(costCap),
         region: MERCHANT_REGION,
         groundingMode: MERCHANT_GROUNDING_MODE,
         // ADR-0017 — server-verified only (never body.signals.shopperId, which deriveServingSignals never

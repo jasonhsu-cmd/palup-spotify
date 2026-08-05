@@ -254,8 +254,15 @@ surface.
   replies are AI-generated"), and a usable embedded panel on a stand-in storefront (now live on
   staging).
 - **Still open:** "Powered by PalUp" badge, appearance/theming, **accessibility**, the **human
-  take-over handoff** UX, offline/basic-mode, and low-latency **transport (WebSocket, `<120ms` load)** —
+  take-over handoff** UX, offline mode, and low-latency **transport (WebSocket, `<120ms` load)** —
   see `comms-and-messaging.md` §10 for the transport starting point.
+- **basic-mode-at-cap (invariant 14) is now ENFORCED, its UX is not.** The decision layer honours all
+  three clauses — no proactive initiation, live chat continues to be answered, and the shopper is never
+  shown the merchant's billing state — driven by a shared cost-cap registry that propagates across
+  serving instances (`state-postgres/src/cost-cap-registry.ts`), set via `POST /api/cost-cap`. **Not
+  built:** any automatic trigger from measured spend (the control plane measures cost but nothing yet
+  turns a threshold breach into a cap — an operator sets it today), the merchant-facing billing surface,
+  and the transport/offline half in `comms-and-messaging.md` §10.
 - **Output format** for the broader deliverable (this doc vs. an interactive prototype).
 
 ## 10. References
