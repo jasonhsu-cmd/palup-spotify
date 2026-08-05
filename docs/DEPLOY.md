@@ -34,14 +34,29 @@ green.
 > 2. **`WIDGET_AUTH_REQUIRED=true`** (set as a repo variable).
 >
 > The **demo keeps working** with no other change: the served widget (`packages/widget/public/index.html`)
-> mints a short-TTL token from the built-in embed key `demo-embed-key` (→ tenant `demo`) via `/widget/token`
+> mints a short-TTL token from the embed key `demo-embed-key` (→ tenant `demo`) via `/widget/token`
 > and sends it as a `Bearer` on `/chat`; a request without a valid token now returns 401. This exact flow —
 > flag on + only the demo tenant configured → 200 under `demo` — is asserted by `widget-tenant.test.ts`
-> ("WIDGET_AUTH_REQUIRED=true: the DEMO still works via the default demo-embed-key"). For a **real second
-> merchant**, add `WIDGET_EMBED_KEYS={"<their-embed-key>":"<their-tenant>"}` and give them that embed key +
-> their own tenant id/store creds — no code change. (The Cloud Run edge staying `--allow-unauthenticated`
-> is fine: the app-level widget-token check is the tenancy gate; the edge is open only so the public embed
-> can reach `/widget/token` and `/`.)
+> ("WIDGET_AUTH_REQUIRED=true: the DEMO still works via the default demo-embed-key"). (The Cloud Run edge
+> staying `--allow-unauthenticated` is fine: the app-level widget-token check is the tenancy gate; the edge
+> is open only so the public embed can reach `/widget/token` and `/`.)
+>
+> **`WIDGET_EMBED_KEYS` is a required deploy env now (fail-closed).** It is the publishable
+> embed-key → tenant registry, and it is **passed by `deploy-staging.yml`** as
+> `{"demo-embed-key":"demo"}`. It used to be optional: the backend fell back to a built-in
+> `demo-embed-key` → `demo` registry whenever the value was unset, malformed, or had any unusable entry —
+> which **failed open**, because a merchant whose key is missing from the substituted registry cannot mint
+> a token, and (with `WIDGET_AUTH_REQUIRED` off) its widget then serves under the `RUNTIME_TENANT`
+> fallback: that merchant's sessions, audit rows, telemetry, consent records, memory namespace **and
+> Shopify grounding context** all resolve under tenant `demo`, and an operator kill armed for their tenant
+> would not halt them. So with `PALUP_REQUIRE_DATABASE_URL=true` (i.e. any real deployment) the service now
+> **refuses to boot** unless the registry is explicitly declared, and it refuses on a malformed/partially
+> invalid value in **any** environment — `resolveEmbedKeys`, `packages/widget-backend/src/server.ts`,
+> mirroring `PALUP_REQUIRE_DATABASE_URL`'s own fail-fast. Local/dev (neither var set) is unchanged and
+> still gets the built-in demo default. For a **real second merchant**, extend the value —
+> `WIDGET_EMBED_KEYS={"demo-embed-key":"demo","<their-embed-key>":"<their-tenant>"}` — and give them that
+> embed key + their own tenant id/store creds; no code change. Dropping the whole variable no longer
+> degrades quietly: the revision fails its health check and the deploy goes red.
 
 ## How to halt the live agent
 
