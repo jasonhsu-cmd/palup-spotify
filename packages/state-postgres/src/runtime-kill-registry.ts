@@ -59,7 +59,17 @@ export async function armKill(
   await store.tx(SYSTEM, async (t) => {
     await t.put(KILL, scope, { scope, reason, at });
     await t.audit(
-      { actor: "operator", action: "runtime_kill.arm", input: { scope, reason }, decision: "armed", reversalPath: "POST /api/runtime-unkill" },
+      {
+        actor: "operator",
+        action: "runtime_kill.arm",
+        input: { scope, reason },
+        decision: "armed",
+        // The CLI is named FIRST because it is the path that works against the current deployment: the
+        // control-plane routes are the operator console for when that service is deployed, and this repo
+        // deploys only the widget backend. A reversal path in an immutable record has to be one an
+        // operator can actually run (NN #5) — see widget-backend/src/jobs/kill-switch.ts.
+        reversalPath: "pnpm kill:disarm --scope <scope> | POST /api/runtime-unkill",
+      },
       at,
     );
   });
@@ -77,7 +87,13 @@ export async function disarmKill(
   await store.tx(SYSTEM, async (t) => {
     for (const s of scopes) await t.delete(KILL, s);
     await t.audit(
-      { actor: "operator", action: "runtime_kill.disarm", input: { scope: scope ?? "all" }, decision: "disarmed", reversalPath: "POST /api/runtime-kill" },
+      {
+        actor: "operator",
+        action: "runtime_kill.disarm",
+        input: { scope: scope ?? "all" },
+        decision: "disarmed",
+        reversalPath: "pnpm kill:arm --scope <scope> | POST /api/runtime-kill",
+      },
       at,
     );
   });

@@ -43,6 +43,65 @@ green.
 > is fine: the app-level widget-token check is the tenancy gate; the edge is open only so the public embed
 > can reach `/widget/token` and `/`.)
 
+## How to halt the live agent
+
+Governance non-negotiable #4 — *any agent, at any scope, halted instantly*. The three commands below are
+the supported way to do it; they are the **only** arming path that works against the current deployment
+(the control-plane operator console — `POST /api/runtime-kill` — is the same registry, but that service
+**is not deployed**; `deploy-staging.yml` deploys only `palup-widget-staging`).
+
+```bash
+export DATABASE_URL=…                                  # MUST be the store the backend uses (see below)
+
+pnpm kill:arm    --scope global --reason "checkout bug — <your name>"   # halt everything, now
+pnpm kill:status                                                       # what is armed right now
+pnpm kill:disarm --scope global                                        # resume
+```
+
+**Scopes** (exactly these; there is no default — a missing `--scope` is refused, so a forgotten flag can
+never halt the platform by accident):
+
+| `--scope` | Halts |
+|---|---|
+| `global` | every tenant, every run-time agent |
+| `tenant:<id>` | one merchant (`tenant:demo` is the staging/demo tenant) |
+| `agent:shopper` | the shopper agent type platform-wide (`shopper` is the only run-time agent type today) |
+| `all` | **disarm only** — lifts every armed scope. `arm --scope all` does not exist. |
+
+**Getting `DATABASE_URL`.** The value mounted into Cloud Run is the Secret Manager secret
+`palup-staging-database-url`, and it connects over the Cloud SQL **unix socket**
+(`host=/cloudsql/palup-jason:us-central1:palup-staging`) — that path exists inside Cloud Run, not on a
+laptop. So from a workstation either (a) run the Cloud SQL Auth proxy for
+`palup-jason:us-central1:palup-staging` and build a `postgres://palup_app:<palup-staging-pg-app>@127.0.0.1:5432/palup`
+URL, or (b) run the command from a shell that already has the socket (e.g. a Cloud Run job/exec on the
+same instance). *(The proxy route is the standard Cloud SQL pattern; it has not been exercised against
+this instance as part of this change — the drill in the PR that added these scripts ran against a real
+Postgres engine in-process, not against staging.)* If `DATABASE_URL` is unset the tool **refuses to run**
+rather than falling back to a per-process store that the deployed backend would never see.
+
+**What a halt actually stops** (all verified in `packages/widget-backend/src/server.ts`):
+
+- `POST /chat` → the reply comes back with `escalate: true`, `pitch: "none"`, `flags: ["kill_switch"]`; the
+  model is never called.
+- `POST /consent` and `POST /forget` → `503 {"error":"paused"}` (the audited consent write and the
+  erasure path are halted too).
+- The customer-account OAuth routes → no new credential flow is started.
+- `pnpm sweep` (scheduled retention) → skips every halted tenant before deleting anything.
+- Promotion of new agent behavior to the live shopper agent (control-plane `promoteToServing`) fails
+  closed while `global` or `agent:shopper` is armed.
+
+**What it does not do:** it does not stop the process, drop traffic at the edge, or roll anything back. The
+widget stays up and degrades to escalation. It is also **not** an erasure — nothing is deleted by arming.
+
+**Notes.**
+- Every arm/disarm writes an immutable audit row (`runtime_kill.arm` / `runtime_kill.disarm`) in the same
+  transaction as the registry write (NN #5). The audit actor is always `operator`, so **name yourself in
+  `--reason`** — that string is the only record of who halted the platform.
+- Each run prints the measured decision→halt-confirmed latency, and confirms by **reading the registry
+  back**; if the scope is not armed afterwards the command fails loudly instead of reporting success.
+- A halt propagates to every serving instance because the registry lives in the shared Cloud SQL store —
+  which is exactly why `DATABASE_URL` must be the deployment's own.
+
 ## Cloud SQL (run-time state store, ADR-0004)
 
 - **Instance:** `palup-staging` (Postgres 16, `db-f1-micro`, single-zone, `us-central1`), connection name
