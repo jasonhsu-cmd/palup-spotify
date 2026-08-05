@@ -82,6 +82,14 @@ export interface SessionState {
   browsingContext?: string;
   /** INV-D — the resume offer was already made once; never repeat it. */
   resumeOffered: boolean;
+  /**
+   * INV-D — the shopper has actually LEFT the browsing topic (at least one non-sales turn since the topic
+   * was last recorded). Without this, `resumeOffer()` fired on the very turn that set the context and
+   * offered to resume what the shopper was doing right now: measured, turn 1 of a fresh session returned
+   * "Want to pick up where you left off — do you have a vitamin C serum??". You cannot resume a detour you
+   * have not taken. Nobody saw it because `resumeOffer()` had no production caller until it was wired.
+   */
+  detoured?: boolean;
   // ── Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL, consumed only in brain.ts) ──────
   // CROSS-TURN CONTROL COUNTERS ONLY — explicitly NOT a persona profile: no observed axes/values, no
   // free text, nothing keyed to a persistent shopper identity. Transient, dies with the session like
@@ -187,6 +195,7 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
         // behaviour-identical and type-honest.
         escalationPending: restored.escalationPending ?? false,
         resumeOffered: restored.resumeOffered ?? false,
+        detoured: restored.detoured ?? false,
         pitchDeclined: restored.pitchDeclined ?? false,
         repeatQuestionCount: restored.repeatQuestionCount ?? 0,
         rageCount: restored.rageCount ?? 0,
@@ -197,6 +206,7 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
         pitchesUsed: 0,
         escalationPending: false,
         resumeOffered: false,
+        detoured: false,
         pitchDeclined: false,
         repeatQuestionCount: 0,
         rageCount: 0,
@@ -212,13 +222,17 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
     resumeOffer(): string | undefined {
       // INV-D: offered at most once, and only when the detour is genuinely over.
       if (state.resumeOffered || !state.browsingContext) return undefined;
+      // The shopper must actually have gone somewhere else and come back — see SessionState.detoured.
+      if (!state.detoured) return undefined;
       // INV-B/INV-A: any open issue, a latched safety event, or a pending escalation still gates.
       if (state.openIssues.length > 0 || state.safetyLatched || state.escalationPending) return undefined;
       // INV-C (resume slow): only when mood is neutral-or-positive — i.e. not a negative-braking mood
       // (matches the brain's serve-and-brake gate; unknown mood defaults to neutral per §4).
       if (state.mood && NEGATIVE_MOODS.includes(state.mood)) return undefined;
       state.resumeOffered = true;
-      return `Want to pick up where you left off — ${state.browsingContext}?`;
+      // Trim the topic's own trailing punctuation: the template adds "?", and the raw shopper message
+      // often ends in one already, which produced "… vitamin C serum??".
+      return `Want to pick up where you left off — ${state.browsingContext.replace(/[?!.,;:\s]+$/, "")}?`;
     },
     async send(message: string, signals: Signals = {}, history: HistoryTurn[] = []): Promise<Decision> {
       const lc = message.toLowerCase();
@@ -310,6 +324,9 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
       // empty turn — an agent-initiated proactive nudge (empty shopper message) has no browsing topic and
       // must not wipe the context captured on a real sales turn.
       if (d.mode === "sales" && message.trim()) state.browsingContext = message.trim().slice(0, 200);
+      // A non-sales turn AFTER a topic was recorded is the detour INV-D exists for. Set here rather than in
+      // resumeOffer() so it is part of the persisted state and survives a reconnect.
+      else if (state.browsingContext && d.mode !== "sales") state.detoured = true;
 
       // INV-E: one budget across the whole conversation; switching modes never refills it.
       if (d.pitch !== "none") {
