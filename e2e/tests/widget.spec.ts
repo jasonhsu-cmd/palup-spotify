@@ -892,3 +892,133 @@ test.describe("P10 — conversation continuity across a closed tab (the safety l
     expect(persistedId).toBe(latchedSessionId);
   });
 });
+
+// --- P6 — every promise the widget makes must be one the system can keep ------------------------
+// The DOM half of packages/widget-backend/test/shopper-promise-guard.test.ts and
+// packages/widget-brain/test/shopper-promise-honesty.test.ts, in a real browser running the
+// unmodified widget script.
+//
+// THE DEFECT THESE LOCK (pre-existing on main): on any escalating turn the widget latched into a
+// banner reading "Connecting you with a person… A team member is joining this chat. You can keep
+// typing — your messages are saved and they'll see the whole conversation." Three claims, none of them
+// keepable: `signals.handoff` (the only "a human took over" input, widget-brain/src/types.ts) has NO
+// production producer — widget-backend/src/signals.ts never accepts it and no route sets it — no
+// transcript is kept for a human (the server persists control state only), and there is no live-agent
+// channel to join. Worse, the same function REPLACED the "AI assistant · replies are AI-generated"
+// header with "Connecting you with a person" while every subsequent reply was still AI-generated: the
+// one moment a shopper is most likely to believe they reached a human was the one moment the AI
+// disclosure disappeared.
+test.describe("P6 — the escalation banner claims only what escalation actually does", () => {
+  test("an escalating turn flags a person WITHOUT claiming one is joining, and keeps the AI disclosure", async ({ page }) => {
+    await page.goto("/"); // the shopper's view, not ?palupDebug=1
+    await page.getByTestId("chat-input").fill("my face is burning after using it");
+    await page.getByTestId("send").click();
+
+    const banner = page.getByTestId("handoff");
+    await expect(banner).toBeVisible();
+    const text = (await banner.textContent()) ?? "";
+
+    // The three unkeepable claims are gone.
+    expect(text).not.toMatch(/joining this chat/i);
+    expect(text).not.toMatch(/your messages are saved/i);
+    expect(text).not.toMatch(/see the whole conversation/i);
+    // What remains is the flag, which is real (the escalate flag + its immutable audit row).
+    expect(text).toMatch(/flagged/i);
+
+    // The AI disclosure survives the escalation — it used to be overwritten by "Connecting you with a
+    // person" while the AI kept answering.
+    await expect(page.locator("#whStatus")).toContainText("AI");
+
+    // And the AI really is still the one replying, which is exactly why the disclosure has to stay.
+    await page.getByTestId("chat-input").fill("what about the moisturizer then");
+    await page.getByTestId("send").click();
+    await expect(page.getByTestId("agent-msg").last()).not.toHaveText("");
+    await expect(page.locator("#whStatus")).toContainText("AI");
+  });
+});
+
+// The "Forget everything about me" control used to report success unconditionally: forgetMe() ignored
+// the /forget response entirely (a 500 never throws), so a failed erasure still rendered "Done — I've
+// cleared what I remembered and started fresh." AND still rotated the local anonId — which also
+// destroyed the only key that could have retried the erasure.
+test.describe("P6 — the erasure control reports what actually happened", () => {
+  const memoryOnChat = (page: Page) =>
+    page.route("**/chat", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "hi there",
+          mode: "sales",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          memoryEnabled: true,
+          consentMode: "opt_out",
+        }),
+      }),
+    );
+  const anonId = (page: Page) =>
+    page.evaluate(() => {
+      const k = Object.keys(localStorage).find((key) => key.startsWith("palup.widget.memory"));
+      return k ? (JSON.parse(localStorage.getItem(k) as string) as { anonId?: string }).anonId : undefined;
+    });
+  const okJson = { status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) };
+
+  test("a FAILED /forget does not claim success, and keeps the anonId so the shopper can retry", async ({ page }) => {
+    await page.route("**/consent", (route) => route.fulfill(okJson));
+    await page.route("**/forget", (route) =>
+      route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) }),
+    );
+    await memoryOnChat(page);
+
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("hello");
+    await page.getByTestId("send").click();
+    await expect(page.getByTestId("manage-memory")).toBeVisible();
+    const before = await anonId(page);
+    expect(before).toBeTruthy();
+
+    await page.getByTestId("manage-memory-forget").click();
+    const confirmation = page.getByTestId("manage-memory-confirmation");
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation).not.toContainText("Done");
+    await expect(confirmation).toContainText(/couldn't|could not/);
+    expect(await anonId(page), "rotating the id on failure would strand the un-erased facts forever").toBe(before);
+  });
+
+  test("a SUCCESSFUL /forget still confirms and still rotates the id", async ({ page }) => {
+    await page.route("**/consent", (route) => route.fulfill(okJson));
+    await page.route("**/forget", (route) => route.fulfill(okJson));
+    await memoryOnChat(page);
+
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("hello");
+    await page.getByTestId("send").click();
+    await expect(page.getByTestId("manage-memory")).toBeVisible();
+    const before = await anonId(page);
+
+    await page.getByTestId("manage-memory-forget").click();
+    await expect(page.getByTestId("manage-memory-confirmation")).toContainText("Done — I've cleared what I remembered");
+    expect(await anonId(page)).not.toBe(before);
+  });
+
+  test("the panel does not claim to delete more than eraseSubject deletes", async ({ page }) => {
+    await page.route("**/consent", (route) => route.fulfill(okJson));
+    await memoryOnChat(page);
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("hello");
+    await page.getByTestId("send").click();
+
+    const helper = page.getByTestId("manage-memory-helper");
+    await expect(helper).toBeVisible();
+    const text = (await helper.textContent()) ?? "";
+    // POST /forget deletes ONE vector namespace (widget-memory/src/erasure.ts `eraseSubject`). It does
+    // not touch the per-tenant traffic log, which keeps the message + reply text
+    // (widget-backend/src/canary.ts `logTraffic`) and cannot be keyed by anonId at all.
+    expect(text).toMatch(/chat|message|log/i);
+    expect(text).not.toMatch(/everything about you|all your data|permanently/i);
+  });
+});
