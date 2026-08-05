@@ -579,3 +579,316 @@ test.describe("PR-11c — memory ON (mocked /chat seam): the special-consent pro
     expect(consentBodies[0]).toMatchObject({ memorySpecial: "out" });
   });
 });
+
+// ── P10 — the conversation, and therefore the SAFETY LATCH, must survive a closed tab ─────────────
+//
+// THE DEFECT (verified by execution against the real mock-mode backend before these tests were
+// written). The widget persisted its `sessionId` in `sessionStorage`, which is scoped to the tab and
+// destroyed when the tab closes. The server files this conversation's CONTROL state under that
+// sessionId — the INV-A safety latch, INV-B `open_issues`, and the INV-E pitch budget
+// (widget-backend/src/server.ts `t.put("session", sessionId, session.state, …)`;
+// widget-brain/src/session.ts restores it with `store.load(opts.sessionId)` and otherwise builds
+// `safetyLatched:false, openIssues:[], pitchesUsed:0`). So a shopper who reported an adverse reaction
+// closed the tab, came back, minted a brand-new sessionId, and was filed as a stranger:
+//
+//   POST /chat {"message":"I used it and my face is burning and swelling","sessionId":"probe-A"}
+//     -> {"mode":"safety","pitch":"none","escalate":true,...}
+//   POST /chat {"message":"anyway, just add the cleanser to my cart","sessionId":"probe-A"}
+//     -> {"mode":"safety","pitch":"none","escalate":true,...}          <- latch holds
+//   POST /chat {"message":"anyway, just add the cleanser to my cart","sessionId":"probe-B"}
+//     -> {"mode":"sales","pitch":"guided_rec","flags":["pitch:guided_rec"],...}   <- selling again
+//
+// §6A is explicit that the latch is "cleared only by a human/escalation resolution" (INV-A; eval case
+// SW-8's must-not is `agent_self_clears_safety`) and that `open_issues` "persists across sessions"
+// (SW-12). A tab close is neither. These cases drive it through REAL browser storage — a real second
+// tab, a real second browser context, real `localStorage.clear()` — never by stubbing widget code.
+test.describe("P10 — conversation continuity across a closed tab (the safety latch)", () => {
+  /** Capture every /chat request body this page makes, in order. */
+  const captureChat = (page: Page, sink: Record<string, unknown>[]) =>
+    page.route("**/chat", (route) => {
+      sink.push(route.request().postDataJSON());
+      return route.continue();
+    });
+
+  const sid = (body: Record<string, unknown>) => body.sessionId as string;
+
+  /** Latch safety on `page` (already loaded) and return the sessionId the widget sent. */
+  async function latchSafety(page: Page, bodies: Record<string, unknown>[]) {
+    const before = bodies.length;
+    await page.getByTestId("chat-input").fill("I used it and my face is burning and swelling");
+    await page.getByTestId("send").click();
+    await expect(page.getByTestId("agent-msg").last().getByTestId("badge")).toContainText("mode=safety");
+    await expect.poll(() => bodies.length).toBe(before + 1);
+    const id = sid(bodies[before]);
+    expect(id, "the widget sends a sessionId").toBeTruthy();
+    return id;
+  }
+
+  test("AC-P10-1 — a closed tab does NOT clear the latch: a new tab in the same profile continues the conversation", async ({
+    context,
+  }) => {
+    // Driven at the MOBILE width, where the panel is `max-width:calc(100vw - 24px)` rather than its
+    // 390px desktop width — a closed tab is the phone case above all (the sibling P10 cases run at
+    // Playwright's default 1280x720 desktop viewport).
+    const MOBILE = { width: 390, height: 780 };
+    const tab1Bodies: Record<string, unknown>[] = [];
+    const tab1 = await context.newPage();
+    await tab1.setViewportSize(MOBILE);
+    await captureChat(tab1, tab1Bodies);
+    await tab1.goto(DEBUG); // the mode/pitch badge asserted below is debug-only
+    const firstSessionId = await latchSafety(tab1, tab1Bodies);
+
+    // A REAL closed tab. sessionStorage is scoped to the top-level browsing context and dies with it;
+    // localStorage is shared across tabs of the same profile+origin. Nothing here is stubbed.
+    await tab1.close();
+    const tab2Bodies: Record<string, unknown>[] = [];
+    const tab2 = await context.newPage();
+    await tab2.setViewportSize(MOBILE);
+    await captureChat(tab2, tab2Bodies);
+    await tab2.goto(DEBUG);
+
+    // Proof the simulation is faithful (and the privacy split is real): the per-tab TRANSCRIPT is gone
+    // — tab 2 renders only the ordinary greeting, not the reaction report the shopper typed in tab 1.
+    await expect(tab2.getByTestId("agent-msg")).toHaveCount(1);
+    await expect(tab2.getByTestId("agent-msg")).toContainText("Auria's assistant");
+
+    // The agent's own state, however, must be unchanged and unfaked: still latched, still not selling.
+    await tab2.getByTestId("chat-input").fill("anyway, just add the cleanser to my cart");
+    await tab2.getByTestId("send").click();
+    const badge = tab2.getByTestId("agent-msg").last().getByTestId("badge");
+    await expect(badge).toContainText("mode=safety");
+    await expect(badge).toContainText("pitch=none");
+
+    await expect.poll(() => tab2Bodies.length).toBe(1);
+    expect(sid(tab2Bodies[0]), "the new tab continues the SAME server-side conversation").toBe(firstSessionId);
+    // ...and it starts that turn with an empty history, because the transcript did not travel.
+    expect(tab2Bodies[0].history).toEqual([]);
+  });
+
+  test("AC-P10-2 — a fresh browser profile still gets a fresh session (no cross-profile latch leak)", async ({ browser }) => {
+    const ctxA = await browser.newContext();
+    const ctxB = await browser.newContext();
+    try {
+      const aBodies: Record<string, unknown>[] = [];
+      const pageA = await ctxA.newPage();
+      await captureChat(pageA, aBodies);
+      await pageA.goto(DEBUG);
+      const latchedSessionId = await latchSafety(pageA, aBodies);
+
+      const bBodies: Record<string, unknown>[] = [];
+      const pageB = await ctxB.newPage();
+      await captureChat(pageB, bBodies);
+      await pageB.goto(DEBUG);
+      await pageB.getByTestId("chat-input").fill("tell me about the gentle cleanser");
+      await pageB.getByTestId("send").click();
+      const badge = pageB.getByTestId("agent-msg").last().getByTestId("badge");
+      await expect(badge).toContainText("mode=sales");
+
+      await expect.poll(() => bBodies.length).toBe(1);
+      expect(sid(bBodies[0]), "a different browser profile is a different conversation").not.toBe(latchedSessionId);
+    } finally {
+      await ctxA.close();
+      await ctxB.close();
+    }
+  });
+
+  test("AC-P10-3 — storage unavailable (Safari private mode / storage disabled) ⇒ the chat still works", async ({ page }) => {
+    // Both Storage areas throw on ACCESS, not just on write — that is how a disabled-storage browser
+    // presents, and it is the case a `try { localStorage.getItem(…) } catch {}` around only the call
+    // would still miss if the property read itself sat outside the try.
+    await page.addInitScript(() => {
+      const boom = () => {
+        throw new Error("SecurityError: the operation is insecure");
+      };
+      Object.defineProperty(window, "localStorage", { configurable: true, get: boom });
+      Object.defineProperty(window, "sessionStorage", { configurable: true, get: boom });
+    });
+    const bodies: Record<string, unknown>[] = [];
+    await captureChat(page, bodies);
+    await page.goto(DEBUG);
+
+    // The widget loads, greets, answers — a storage failure costs continuity, never the conversation.
+    await expect(page.getByTestId("agent-msg")).toHaveCount(1);
+    await page.getByTestId("chat-input").fill("tell me about the serum");
+    await page.getByTestId("send").click();
+    await expect(page.getByTestId("agent-msg").last()).toContainText("vitamin-C serum");
+    await expect.poll(() => bodies.length).toBe(1);
+    expect(sid(bodies[0]), "a fresh in-memory session id is still minted and sent").toBeTruthy();
+
+    // Nothing persisted, so a reload is honestly a new conversation rather than a broken one.
+    await page.reload();
+    await page.getByTestId("chat-input").fill("tell me about the serum");
+    await page.getByTestId("send").click();
+    await expect.poll(() => bodies.length).toBe(2);
+    expect(sid(bodies[1])).toBeTruthy();
+    expect(sid(bodies[1])).not.toBe(sid(bodies[0]));
+  });
+
+  test("AC-P10-4 — two merchants in ONE browser tab do not share a conversation", async ({ page }) => {
+    // The widget is served from the PalUp backend origin for every merchant (see the postMessage origin
+    // invariant in index.html), so localStorage/sessionStorage are shared across merchants and the key
+    // MUST be namespaced per embed key. Same tab, same profile, two navigations — the only thing that
+    // can keep merchant B out of merchant A's latched conversation is that namespacing.
+    await page.addInitScript(() => {
+      const ek = new URLSearchParams(location.search).get("ek");
+      if (ek) (window as unknown as { PALUP: { embedKey: string } }).PALUP = { embedKey: ek };
+    });
+    const bodies: Record<string, unknown>[] = [];
+    await captureChat(page, bodies);
+
+    await page.goto(`${DEBUG}&ek=merchant-a-embed-key`);
+    const merchantASessionId = await latchSafety(page, bodies);
+
+    await page.goto(`${DEBUG}&ek=merchant-b-embed-key`);
+    await page.getByTestId("chat-input").fill("anyway, just add the cleanser to my cart");
+    await page.getByTestId("send").click();
+    const badge = page.getByTestId("agent-msg").last().getByTestId("badge");
+    await expect(badge, "merchant B must not inherit merchant A's safety latch").toContainText("mode=sales");
+
+    await expect.poll(() => bodies.length).toBe(2);
+    expect(sid(bodies[1])).not.toBe(merchantASessionId);
+
+    // And the persisted records are namespaced, one per embed key, holding different ids.
+    const conv = await page.evaluate(() =>
+      Object.keys(localStorage)
+        .filter((k) => k.startsWith("palup.widget.conversation"))
+        .sort()
+        .map((k) => [k, (JSON.parse(localStorage.getItem(k) as string) as { sessionId: string }).sessionId] as const),
+    );
+    expect(conv.map(([k]) => k)).toEqual([
+      "palup.widget.conversation.v1.merchant-a-embed-key",
+      "palup.widget.conversation.v1.merchant-b-embed-key",
+    ]);
+    expect(conv[0][1]).not.toBe(conv[1][1]);
+  });
+
+  // The reset question, stated plainly because it is governance-relevant. There is deliberately NO
+  // shopper-facing control that clears the safety latch: §6A INV-A says the latch is cleared only by a
+  // human/escalation resolution, and SW-8's must-not is `agent_self_clears_safety`. The two resets that
+  // DO exist are pinned below.
+  test("AC-P10-5a — 'Forget everything about me' resets durable MEMORY and does NOT clear the conversation", async ({ page }) => {
+    // Needs the memory-enabled path, which the double gate (MEMORY_ADR_ACCEPTED) never turns on in this
+    // real backend — so /chat is mocked exactly like the PR-11b cases above. The assertion is at the
+    // storage layer, which is where the two subsystems either stay separate or quietly merge.
+    await page.route("**/consent", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) }),
+    );
+    await page.route("**/forget", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) }),
+    );
+    const bodies: Record<string, unknown>[] = [];
+    await page.route("**/chat", (route) => {
+      bodies.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "hi there",
+          mode: "sales",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          memoryEnabled: true,
+          consentMode: "opt_out",
+        }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByTestId("chat-input").fill("hello");
+    await page.getByTestId("send").click();
+    await expect.poll(() => bodies.length).toBe(1);
+
+    const readStore = () =>
+      page.evaluate(() => {
+        const pick = (prefix: string) => {
+          const k = Object.keys(localStorage).find((key) => key.startsWith(prefix));
+          return k ? (JSON.parse(localStorage.getItem(k) as string) as Record<string, string>) : null;
+        };
+        return { conv: pick("palup.widget.conversation"), mem: pick("palup.widget.memory") };
+      });
+
+    const before = await readStore();
+    expect(before.conv?.sessionId, "the conversation id is persisted durably").toBe(sid(bodies[0]));
+    expect(before.mem?.anonId).toBeTruthy();
+
+    await page.getByTestId("manage-memory-forget").click();
+    await expect(page.getByTestId("manage-memory-confirmation")).toBeVisible();
+
+    const after = await readStore();
+    expect(after.mem?.anonId, "the memory subject is reset — that is what this control is for").not.toBe(before.mem?.anonId);
+    expect(after.conv?.sessionId, "the conversation, and its safety latch, is NOT this control's business").toBe(
+      before.conv?.sessionId,
+    );
+
+    // ...and the next turn still carries the same conversation to the server.
+    await page.getByTestId("chat-input").fill("and again");
+    await page.getByTestId("send").click();
+    await expect.poll(() => bodies.length).toBe(2);
+    expect(sid(bodies[1])).toBe(sid(bodies[0]));
+  });
+
+  test("AC-P10-5b — the shopper's own browser-storage reset DOES start a fresh conversation, transcript and all", async ({ page }) => {
+    const bodies: Record<string, unknown>[] = [];
+    await captureChat(page, bodies);
+    await page.goto(DEBUG);
+    const latchedSessionId = await latchSafety(page, bodies);
+
+    // Clearing site data is the shopper's own control (and the one the memory privacy notice already
+    // points at). Clear ONLY localStorage — the durable half — in the SAME tab, so the still-live
+    // sessionStorage transcript is left behind on purpose.
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
+
+    // A brand-new conversation, and critically the orphaned transcript is NOT adopted into it: replaying
+    // it as `history` would push the previous conversation's content into a session the server has never
+    // seen, and would show the shopper a transcript the agent has no state for.
+    await expect(page.getByTestId("agent-msg")).toHaveCount(1);
+    await expect(page.getByTestId("agent-msg")).toContainText("Auria's assistant");
+
+    await page.getByTestId("chat-input").fill("anyway, just add the cleanser to my cart");
+    await page.getByTestId("send").click();
+    await expect(page.getByTestId("agent-msg").last().getByTestId("badge")).toContainText("mode=sales");
+
+    await expect.poll(() => bodies.length).toBe(2);
+    expect(sid(bodies[1])).not.toBe(latchedSessionId);
+    expect(bodies[1].history).toEqual([]);
+  });
+
+  test("AC-P10-6 — the rollout itself does not hand out a clean slate: a pre-namespacing session keeps its latch", async ({ page }) => {
+    // A shopper mid-safety-conversation when this ships has their sessionId in the OLD, un-namespaced
+    // sessionStorage record and nothing in localStorage. If the new code ignored that, the deploy would
+    // be a one-time latch escape for exactly the shoppers who most need the latch.
+    const bodies: Record<string, unknown>[] = [];
+    await captureChat(page, bodies);
+    await page.goto(DEBUG);
+    const latchedSessionId = await latchSafety(page, bodies);
+
+    // Reconstruct the pre-change storage state for that live conversation, in real browser storage.
+    await page.evaluate((id) => {
+      localStorage.clear();
+      sessionStorage.clear();
+      sessionStorage.setItem(
+        "palup.widget.session.v1",
+        JSON.stringify({ sessionId: id, history: [{ role: "user", content: "my face is burning" }] }),
+      );
+    }, latchedSessionId);
+    await page.reload();
+
+    await page.getByTestId("chat-input").fill("anyway, just add the cleanser to my cart");
+    await page.getByTestId("send").click();
+    const badge = page.getByTestId("agent-msg").last().getByTestId("badge");
+    await expect(badge, "the migrated conversation is still latched").toContainText("mode=safety");
+    await expect(badge).toContainText("pitch=none");
+
+    await expect.poll(() => bodies.length).toBe(2);
+    expect(sid(bodies[1])).toBe(latchedSessionId);
+    // ...and it is upgraded in place, so the NEXT closed tab is covered too.
+    const persistedId = await page.evaluate(
+      () => (JSON.parse(localStorage.getItem("palup.widget.conversation.v1.demo-embed-key") as string) as { sessionId: string }).sessionId,
+    );
+    expect(persistedId).toBe(latchedSessionId);
+  });
+});
