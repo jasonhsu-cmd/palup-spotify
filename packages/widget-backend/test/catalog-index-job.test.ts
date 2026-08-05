@@ -435,22 +435,38 @@ describe("E1 pinning — the corpus pin includes the embedding PURPOSE", () => {
     expect(await manifestOf(h.store, h.tenantId)).toMatchObject({ purpose: "document" });
   });
 
-  it("REFUSES to extend a corpus when the embedder starts reporting a different purpose", async () => {
+  it("REFUSES to extend a corpus whose recorded purpose differs from the one being applied now", async () => {
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     let products = [product(1)];
     const catalog = async () => context("acme-co", products);
     await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"]);
 
+    // Rewrite ONLY the recorded purpose — same model, same dimension. This is exactly the case the old
+    // {model, dimension} pin was blind to: identical shape, different vector space.
+    const m = (await manifestOf(store, "acme-co"))!;
+    await store.put({ tenantId: "acme-co" }, MANIFEST_COLLECTION, MANIFEST_KEY, { ...m, purpose: "query" });
+
     products = [product(1), product(2)];
-    // Same model, same dimension — ONLY the purpose differs. This is exactly the case the old pin missed.
-    const drifted = fakeEmbedder({ purposeOverride: "query" });
-    const reports = await runCatalogIndex({ store, vector, model: drifted.port, catalog }, ["acme-co"]);
+    const reports = await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"]);
 
     expect(reports[0]!.outcome).toBe("pin-mismatch");
-    expect(reports[0]!.reason).toMatch(/purpose/i);
+    expect(reports[0]!.reason).toMatch(/query/);
+    expect(reports[0]!.reason).toMatch(/reindex/);
     expect(await idsIn(vector, "acme-co")).toHaveLength(1); // nothing written
-    expect((await manifestOf(store, "acme-co"))!.purpose).toBe("document");
+  });
+
+  it("REFUSES outright when the embedder ignored the requested purpose (a broken adapter, not a drift)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const catalog = async () => context("acme-co", [product(1)]);
+    // Asked for `document`, answers `query`: well-formed vectors in the wrong space, with no downstream
+    // symptom at all. The port's shared validator catches the broken echo before anything is stored.
+    const liar = fakeEmbedder({ purposeOverride: "query" });
+    const reports = await runCatalogIndex({ store, vector, model: liar.port, catalog }, ["acme-co"]);
+    expect(reports[0]!.outcome).toBe("failed");
+    expect(await idsIn(vector, "acme-co")).toHaveLength(0);
+    expect(await manifestOf(store, "acme-co")).toBeNull();
   });
 
   it("REFUSES to extend a corpus whose manifest predates the purpose pin (provenance unknowable)", async () => {
@@ -471,13 +487,14 @@ describe("E1 pinning — the corpus pin includes the embedding PURPOSE", () => {
     expect(reports[0]!.reason).toMatch(/reindex/);
   });
 
-  it("an explicit --reindex rebuilds at the current purpose", async () => {
+  it("an explicit --reindex is the way out of a wrong-purpose corpus", async () => {
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const products = [product(1)];
     const catalog = async () => context("acme-co", products);
-    await runCatalogIndex({ store, vector, model: fakeEmbedder({ purposeOverride: "query" }).port, catalog }, ["acme-co"]);
-    expect((await manifestOf(store, "acme-co"))!.purpose).toBe("query");
+    await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"]);
+    const m = (await manifestOf(store, "acme-co"))!;
+    await store.put({ tenantId: "acme-co" }, MANIFEST_COLLECTION, MANIFEST_KEY, { ...m, purpose: "query" });
 
     const reports = await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"], {
       reindex: true,

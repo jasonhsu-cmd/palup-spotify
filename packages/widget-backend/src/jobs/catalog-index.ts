@@ -5,6 +5,7 @@ import {
   createMeteringModelPort,
   createStoreTelemetry,
   requireEmbedAlignment,
+  type EmbedPurpose,
   type GroundingContext,
   type ModelPort,
   type Product,
@@ -133,6 +134,14 @@ export const MANIFEST_KEY = "manifest";
 export const CATALOG_INDEX_ACTOR = "catalog-index-job";
 
 /**
+ * The side of retrieval this job embeds. A CORPUS is always `"document"` — that is what the word means
+ * (docs/design/… "you must use different task types for your corpus and your queries", quoted in the
+ * Vertex adapter's [E3]). Named rather than inlined so the retriever can assert the corpus it queries was
+ * built on the other side of the same pair.
+ */
+export const CATALOG_CORPUS_PURPOSE: EmbedPurpose = "document";
+
+/**
  * What one tenant's corpus was built with. Lives in the RuntimeStatePort KV, NOT as a vector record, for
  * two reasons: (a) it commits ATOMICALLY WITH ITS AUDIT RECORD in one `store.tx` (NN#5 — the closest to
  * atomic these ports allow, see the write sequence in `indexOneTenant`), and (b) a metadata-only record
@@ -145,6 +154,18 @@ export interface CatalogManifest {
   model: string;
   /** …and this exact dimension. Mixing either produces silently meaningless similarity (#188). */
   dimension: number;
+  /**
+   * …and this exact PURPOSE (E1). The third leg of the pin, and the one B3 (#192) said was missing:
+   * a corpus embedded with QUERY treatment reports the SAME model and the SAME dimension as a correct
+   * one, so `{model, dimension}` alone cannot see it — same shape, wrong space, no downstream symptom.
+   * Always `"document"` for a corpus written by this job; recorded rather than assumed so a corpus built
+   * by a mis-configured deployment is VISIBLE, and so the retriever can refuse to query across it.
+   *
+   * A manifest written before E1 has no `purpose` at runtime despite this type. That is treated as a
+   * MISMATCH, not as "probably document": the provenance is genuinely unknown, and guessing it is how a
+   * silently-wrong corpus gets blessed. `--reindex` is the way through.
+   */
+  purpose: EmbedPurpose;
   /** Product records the last confirmed write left in the corpus. */
   products: number;
   /** ISO-8601 timestamp of that write. */
@@ -242,6 +263,40 @@ interface PlannedProduct {
   recordId: string;
   text: string;
   hash: string;
+}
+
+/** The three things a corpus is pinned to. Purpose joined `{model, dimension}` in E1 — see the manifest. */
+interface CorpusPin {
+  model: string;
+  dimension: number;
+  purpose: EmbedPurpose;
+}
+
+/** Operator-readable rendering of a pin: `model/768d/document`. */
+function describePin(p: CorpusPin): string {
+  return `${p.model}/${p.dimension}d/${p.purpose}`;
+}
+
+/**
+ * Compare a corpus's recorded pin against what the embedder reports NOW, returning a static, PII-free
+ * explanation when they disagree and `undefined` when they match.
+ *
+ * The purpose leg fails on an ABSENT recorded purpose too (a manifest written before E1). That is
+ * deliberate: `undefined` is not evidence of a document corpus, it is an absence of evidence, and the
+ * whole point of the pin is to refuse to guess about a vector space.
+ */
+function pinMismatch(manifest: CatalogManifest, now: CorpusPin): string | undefined {
+  if (manifest.model === now.model && manifest.dimension === now.dimension && manifest.purpose === now.purpose)
+    return undefined;
+  const recorded = manifest.purpose
+    ? describePin(manifest)
+    : `${manifest.model}/${manifest.dimension}d/(no purpose recorded — this corpus predates the purpose pin)`;
+  return (
+    `corpus is pinned to ${recorded} but the embedder now reports ${describePin(now)} — refusing to mix ` +
+    "vector spaces (similarity would be meaningless, and a corpus embedded for the wrong side of " +
+    "retrieval looks exactly like a correct one); rebuild the whole corpus with --reindex when this " +
+    "change is intended"
+  );
 }
 
 /** A refusal this job authored itself: a static, PII-free sentence, reported as `reason`. */
@@ -436,9 +491,21 @@ async function indexOneTenant(
       // an "unknown"/0 placeholder would be a fabricated provenance for real vectors.
       throw new CatalogRefusal("failed", "no manifest to repair and no products to embed — nothing safe to record");
     }
+    // A repair rewrites the COUNT, never the provenance: nothing was embedded, so the recorded
+    // {model, dimension, purpose} is carried forward verbatim. A manifest with no recorded purpose cannot
+    // be repaired into one — writing "document" here would be inventing the provenance the pin exists to
+    // protect — so it refuses and points at the one command that CAN establish it.
+    if (!manifest.purpose) {
+      throw new CatalogRefusal(
+        "failed",
+        "the corpus manifest records no embedding purpose, so repairing it would mean inventing the " +
+          "vector space its records were built in — rebuild explicitly with --reindex",
+      );
+    }
     const repaired: CatalogManifest = {
       model: manifest.model,
       dimension: manifest.dimension,
+      purpose: manifest.purpose,
       products: existing.length,
       at: now().toISOString(),
       ceiling: maxProducts,
@@ -465,23 +532,26 @@ async function indexOneTenant(
 
   // ── embed everything first; write nothing until every batch is in hand ──
   const vectors = new Map<string, number[]>();
-  let pin: { model: string; dimension: number } | undefined;
+  let pin: CorpusPin | undefined;
   for (let i = 0; i < toEmbed.length; i += batchSize) {
     const stop = await checkHalts(deps, tenantId);
     if (stop) return { tenantId, outcome: stop }; // nothing written yet — the corpus stays fully old
     const batch = toEmbed.slice(i, i + batchSize);
     const texts = batch.map((p) => p.text);
-    const res = await deps.model.embed({ texts, tenantId });
-    // The caller re-checks the port's own invariant: one vector per text, all of the reported dimension.
-    // Cheap, and it means a truncating adapter cannot put a hole in this corpus even if it skipped the
-    // shared validator.
-    requireEmbedAlignment(texts, res);
+    const req = { texts, purpose: CATALOG_CORPUS_PURPOSE, tenantId };
+    const res = await deps.model.embed(req);
+    // The caller re-checks the port's own invariant: one vector per text, all of the reported dimension,
+    // and the purpose echoed. Cheap, and it means a truncating adapter — or one that quietly embedded the
+    // corpus on the QUERY side — cannot put a hole (or a wrong-space vector) in this corpus even if it
+    // skipped the shared validator.
+    requireEmbedAlignment(req, res);
 
     if (!pin) {
-      // THE PIN CHECK, on the FIRST batch — so a model/dimension change costs one batch of spend, not a
-      // whole catalog. An empty corpus has nothing to mix with, so it simply adopts the current pin.
+      // THE PIN CHECK, on the FIRST batch — so a model/dimension/purpose change costs one batch of spend,
+      // not a whole catalog. An empty corpus has nothing to mix with, so it simply adopts the current pin.
       if (manifest && existing.length > 0 && !opts.reindex) {
-        if (manifest.model !== res.model || manifest.dimension !== res.dimension) {
+        const mismatch = pinMismatch(manifest, res);
+        if (mismatch) {
           return {
             tenantId,
             outcome: "pin-mismatch",
@@ -489,18 +559,15 @@ async function indexOneTenant(
             embedded: texts.length,
             model: res.model,
             dimension: res.dimension,
-            reason:
-              `corpus is pinned to ${manifest.model}/${manifest.dimension}d but the embedder now reports ` +
-              `${res.model}/${res.dimension}d — refusing to mix vector spaces (similarity would be ` +
-              "meaningless); rebuild the whole corpus with --reindex when this change is intended",
+            reason: mismatch,
           };
         }
       }
-      pin = { model: res.model, dimension: res.dimension };
-    } else if (res.model !== pin.model || res.dimension !== pin.dimension) {
+      pin = { model: res.model, dimension: res.dimension, purpose: res.purpose };
+    } else if (res.model !== pin.model || res.dimension !== pin.dimension || res.purpose !== pin.purpose) {
       throw new CatalogRefusal(
         "failed",
-        `the embedder changed from ${pin.model}/${pin.dimension}d to ${res.model}/${res.dimension}d mid-run — ` +
+        `the embedder changed from ${describePin(pin)} to ${describePin(res)} mid-run — ` +
           "refusing to write a corpus of two vector spaces",
       );
     }
@@ -540,12 +607,16 @@ async function indexOneTenant(
   // fresh pin to record. Carry the manifest's forward rather than inventing one — the corpus's vectors did
   // not change, so neither may its recorded provenance. `manifest` is guaranteed here: a non-empty corpus
   // without one already refused above, and stale records imply a non-empty corpus.
-  const effectivePin = pin ?? (manifest ? { model: manifest.model, dimension: manifest.dimension } : undefined);
+  const effectivePin: CorpusPin | undefined =
+    pin ??
+    (manifest && manifest.purpose
+      ? { model: manifest.model, dimension: manifest.dimension, purpose: manifest.purpose }
+      : undefined);
   if (!effectivePin) {
     throw new CatalogRefusal(
       "failed",
-      "nothing was embedded and no existing pin is recorded, so the corpus's model/dimension cannot be " +
-        "stated honestly — refusing to write a manifest",
+      "nothing was embedded and no complete pin is recorded, so the corpus's model/dimension/purpose " +
+        "cannot be stated honestly — refusing to write a manifest",
     );
   }
 
@@ -553,6 +624,7 @@ async function indexOneTenant(
   const written: CatalogManifest = {
     model: effectivePin.model,
     dimension: effectivePin.dimension,
+    purpose: effectivePin.purpose,
     products: finalCount,
     at: now().toISOString(),
     ceiling: maxProducts,
@@ -607,6 +679,7 @@ async function writeManifestAndAudit(
           removed: counts.removed,
           model: manifest.model,
           dimension: manifest.dimension,
+          purpose: manifest.purpose,
           ceiling: manifest.ceiling,
           reindex: counts.reindex,
         },
