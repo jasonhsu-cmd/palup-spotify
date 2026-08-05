@@ -62,15 +62,138 @@ jobs:
         # declares exactly that — the same value the built-in fallback used, now an explicit operator
         # choice. Same JSON-in-env pattern as SHOPIFY_STORES above (no '@' in the value). Adding a real
         # merchant means adding its publishable key here: {"demo-embed-key":"demo","<key>":"<tenant>"}.
+        #
+        # ── D3 — WHY THIS STEP IS NOW A SHELL SCRIPT INSTEAD OF ONE LONG INLINE FLAG ──────────────────
+        # Track B added env vars that were documented in docs/DEPLOY.md and passed to NOTHING, so the code
+        # reading them was unreachable in staging: C1's three install vars, and D2's MERCHANT_REGION —
+        # which, unset, silently defaults to "us" and is therefore a residency decision made by an absent
+        # variable. That is exactly the trap the NOTE above warns about, sprung.
+        #
+        # The list is built in shell rather than interpolated inline for ONE reason: several of these are
+        # OPTIONAL, and an unset repo variable would interpolate to `NAME=` (an empty value). Whether
+        # gcloud accepts an empty value in a ^@^-delimited --set-env-vars is NOT something this workflow
+        # may find out on a live merge-deploy, so optional pairs are appended only when they have a value
+        # and never emitted empty.
+        #
+        # Repo variables are read through `env:` (not interpolated into the script body) so a value
+        # containing shell metacharacters is data, never code.
+        #
+        # WHAT IS DELIBERATELY NOT HERE:
+        #   • `shopify_app_client_secret` (C1/C2's gate) and `MEMORY_ENCRYPTION_KEY__merchant-cred` (B2's
+        #     per-tenant credential key) are JSON entries INSIDE the already-mounted `palup-secrets`
+        #     secret, not Cloud Run mounts. An operator adds them to that secret's payload; there is
+        #     nothing to add here, and adding a mount for them would be wrong.
+        #   • a hard-coded `--set-secrets AUDIT_HMAC_SECRET=…:latest`. A reference to a Secret Manager
+        #     secret that does not exist makes `gcloud run deploy` ITSELF fail, which would break every
+        #     merge until someone created it. It is optional in code (server.ts falls back to
+        #     SHOPPER_TOKEN_SECRET; `subjectRef` degrades to a literal "unreferenced (no AUDIT_HMAC_SECRET
+        #     configured)" rather than throwing), so it is mounted only once an operator names an existing
+        #     secret in the AUDIT_HMAC_SECRET_NAME repo variable.
+        env:
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+          GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+          WIDGET_AUTH_REQUIRED: ${{ vars.WIDGET_AUTH_REQUIRED || 'false' }}
+          # D2 — the named fallback region/grounding mode for a tenant with NO pl_merchant row (staging's
+          # `demo`). Registry merchants are served under their own row's values and ignore these entirely.
+          # Defaulted here so the pair is never emitted empty, and so the value is VISIBLE rather than
+          # being an unset variable that server.ts quietly reads as "us".
+          MERCHANT_REGION: ${{ vars.MERCHANT_REGION || 'us' }}
+          MERCHANT_GROUNDING_MODE: ${{ vars.MERCHANT_GROUNDING_MODE || 'full' }}
+          # C1 — the Shopify app install. All three, or none: server.ts refuses to register the routes
+          # unless every one is present (fully-configured-or-absent), so a partial set 404s silently.
+          SHOPIFY_APP_CLIENT_ID: ${{ vars.SHOPIFY_APP_CLIENT_ID }}
+          SHOPIFY_INSTALL_REDIRECT_URI: ${{ vars.SHOPIFY_INSTALL_REDIRECT_URI }}
+          SHOPIFY_INSTALL_REGION: ${{ vars.SHOPIFY_INSTALL_REGION }}
+          SHOPIFY_INSTALL_SCOPES: ${{ vars.SHOPIFY_INSTALL_SCOPES }}
+          SHOPIFY_DELEGATE_SCOPES: ${{ vars.SHOPIFY_DELEGATE_SCOPES }}
+          # The NAME of an existing Secret Manager secret, not the secret. Empty ⇒ not mounted.
+          AUDIT_HMAC_SECRET_NAME: ${{ vars.AUDIT_HMAC_SECRET_NAME }}
         run: |
+          set -euo pipefail
+
+          # The '@' delimiter is only safe while no VALUE contains one. That held while every value was a
+          # literal in this file; it stops being guaranteed now that operators supply some through repo
+          # variables, and a stray '@' would not fail — it would silently split one value into two bogus
+          # env pairs. Check rather than assume.
+          for pair in "MERCHANT_REGION=${MERCHANT_REGION}" "MERCHANT_GROUNDING_MODE=${MERCHANT_GROUNDING_MODE}" \
+                      "WIDGET_AUTH_REQUIRED=${WIDGET_AUTH_REQUIRED}" \
+                      "SHOPIFY_APP_CLIENT_ID=${SHOPIFY_APP_CLIENT_ID:-}" \
+                      "SHOPIFY_INSTALL_REDIRECT_URI=${SHOPIFY_INSTALL_REDIRECT_URI:-}" \
+                      "SHOPIFY_INSTALL_REGION=${SHOPIFY_INSTALL_REGION:-}" \
+                      "SHOPIFY_INSTALL_SCOPES=${SHOPIFY_INSTALL_SCOPES:-}" \
+                      "SHOPIFY_DELEGATE_SCOPES=${SHOPIFY_DELEGATE_SCOPES:-}"; do
+            case "$pair" in
+              *@*) echo "::error::the repo variable behind '${pair%%=*}' contains an '@', which is the" \
+                        "--set-env-vars delimiter. Its value would be split into bogus env pairs. Remove it."
+                   exit 1 ;;
+            esac
+          done
+
+          SECRETS="DATABASE_URL=palup-staging-database-url:latest"
+          SECRETS="${SECRETS},WIDGET_TOKEN_SECRET=widget-token-secret:latest"
+          SECRETS="${SECRETS},PALUP_SECRETS=palup-secrets:latest"
+          if [ -n "${AUDIT_HMAC_SECRET_NAME:-}" ]; then
+            SECRETS="${SECRETS},AUDIT_HMAC_SECRET=${AUDIT_HMAC_SECRET_NAME}:latest"
+            echo "mounting AUDIT_HMAC_SECRET from secret '${AUDIT_HMAC_SECRET_NAME}'"
+          else
+            echo "AUDIT_HMAC_SECRET not mounted — GDPR-erasure audit rows will record" \
+                 "'unreferenced (no AUDIT_HMAC_SECRET configured)' instead of a keyed subject ref." \
+                 "Create the secret, then set the AUDIT_HMAC_SECRET_NAME repo variable to its name."
+          fi
+
+          # ^@^ delimiter: pairs split on '@', so the JSON values below keep their quotes and colons.
+          # None of these values contains an '@'.
+          ENVS="GOOGLE_CLOUD_PROJECT=${GCP_PROJECT}"
+          ENVS="${ENVS}@GOOGLE_CLOUD_LOCATION=global"
+          ENVS="${ENVS}@PALUP_MODEL=gemini-2.5-flash"
+          ENVS="${ENVS}@PALUP_REQUIRE_DATABASE_URL=true"
+          ENVS="${ENVS}@WIDGET_AUTH_REQUIRED=${WIDGET_AUTH_REQUIRED}"
+          ENVS="${ENVS}@WIDGET_EMBED_KEYS={\"demo-embed-key\":\"demo\"}"
+          ENVS="${ENVS}@SHOPIFY_STORES={\"demo\":\"palup-skincare-jason.myshopify.com\"}"
+          ENVS="${ENVS}@MERCHANT_REGION=${MERCHANT_REGION}"
+          ENVS="${ENVS}@MERCHANT_GROUNDING_MODE=${MERCHANT_GROUNDING_MODE}"
+
+          # C1 — all-or-nothing. A partial set is a CONFIGURATION MISTAKE, and the runtime's correct
+          # response to it (register nothing, 404) is the wrong response for a deploy: the operator who set
+          # two of three needs to be told, not left with routes that are quietly absent.
+          INSTALL_SET=0
+          for v in "${SHOPIFY_APP_CLIENT_ID:-}" "${SHOPIFY_INSTALL_REDIRECT_URI:-}" "${SHOPIFY_INSTALL_REGION:-}"; do
+            [ -n "$v" ] && INSTALL_SET=$((INSTALL_SET + 1)) || true
+          done
+          if [ "$INSTALL_SET" -gt 0 ] && [ "$INSTALL_SET" -lt 3 ]; then
+            echo "::error::partial Shopify install config: SHOPIFY_APP_CLIENT_ID," \
+                 "SHOPIFY_INSTALL_REDIRECT_URI and SHOPIFY_INSTALL_REGION must ALL be set as repo" \
+                 "variables, or none of them. Set the missing ones or clear the rest."
+            exit 1
+          fi
+          if [ "$INSTALL_SET" -eq 3 ]; then
+            case "${SHOPIFY_INSTALL_REGION}" in
+              us|eu|uk|other) ;;
+              *) echo "::error::SHOPIFY_INSTALL_REGION must be us|eu|uk|other (it is written to every new" \
+                      "merchant's pl_merchant row and decides their consent regime — it has no default)"
+                 exit 1 ;;
+            esac
+            ENVS="${ENVS}@SHOPIFY_APP_CLIENT_ID=${SHOPIFY_APP_CLIENT_ID}"
+            ENVS="${ENVS}@SHOPIFY_INSTALL_REDIRECT_URI=${SHOPIFY_INSTALL_REDIRECT_URI}"
+            ENVS="${ENVS}@SHOPIFY_INSTALL_REGION=${SHOPIFY_INSTALL_REGION}"
+            [ -n "${SHOPIFY_INSTALL_SCOPES:-}" ] && ENVS="${ENVS}@SHOPIFY_INSTALL_SCOPES=${SHOPIFY_INSTALL_SCOPES}" || true
+            [ -n "${SHOPIFY_DELEGATE_SCOPES:-}" ] && ENVS="${ENVS}@SHOPIFY_DELEGATE_SCOPES=${SHOPIFY_DELEGATE_SCOPES}" || true
+            echo "Shopify install env is complete; the routes still stay 404 until" \
+                 "shopify_app_client_secret exists in the palup-secrets JSON under \"__shopify_app__\"."
+          else
+            echo "Shopify install/webhook env not configured — /shopify/* routes will 404 (inert, by design)."
+          fi
+
+          echo "env keys: $(echo "$ENVS" | tr '@' '\n' | cut -d= -f1 | tr '\n' ' ')"
+
           gcloud run deploy palup-widget-staging \
             --source . \
-            --project "${{ vars.GCP_PROJECT }}" \
-            --region "${{ vars.GCP_REGION || 'us-central1' }}" \
+            --project "${GCP_PROJECT}" \
+            --region "${GCP_REGION}" \
             --allow-unauthenticated \
-            --add-cloudsql-instances "${{ vars.GCP_PROJECT }}:${{ vars.GCP_REGION || 'us-central1' }}:palup-staging" \
-            --set-secrets "DATABASE_URL=palup-staging-database-url:latest,WIDGET_TOKEN_SECRET=widget-token-secret:latest,PALUP_SECRETS=palup-secrets:latest" \
-            --set-env-vars "^@^GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT }}@GOOGLE_CLOUD_LOCATION=global@PALUP_MODEL=gemini-2.5-flash@PALUP_REQUIRE_DATABASE_URL=true@WIDGET_AUTH_REQUIRED=${{ vars.WIDGET_AUTH_REQUIRED || 'false' }}@WIDGET_EMBED_KEYS={\"demo-embed-key\":\"demo\"}@SHOPIFY_STORES={\"demo\":\"palup-skincare-jason.myshopify.com\"}"
+            --add-cloudsql-instances "${GCP_PROJECT}:${GCP_REGION}:palup-staging" \
+            --set-secrets "${SECRETS}" \
+            --set-env-vars "^@^${ENVS}"
       - name: Post-deploy smoke gate (health + live /chat + auth)
         run: |
           set -euo pipefail
@@ -87,6 +210,18 @@ jobs:
           if [ "$(echo "$HEALTH" | jq -r '.model')" = "mock" ]; then
             echo "::error::/health reports model=mock — live Vertex adapter not wired"; exit 1
           fi
+
+          # 1b) D1/D2 — the merchant registry is wired. `merchants` is "registry+env" when a durable
+          #     pl_merchant is reachable and the env fallback is armed, "env" when there is no registry at
+          #     all. "env" in staging would mean revocation does not revoke and every tenant is served
+          #     under the process's region — precisely the two properties D1 and D2 exist to provide — so
+          #     it fails the gate rather than passing quietly.
+          MODE=$(echo "$HEALTH" | jq -r '.merchants')
+          case "$MODE" in
+            registry*) echo "merchant resolution: $MODE" ;;
+            *) echo "::error::/health reports merchants=$MODE — no durable merchant registry is wired," \
+                    "so revocation and per-merchant region are both inert"; exit 1 ;;
+          esac
 
           # 2) Auth is ENFORCED — an unauthenticated /chat must be rejected (WIDGET_AUTH_REQUIRED=true).
           CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -X POST "$URL/chat" \

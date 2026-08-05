@@ -111,10 +111,11 @@ green.
 >   `PALUP_SECRETS` — *not* the encrypted delegate credential an install stores. **A merchant who installs
 >   themselves therefore gets the built-in FIXTURE catalog, not their own products,** until an operator
 >   provisions that secret for their tenant. There is exactly one source of truth for the token today.
-> - **`MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` are still process-wide env.** A merchant is *recorded*
->   with `SHOPIFY_INSTALL_REGION` but *served* with `MERCHANT_REGION`. If those disagree the backend logs a
->   `[config] SHOPIFY_INSTALL_REGION=… but MERCHANT_REGION=…` warning at boot — **set both to the same
->   value.**
+> - ~~**`MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` are still process-wide env.**~~ **CLOSED BY D2 — see
+>   *Per-merchant region* below.** A merchant is now *served* with the region on their own `pl_merchant`
+>   row, i.e. the value `SHOPIFY_INSTALL_REGION` recorded. D1's `[config] SHOPIFY_INSTALL_REGION=… but
+>   MERCHANT_REGION=…` boot warning **was removed**: the two variables now mean different things and
+>   **should not be kept equal** (see below).
 > - **The catalog-index and retention-sweep jobs still enumerate `SHOPIFY_STORES`,** so a self-installed
 >   merchant is invisible to them. This is not a deferral by preference: `MerchantRegistryPort` has no
 >   enumeration operation at all, so migrating those jobs needs a new port method.
@@ -131,7 +132,7 @@ redirect URI lapse must not stop honouring GDPR erasure for merchants who alread
 |---|---|---|
 | `SHOPIFY_APP_CLIENT_ID` | env | the app's OAuth client id — not a secret, it ships in the URL |
 | `SHOPIFY_INSTALL_REDIRECT_URI` | env | must **also** be registered as an allowed redirect URL on the Shopify app |
-| `SHOPIFY_INSTALL_REGION` | env | `us`\|`eu`\|`uk`\|`other`. **Required, no default** — an unset var must not make a residency decision. Keep it equal to `MERCHANT_REGION` (see above) |
+| `SHOPIFY_INSTALL_REGION` | env | `us`\|`eu`\|`uk`\|`other`. **Required, no default** — an unset var must not make a residency decision. Since D2 this is the region a new merchant is both *recorded with* and *served under*; it does **not** need to equal `MERCHANT_REGION` (see *Per-merchant region*) |
 | `SHOPIFY_INSTALL_SCOPES` | env, optional | defaults to `unauthenticated_read_product_listings` |
 | `SHOPIFY_DELEGATE_SCOPES` | env, optional | comma-separated; must be covered by what the merchant granted |
 | `shopify_app_client_secret` | **secret** | in `PALUP_SECRETS` under the **app-scoped** pseudo-tenant `__shopify_app__`: `{"__shopify_app__":{"shopify_app_client_secret":"…"}}` |
@@ -163,6 +164,93 @@ carried over: nothing re-encrypts existing rows for you (a row moves to the new 
 written again — i.e. on re-install), and rotating the merchant's **token** is a different operation from
 rotating the **key**. The `__merchant-cred` scope exists so that a compromise of `MEMORY_ENCRYPTION_KEY`
 does **not** expose stored merchant credentials.
+
+## Per-merchant region (D2) — the setting that decides a consent regime
+
+`region` is not a label. It selects the **consent regime**: `consentPermits(region, "ordinary", value)` is
+`region === "us" ? value !== "out" : value === "in"` (`packages/widget-brain/src/consent-rules.ts`). Serving
+an EU merchant under `us` therefore does not mislabel anything — it converts an **opt-in** regime into an
+**opt-out** one and stores cross-visit facts about shoppers who never agreed. Before D2 that was guaranteed
+for every merchant whose residency differed from the one process-wide `MERCHANT_REGION`.
+
+| situation | region + groundingMode used |
+|---|---|
+| the merchant has an **active** `pl_merchant` row with a valid `region` | **that row's** `region` and `grounding_mode`. `MERCHANT_REGION` is not consulted |
+| the merchant has **no row** (or there is no registry) | `MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` — the named fallback, same rank `WIDGET_EMBED_KEYS` has for identity. **This is staging's `demo` tenant** |
+| the row is active but its `region` is missing / not in the enum | **REFUSED** — 401 at `/widget/token`, 403 + flag `merchant_region_unset` at `/chat`. Audited as `merchant.region_unset`. It is *never* defaulted to `MERCHANT_REGION` |
+| the registry could not be read | **REFUSED** (D1's rule, unchanged) |
+
+**Why the third row refuses instead of falling back.** An absent row is an unambiguous fact — nobody claims
+this tenant, so the operator's env map is the only claim there is, and using it is legitimate. An *active*
+row with no usable region is a merchant we **have**, whose jurisdiction we do **not know**; substituting
+`MERCHANT_REGION` there is a residency decision made by a variable nobody set for that merchant, which is
+the exact thing that makes `SHOPIFY_INSTALL_REGION` and `NewMerchant.region` required with no default. A
+wrong region is undetectable after the fact; a refused merchant is visible within one page load.
+`groundingMode` deliberately does **not** refuse — it is product policy, not law, so an unusable value
+degrades to the most restrictive mode (`off`) and keeps the store served.
+
+**Fix a refused merchant** (one command, effective on the next request — nothing is deleted or reset):
+```bash
+pnpm exec tsx packages/widget-backend/src/jobs/merchant.ts set --tenant <tenantId> --region us|eu|uk|other
+pnpm exec tsx packages/widget-backend/src/jobs/merchant.ts set --tenant <tenantId> --grounding-mode off|general|full
+```
+Do **not** guess the value.
+
+**`MERCHANT_REGION` and `SHOPIFY_INSTALL_REGION` now mean different things and may legitimately differ:**
+`SHOPIFY_INSTALL_REGION` is the residency **new installs are recorded with**; `MERCHANT_REGION` is the
+fallback for tenants with **no row**. A US-hosted deployment onboarding EU merchants should set them
+differently. D1's boot warning that they must match was removed for exactly this reason.
+
+**One wire-contract change:** `/chat` responses that answer *before* a merchant is resolved (oversize input,
+unauthenticated, rate-limited, and the servability refusal) now report `consentMode: "opt_in"` — the
+stricter regime — instead of the process default. The shipped widget throws on any non-2xx before reading
+the body, so it never sees these; the change is about not asserting a jurisdiction we did not resolve.
+
+## What the staging deploy actually passes (D3)
+
+`--set-secrets` and `--set-env-vars` **replace the whole set on every deploy**, so anything not listed in
+`.github/workflows/deploy-staging.yml` is dropped on the next merge. Track B repeatedly documented env vars
+here and passed none of them; `packages/widget-backend/test/deploy-staging-env.test.ts` is now a unit test
+over that workflow file so the list cannot silently lose an entry again. (It proves the *list*, not the
+deploy — only a real deploy proves that.)
+
+**Always passed** — `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `PALUP_MODEL`,
+`PALUP_REQUIRE_DATABASE_URL`, `WIDGET_AUTH_REQUIRED`, `WIDGET_EMBED_KEYS`, `SHOPIFY_STORES`, and (new in D3)
+`MERCHANT_REGION` + `MERCHANT_GROUNDING_MODE`. Secrets: `DATABASE_URL`, `WIDGET_TOKEN_SECRET`,
+`PALUP_SECRETS`.
+
+**Optional, driven by repo variables** (`Settings → Secrets and variables → Actions → Variables`). Each is
+appended only when set, so an unset one never produces an empty env pair:
+
+| repo variable | effect |
+|---|---|
+| `MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` | the D2 fallback for tenants with no row. Default `us` / `full` — the same values the code already assumed, now visible instead of implied |
+| `SHOPIFY_APP_CLIENT_ID`, `SHOPIFY_INSTALL_REDIRECT_URI`, `SHOPIFY_INSTALL_REGION` | **all three or none.** A partial set **fails the deploy** with a `::error::` rather than leaving `/shopify/*` silently 404. An invalid `SHOPIFY_INSTALL_REGION` also fails the deploy |
+| `SHOPIFY_INSTALL_SCOPES`, `SHOPIFY_DELEGATE_SCOPES` | optional overrides of the code defaults |
+| `AUDIT_HMAC_SECRET_NAME` | the **name of an existing Secret Manager secret**, which is then mounted as `AUDIT_HMAC_SECRET` |
+
+**What an operator must create before any of this does anything.** These are *not* provisioned by this
+change and the deploy does not create them:
+
+1. **`shopify_app_client_secret`** inside the existing `palup-secrets` payload, under the app-scoped
+   pseudo-tenant: `{"__shopify_app__":{"shopify_app_client_secret":"…"}}`. Until it exists, `/shopify/*`
+   stays **404 even with all three env vars set** — both C1's install gate and C2's webhook gate read it.
+   It is a JSON entry in a secret that is already mounted, so there is nothing to add to the workflow.
+2. **`MEMORY_ENCRYPTION_KEY__merchant-cred`** per installing tenant, in the same `palup-secrets` payload.
+   Also nothing to add to the workflow. Missing ⇒ the install callback returns **502** and stores nothing.
+3. **An `AUDIT_HMAC_SECRET` secret**, only if you want a keyed subject ref in GDPR-erasure audit rows.
+   Without it those rows record the literal `unreferenced (no AUDIT_HMAC_SECRET configured)` — a
+   documented degradation, not a crash, which is why the workflow does **not** hard-code a mount for it: a
+   `--set-secrets` reference to a secret that does not exist makes `gcloud run deploy` itself fail and
+   would break **every** merge until someone created it.
+4. **The `pl_merchant` grants** (`GRANT SELECT, INSERT, UPDATE … TO palup_app`, deliberately no `DELETE`) —
+   see *Cloud SQL* below. `migrate()` runs the DDL at boot only when the install or webhook routes are
+   enabled, i.e. only once (1) exists.
+
+**The post-deploy smoke gate gained one check:** `/health` must report `merchants` starting with
+`registry`. `env` there would mean no durable merchant registry is reachable, so revocation would not
+revoke and every tenant would be served under the process's region — the two properties D1 and D2 exist to
+provide. It fails the gate rather than passing quietly.
 
 ## How to halt the live agent
 
