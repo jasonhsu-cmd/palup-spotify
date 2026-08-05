@@ -21,22 +21,37 @@ import {
 // ordering.
 //
 // ****************************************************************************************************
-// READ THIS BEFORE BELIEVING A MERCHANT CAN BE SERVED. **INSTALLING THROUGH THIS FLOW DOES NOT MAKE A
-// MERCHANT SERVABLE.** C1 is option (a): it RECORDS the install. Serving still resolves tenancy from env
-// vars, exactly as before —
-//   • `WIDGET_EMBED_KEYS` → tenant, at mint time and on the widget HTML route (server.ts:249, 545, 628)
-//   • `SHOPIFY_STORES`    → shop domain, forward and reverse (merchant-store.ts:20-49, server.ts:589-591)
-//   • `MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` → one value for the whole process (server.ts:479-494)
-//   • the Storefront token → `SecretsPort`, hand-provisioned (merchant-store.ts:16,47)
-// Nothing in the serving path reads `pl_merchant`. So a merchant who completes this flow gets a durable,
-// auditable, revocable REGISTRY ROW and an encrypted CREDENTIAL — and their shoppers are served by
-// whatever the env vars say, which for a newly-installed merchant is nothing. Cutting serving over is
-// D1/D2: it means changing `/widget/token`, `/chat`, `/shopper/session`, `/auth/customer/login`, the widget
-// HTML route and the grounding composition root, and deciding what becomes of the built-in `demo` tenant
-// (which today maps to `palup-skincare-jason.myshopify.com` via SHOPIFY_STORES in deploy-staging.yml — a
-// shop that, installed through THIS flow, would land on tenant `palup-skincare-jason`, NOT `demo`).
-// That is more than one reviewable PR, so it is deliberately not attempted here. Do not read this file as
-// "merchants can onboard themselves now"; read it as "the install is recorded, revocably and auditably".
+// SUPERSEDED BY D1 — this block used to read "INSTALLING THROUGH THIS FLOW DOES NOT MAKE A MERCHANT
+// SERVABLE … nothing in the serving path reads `pl_merchant`". Both halves are now FALSE, and a stale
+// disclaimer that under-claims is still a wrong claim, so here is the corrected state.
+//
+// WHAT D1 CUT OVER (merchant-resolver.ts is the single place the rule lives):
+//   • `/widget/token` resolves an embed key through the REGISTRY first; `WIDGET_EMBED_KEYS` is a named,
+//     logged, audited FALLBACK that applies only when no row claims that key.
+//   • `/chat` re-reads `pl_merchant.status` EVERY TURN, so `setStatus(…, "uninstalled")` — this file's own
+//     documented reversal path, and what C2's `app/uninstalled` webhook writes — actually stops serving,
+//     rather than being recorded and ignored.
+//   • `/shopper/session` and `/auth/customer/login` honour the same status check, and the shop domain for
+//     grounding comes from the row.
+//
+// WHAT IS STILL NOT TRUE, so nobody over-corrects the other way. A merchant who completes this flow
+// CANNOT YET BE SERVED THEIR OWN STORE, for two independent reasons:
+//   1. NOBODY HANDS THEM THEIR EMBED KEY. This file generates one (`newEmbedKey` below) and writes it to
+//      the registry, but — verified by grepping `packages/widget-backend/src` + `packages/control-plane/src`
+//      — no route, page or console returns it. The only way out is an operator running
+//      `jobs/merchant.ts show --tenant <id>`, which prints it since D1. Without that key their storefront
+//      snippet has nothing to mint with. `OK_PAGE` below therefore still says "not live yet", and that
+//      remains ACCURATE — it is deliberately not reworded.
+//   2. THEIR STOREFRONT TOKEN IS NOT READ. Serving takes `shopify_storefront_token` from `SecretsPort`
+//      (merchant-store.ts), NOT the encrypted delegate credential this flow custodies, so even once they
+//      have their key their shoppers get the FIXTURE catalog rather than their products. That is D2.
+// Also unchanged: `MERCHANT_REGION`/`MERCHANT_GROUNDING_MODE` remain process-wide, so a merchant recorded
+// with `SHOPIFY_INSTALL_REGION` is SERVED with `MERCHANT_REGION` (server.ts warns at boot when they differ).
+//
+// The `demo` question this block used to pose is answered: env survives as an explicit fallback, so
+// `demo` → `palup-skincare-jason.myshopify.com` keeps working, while that same shop installed through THIS
+// flow would land on tenant `palup-skincare-jason` — a DIFFERENT tenant, which is why the collision case
+// below fails loudly instead of merging.
 //
 // WHAT IT DOES DO, AND IT IS REAL. `deps.credentials` is REQUIRED, and it is B2's
 // `createMerchantCredentialStore` (#186), wired in server.ts: the delegate token is encrypted at rest under
