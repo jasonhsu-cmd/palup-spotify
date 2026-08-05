@@ -400,11 +400,13 @@ describe("C2 — app/uninstalled makes the merchant INERT, end to end", () => {
     const res = await h.post(WEBHOOK_ROUTES.appUninstalled, { raw, topic: "app/uninstalled", webhookId: nextWebhookId() });
     expect(res.statusCode).toBe(200);
     expect(await h.registry.lookupByTenantId(TENANT)).toBeNull();
-    const statuses = (await auditFor(h.store, TENANT))
+    // No audit row this topic writes may ever claim it restored servability. (`previousStatus` legitimately
+    // records what the status WAS; the asserted field is the status this webhook SET.)
+    const decisions = (await auditFor(h.store, TENANT))
       .filter((r) => r.action === "merchant.uninstalled")
-      .map((r) => JSON.stringify(r.decision));
-    // No audit row may ever claim this webhook restored servability.
-    for (const d of statuses) expect(d).not.toContain('"active"');
+      .map((r) => r.decision as { status?: unknown });
+    expect(decisions.length).toBeGreaterThan(0);
+    for (const d of decisions) expect(d.status).toBe("uninstalled");
   });
 
   it("REPLAY: an old delivery replayed AFTER a legitimate re-install does not re-revoke the merchant", async () => {
