@@ -19,8 +19,9 @@ import type { CryptoPort, RuntimeStatePort } from "@palup/platform-ports";
 // WHY `rs_kv` AND NOT A COLUMN ON `pl_merchant`: `pl_merchant` (B1) is the merchant IDENTITY table and its
 // column set is asserted as an exact allowlist precisely so a token can never be stashed there
 // (postgres-merchant-registry.ts:63-68). A credential belongs behind encryption in the tenant-scoped KV,
-// where every statement is already scoped by `tenant_id` (postgres-runtime-store.ts:20-24) and where the
-// audit chain that must record the write lives in the same transaction.
+// where every statement carries a `tenant_id` predicate and a blank tenant is refused outright
+// (postgres-runtime-store.ts:20-24), and where the audit chain that must record the write can commit in
+// the same transaction.
 //
 // TWO INDEPENDENT ISOLATION MECHANISMS, ON PURPOSE (belt and braces — neither alone is enough):
 //   1. `RuntimeStatePort`'s `{ tenantId }` scoping keeps merchant B's reads off merchant A's ROW. That is
