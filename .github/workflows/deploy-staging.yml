@@ -4,18 +4,42 @@ name: deploy-staging
 # never auto-deployed. INACTIVE until you set repo variable STAGING_ENABLED=true and the secrets below
 # (so main stays green until staging is configured). See docs/DEPLOY.md.
 on:
-  push:
+  # GATED ON CI (owner decision 2026-08-05). This previously triggered on `push: [main]` as a SIBLING of
+  # ci.yml — no `needs:`, no dependency — so both started in the same second and a merge whose tests were
+  # RED still deployed to staging. There is no rollback: the post-deploy smoke check below only reddens
+  # the run, after live traffic is already being served the bad revision. With ~30 auto-merged PRs that
+  # stops being a tail risk and becomes routine.
+  #
+  # `workflow_run` fires only after ci concludes; the `if` below additionally requires success, so a red
+  # or cancelled ci never reaches a deploy. NOTE that a `workflow_run` job checks out the DEFAULT branch
+  # by default, so the checkout step below pins the exact commit ci actually validated.
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [main]
+
+# Serialize deploys. Concurrent `gcloud run deploy --source .` against ONE service has already happened
+# here three times (2026-08-04 05:52:37/44/51, all finishing 05:54:40): which revision ends up serving is
+# not determined by commit order, and each run's own smoke check describes whatever revision is live —
+# so a green smoke does not prove YOUR commit is the one serving. `cancel-in-progress: false` makes this
+# a queue with latest-wins for anything superseded, which is the right semantics for a deploy.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    if: ${{ vars.STAGING_ENABLED == 'true' }}
+    if: ${{ vars.STAGING_ENABLED == 'true' && github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write # Workload Identity Federation (no long-lived keys)
     steps:
+      # Pin the commit ci validated. A workflow_run job otherwise checks out the default branch's tip,
+      # which by then may be a LATER commit that no ci run has passed.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - id: auth
         uses: google-github-actions/auth@v2
         with:
