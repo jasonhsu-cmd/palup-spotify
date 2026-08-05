@@ -45,7 +45,7 @@ import {
   type CallbackResult,
 } from "./customer-account-flow.js";
 import { parseStoreDomains } from "./merchant-store.js";
-import { createMerchantResolver } from "./merchant-resolver.js";
+import { createMerchantResolver, consentModeFor } from "./merchant-resolver.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE, DELEGATE_SCOPES_DEFAULT } from "./shopify-install-identity.js";
 import {
   registerShopifyInstallRoutes,
@@ -296,12 +296,46 @@ export async function buildServer(opts?: {
   // corpus unchanged.
   const merchantRegistry: MerchantRegistryPort | undefined =
     opts?.merchantRegistry ?? (runtimeResult.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : undefined);
+  // D2 — `MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE`, hoisted here (they used to be parsed ~220 lines
+  // below, next to `CONSENT_MODE`) because the resolver now needs them at construction. Both are pure env
+  // reads with no I/O, so hoisting them changes nothing about boot ordering.
+  //
+  // THEIR RANK CHANGED, NOT THEIR PARSING. Since D2 these are the NAMED FALLBACK for a tenant the merchant
+  // registry has no row for — exactly the rank `WIDGET_EMBED_KEYS` has held for identity since D1 — rather
+  // than the residency EVERY merchant is served under. A registry merchant is served under their OWN row's
+  // `region`; see merchant-resolver.ts's "THE SERVING CONFIG" for the full rule and for why a row with an
+  // unusable region is REFUSED instead of inheriting these.
+  const MERCHANT_REGION: MerchantRegion = (() => {
+    const r = process.env.MERCHANT_REGION;
+    return r === "us" || r === "eu" || r === "uk" || r === "other" ? r : "us";
+  })();
+  const MERCHANT_GROUNDING_MODE: NonNullable<Signals["groundingMode"]> = (() => {
+    const g = process.env.MERCHANT_GROUNDING_MODE;
+    return g === "off" || g === "general" || g === "full" ? g : "full";
+  })();
   const merchants = createMerchantResolver({
     store,
     ...(merchantRegistry ? { registry: merchantRegistry } : {}),
     embedKeys: EMBED_KEYS,
     storeDomains: () => parseStoreDomains(),
+    envRegion: MERCHANT_REGION,
+    envGroundingMode: MERCHANT_GROUNDING_MODE,
   });
+  /**
+   * D2 — the merchant's region for the DATA-RIGHTS paths, which are deliberately NOT gated on servability
+   * (D1: erasure and consent withdrawal must outlive the install). `/consent` still has to answer for a
+   * revoked merchant, an unregistered tenant and an unreadable registry, and in all three there is no
+   * merchant-declared jurisdiction to apply.
+   *
+   * Returns `undefined` in exactly those cases, which every consent consumer already treats as the
+   * STRICTEST regime (`consentPermits`, ADR-0015 Inv 3) — never the process env value. Guessing `"us"` for
+   * a merchant we could not resolve is the whole defect D2 exists to remove, and it would be worse on this
+   * endpoint than on `/chat`: this one is what the manage panel renders back to the shopper.
+   */
+  const consentRegionFor = async (tenantId: string): Promise<MerchantRegion | undefined> => {
+    const s = await merchants.servability(tenantId, "chat");
+    return s.kind === "servable" ? s.config.region : undefined;
+  };
   const grounding = createGroundingPort(store, secrets, { shopDomainFor: (t) => merchants.shopDomainFor(t) });
   // Hoisted ABOVE `createMemoryService` below (it used to be declared much later, alongside
   // `shopperIdentity`) so the memory service can be constructed with a real `hmacKey` from the start —
@@ -517,25 +551,23 @@ export async function buildServer(opts?: {
   // AUDIT_HMAC_SECRET (T8 identity-resolution audit ref, F7 — never a bare hash) is now declared much
   // earlier, alongside SHOPPER_TOKEN_SECRET, so `createMemoryService` below can use it too.
   // T7 — server-derived trust-bearing signals. These govern behavior/residency/competitor-mode, so they
-  // come from merchant/server config, never the shopper. Single-tenant defaults for now; when real
-  // multi-tenancy lands (post flag-flip) these are looked up per-merchant by tenantId. `region` should
-  // become geo-derived from the request; the conservative default here is the initial US market.
-  const MERCHANT_REGION: NonNullable<Signals["region"]> = (() => {
-    const r = process.env.MERCHANT_REGION;
-    return r === "us" || r === "eu" || r === "uk" || r === "other" ? r : "us";
-  })();
-  // PR-11b — read-only client-facing memory state, returned on every /chat response so the (still fully
-  // inert-by-default) widget can learn it and gate its own anonId-minting/consent-UX ONLY off the real
-  // server state — never guessed client-side. `memoryEnabled` mirrors the SAME double-gated
+  // come from merchant/server config, never the shopper.
+  //
+  // D2 — THE MULTI-TENANCY THIS COMMENT USED TO PROMISE IS NOW HERE. `MERCHANT_REGION` /
+  // `MERCHANT_GROUNDING_MODE` are parsed much earlier (next to the merchant resolver, which needs them)
+  // and are now the NAMED FALLBACK for a tenant with no registry row, not the value every merchant is
+  // served under: `merchants.servability(tenantId, …)` returns the tenant's OWN `config` from their
+  // `pl_merchant` row, and that is what reaches `deriveServingSignals` below.
+  //
+  // `CONSENT_MODE` IS GONE AS A BOOT CONSTANT, and that is the substantive part of D2. It was derived once
+  // from the process's region and returned on every `/chat` response, which meant one jurisdiction per
+  // instance for a field that decides whether ordinary memory is opt-in or opt-out
+  // (`consentPermits`, widget-brain/src/consent-rules.ts). It is now `consentModeFor(<this merchant's
+  // region>)`, computed per response — and `consentModeFor(undefined)` on the paths that answer before a
+  // merchant is resolved, which is the STRICTER regime by construction (ADR-0015 Inv 3).
+  //
+  // PR-11b's other client-facing field is unchanged: `memoryEnabled` still mirrors the SAME double-gated
   // `memoryServiceEnabled` computed above (false in real production — the double gate, flag.ts).
-  // `consentMode` mirrors ADR-0015's region split: the US gets an opt-out NOTICE (memory defaults on,
-  // shopper may decline); every other region gets an opt-in PROMPT (memory defaults off, shopper must
-  // accept). Both are static per boot (no per-request cost).
-  const CONSENT_MODE: "opt_in" | "opt_out" = MERCHANT_REGION === "us" ? "opt_out" : "opt_in";
-  const MERCHANT_GROUNDING_MODE: NonNullable<Signals["groundingMode"]> = (() => {
-    const g = process.env.MERCHANT_GROUNDING_MODE;
-    return g === "off" || g === "general" || g === "full" ? g : "full";
-  })();
   // ADR-0018 — Customer Account API OAuth (shopper sign-in that yields a token to read their own orders/
   // subscriptions). Gated by the SAME SHOPPER_AUTH_ENABLED posture (so it's inert exactly when App-Proxy
   // identity is) PLUS a configured redirect_uri PLUS a shopper-token secret to mint. Per-shop client creds
@@ -570,9 +602,9 @@ export async function buildServer(opts?: {
   //   • their STOREFRONT TOKEN. Serving reads `shopify_storefront_token` from `SecretsPort`
   //     (merchant-store.ts) — NOT B2's encrypted delegate credential — so a self-installed merchant's
   //     shoppers get the FIXTURE catalog until an operator provisions that secret. That is D2.
-  //   • `MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` are still process-wide env (see the
-  //     SHOPIFY_INSTALL_REGION mismatch warning below), so an installed merchant is SERVED with this
-  //     process's residency, not the one recorded on their row.
+  //   • (CLOSED BY D2 — `region`/`groundingMode` used to be listed here. An installed merchant is now
+  //     SERVED with the residency recorded on their own row, so `SHOPIFY_INSTALL_REGION` is the value that
+  //     actually governs their shoppers' consent regime, not just a column.)
   //   • the catalog-index and retention-sweep jobs still enumerate `SHOPIFY_STORES`, because
   //     `MerchantRegistryPort` has no enumeration operation (C3's finding, still open).
   //
@@ -604,22 +636,18 @@ export async function buildServer(opts?: {
     const r = process.env.SHOPIFY_INSTALL_REGION;
     return r === "us" || r === "eu" || r === "uk" || r === "other" ? r : undefined; // no silent default
   })();
-  // D1 — the one residency gap the cutover does NOT close, made observable instead of silent.
-  // `SHOPIFY_INSTALL_REGION` is the residency an installing merchant's registry row is RECORDED with;
-  // `MERCHANT_REGION` is the residency every merchant is actually SERVED with (it feeds `signals.region`
-  // and, through it, `CONSENT_MODE`). D1 cut identity and servability over to the registry but left
-  // `region`/`groundingMode` on process-wide env — see merchant-resolver.ts's header for why — so these two
-  // CAN disagree, and a disagreement is exactly the residency-by-unset-env-var the legal review flagged
-  // (merchant-registry-port.ts:89-91). Warn, don't hard-gate: refusing to boot would take a serving
-  // deployment down over a mismatch that predates this PR and harms nobody until a merchant installs.
-  if (SHOPIFY_INSTALL_REGION && SHOPIFY_INSTALL_REGION !== MERCHANT_REGION) {
-    console.warn(
-      `[config] SHOPIFY_INSTALL_REGION=${SHOPIFY_INSTALL_REGION} but MERCHANT_REGION=${MERCHANT_REGION}. ` +
-        `A merchant installing through /shopify/install is RECORDED as "${SHOPIFY_INSTALL_REGION}" but is ` +
-        `SERVED as "${MERCHANT_REGION}" (consentMode "${CONSENT_MODE}"), because D1 left region on ` +
-        `process-wide env. Set both to the same value until per-merchant region lands (D2).`,
-    );
-  }
+  // D2 — D1's `SHOPIFY_INSTALL_REGION !== MERCHANT_REGION` boot warning WAS REMOVED HERE, because the
+  // defect it reported no longer exists and leaving it would be a false alarm about a correct config.
+  //
+  // D1's warning said: a merchant is RECORDED with `SHOPIFY_INSTALL_REGION` but SERVED with
+  // `MERCHANT_REGION`, so keep them equal. Since D2 an installed merchant is served with the region on
+  // their OWN row — which is the value `SHOPIFY_INSTALL_REGION` wrote — so the two agree by construction
+  // and the vars now mean genuinely different things: `SHOPIFY_INSTALL_REGION` is the residency NEW
+  // installs are recorded with, `MERCHANT_REGION` is the fallback for tenants with NO row (staging's
+  // `demo`). A US-hosted deployment onboarding EU merchants SHOULD now set them differently. Keeping a
+  // warning would train operators to "fix" a correct configuration by making it wrong.
+  // What still enforces the residency rule: `SHOPIFY_INSTALL_REGION` remains REQUIRED with no default
+  // (above), and a row whose region is unusable is REFUSED rather than served (merchant-resolver.ts).
   const SHOPIFY_INSTALL_SCOPES = process.env.SHOPIFY_INSTALL_SCOPES || INSTALL_SCOPES_DEFAULT;
   const SHOPIFY_DELEGATE_SCOPES = (process.env.SHOPIFY_DELEGATE_SCOPES ?? DELEGATE_SCOPES_DEFAULT.join(","))
     .split(",")
@@ -1125,8 +1153,18 @@ export async function buildServer(opts?: {
     // render what is true without re-implementing the region regime client-side. It must not: the panel
     // binding its checkbox to `consent === "in"` is exactly how it came to render "off" for the US
     // opt-out regime's ACTIVE "unknown" (see manage-panel-honesty.test.ts). Same function, same region
-    // source (`MERCHANT_REGION`, which is also what `deriveServingSignals` puts on `signals.region`) as
-    // /chat's own `memoryActive` and the `remember()` gate.
+    // source as /chat's own `memoryActive` and the `remember()` gate.
+    //
+    // D2 — THAT SOURCE IS NOW THIS MERCHANT'S OWN REGION, not the process's. It has to be: `"unknown"` is
+    // the ONE input whose meaning is regime-dependent (`consentPermits` — US reads it as allowed, every
+    // other region as not), and it is precisely the value a shopper who never answered the prompt carries.
+    // Reporting the process default here while /chat reported the merchant's would make the manage panel
+    // and the turn that follows it disagree about the same shopper.
+    //
+    // THIS ENDPOINT IS NOT GATED ON SERVABILITY (D1: withdrawal must outlive the install), so it must
+    // still answer for a revoked merchant, an unregistered tenant and an unreadable registry. In all three
+    // there is no merchant-declared region to use, and `consentRegionFor` resolves to the STRICTEST
+    // regime rather than guessing — the fail-closed direction for a consent answer.
     //
     // SCOPE: this is the state for the subject THIS call recorded against — `acct:<shopperId>` when
     // signed in, the guest anonId otherwise. It is not a promise about a later turn under a different
@@ -1137,7 +1175,11 @@ export async function buildServer(opts?: {
     return {
       ok: true,
       memoryActive: (({ mayWriteOrdinary, mayWriteSpecial }) => ({ ordinary: mayWriteOrdinary, special: mayWriteSpecial }))(
-        decideMemoryWrite({ region: MERCHANT_REGION, consent1: body.memoryOrdinary, consent2: body.memorySpecial }),
+        decideMemoryWrite({
+          region: await consentRegionFor(tenantId),
+          consent1: body.memoryOrdinary,
+          consent2: body.memorySpecial,
+        }),
       ),
     };
   });
@@ -1286,10 +1328,31 @@ export async function buildServer(opts?: {
     const message = String(body.message ?? "");
     const idemKey = typeof body.idempotencyKey === "string" && body.idempotencyKey ? body.idempotencyKey : undefined;
 
+    // D2 — THE THREE EARLY RETURNS BELOW ANSWER BEFORE A MERCHANT IS RESOLVED, so they report
+    // `consentModeFor(undefined)` — the STRICTEST regime — rather than this process's default.
+    //
+    // Why not the env value: `consentMode` is a statement about a MERCHANT's consent regime, and on these
+    // paths there is no merchant to make it about (oversize and unauthenticated fire before the token is
+    // read at all; the rate limiter fires after, but deliberately before the registry lookup, so that an
+    // unauthenticated flood cannot spend unbounded registry reads — D1's placement, kept). Emitting
+    // `opt_out` there would be the US default asserted over a merchant we have not identified, which is
+    // the exact shape of the defect D2 removes from the served path. `consentPermits` itself treats an
+    // unknown region as the stricter regime (ADR-0015 Inv 3); this is that rule, on the wire.
+    //
+    // Why not OMIT the field: PR-11b's contract is that these paths carry it
+    // (chat-memory-state.test.ts), and an absent field would leave a client's cached value in place —
+    // silently keeping a stale, possibly wrong regime rather than replacing it with a safe one.
+    //
+    // SCOPE OF THE PRACTICAL EFFECT, stated honestly: the shipped widget throws on any non-2xx before it
+    // reads the body (`if (!r.ok) throw`, then `onChatMeta(d)` — widget/public/index.html), so it never
+    // learns a consentMode from these three responses today. This is about not asserting a falsehood on a
+    // public wire contract, not about a live defect in our own client.
+    const UNRESOLVED_CONSENT_MODE = consentModeFor(undefined);
+
     // T5 — input bounds: reject oversized input before any work (bounds the model + the KV keys).
     if (message.length > MAX_MESSAGE_CHARS || sessionId.length > MAX_ID_CHARS || (idemKey && idemKey.length > MAX_ID_CHARS)) {
       reply.code(400);
-      return { reply: "Sorry — that message is too long. Could you shorten it?", mode: "support", pitch: "none", escalate: false, flags: ["input_rejected"], memoryEnabled: memoryServiceEnabled, consentMode: CONSENT_MODE };
+      return { reply: "Sorry — that message is too long. Could you shorten it?", mode: "support", pitch: "none", escalate: false, flags: ["input_rejected"], memoryEnabled: memoryServiceEnabled, consentMode: UNRESOLVED_CONSENT_MODE };
     }
 
     // T3 — TENANT IDENTITY: derive the merchant/tenant from a VERIFIED widget token (Authorization:
@@ -1306,7 +1369,7 @@ export async function buildServer(opts?: {
     const principal = await widgetIdentity.authenticate(widgetToken);
     if (principal.kind !== "merchant" && WIDGET_AUTH_REQUIRED) {
       reply.code(401);
-      return { reply: "This assistant needs to be opened from the store page.", mode: "support", pitch: "none", escalate: false, flags: ["unauthenticated"], memoryEnabled: memoryServiceEnabled, consentMode: CONSENT_MODE };
+      return { reply: "This assistant needs to be opened from the store page.", mode: "support", pitch: "none", escalate: false, flags: ["unauthenticated"], memoryEnabled: memoryServiceEnabled, consentMode: UNRESOLVED_CONSENT_MODE };
     }
     const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
     const serving = { tenantId };
@@ -1349,7 +1412,7 @@ export async function buildServer(opts?: {
     });
     if (!allowed) {
       reply.code(429);
-      return { reply: "You're sending messages a little too fast — give me a moment and try again.", mode: "support", pitch: "none", escalate: false, flags: ["rate_limited"], memoryEnabled: memoryServiceEnabled, consentMode: CONSENT_MODE };
+      return { reply: "You're sending messages a little too fast — give me a moment and try again.", mode: "support", pitch: "none", escalate: false, flags: ["rate_limited"], memoryEnabled: memoryServiceEnabled, consentMode: UNRESOLVED_CONSENT_MODE };
     }
 
     // ── D1 — REVOCATION, ENFORCED ON EVERY TURN. This is the property that did not exist before this PR.
@@ -1368,6 +1431,8 @@ export async function buildServer(opts?: {
     // BEFORE the try/catch below (so a registry fault surfaces as this explicit 403 rather than being
     // absorbed by the generic model-error handler, which returns 200). Fails CLOSED on a registry error —
     // see the resolver header for why, and for what that costs.
+    // D2 — this ONE read now also yields the tenant's serving config (`region` + `groundingMode`), so
+    // per-merchant residency costs no extra registry round trip on the hot path.
     const servable = await merchants.servability(tenantId, "chat");
     if (servable.kind !== "servable") {
       reply.code(403);
@@ -1378,14 +1443,25 @@ export async function buildServer(opts?: {
         mode: "support",
         pitch: "none",
         escalate: false,
-        // Two DISTINGUISHABLE flags, because they are different operator problems: a deliberate revocation
-        // versus a registry we could not read. Neither is distinguishable to the shopper, whose reply text is
-        // identical.
-        flags: [servable.kind === "revoked" ? "merchant_inactive" : "merchant_unresolved"],
+        // THREE DISTINGUISHABLE flags, because they are three different operator problems with three
+        // different fixes: a deliberate revocation (`status --status active`), a registry we could not
+        // read (a database fault), and — D2 — an active row whose residency we cannot determine
+        // (`set --region …`). None is distinguishable to the shopper, whose reply text is identical.
+        flags: [
+          servable.kind === "revoked"
+            ? "merchant_inactive"
+            : servable.kind === "region-unset"
+              ? "merchant_region_unset"
+              : "merchant_unresolved",
+        ],
         memoryEnabled: memoryServiceEnabled,
-        consentMode: CONSENT_MODE,
+        // A merchant we refuse has no serving regime to report — the strictest, as above.
+        consentMode: UNRESOLVED_CONSENT_MODE,
       };
     }
+    // From here the merchant IS resolved and servable, so every remaining response reports THEIR regime.
+    const servingConfig = servable.config;
+    const CONSENT_MODE = consentModeFor(servingConfig.region);
 
     try {
       // IDEMPOTENCY: a client retry (e.g. the widget's offline-retry replaying the same turn) must NOT
@@ -1566,8 +1642,12 @@ export async function buildServer(opts?: {
         tenantId,
         kill: Boolean(kill),
         atCap: Boolean(costCap),
-        region: MERCHANT_REGION,
-        groundingMode: MERCHANT_GROUNDING_MODE,
+        // D2 — THIS MERCHANT's residency and grounding posture (their `pl_merchant` row when they have
+        // one, the named env fallback when they do not), never the process's. `signals.region` is what
+        // `memoryConsentInputs` below feeds to `decideMemoryWrite`, so this line is the actual consent
+        // gate moving, not just a label.
+        region: servingConfig.region,
+        groundingMode: servingConfig.groundingMode,
         // ADR-0017 — server-verified only (never body.signals.shopperId, which deriveServingSignals never
         // reads anyway): undefined when shopperPrincipal stayed anonymous (SHOPPER_AUTH off, no/invalid
         // token, or the F1 re-binding check above failed).
