@@ -68,7 +68,26 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // Read routes stay open for the dashboard for now (info-disclosure follow-up when it gets an auth UI).
   // The shared-token gate is the interim posture; SSO/passkey + step-up + two-person land behind the
   // same identity port next (identity-and-access.md §1-2).
-  const operatorIdentity = createOperatorTokenIdentity(process.env.OPERATOR_TOKEN);
+  // NAMED OPERATORS — `OPERATOR_TOKENS` is a JSON map of operatorId -> token, e.g.
+  // {"alice":"...","bob":"..."}. The legacy single OPERATOR_TOKEN still works and still resolves to
+  // "operator", so an existing deployment is unaffected until names are configured. Malformed JSON is
+  // IGNORED (with a warning) rather than throwing: a typo in this env must never take the control plane
+  // down, and the legacy token keeps it operable.
+  const namedOperators = (() => {
+    const raw = process.env.OPERATOR_TOKENS;
+    if (!raw) return undefined;
+    try {
+      const o = JSON.parse(raw);
+      if (o && typeof o === "object" && !Array.isArray(o)) return o as Record<string, string>;
+    } catch { /* fall through */ }
+    console.warn("[config] OPERATOR_TOKENS is not a valid JSON object — ignoring; named operators disabled");
+    return undefined;
+  })();
+  const operatorIdentity = createOperatorTokenIdentity(process.env.OPERATOR_TOKEN, namedOperators);
+  // A two-person rule needs two people. With one shared token every operator IS "operator", so enforcing
+  // it would block every promotion; silently skipping it would be the "control that never applies"
+  // pattern. It activates exactly when it becomes satisfiable, and the state is reported on /api/state.
+  const twoPersonPromote = operatorIdentity.operatorCount >= 2;
   app.addHook("onRequest", async (req, reply) => {
     // Gate everything except the safe (read) methods, so a future non-POST mutation can't slip the gate.
     if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return;
@@ -80,9 +99,21 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       return; // stop the hook chain / handler (defensive; Fastify already halts after send)
     }
   });
+  /** The operator id behind THIS request, from the same token the auth hook already validated. Falls
+   * back to "operator" so a single-token deployment behaves exactly as before. */
+  const actingOperator = async (req: FastifyRequest): Promise<string> => {
+    const auth = req.headers["authorization"];
+    const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+    const p = await operatorIdentity.authenticate(token);
+    return p.kind === "operator" ? p.operatorId : "operator";
+  };
   const state = () => ({
     mode,
     judgeFamily,
+    /** Whether approver != promoter is being ENFORCED. False means one shared operator identity, so the
+     * rule is unsatisfiable — surfaced rather than left to look enforced. */
+    twoPersonPromote,
+    operatorCount: operatorIdentity.operatorCount,
     killed: engine.isKilled(),
     champion: engine.getChampion(),
     candidates: engine.getCandidates(),
@@ -162,7 +193,10 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
     if (mode !== "live") await p;
     return state();
   });
-  app.post("/api/approve/:id", async (req) => act(async () => { await assertRuntimeNotKilled(); engine.approve((req.params as { id: string }).id, "operator"); }));
+  // The approver of record is the AUTHENTICATED operator, not the literal string "operator". This is the
+  // name bound into the immutable audit and compared by the two-person rule at promotion, so it must come
+  // from the credential that was actually presented.
+  app.post("/api/approve/:id", async (req) => act(async () => { await assertRuntimeNotKilled(); engine.approve((req.params as { id: string }).id, await actingOperator(req)); }));
   app.post("/api/reject/:id", async (req) => act(() => engine.reject((req.params as { id: string }).id, "operator")));
   app.post("/api/promote/:id", async (req) =>
     act(async () => {
@@ -171,7 +205,11 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
       // shoppers). promoteToServing verifies the human approval, fails closed on the shared kill registry,
       // persists CHAMPION/active (put + audit atomically), THEN advances the engine — the human path made
       // end-to-end, and what makes the orchestrator's route-to-human actionable.
-      await promoteToServing(engine, (req.params as { id: string }).id, runtimeStore, PROMOTE_TENANT);
+      // Supply the promoter identity ONLY when the rule is satisfiable (>= 2 configured operators);
+      // otherwise every id is "operator" and the check would refuse every promotion.
+      await promoteToServing(engine, (req.params as { id: string }).id, runtimeStore, PROMOTE_TENANT, undefined, {
+        promotedBy: twoPersonPromote ? await actingOperator(req) : undefined,
+      });
     }),
   );
   // --- The HUMAN lane's staging surface (CLAUDE.md §3 NN#2: shadow → canary before any promotion) ---
