@@ -51,6 +51,7 @@ import {
   INSTALL_SCOPES_DEFAULT,
   type MerchantCredentialSink,
 } from "./routes/shopify-install.js";
+import { registerShopifyWebhookRoutes } from "./routes/shopify-webhooks.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
 // multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
@@ -623,6 +624,51 @@ export async function buildServer(opts?: {
       // /shopper/session, the CAA routes) — one rate-limit mechanism, not a second one that could drift.
       checkRateLimit: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
       now: nowSec,
+    });
+  }
+
+  // ── C2 — the three MANDATORY Shopify compliance webhooks + app/uninstalled ─────────────────────────
+  //
+  // A NARROWER GATE THAN C1's, deliberately. C1 needs a client id, a redirect URI and a declared
+  // residency region because it CREATES merchants; C2 only ever acts on merchants that already exist, so
+  // it needs exactly two things:
+  //   • the app client secret in the SecretsPort — the SAME secret C1 reads, because Shopify signs
+  //     webhook HMACs with the app's client secret (shopify-webhook-identity.ts [W1]). NO NEW ENV VAR and
+  //     no new secret to provision.
+  //   • a durable MerchantRegistryPort — there is no other way to resolve a shop domain to a tenant or to
+  //     revoke one. An in-memory registry is not accepted for the same reason C1 refuses it: it would
+  //     forget every revocation on the next cold start while reporting 200 to Shopify.
+  // Sharing C1's gate instead would mean that letting the OAuth redirect URI lapse silently stopped
+  // honouring GDPR erasure requests for merchants who had already installed — a compliance failure caused
+  // by an unrelated config change. So these are separate gates on purpose.
+  //
+  // WHY THE ROUTES MUST 404 RATHER THAN 500 WHEN UNCONFIGURED. Shopify treats any non-2xx as a failure,
+  // retries 8 times over 4 hours, and then DELETES a subscription configured through the Admin API. A
+  // half-working endpoint that 500s is therefore worse than an absent one: it burns the retries either
+  // way, but a 404 is unambiguous to whoever is debugging the app's configuration.
+  const SHOPIFY_WEBHOOKS_ENABLED = Boolean(shopifyAppSecretPresent && merchantRegistry);
+  if (SHOPIFY_WEBHOOKS_ENABLED) {
+    // Idempotent DDL, and only when C1 has not already run it (an injected registry has no migration).
+    if (!SHOPIFY_INSTALL_ENABLED && merchantRegistry instanceof PostgresMerchantRegistry) await merchantRegistry.migrate();
+    registerShopifyWebhookRoutes(app, {
+      store,
+      registry: merchantRegistry!,
+      // The SAME unconditionally-constructed vector port POST /forget erases through, for the same reason
+      // it is unconditional there: a shopper's (or a regulator's) right to erase what may already be
+      // stored does not depend on whether the memory feature is switched on right now.
+      vector: vectorPort,
+      clientSecret: () => secrets.get(SHOPIFY_APP_SECRET_SCOPE, SHOPIFY_APP_CLIENT_SECRET_NAME),
+      // Same keyed-HMAC secret every other audit subjectRef uses (F7 — never a bare hash of a
+      // low-entropy numeric customer id).
+      auditHmacKey: AUDIT_HMAC_SECRET,
+      // NN#4 — the SAME `matchedKill` the /chat, /forget and install paths read, so a halt at any of the
+      // three scopes (global / tenant / agent) stops a DESTRUCTIVE erasure. It deliberately does NOT stop
+      // `app/uninstalled` from making a merchant inert — see that handler's own note.
+      killCheck: async (tenantId) => (await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) !== null,
+      // Same per-IP bucket and reserved mint tenant every other public route uses — one rate-limit
+      // mechanism, not a second one that could drift.
+      checkRateLimit: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
+      now: () => Date.now(),
     });
   }
 
