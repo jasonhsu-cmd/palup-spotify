@@ -16,6 +16,30 @@ import type { SecretsPort } from "./secrets-port.js";
 // `deriveKey` below) so two tenants provisioned with the IDENTICAL raw secret still get DIFFERENT AES
 // keys — one tenant's key compromise/rotation never touches another's data (least privilege, CLAUDE.md
 // §3.6; security review finding 3).
+//
+// KEY SCOPE (A3). A tenant may need MORE THAN ONE key: a per-purpose key so a compromise of the
+// memory-encryption key does not also expose stored merchant credentials, and independent rotation
+// schedules for each. Before this, the port had no way to say WHICH key produced a ciphertext, so
+// neither could be expressed. `keyScope` is that name: an optional, non-secret, lowercase label that
+// (a) selects the key material, (b) is recorded in the envelope so a decrypt knows which key to ask
+// for, and (c) is bound into the GCM aad so a ciphertext from one scope can never be read under
+// another — even if an operator provisioned both scopes with identical raw material.
+//
+// The two fail-closed rules, because the brief for this port pulls in two directions (back-compat vs.
+// "a missing scope must be an error") and the resolution has to be explicit rather than implied:
+//   1. OMITTING `keyScope` entirely is the DEFAULT SCOPE, which is byte-for-byte today's behavior
+//      (`v1:` envelopes, the same secret name, the same HKDF info). That is what keeps every existing
+//      caller and every already-stored row working, and it is a documented contract, not a fallback.
+//   2. A scope that is PRESENT BUT BLANK OR MALFORMED is an ERROR, never coerced into the default; and
+//      a scope MISMATCH between the envelope and the request never falls back to another key. An
+//      unconfigured scope refuses (encrypt throws / decrypt yields undefined) even when the default
+//      scope's key IS configured.
+
+/**
+ * The scope used when a caller passes no `keyScope`. Envelope version `v1` IS this scope by definition —
+ * a v1 envelope predates scopes and can only ever have come from the default key.
+ */
+export const DEFAULT_KEY_SCOPE = "default";
 
 export interface CryptoPort {
   /**
@@ -24,33 +48,45 @@ export interface CryptoPort {
    * AES-GCM so the envelope can never be decrypted successfully after being copied/relocated onto a
    * different record or field (security review finding 4 — "ciphertext can be relocated between
    * records"). MUST throw (never silently return plaintext or a fixed placeholder) when no key is
-   * configured for this tenant — callers that need fail-closed semantics (ADR-0015 Inv 9: a
+   * configured for this tenant AND scope — callers that need fail-closed semantics (ADR-0015 Inv 9: a
    * special-category write is REFUSED, never persisted in the clear) rely on this throwing, not on
    * inspecting the result.
+   *
+   * `keyScope` selects WHICH of the tenant's keys to use (see the module header). Omit it for the
+   * default scope — today's behavior. A blank/malformed scope throws; an unconfigured scope throws
+   * rather than falling back to the default key.
    */
-  encrypt(tenantId: string, plaintext: string, aad: string): Promise<string>;
+  encrypt(tenantId: string, plaintext: string, aad: string, keyScope?: string): Promise<string>;
   /**
-   * Decrypts an envelope previously returned by `encrypt` for the SAME `tenantId` AND the SAME `aad`.
-   * NEVER throws: an unknown envelope shape, a wrong/rotated/missing key, a mismatched `aad` (the
-   * ciphertext was moved to a different record/field), or genuine corruption all resolve to `undefined`
-   * so a caller can drop the record rather than crash the turn or surface ciphertext as "garbage"
-   * plaintext.
+   * Decrypts an envelope previously returned by `encrypt` for the SAME `tenantId`, the SAME `aad` AND
+   * the SAME `keyScope`. Resolves to `undefined` — never throws — for an unknown envelope shape, a
+   * wrong/rotated/missing/other-scope key, a mismatched `aad` (the ciphertext was moved to a different
+   * record/field), or genuine corruption, so a caller can drop the record rather than crash the turn or
+   * surface ciphertext as "garbage" plaintext.
+   *
+   * THE ONE EXCEPTION, and it is deliberate: a `keyScope` argument that is blank or malformed THROWS.
+   * That is a caller bug, not unreadable data — resolving it to `undefined` would tell a caller with a
+   * typo'd scope that its records are undecryptable, which is exactly the "an absent read looks like a
+   * valid answer" defect this repo keeps getting bitten by. Argument validation happens before any key
+   * lookup or crypto, so nothing is attempted with the wrong key first.
    */
-  decrypt(tenantId: string, ciphertext: string, aad: string): Promise<string | undefined>;
+  decrypt(tenantId: string, ciphertext: string, aad: string, keyScope?: string): Promise<string | undefined>;
 }
 
 export interface AesGcmCryptoOpts {
-  /** SecretsPort name this adapter reads the tenant's key material from. Defaults to
+  /** SecretsPort name this adapter reads the tenant's DEFAULT-scope key material from. Defaults to
    * `"MEMORY_ENCRYPTION_KEY"` so a tenant's encryption key is provisioned exactly like any other
    * tenant secret — never hardcoded, never in env/code directly (SecretsPort is the only path,
    * ADR-0001 / CLAUDE.md §5). A rotation keeps the OUTGOING value available for one cycle at
    * `"<secretName>_previous"` (see the module header's key-rotation note) so already-encrypted records
-   * stay decryptable across the rotation instead of silently failing en masse. */
+   * stay decryptable across the rotation instead of silently failing en masse. A non-default key scope
+   * reads its own name, `keyScopeSecretName(secretName, scope)`, and rotates the same way. */
   secretName?: string;
 }
 
-const ENVELOPE_VERSION = "v1"; // envelope format tag — lets a future v2 (e.g. cloud-KMS-wrapped) adapter
-// recognize/reject a shape it doesn't understand rather than mis-decrypting it.
+const ENVELOPE_V1 = "v1"; // pre-scope envelope. By definition the DEFAULT key scope: it could not have
+// been produced by any other, so a v1 row needs no migration and stays readable forever.
+const ENVELOPE_V2 = "v2"; // scoped envelope: `v2:<scope>:<keyId>:<iv>:<authTag>:<ciphertext>`.
 const ALGORITHM = "aes-256-gcm";
 const IV_BYTES = 12; // NIST-recommended GCM nonce size
 const HKDF_KEY_BYTES = 32; // AES-256 key size
@@ -63,11 +99,54 @@ const KEY_ID_HEX_CHARS = 8; // short, non-secret fingerprint of the DERIVED key 
 // production.
 const MIN_KEY_MATERIAL_BYTES = 16;
 const PREVIOUS_KEY_SUFFIX = "_previous";
-const ENVELOPE_PARTS = 5; // v1:keyId:iv:authTag:ciphertext
+const ENVELOPE_V1_PARTS = 5; // v1:keyId:iv:authTag:ciphertext
+const ENVELOPE_V2_PARTS = 6; // v2:scope:keyId:iv:authTag:ciphertext
+/** Separator between the base secret name and a key scope. Doubled so it cannot be produced by a scope
+ *  name (which may not contain `_` — see `KEY_SCOPE_RE`) nor collide with the base name itself. */
+const KEY_SCOPE_SEPARATOR = "__";
+/**
+ * A key scope is a lowercase label, not key material and not free text: `[a-z0-9]` then `[a-z0-9-]`, at
+ * most 64 chars. Why each restriction is load-bearing rather than tidiness:
+ *   - no `:`      — the envelope is colon-delimited; a scope with a colon would forge extra fields.
+ *   - no `_`      — a per-scope secret name gets the `_previous` rotation suffix appended, so a scope
+ *                   named `x_previous` would otherwise alias scope `x`'s OUTGOING key.
+ *   - lowercase   — case-variant scopes would silently split a tenant's keys in two.
+ *   - length cap  — bounds what a scope can put into a secret name and into an error string.
+ */
+const KEY_SCOPE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 interface DerivedKey {
   key: Buffer;
   keyId: string;
+}
+
+/**
+ * Validates a `keyScope` argument, resolving an omitted one to `DEFAULT_KEY_SCOPE`. THROWS for a blank
+ * or malformed scope — never coerces it into the default (module header, rule 2). The rejection message
+ * states the rule and does NOT echo the offending value: a scope is caller-supplied and lands in logs
+ * (same reasoning as `resolveEmbedKeys` in widget-backend, which names the variable and the rule but
+ * never the value).
+ */
+export function requireKeyScope(keyScope: string | undefined): string {
+  if (keyScope === undefined) return DEFAULT_KEY_SCOPE;
+  if (typeof keyScope !== "string" || !KEY_SCOPE_RE.test(keyScope))
+    throw new Error(
+      "CryptoPort: keyScope must match /^[a-z0-9][a-z0-9-]{0,63}$/ (lowercase letters, digits and hyphens; " +
+        "no underscore, no colon) — a blank or malformed scope is an error, never the default scope (fail closed)",
+    );
+  return keyScope;
+}
+
+/**
+ * SecretsPort name holding the key material for one scope. The DEFAULT scope keeps the bare `secretName`
+ * (so nothing already provisioned moves); every other scope gets its own name, which is what lets an
+ * operator provision genuinely INDEPENDENT material per scope and rotate each on its own schedule via
+ * the same `<name>_previous` convention. An unconfigured scope therefore resolves to "no secret" and
+ * fails closed — it can never silently reach the default scope's key.
+ */
+export function keyScopeSecretName(secretName: string, keyScope: string | undefined): string {
+  const scope = requireKeyScope(keyScope);
+  return scope === DEFAULT_KEY_SCOPE ? secretName : `${secretName}${KEY_SCOPE_SEPARATOR}${scope}`;
 }
 
 /**
@@ -93,11 +172,19 @@ function deriveKey(tenantId: string, raw: string): DerivedKey {
   return { key, keyId };
 }
 
-/** GCM associated data actually bound into the ciphertext: the port's own envelope version PLUS the
- * caller-supplied `aad` (record-identity string) — so a foreign-shaped/wrong-version envelope can never
- * be coerced into matching by accident. */
-function gcmAad(aad: string): Buffer {
-  return Buffer.from(`${ENVELOPE_VERSION}|${aad}`, "utf8");
+/**
+ * GCM associated data actually bound into the ciphertext: the port's own envelope version, the KEY SCOPE
+ * (for v2), and the caller-supplied `aad` (record-identity string) — so a foreign-shaped/wrong-version
+ * envelope can never be coerced into matching by accident, and a ciphertext from one scope fails
+ * authentication under another EVEN IF both scopes were provisioned with identical raw key material.
+ *
+ * The default scope's form is exactly the pre-scope one (`v1|<aad>`), which is what keeps every
+ * already-stored row decryptable.
+ */
+function gcmAad(aad: string, keyScope: string): Buffer {
+  return keyScope === DEFAULT_KEY_SCOPE
+    ? Buffer.from(`${ENVELOPE_V1}|${aad}`, "utf8")
+    : Buffer.from(`${ENVELOPE_V2}|${keyScope}|${aad}`, "utf8");
 }
 
 /**
@@ -113,42 +200,58 @@ function gcmAad(aad: string): Buffer {
  * secret in production; a cloud-KMS adapter replacing this later need not keep this derivation, it only
  * has to satisfy the same `CryptoPort` contract.
  *
- * ENVELOPE SHAPE: `v1:<hex keyId>:<base64 iv>:<base64 authTag>:<base64 ciphertext>` — versioned +
- * self-describing so `decrypt` can recognize a corrupt/foreign-shaped string and return `undefined`
- * rather than guess. The `keyId` is a hex fingerprint of the DERIVED key (never the raw secret), present
- * so a rotated-out key is DETECTABLE rather than indistinguishable from corruption.
+ * ENVELOPE SHAPE — two versions, and `v1` is not legacy-to-be-migrated, it is the DEFAULT SCOPE:
+ *   - default scope (no `keyScope` passed): `v1:<hex keyId>:<base64 iv>:<base64 authTag>:<base64 ct>`
+ *     — unchanged, byte for byte, from before key scopes existed. Every row already written stays
+ *     readable and every existing caller keeps producing exactly this.
+ *   - any other scope: `v2:<scope>:<hex keyId>:<base64 iv>:<base64 authTag>:<base64 ct>` — the scope is
+ *     recorded so `decrypt` knows which key to ask for, and a scope MISMATCH is refused before any key
+ *     lookup rather than trying another key.
+ * Both are versioned + self-describing so `decrypt` can recognize a corrupt/foreign-shaped string and
+ * return `undefined` rather than guess. The `keyId` is a hex fingerprint of the DERIVED key (never the
+ * raw secret), present so a rotated-out key is DETECTABLE rather than indistinguishable from corruption.
  *
- * KEY ROTATION (security review finding 5): `decrypt` tries the CURRENT `secretName` key first; if the
- * envelope's `keyId` doesn't match, it falls back to `"<secretName>_previous"` (if configured). An
- * operator rotating the key should, for one rotation cycle, move the outgoing value to
- * `"<secretName>_previous"` and put the new value at `secretName` — existing records then keep
- * decrypting via the fallback while new writes use the new key. Without keeping the previous value
- * around, the affected records are genuinely unrecoverable. It is not SILENT — `recall` counts records
- * it had to drop as undecryptable and emits a PII-free `recall.dropped` audit (count only) — but that is
- * detection after the fact, not recovery: once the outgoing key is gone the plaintext is gone. The
- * operator runbook for the two-step rotation lives in `docs/DEPLOY.md`.
+ * KEY ROTATION (security review finding 5): `decrypt` tries the CURRENT key for the requested scope
+ * first; if the envelope's `keyId` doesn't match, it falls back to that scope's `"<name>_previous"` (if
+ * configured). An operator rotating a key should, for one rotation cycle, move the outgoing value to
+ * `"<name>_previous"` and put the new value at `<name>` — existing records then keep decrypting via the
+ * fallback while new writes use the new key. `<name>` is `secretName` for the default scope and
+ * `keyScopeSecretName(secretName, scope)` otherwise, so EACH SCOPE ROTATES INDEPENDENTLY and rotating
+ * one never touches another's records. Without keeping the previous value around, the affected records
+ * are genuinely unrecoverable. It is not SILENT — `recall` counts records it had to drop as
+ * undecryptable and emits a PII-free `recall.dropped` audit (count only) — but that is detection after
+ * the fact, not recovery: once the outgoing key is gone the plaintext is gone. The operator runbook for
+ * the two-step rotation lives in `docs/DEPLOY.md`; it currently documents the default scope only,
+ * because no caller uses a non-default scope yet — the first one (the merchant credential store) must
+ * extend it with its own scope's secret names.
  *
  * FAIL CLOSED: `encrypt` throws (never returns a plaintext fallback) when `secrets.get` resolves to
- * undefined/empty for `tenantId`, or when the configured material is below the entropy floor — the
- * caller (widget-memory's service.ts) is the one that decides what "no key" means for a given write
- * (refuse for special-category, best-effort-plaintext for ordinary); this adapter never makes that
- * policy call itself, it only ever refuses to fake-encrypt.
+ * undefined/empty for `tenantId` AND THE REQUESTED SCOPE, or when the configured material is below the
+ * entropy floor — the caller (widget-memory's service.ts) is the one that decides what "no key" means
+ * for a given write (refuse for special-category, best-effort-plaintext for ordinary); this adapter never
+ * makes that policy call itself, it only ever refuses to fake-encrypt. A scope with no key configured is
+ * refused even when the DEFAULT scope's key is present — there is no cross-scope fallback.
  */
 export function createAesGcmCrypto(secrets: SecretsPort, opts: AesGcmCryptoOpts = {}): CryptoPort {
   const secretName = opts.secretName ?? "MEMORY_ENCRYPTION_KEY";
 
-  async function currentKey(tenantId: string): Promise<DerivedKey> {
-    const raw = await secrets.get(tenantId, secretName);
+  /** Key material for one scope. The default scope reads the bare `secretName` — exactly as before. */
+  async function currentKey(tenantId: string, keyScope: string): Promise<DerivedKey> {
+    const name = keyScopeSecretName(secretName, keyScope);
+    const raw = await secrets.get(tenantId, name);
     if (!raw) {
+      // Names the tenant, the secret it looked for, and the scope — all non-secret — and never the
+      // material (there is none configured to leak). NO fallback to another scope's key.
       throw new Error(
-        `CryptoPort: no "${secretName}" key configured for tenant "${tenantId}" — refusing to encrypt/decrypt (fail closed)`,
+        `CryptoPort: no "${name}" key configured for tenant "${tenantId}" (key scope "${keyScope}") — ` +
+          `refusing to encrypt/decrypt (fail closed)`,
       );
     }
     return deriveKey(tenantId, raw);
   }
 
-  async function previousKey(tenantId: string): Promise<DerivedKey | undefined> {
-    const raw = await secrets.get(tenantId, `${secretName}${PREVIOUS_KEY_SUFFIX}`);
+  async function previousKey(tenantId: string, keyScope: string): Promise<DerivedKey | undefined> {
+    const raw = await secrets.get(tenantId, `${keyScopeSecretName(secretName, keyScope)}${PREVIOUS_KEY_SUFFIX}`);
     if (!raw) return undefined;
     try {
       return deriveKey(tenantId, raw);
@@ -158,35 +261,52 @@ export function createAesGcmCrypto(secrets: SecretsPort, opts: AesGcmCryptoOpts 
   }
 
   return {
-    async encrypt(tenantId, plaintext, aad) {
-      const { key, keyId } = await currentKey(tenantId); // throws when unconfigured — see file header
+    async encrypt(tenantId, plaintext, aad, keyScope) {
+      const scope = requireKeyScope(keyScope); // throws on a blank/malformed scope, before any key lookup
+      const { key, keyId } = await currentKey(tenantId, scope); // throws when unconfigured — see file header
       const iv = randomBytes(IV_BYTES);
       const cipher = createCipheriv(ALGORITHM, key, iv);
-      cipher.setAAD(gcmAad(aad));
+      cipher.setAAD(gcmAad(aad, scope));
       const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
       const authTag = cipher.getAuthTag();
-      return [
-        ENVELOPE_VERSION,
-        keyId,
-        iv.toString("base64"),
-        authTag.toString("base64"),
-        ciphertext.toString("base64"),
-      ].join(":");
+      const body = [keyId, iv.toString("base64"), authTag.toString("base64"), ciphertext.toString("base64")];
+      // The default scope keeps emitting the pre-scope v1 shape (v1 IS the default scope), so no stored
+      // row and no existing reader changes; a scoped write records its scope in a v2 envelope.
+      return scope === DEFAULT_KEY_SCOPE
+        ? [ENVELOPE_V1, ...body].join(":")
+        : [ENVELOPE_V2, scope, ...body].join(":");
     },
 
-    async decrypt(tenantId, envelope, aad) {
+    async decrypt(tenantId, envelope, aad, keyScope) {
+      // Outside the try/catch on purpose: a malformed scope ARGUMENT is a caller bug and must surface as
+      // a throw, not as "this record is undecryptable" (see the port's `decrypt` doc comment).
+      const scope = requireKeyScope(keyScope);
       try {
         const parts = envelope.split(":");
-        if (parts.length !== ENVELOPE_PARTS || parts[0] !== ENVELOPE_VERSION) return undefined; // unknown/foreign shape
-        const [, keyId, ivB64, tagB64, dataB64] = parts as [string, string, string, string, string];
+        let keyId: string, ivB64: string, tagB64: string, dataB64: string;
+        if (parts[0] === ENVELOPE_V1) {
+          // A v1 envelope can only have come from the default key, so it is readable under the default
+          // scope and NOTHING else — asking for it under another scope is a mismatch, not a fallback.
+          if (parts.length !== ENVELOPE_V1_PARTS || scope !== DEFAULT_KEY_SCOPE) return undefined;
+          [, keyId, ivB64, tagB64, dataB64] = parts as [string, string, string, string, string];
+        } else if (parts[0] === ENVELOPE_V2) {
+          if (parts.length !== ENVELOPE_V2_PARTS) return undefined;
+          const [, envScope, ...rest] = parts as [string, string, string, string, string, string];
+          // Scope mismatch is refused HERE, before any key lookup: no other scope's key is ever tried.
+          if (envScope !== scope) return undefined;
+          [keyId, ivB64, tagB64, dataB64] = rest;
+        } else {
+          return undefined; // unknown/foreign shape
+        }
 
         // Try the CURRENT key first (the common case); fall back to the PREVIOUS key only when the
         // envelope's keyId doesn't match it — this is what makes a rotation recoverable rather than a
-        // silent, untraceable mass decrypt failure (finding 5). Neither lookup throws past this point.
-        const current = await currentKey(tenantId).catch(() => undefined);
+        // silent, untraceable mass decrypt failure (finding 5). Both are scoped to `scope`, so a
+        // rotation in one scope never affects another. Neither lookup throws past this point.
+        const current = await currentKey(tenantId, scope).catch(() => undefined);
         let key = current?.keyId === keyId ? current.key : undefined;
         if (!key) {
-          const previous = await previousKey(tenantId);
+          const previous = await previousKey(tenantId, scope);
           if (previous?.keyId === keyId) key = previous.key;
         }
         if (!key) return undefined; // no configured key (current or previous) matches this envelope
@@ -195,7 +315,7 @@ export function createAesGcmCrypto(secrets: SecretsPort, opts: AesGcmCryptoOpts 
         const authTag = Buffer.from(tagB64, "base64");
         const data = Buffer.from(dataB64, "base64");
         const decipher = createDecipheriv(ALGORITHM, key, iv);
-        decipher.setAAD(gcmAad(aad));
+        decipher.setAAD(gcmAad(aad, scope));
         decipher.setAuthTag(authTag);
         const plaintext = Buffer.concat([decipher.update(data), decipher.final()]);
         return plaintext.toString("utf8");

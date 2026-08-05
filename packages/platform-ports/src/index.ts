@@ -58,7 +58,19 @@ export type { CachingGroundingOpts } from "./grounding-cache.js";
 export type { SecretsPort } from "./secrets-port.js";
 export { createEnvSecrets } from "./secrets-port.js";
 export type { CryptoPort, AesGcmCryptoOpts } from "./crypto-port.js";
-export { createAesGcmCrypto } from "./crypto-port.js";
+export { createAesGcmCrypto, keyScopeSecretName, requireKeyScope, DEFAULT_KEY_SCOPE } from "./crypto-port.js";
+export type {
+  MerchantRegistryPort,
+  MerchantRecord,
+  MerchantStatus,
+  MerchantRegion,
+  MerchantGroundingMode,
+  NewMerchant,
+  MerchantUpdate,
+  MerchantLookupOpts,
+  InMemoryMerchantRegistryOpts,
+} from "./merchant-registry-port.js";
+export { createInMemoryMerchantRegistry } from "./merchant-registry-port.js";
 export type { VectorPort, VectorRecord, VectorQuery, VectorMatch } from "./vector-port.js";
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type {
