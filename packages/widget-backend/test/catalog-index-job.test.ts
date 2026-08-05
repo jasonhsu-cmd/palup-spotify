@@ -6,6 +6,7 @@ import {
   createEnvSecrets,
   requireEmbedAlignment,
   requireEmbedInputs,
+  type EmbedPurpose,
   type EmbedRequest,
   type EmbedResponse,
   type GroundingContext,
@@ -58,8 +59,10 @@ import {
  * the SAME exported validators every real adapter must call, so the job is exercised against the port's
  * real contract. It says NOTHING about semantic quality.
  */
-function fakeEmbedder(opts: { dimension?: number; model?: string; failOnCall?: number } = {}) {
-  const calls: Array<{ texts: string[]; tenantId?: string }> = [];
+function fakeEmbedder(
+  opts: { dimension?: number; model?: string; failOnCall?: number; purposeOverride?: EmbedPurpose } = {},
+) {
+  const calls: Array<{ texts: string[]; tenantId?: string; purpose: EmbedPurpose }> = [];
   const dimension = opts.dimension ?? 4;
   const model = opts.model ?? "fake-embed-4d";
   const port: ModelPort = {
@@ -67,16 +70,25 @@ function fakeEmbedder(opts: { dimension?: number; model?: string; failOnCall?: n
       return { text: "ok", model };
     },
     async embed(req: EmbedRequest): Promise<EmbedResponse> {
-      calls.push({ texts: [...req.texts], tenantId: req.tenantId });
+      calls.push({ texts: [...req.texts], tenantId: req.tenantId, purpose: req.purpose });
       if (opts.failOnCall === calls.length) throw new Error("provider 503");
-      requireEmbedInputs(req.texts);
+      requireEmbedInputs(req);
       const vectors = req.texts.map((t) => {
         const v = new Array<number>(dimension).fill(0);
         for (let i = 0; i < t.length; i++) v[i % dimension] = (v[i % dimension] ?? 0) + t.charCodeAt(i);
         return v;
       });
-      const res: EmbedResponse = { vectors, dimension, model, usage: { inputTokens: req.texts.join(" ").length } };
-      requireEmbedAlignment(req.texts, res);
+      // `purposeOverride` stands in for an adapter/deployment configured for the WRONG side of retrieval
+      // — the B3 failure mode. It bypasses requireEmbedAlignment's echo check on purpose, because the
+      // point is to hand the JOB a response the port would have rejected and prove the job refuses too.
+      const res: EmbedResponse = {
+        vectors,
+        dimension,
+        model,
+        purpose: opts.purposeOverride ?? req.purpose,
+        usage: { inputTokens: req.texts.join(" ").length },
+      };
+      if (!opts.purposeOverride) requireEmbedAlignment(req, res);
       return res;
     },
   };
@@ -405,6 +417,89 @@ describe("C3 pinning — one corpus, one {model, dimension}, enforced by refusal
     expect(reports[0]!.outcome).toBe("failed");
     expect(reports[0]!.reason).toMatch(/manifest/i);
     expect(reports[0]!.reason).toMatch(/reindex/);
+  });
+});
+
+// ── E1 prerequisite: the pin gains PURPOSE ──────────────────────────────────────────────────────────
+//
+// B3 (#192) reported the gap and E1 closes it: a corpus embedded with QUERY treatment reports the SAME
+// model and the SAME dimension as a correct one, so `{model, dimension}` cannot see the difference. The
+// manifest now records the purpose the embedder ACTUALLY applied, and the same refusal that guards a
+// dimension change guards this.
+
+describe("E1 pinning — the corpus pin includes the embedding PURPOSE", () => {
+  it("always embeds the corpus with purpose DOCUMENT and records it in the manifest", async () => {
+    const h = harness([product(1)]);
+    await runCatalogIndex(h, [h.tenantId]);
+    expect(h.embedCalls[0]!.purpose).toBe("document");
+    expect(await manifestOf(h.store, h.tenantId)).toMatchObject({ purpose: "document" });
+  });
+
+  it("REFUSES to extend a corpus when the embedder starts reporting a different purpose", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    let products = [product(1)];
+    const catalog = async () => context("acme-co", products);
+    await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"]);
+
+    products = [product(1), product(2)];
+    // Same model, same dimension — ONLY the purpose differs. This is exactly the case the old pin missed.
+    const drifted = fakeEmbedder({ purposeOverride: "query" });
+    const reports = await runCatalogIndex({ store, vector, model: drifted.port, catalog }, ["acme-co"]);
+
+    expect(reports[0]!.outcome).toBe("pin-mismatch");
+    expect(reports[0]!.reason).toMatch(/purpose/i);
+    expect(await idsIn(vector, "acme-co")).toHaveLength(1); // nothing written
+    expect((await manifestOf(store, "acme-co"))!.purpose).toBe("document");
+  });
+
+  it("REFUSES to extend a corpus whose manifest predates the purpose pin (provenance unknowable)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    let products = [product(1)];
+    const catalog = async () => context("acme-co", products);
+    await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"]);
+
+    const legacy = (await manifestOf(store, "acme-co"))!;
+    delete (legacy as Partial<CatalogManifest>).purpose;
+    await store.put({ tenantId: "acme-co" }, MANIFEST_COLLECTION, MANIFEST_KEY, legacy);
+
+    products = [product(1), product(2)];
+    const reports = await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"]);
+    expect(reports[0]!.outcome).toBe("pin-mismatch");
+    expect(reports[0]!.reason).toMatch(/purpose/i);
+    expect(reports[0]!.reason).toMatch(/reindex/);
+  });
+
+  it("an explicit --reindex rebuilds at the current purpose", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const products = [product(1)];
+    const catalog = async () => context("acme-co", products);
+    await runCatalogIndex({ store, vector, model: fakeEmbedder({ purposeOverride: "query" }).port, catalog }, ["acme-co"]);
+    expect((await manifestOf(store, "acme-co"))!.purpose).toBe("query");
+
+    const reports = await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"], {
+      reindex: true,
+    });
+    expect(reports[0]!.outcome).toBe("indexed");
+    expect((await manifestOf(store, "acme-co"))!.purpose).toBe("document");
+  });
+
+  it("a manifest REPAIR carries the recorded purpose forward and never invents one", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const products = [product(1)];
+    const catalog = async () => context("acme-co", products);
+    await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"]);
+
+    // Simulate the "died after the vector write, before the manifest" case the repair path exists for.
+    const m = (await manifestOf(store, "acme-co"))!;
+    await store.put({ tenantId: "acme-co" }, MANIFEST_COLLECTION, MANIFEST_KEY, { ...m, products: 99 });
+
+    const reports = await runCatalogIndex({ store, vector, model: fakeEmbedder().port, catalog }, ["acme-co"]);
+    expect(reports[0]!.outcome).toBe("manifest-repaired");
+    expect((await manifestOf(store, "acme-co"))!.purpose).toBe("document");
   });
 });
 
