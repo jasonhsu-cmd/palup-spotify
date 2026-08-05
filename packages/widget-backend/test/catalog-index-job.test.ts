@@ -181,6 +181,18 @@ describe("C3 ceiling — the job REFUSES an oversized catalog rather than indexi
     expect(await idsIn(vector, "acme-co")).toEqual(before); // untouched
   });
 
+  it("refuses to reconcile a namespace holding records it did not write (never deletes foreign data)", async () => {
+    const h = harness([product(1)]);
+    await runCatalogIndex(h, [h.tenantId]);
+    await h.vector.upsert(catalogNamespace(h.tenantId), [{ id: "someone-elses-record", vector: [1, 0, 0, 0] }]);
+
+    const reports = await runCatalogIndex(h, [h.tenantId]);
+
+    expect(reports[0]!.outcome).toBe("failed");
+    expect(reports[0]!.reason).toMatch(/not written by this job/i);
+    expect(await idsIn(h.vector, h.tenantId)).toContain("someone-elses-record"); // untouched
+  });
+
   it("refuses when the existing corpus cannot be ENUMERATED completely (no blind reconcile)", async () => {
     const h = harness([product(1)]);
     // Pre-seed more records than the ceiling allows: one query can no longer prove what is in there, so

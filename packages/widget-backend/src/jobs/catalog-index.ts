@@ -402,6 +402,17 @@ async function indexOneTenant(
     }
   }
   const wanted = new Set(plan.map((p) => p.recordId));
+  // Reconciliation only ever deletes records THIS JOB WROTE (`product:` ids). A record of any other shape
+  // in this namespace is not a delisted product — it is something we do not understand — and deleting data
+  // we did not write must never be a side effect of an index run. Refuse loudly instead.
+  const foreign = existing.map((m) => m.id).filter((id) => !id.startsWith("product:"));
+  if (foreign.length > 0) {
+    throw new CatalogRefusal(
+      "failed",
+      `${foreign.length} record(s) in this namespace were not written by this job (ids do not start with ` +
+        '"product:") — refusing to reconcile a corpus it does not own rather than deleting data it did not write',
+    );
+  }
   const stale = opts.reindex ? [] : existing.map((m) => m.id).filter((id) => !wanted.has(id));
   const toEmbed = plan.filter((p) => priorHashes.get(p.recordId) !== p.hash);
 
@@ -419,18 +430,19 @@ async function indexOneTenant(
         dimension: manifest.dimension,
       };
     }
+    if (!manifest) {
+      // Unreachable in practice (a manifest-less non-empty corpus already refused above, and an empty
+      // corpus with an empty catalog returned `not-configured`), but guessing a pin is never acceptable —
+      // an "unknown"/0 placeholder would be a fabricated provenance for real vectors.
+      throw new CatalogRefusal("failed", "no manifest to repair and no products to embed — nothing safe to record");
+    }
     const repaired: CatalogManifest = {
-      model: manifest?.model ?? "unknown",
-      dimension: manifest?.dimension ?? 0,
+      model: manifest.model,
+      dimension: manifest.dimension,
       products: existing.length,
       at: now().toISOString(),
       ceiling: maxProducts,
     };
-    if (!manifest) {
-      // Unreachable in practice (a manifest-less non-empty corpus already refused above, and an empty
-      // corpus with an empty catalog returned `not-configured`), but guessing a pin is never acceptable.
-      throw new CatalogRefusal("failed", "no manifest to repair and no products to embed — nothing safe to record");
-    }
     await writeManifestAndAudit(deps, tenantId, repaired, {
       products: plan.length,
       embedded: 0,
