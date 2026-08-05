@@ -26,6 +26,8 @@
     "cap:set": "tsx packages/widget-backend/src/jobs/cost-cap.ts set",
     "cap:status": "tsx packages/widget-backend/src/jobs/cost-cap.ts status",
     "cap:clear": "tsx packages/widget-backend/src/jobs/cost-cap.ts clear",
+    "catalog:index": "tsx packages/widget-backend/src/jobs/catalog-index.ts index",
+    "catalog:clear": "tsx packages/widget-backend/src/jobs/catalog-index.ts clear",
     "widget:dev": "pnpm --filter @palup/widget dev",
     "e2e": "playwright test --config e2e/playwright.config.ts",
     "e2e:live": "playwright test --config e2e/playwright.live.config.ts",
