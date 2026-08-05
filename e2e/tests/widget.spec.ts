@@ -473,8 +473,9 @@ test.describe("PR-11c — memory OFF (default, real unmocked backend): the speci
     // Previously this asserted "AI-generated" on #whStatus AFTER the send — which only ever passed by
     // RACING the reply: "I'm allergic to tree nuts" is classified `safety:allergy` and escalates
     // (verified: POST /chat returns escalate:true, flags safety:product_safety/safety:allergy), so the
-    // widget CORRECTLY latches into its human-handoff state and rewrites #whStatus to "Connecting you
-    // with a person". A slower reply made the old assertion fail on a change that never touched it.
+    // widget CORRECTLY latches into its escalation state and rewrites #whStatus (to "AI assistant ·
+    // flagged for a person" since P6; it used to drop the AI disclosure entirely and read "Connecting you
+    // with a person"). A slower reply made the old assertion fail on a change that never touched it.
     await expect(page.locator("#whStatus")).toContainText("AI-generated");
 
     await page.getByTestId("chat-input").fill("I'm allergic to tree nuts");

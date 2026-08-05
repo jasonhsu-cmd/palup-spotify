@@ -124,6 +124,17 @@ describe("the shopper-promise guard", () => {
     expect(stripComments(widget.source).split("\n")).toHaveLength(widget.source.split("\n").length);
   });
 
+  it("a registered claim exempts its own sentence only, never the rest of the line", () => {
+    // The hole this closes, found by the brain mutation test above: shopper replies are single long
+    // source lines, so a line-level exemption let one allowed claim ("I've recorded your request") cover
+    // an unrelated over-promise sitting in the same string.
+    const src =
+      'const reply = "I\'ve recorded your request, and your data has been permanently erased.";';
+    const ids = scan([{ path: "packages/widget-brain/src/brain.ts", source: src }]).map((x) => x.klass.id);
+    expect(ids).toContain("absolute-or-instant-erasure");
+    expect(ids, "the registered claim itself stays exempt").not.toContain("completed-action");
+  });
+
   it("a DENIED claim is not a promise (the negation window)", () => {
     const src = 'const reply = "I can\'t guarantee a product is safe for a specific allergy.";';
     expect(scan([{ path: "packages/widget-brain/src/x.ts", source: src }])).toHaveLength(0);

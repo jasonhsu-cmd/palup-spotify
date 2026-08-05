@@ -401,21 +401,42 @@ export interface Violation {
   klass: ClaimClass;
 }
 
+/** Every [start,end) range in `text` occupied by a registered claim for this surface. */
+function allowedRanges(path: string, text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  for (const a of ALLOWED_CLAIMS) {
+    if (a.surface !== path) continue;
+    let from = 0;
+    for (;;) {
+      const at = text.indexOf(a.claim, from);
+      if (at === -1) break;
+      ranges.push([at, at + a.claim.length]);
+      from = at + 1;
+    }
+  }
+  return ranges;
+}
+
 export function scan(files: Array<{ path: string; source: string }>): Violation[] {
   const violations: Violation[] = [];
   for (const { path, source } of files) {
     const text = stripComments(source);
-    const lines = text.split("\n");
+    const allowed = allowedRanges(path, text);
     for (const klass of CLAIM_CLASSES) {
       for (const pattern of klass.patterns) {
         const re = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
         for (const m of text.matchAll(re)) {
           const at = m.index ?? 0;
+          const end = at + m[0].length;
           const before = text.slice(Math.max(0, at - 64), at);
           if (NEGATION.test(before)) continue;
+          // A registered claim exempts ONLY the span of that sentence — deliberately NOT the whole line.
+          // Line-level exemption was the first version of this check and it was a hole: a shopper reply
+          // is one long source line, so a single registered claim on it would have exempted every OTHER
+          // claim in the same string (proven by the brain mutation test, which went green while the
+          // spliced "permanently erased" sat on the same line as an allowed "I've recorded your request").
+          if (allowed.some(([s, e]) => at >= s && end <= e)) continue;
           const line = text.slice(0, at).split("\n").length;
-          const lineText = (lines[line - 1] ?? "").trim();
-          if (ALLOWED_CLAIMS.some((a) => a.surface === path && lineText.includes(a.claim))) continue;
           violations.push({ file: path, line, matched: m[0], klass });
         }
       }
