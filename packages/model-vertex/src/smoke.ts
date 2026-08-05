@@ -44,16 +44,29 @@ async function main() {
   // at the default model that is one text per request ([E2]), i.e. two round-trips reassembled in order.
   const texts = ["ceramide barrier repair cream for dry skin", "waterproof zinc sunscreen SPF 50"];
   const t1 = Date.now();
-  const emb = await adapter.embed({ texts });
+  const emb = await adapter.embed({ texts, purpose: "document" });
   console.log(`✅ LIVE Vertex embedding call OK (${Date.now() - t1}ms for ${texts.length} texts)`);
   console.log(
     "embed model:",
     emb.model,
     "| MEASURED dimension:",
     emb.dimension,
+    "| purpose applied:",
+    emb.purpose,
     "| usage:",
     JSON.stringify(emb.usage) ?? "(none reported)",
   );
+  // The QUERY side too: E1 makes both sides live, and the ONLY way to see that the corpus/query
+  // asymmetry actually behaves differently on real Vertex is to call both and compare.
+  const q = await adapter.embed({ texts: ["something gentle for a dry, tight face"], purpose: "query" });
+  console.log(`✅ LIVE Vertex QUERY-side embedding OK — purpose applied: ${q.purpose}, dimension ${q.dimension}`);
+  if (q.dimension !== emb.dimension) {
+    console.error(
+      `❌ the two sides returned different dimensions (${emb.dimension} vs ${q.dimension}) — a query could ` +
+        "never be scored against this corpus",
+    );
+    process.exit(1);
+  }
   console.log(
     `Record these three numbers: the dimension above is what a corpus gets PINNED to, the latency is\n` +
       `per ${texts.length} text(s), and ${emb.usage ? "the token count is what the cost meter will bill" : "NO token count came back, so embedding spend will be invisible to the cost meter"}.\n`,

@@ -156,6 +156,37 @@ export interface MemoryRecallPort {
   }): Promise<RecalledFact[]>;
 }
 
+/** One retrieved catalog candidate: an id and how near it scored. NO TEXT, deliberately — see below. */
+export interface RetrievedProduct {
+  /** The merchant's own product id, to be resolved against the LIVE catalog by the caller. */
+  productId: string;
+  /** Similarity, higher = nearer. Reported for audit/debugging; the brain does not threshold on it. */
+  score: number;
+}
+
+/**
+ * The brain's own, minimal port for CATALOG RETRIEVAL (E1) — read-only, and defined HERE rather than
+ * imported, for the same no-dep-cycle reason as `MemoryRecallPort` above: widget-backend implements it
+ * (`catalog-retriever.ts`) and this package never depends on that one.
+ *
+ * IT RETURNS IDS, NOT TEXT, and that is load-bearing. The corpus behind it stores ids only — "a relevance
+ * index over product IDS, not a second copy of the catalog" (catalog-index.ts) — precisely so that a
+ * price or description cannot go stale inside it and be quoted at a shopper. The brain resolves each id
+ * against the LIVE `GroundingContext` and drops anything it cannot find, so a delisted product is
+ * physically unquotable no matter what the corpus still remembers (#157/#180's stale-falsehood lesson).
+ *
+ * Consulted ONLY on the clean sales path, behind the CATALOG_RETRIEVAL posture flag, and only for a
+ * shopper's own non-empty turn — never on the kill/injection/safety/support/uncertainty/b2b rungs, and
+ * never on a proactive turn (where the "message" is the agent's own prompt, not the shopper's words).
+ *
+ * FAIL-OPEN CONTRACT: an implementation that cannot answer must REJECT. The brain treats a rejection and
+ * an empty result identically — it renders the FULL catalog exactly as it does today. Retrieval can
+ * therefore make a prompt smaller, never make an answer worse-grounded than the flag-off baseline.
+ */
+export interface CatalogRetrieverPort {
+  retrieve(ctx: { tenantId: string; query: string; k: number }): Promise<RetrievedProduct[]>;
+}
+
 export interface Signals {
   mood?: Mood;
   relationship?: Relationship;

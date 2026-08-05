@@ -4,7 +4,7 @@ import {
   VertexModelAdapter,
   maxBatchForEmbedModel,
   DEFAULT_EMBED_MODEL,
-  DEFAULT_EMBED_TASK_TYPE,
+  DEFAULT_EMBED_TASK_TYPES,
   type EmbedContentFn,
   type GenerateFn,
   type VertexEmbedRequest,
@@ -43,7 +43,7 @@ function fakeEmbed(): EmbedContentFn {
 function adapterWith(call: EmbedContentFn, maxBatch = 1, extra: Record<string, unknown> = {}) {
   return new VertexModelAdapter(gen, CFG, {
     call,
-    cfg: { model: "embed-test-1", taskType: "RETRIEVAL_DOCUMENT", maxBatch, ...extra },
+    cfg: { model: "embed-test-1", taskTypes: DEFAULT_EMBED_TASK_TYPES, maxBatch, ...extra },
   });
 }
 
@@ -67,7 +67,7 @@ describe("VertexModelAdapter.embed — the port's contract, satisfied by the por
   it("returns one vector per text, in order, with the dimension and model it actually produced", async () => {
     const adapter = adapterWith(fakeEmbed(), 3);
     const texts = ["ceramide barrier cream", "zinc mineral sunscreen", "caffeine eye cream", "niacinamide serum"];
-    const res = await adapter.embed!({ texts });
+    const res = await adapter.embed!({ texts, purpose: "document" });
     expect(res.vectors).toHaveLength(4);
     expect(res.dimension).toBe(DIM);
     expect(res.model).toBe("embed-test-1");
@@ -78,20 +78,20 @@ describe("VertexModelAdapter.embed — the port's contract, satisfied by the por
   it("rejects an empty batch BEFORE spending a provider call (requireEmbedInputs)", async () => {
     const call = vi.fn<EmbedContentFn>(fakeEmbed());
     const adapter = adapterWith(call);
-    await expect(adapter.embed!({ texts: [] })).rejects.toThrow(/at least one text/);
+    await expect(adapter.embed!({ texts: [], purpose: "document" })).rejects.toThrow(/at least one text/);
     expect(call).not.toHaveBeenCalled();
   });
 
   it("rejects a blank text BEFORE spending a provider call, naming the index (requireEmbedInputs)", async () => {
     const call = vi.fn<EmbedContentFn>(fakeEmbed());
     const adapter = adapterWith(call);
-    await expect(adapter.embed!({ texts: ["ceramide cream", "   "] })).rejects.toThrow(/index 1/);
+    await expect(adapter.embed!({ texts: ["ceramide cream", "   "], purpose: "document" })).rejects.toThrow(/index 1/);
     expect(call).not.toHaveBeenCalled();
   });
 
   it("reports usage as inputTokens only — an embedding has no completion tokens", async () => {
     const adapter = adapterWith(fakeEmbed(), 2);
-    const res = await adapter.embed!({ texts: ["abcd", "efgh", "ijkl"] });
+    const res = await adapter.embed!({ texts: ["abcd", "efgh", "ijkl"], purpose: "document" });
     expect(res.usage).toEqual({ inputTokens: 3 }); // 1 token per 4 chars, summed across 2 chunks
     expect(res.usage).not.toHaveProperty("outputTokens");
   });
@@ -103,7 +103,7 @@ describe("VertexModelAdapter.embed — the port's contract, satisfied by the por
         ...(i === 0 ? { statistics: { tokenCount: 7 } } : {}),
       })),
     });
-    const res = await adapterWith(partial, 5).embed!({ texts: ["aaaa", "bbbb"] });
+    const res = await adapterWith(partial, 5).embed!({ texts: ["aaaa", "bbbb"], purpose: "document" });
     expect(res.usage).toBeUndefined();
   });
 });
@@ -113,7 +113,7 @@ describe("VertexModelAdapter.embed — chunking to the provider's per-request ca
     const call = vi.fn<EmbedContentFn>(fakeEmbed());
     const adapter = adapterWith(call, 3);
     const texts = ["t0", "t1", "t2", "t3", "t4", "t5", "t6"];
-    const res = await adapter.embed!({ texts });
+    const res = await adapter.embed!({ texts, purpose: "document" });
     expect(call).toHaveBeenCalledTimes(3);
     expect(call.mock.calls.map((c) => c[0].contents)).toEqual([["t0", "t1", "t2"], ["t3", "t4", "t5"], ["t6"]]);
     texts.forEach((t, i) => expect(res.vectors[i]).toEqual(fakeVector(t)));
@@ -121,7 +121,7 @@ describe("VertexModelAdapter.embed — chunking to the provider's per-request ca
 
   it("sends ONE text per request at the gemini-embedding-001 default of maxBatch=1", async () => {
     const call = vi.fn<EmbedContentFn>(fakeEmbed());
-    await adapterWith(call, 1).embed!({ texts: ["a", "b", "c"] });
+    await adapterWith(call, 1).embed!({ texts: ["a", "b", "c"], purpose: "document" });
     expect(call).toHaveBeenCalledTimes(3);
     for (const c of call.mock.calls) expect(c[0].contents).toHaveLength(1);
   });
@@ -132,14 +132,14 @@ describe("VertexModelAdapter.embed — chunking to the provider's per-request ca
       if (++n === 2) throw new Error("provider 503");
       return { embeddings: req.contents.map((t) => ({ values: fakeVector(t) })) };
     };
-    await expect(adapterWith(flaky, 1).embed!({ texts: ["a", "b", "c"] })).rejects.toThrow(/503/);
+    await expect(adapterWith(flaky, 1).embed!({ texts: ["a", "b", "c"], purpose: "document" })).rejects.toThrow(/503/);
   });
 
   it("a chunk that returns FEWER vectors than its texts rejects the whole call", async () => {
     const short: EmbedContentFn = async (req) => ({
       embeddings: req.contents.slice(0, req.contents.length - 1).map((t) => ({ values: fakeVector(t) })),
     });
-    await expect(adapterWith(short, 3).embed!({ texts: ["a", "b", "c"] })).rejects.toThrow(
+    await expect(adapterWith(short, 3).embed!({ texts: ["a", "b", "c"], purpose: "document" })).rejects.toThrow(
       /3 texts .* 2 vectors|sent 3 .* got 2/,
     );
   });
@@ -148,11 +148,11 @@ describe("VertexModelAdapter.embed — chunking to the provider's per-request ca
     const over: EmbedContentFn = async (req) => ({
       embeddings: [...req.contents, "phantom"].map((t) => ({ values: fakeVector(t) })),
     });
-    await expect(adapterWith(over, 3).embed!({ texts: ["a", "b"] })).rejects.toThrow();
+    await expect(adapterWith(over, 3).embed!({ texts: ["a", "b"], purpose: "document" })).rejects.toThrow();
   });
 
   it("a chunk with NO embeddings field at all rejects rather than yielding empty vectors", async () => {
-    await expect(adapterWith(async () => ({}), 1).embed!({ texts: ["a"] })).rejects.toThrow();
+    await expect(adapterWith(async () => ({}), 1).embed!({ texts: ["a"], purpose: "document" })).rejects.toThrow();
   });
 
   it("rejects when the dimension CHANGES between chunks — mixed spaces rank as garbage", async () => {
@@ -160,14 +160,14 @@ describe("VertexModelAdapter.embed — chunking to the provider's per-request ca
     const drifting: EmbedContentFn = async (req) => ({
       embeddings: req.contents.map(() => ({ values: new Array(++n === 1 ? 8 : 4).fill(0.5) })),
     });
-    await expect(adapterWith(drifting, 1).embed!({ texts: ["a", "b"] })).rejects.toThrow(/dimension/i);
+    await expect(adapterWith(drifting, 1).embed!({ texts: ["a", "b"], purpose: "document" })).rejects.toThrow(/dimension/i);
   });
 
   it("rejects a non-finite component (via the port's own requireEmbedAlignment)", async () => {
     const nanny: EmbedContentFn = async (req) => ({
       embeddings: req.contents.map(() => ({ values: [1, Number.NaN, 3] })),
     });
-    await expect(adapterWith(nanny, 5).embed!({ texts: ["a"] })).rejects.toThrow(/finite/);
+    await expect(adapterWith(nanny, 5).embed!({ texts: ["a"], purpose: "document" })).rejects.toThrow(/finite/);
   });
 });
 
@@ -176,7 +176,7 @@ describe("VertexModelAdapter.embed — fail closed on provider-side silent degra
     const truncating: EmbedContentFn = async (req) => ({
       embeddings: req.contents.map((t) => ({ values: fakeVector(t), statistics: { truncated: true, tokenCount: 9 } })),
     });
-    await expect(truncating && adapterWith(truncating, 1).embed!({ texts: ["a very long product description"] })).rejects.toThrow(
+    await expect(truncating && adapterWith(truncating, 1).embed!({ texts: ["a very long product description"], purpose: "document" })).rejects.toThrow(
       /truncat/i,
     );
   });
@@ -186,7 +186,7 @@ describe("VertexModelAdapter.embed — fail closed on provider-side silent degra
       embeddings: req.contents.map((t) => ({ values: fakeVector(t) })), // DIM=16, not the 8 asked for
     });
     await expect(
-      adapterWith(ignoring, 1, { outputDimensionality: 8 }).embed!({ texts: ["a"] }),
+      adapterWith(ignoring, 1, { outputDimensionality: 8 }).embed!({ texts: ["a"], purpose: "document" }),
     ).rejects.toThrow(/8/);
   });
 
@@ -194,7 +194,7 @@ describe("VertexModelAdapter.embed — fail closed on provider-side silent degra
     const secretish = "shopper@example.com ordered the ceramide cream";
     const short: EmbedContentFn = async () => ({ embeddings: [] });
     const err = await adapterWith(short, 5)
-      .embed!({ texts: [secretish] })
+      .embed!({ texts: [secretish], purpose: "document" })
       .then(() => null, (e: Error) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err!.message).not.toContain("ceramide");
@@ -205,7 +205,7 @@ describe("VertexModelAdapter.embed — fail closed on provider-side silent degra
 describe("VertexModelAdapter.embed — request shaping (no Google concept crosses the port)", () => {
   it("sends the adapter's OWN model + task type, and turns silent truncation OFF", async () => {
     const call = vi.fn<EmbedContentFn>(fakeEmbed());
-    await adapterWith(call, 1).embed!({ texts: ["ceramide cream"] });
+    await adapterWith(call, 1).embed!({ texts: ["ceramide cream"], purpose: "document" });
     const req = call.mock.calls[0]![0];
     expect(req.model).toBe("embed-test-1");
     expect(req.config?.taskType).toBe("RETRIEVAL_DOCUMENT");
@@ -218,14 +218,14 @@ describe("VertexModelAdapter.embed — request shaping (no Google concept crosse
       embeddings: req.contents.map(() => ({ values: new Array(768).fill(0.01) })),
     });
     const call = vi.fn<EmbedContentFn>(sized);
-    const res = await adapterWith(call, 1, { outputDimensionality: 768 }).embed!({ texts: ["a"] });
+    const res = await adapterWith(call, 1, { outputDimensionality: 768 }).embed!({ texts: ["a"], purpose: "document" });
     expect(call.mock.calls[0]![0].config?.outputDimensionality).toBe(768);
     expect(res.dimension).toBe(768);
   });
 
   it("does NOT send the port's tenantId to the provider (attribution is metered locally)", async () => {
     const call = vi.fn<EmbedContentFn>(fakeEmbed());
-    await adapterWith(call, 1).embed!({ texts: ["a"], tenantId: "acme" });
+    await adapterWith(call, 1).embed!({ texts: ["a"], tenantId: "acme", purpose: "document" });
     expect(JSON.stringify(call.mock.calls[0]![0])).not.toContain("acme");
   });
 });
@@ -254,23 +254,23 @@ describe("createVertexAdapter wires the embedding capability", () => {
 
   it("defaults to the documented per-token-priced embedding model and the DOCUMENT task type", () => {
     expect(DEFAULT_EMBED_MODEL).toBe("gemini-embedding-001");
-    expect(DEFAULT_EMBED_TASK_TYPE).toBe("RETRIEVAL_DOCUMENT");
+    expect(DEFAULT_EMBED_TASK_TYPES.document).toBe("RETRIEVAL_DOCUMENT");
   });
 
   it("lets an operator override model / task type / batch cap / dimension by env", async () => {
     vi.stubEnv("PALUP_EMBED_MODEL", "text-embedding-005");
-    vi.stubEnv("PALUP_EMBED_TASK_TYPE", "RETRIEVAL_QUERY");
+    vi.stubEnv("PALUP_EMBED_TASK_TYPE_DOCUMENT", "SEMANTIC_SIMILARITY");
     vi.stubEnv("PALUP_EMBED_MAX_BATCH", "2");
     vi.stubEnv("PALUP_EMBED_DIMENSION", "768");
     const call = vi.fn<EmbedContentFn>(async (req) => ({
       embeddings: req.contents.map(() => ({ values: new Array(768).fill(0.01) })),
     }));
     const adapter = createVertexAdapter({ project: "p", embedContent: call });
-    await adapter.embed!({ texts: ["a", "b", "c"] });
+    await adapter.embed!({ texts: ["a", "b", "c"], purpose: "document" });
     expect(call).toHaveBeenCalledTimes(2); // maxBatch 2 => chunks of 2 and 1
     const req = call.mock.calls[0]![0];
     expect(req.model).toBe("text-embedding-005");
-    expect(req.config?.taskType).toBe("RETRIEVAL_QUERY");
+    expect(req.config?.taskType).toBe("SEMANTIC_SIMILARITY");
     expect(req.config?.outputDimensionality).toBe(768);
   });
 });

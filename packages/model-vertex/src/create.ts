@@ -6,9 +6,10 @@
 // fully unit-tested (vertex-adapter.test.ts, vertex-embed.test.ts). Confirm the exact `usageMetadata` /
 // `embeddings[].statistics` field names, the current model ids, and the REAL vector dimension against
 // live Vertex before relying on them — `pnpm model:smoke` is the command that does it.
+import type { EmbedPurpose } from "@palup/platform-ports";
 import {
   DEFAULT_EMBED_MODEL,
-  DEFAULT_EMBED_TASK_TYPE,
+  DEFAULT_EMBED_TASK_TYPES,
   maxBatchForEmbedModel,
   VertexModelAdapter,
   type EmbedContentFn,
@@ -23,8 +24,11 @@ export interface CreateVertexOptions {
   model?: string;
   /** Embedding model id; defaults to PALUP_EMBED_MODEL, then DEFAULT_EMBED_MODEL. */
   embedModel?: string;
-  /** Provider task type; defaults to PALUP_EMBED_TASK_TYPE, then DEFAULT_EMBED_TASK_TYPE. */
-  embedTaskType?: string;
+  /**
+   * Provider task type PER PORTABLE PURPOSE; each side defaults to
+   * `PALUP_EMBED_TASK_TYPE_DOCUMENT` / `PALUP_EMBED_TASK_TYPE_QUERY`, then `DEFAULT_EMBED_TASK_TYPES`.
+   */
+  embedTaskTypes?: Partial<Record<EmbedPurpose, string>>;
   /** Texts per provider request; defaults to PALUP_EMBED_MAX_BATCH, then the per-model documented cap. */
   embedMaxBatch?: number;
   /** `outputDimensionality`; defaults to PALUP_EMBED_DIMENSION, else unset (the model's full length). */
@@ -94,8 +98,21 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
     });
 
   const embedModel = opts.embedModel ?? process.env.PALUP_EMBED_MODEL ?? DEFAULT_EMBED_MODEL;
-  const embedTaskType =
-    opts.embedTaskType ?? process.env.PALUP_EMBED_TASK_TYPE ?? DEFAULT_EMBED_TASK_TYPE;
+  // Retrieval is asymmetric, so the task type is a PAIR and the old single-valued env cannot express it.
+  // An operator who still has it set gets a hard failure rather than having it silently ignored — a
+  // deliberately-set-and-quietly-dropped task type is how a corpus ends up embedded on the wrong side,
+  // which is exactly the failure class E1's `purpose` field exists to make impossible.
+  if (process.env.PALUP_EMBED_TASK_TYPE) {
+    throw new Error(
+      "createVertexAdapter: PALUP_EMBED_TASK_TYPE is retired — one value cannot express an asymmetric " +
+        "corpus/query pair. Set PALUP_EMBED_TASK_TYPE_DOCUMENT and/or PALUP_EMBED_TASK_TYPE_QUERY instead.",
+    );
+  }
+  const embedTaskTypes: Record<EmbedPurpose, string> = {
+    document:
+      opts.embedTaskTypes?.document ?? process.env.PALUP_EMBED_TASK_TYPE_DOCUMENT ?? DEFAULT_EMBED_TASK_TYPES.document,
+    query: opts.embedTaskTypes?.query ?? process.env.PALUP_EMBED_TASK_TYPE_QUERY ?? DEFAULT_EMBED_TASK_TYPES.query,
+  };
   const embedMaxBatch =
     opts.embedMaxBatch ??
     positiveIntEnv(process.env.PALUP_EMBED_MAX_BATCH) ??
@@ -114,7 +131,7 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
       call: embedContent,
       cfg: {
         model: embedModel,
-        taskType: embedTaskType,
+        taskTypes: embedTaskTypes,
         maxBatch: embedMaxBatch,
         ...(embedDimension === undefined ? {} : { outputDimensionality: embedDimension }),
       },

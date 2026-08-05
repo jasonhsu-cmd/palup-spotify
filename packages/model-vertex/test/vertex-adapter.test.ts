@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { runModelPortContract } from "@palup/platform-ports/contract";
 import {
+  DEFAULT_EMBED_TASK_TYPES,
   VertexModelAdapter,
   type EmbedContentFn,
   type GenerateFn,
@@ -34,7 +35,7 @@ runModelPortContract(
   () =>
     new VertexModelAdapter(fakeGenerate, { model: "gemini-test" }, {
       call: fakeEmbedContent,
-      cfg: { model: "embed-test-1", taskType: "RETRIEVAL_DOCUMENT", maxBatch: 1 },
+      cfg: { model: "embed-test-1", taskTypes: DEFAULT_EMBED_TASK_TYPES, maxBatch: 1 },
     }),
 );
 

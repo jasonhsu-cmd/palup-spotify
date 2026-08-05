@@ -15,6 +15,9 @@ playwright-report/
 # self-improvement loop runtime state
 .palup-state/
 
+# throwaway one-off scripts (never repo content)
+.scratch/
+
 # Claude Code agent worktrees (transient; never repo content)
 .claude/worktrees/
 
