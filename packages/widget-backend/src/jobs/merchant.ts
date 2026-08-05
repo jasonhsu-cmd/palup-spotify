@@ -240,8 +240,22 @@ export async function resolveMerchantStore(
   return { store, registry, kind };
 }
 
-function describe(m: MerchantRecord): string {
-  return `${m.tenantId}  shop=${m.shopDomain}  status=${m.status}${m.statusReason ? ` ("${m.statusReason}")` : ""}  region=${m.region}  grounding=${m.groundingMode}${m.plan ? `  plan=${m.plan}` : ""}  updated=${m.updatedAt}`;
+/**
+ * `embedKey` is printed (added by D1) because it was otherwise UNREACHABLE. The install flow generates it
+ * (`routes/shopify-install.ts`) and writes it to `pl_merchant`, but — verified by grepping
+ * `packages/widget-backend/src` and `packages/control-plane/src` — nothing surfaced it: not the merchant
+ * landing page, not any HTTP route, not the control plane, and not this line. Since D1 made that key the
+ * thing that actually mints a widget token, a merchant who installed could not obtain the one value their
+ * storefront snippet needs, so this CLI is now the (operator-mediated) delivery path.
+ *
+ * SAFE TO PRINT, and it is worth saying why rather than assuming: the embed key is PUBLISHABLE by
+ * definition — "the publishable key that ships in the storefront snippet … NOT a secret"
+ * (merchant-registry-port.ts:74). It is an identifier, not a credential: holding it lets you mint a widget
+ * token for that tenant, which is exactly what every visitor to that merchant's storefront can already do.
+ * The actual credential (the delegate token) lives encrypted in a different store and is never read here.
+ */
+export function describeMerchantForOperator(m: MerchantRecord): string {
+  return `${m.tenantId}  shop=${m.shopDomain}  embedKey=${m.embedKey}  status=${m.status}${m.statusReason ? ` ("${m.statusReason}")` : ""}  region=${m.region}  grounding=${m.groundingMode}${m.plan ? `  plan=${m.plan}` : ""}  updated=${m.updatedAt}`;
 }
 
 async function main(): Promise<void> {
@@ -260,7 +274,7 @@ async function main(): Promise<void> {
       return exit(1);
     }
     console.log(`[merchant] ${report.action} CONFIRMED in ${report.elapsedMs}ms (store=${kind})`);
-    console.log(`[merchant]   ${describe(report.merchant)}`);
+    console.log(`[merchant]   ${describeMerchantForOperator(report.merchant)}`);
     if (report.merchant.status !== "active") {
       console.log(`[merchant] this merchant is INERT: every registry lookup now resolves to null.`);
       console.log(`[merchant] restore with: ${RUN} status --tenant ${cmd.tenantId} --status active`);

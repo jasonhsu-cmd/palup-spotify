@@ -92,6 +92,20 @@ green.
 > Revocation is a **status, never a delete** — the row, its `embedKey` and its `createdAt` survive, so an
 > already-deployed storefront snippet works again on reactivation.
 >
+> **Onboarding a merchant who installed the app themselves — the two manual steps.** The install generates
+> their embed key and writes it to `pl_merchant`, but **nothing hands it to them**: there is no merchant
+> console and no route that returns it. So an operator must:
+> ```bash
+> # 1. read their embed key (and confirm status=active)
+> pnpm exec tsx packages/widget-backend/src/jobs/merchant.ts show --tenant <tenantId>
+> #    → acme-store  shop=acme-store.myshopify.com  embedKey=pk_…  status=active  region=us  …
+> #    Give them that embedKey for their storefront snippet. It is PUBLISHABLE, not a secret.
+> # 2. provision their Storefront token, or they get the FIXTURE catalog rather than their own products:
+> #    add {"<tenantId>":{"shopify_storefront_token":"…"}} to the PALUP_SECRETS secret.
+> ```
+> Until both are done, an installed merchant is registered and revocable but **not usefully served** — which
+> is exactly what the install landing page tells them ("not live on your storefront yet").
+>
 > **What D1 did NOT cut over** (so nobody assumes it did):
 > - **The Storefront token is still `SecretsPort`.** Serving reads `shopify_storefront_token` from
 >   `PALUP_SECRETS` — *not* the encrypted delegate credential an install stores. **A merchant who installs

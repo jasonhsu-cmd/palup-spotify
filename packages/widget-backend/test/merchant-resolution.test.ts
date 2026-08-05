@@ -471,6 +471,29 @@ describe("D1 (8) the resolver itself — the ONE place the precedence rule lives
 });
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────────
+describe("D1 (8b) an installed merchant's embed key is REACHABLE — otherwise the cutover is unusable", () => {
+  it("the operator CLI prints the embedKey, the one value a storefront snippet needs", async () => {
+    // Before D1 this line omitted `embedKey`, and grepping widget-backend/src + control-plane/src showed
+    // NOTHING else surfaced it either: the install generates the key, writes it to pl_merchant, and no
+    // route, page or console ever returns it. D1 makes that key the thing that mints a widget token, so a
+    // merchant who installed would hold a live registry row they could not use. This is the delivery path.
+    const { describeMerchantForOperator } = await import("../src/jobs/merchant.js");
+    const line = describeMerchantForOperator({
+      tenantId: TENANT,
+      shopDomain: SHOP,
+      embedKey: KEY,
+      status: "active",
+      region: "us",
+      groundingMode: "full",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(line).toContain(`embedKey=${KEY}`);
+    expect(line).toContain(`shop=${SHOP}`);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────────
 describe("D1 (9) grounding resolves its shop domain through the SAME resolver", () => {
   it("resolveShopifyStore takes the registry's domain, and refuses a revoked merchant outright", async () => {
     process.env.PALUP_SECRETS = JSON.stringify({ [TENANT]: { [SHOPIFY_TOKEN_SECRET]: "storefront-token-never-logged" } });
