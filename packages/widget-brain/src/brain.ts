@@ -926,11 +926,16 @@ export function createBrain(
         const declinedOneStrike =
           dispositionBehavioralEnabled && (signals.behavioral?.includes("pitch_declined") ?? false);
         const rageQuiet = dispositionBehavioralEnabled && (signals.behavioral?.includes("rage") ?? false);
-        if (proactiveNegativeMood) flags.push("mood_brake", "no_pitch");
+        // §8a invariant 14 basic-mode-at-cap. Checked FIRST among the brakes because it is the one that
+        // holds even when every commercial signal says "pitch now" — a healthy high-value cart and a
+        // satisfied shopper. It only ever SUPPRESSES; see Signals.atCap for why this is not `kill` (the
+        // shopper must still be answered — reactive turns never reach this rung).
+        if (signals.atCap) flags.push("at_cap", "no_pitch");
+        else if (proactiveNegativeMood) flags.push("mood_brake", "no_pitch");
         else if (!hasCart) flags.push("no_cart", "no_pitch"); // empty cart / "just browsing" → never nag
         else if (declinedOneStrike) flags.push("behavioral:declined", "disposition:one_strike", "no_pitch");
         else if (rageQuiet) flags.push("behavioral:rage", "no_pitch", "escalate");
-        if (proactiveNegativeMood || !hasCart || declinedOneStrike || rageQuiet) {
+        if (signals.atCap || proactiveNegativeMood || !hasCart || declinedOneStrike || rageQuiet) {
           // QUIET: surface nothing (the client renders no message for an empty proactive reply).
           return {
             mode: "smalltalk",
