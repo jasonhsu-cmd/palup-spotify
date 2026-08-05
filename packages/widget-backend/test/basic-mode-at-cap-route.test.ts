@@ -77,15 +77,26 @@ describe("the cost-cap registry", () => {
     expect(actions).toContain("cost_cap.clear");
   });
 
-  it("the audit's reversalPath names a route that EXISTS in the control plane", async () => {
-    // #166 found the kill registry's reversalPath naming a route on an undeployed service. A reversal path
-    // in an immutable record has to be one an operator can actually run.
+  it("the audit's reversalPath names a RUNNABLE path, not just a route that exists in the repo", async () => {
+    // THIS ASSERTION USED TO ASK THE WRONG QUESTION. It was
+    //   expect(rec?.reversalPath).toBe("POST /api/cost-cap/clear")
+    // i.e. "does the recorded string match a route that exists in CODE" — and it passed, while the route
+    // it named was on the CONTROL PLANE, which `deploy-staging.yml` does not deploy at all. So the
+    // immutable record promised a reversal no operator could perform: exactly the defect #166 had already
+    // fixed for the kill switch's own reversalPath, reintroduced one registry later.
+    //
+    // Reachable in the repo is not reachable in production. The right question is whether the path names
+    // something an operator can RUN, which is what `cost-cap-cli.test.ts` now checks against the real
+    // package.json scripts. This keeps the ordering guarantee here.
     const store = new InMemoryRuntimeStore();
     await setCostCap(store, "global", "x");
     const rec = (await store.readAudit({ tenantId: "__system__" })).find(
       (e: { action: string }) => e.action === "cost_cap.set",
     ) as { reversalPath?: string } | undefined;
-    expect(rec?.reversalPath).toBe("POST /api/cost-cap/clear");
+    expect(rec?.reversalPath).toContain("pnpm cap:clear");
+    // The CLI first, because it is the only path that works today; the HTTP route second, for when the
+    // control plane is deployed.
+    expect(rec!.reversalPath!.indexOf("pnpm")).toBeLessThan(rec!.reversalPath!.indexOf("POST"));
   });
 
   it("a cap set by the breaker is attributed to the breaker; a clear to an operator", async () => {
