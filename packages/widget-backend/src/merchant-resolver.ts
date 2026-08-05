@@ -1,5 +1,7 @@
 import type {
+  MerchantGroundingMode,
   MerchantRecord,
+  MerchantRegion,
   MerchantRegistryPort,
   MerchantStatus,
   RuntimeStatePort,
@@ -15,16 +17,11 @@ import type {
 // C2's `app/uninstalled` (#191) wrote `status = "uninstalled"` faithfully **to a column nothing consulted**.
 // A merchant who uninstalled stayed servable forever. That is what this file ends.
 //
+// D2 CLOSED THE REGION GAP THIS HEADER USED TO NAME. `region` and `groundingMode` are now resolved PER
+// TENANT here, alongside identity and servability — see "THE SERVING CONFIG" below. The env values keep
+// exactly the rank `WIDGET_EMBED_KEYS` has: a named fallback for a tenant the registry has no row for.
+//
 // WHAT IT STILL DOES NOT DO — the line, drawn explicitly rather than implied:
-//   • `region` / `groundingMode` STAY PROCESS-WIDE ENV (`MERCHANT_REGION`, `MERCHANT_GROUNDING_MODE`,
-//     server.ts:501-516). `MerchantRecord` carries both, so the data is right here in hand — but
-//     `CONSENT_MODE` is derived from `MERCHANT_REGION` once at boot and returned on EVERY /chat response,
-//     including the three early returns that fire BEFORE a tenant is known (oversize input, rate limit,
-//     unauthenticated). Making it per-merchant means either a response field that disagrees with itself
-//     across those paths or restructuring them. That is a separate, reviewable change (D2). What IS done
-//     here instead: server.ts warns at boot when `SHOPIFY_INSTALL_REGION` (the residency an installing
-//     merchant is recorded with) disagrees with `MERCHANT_REGION` (the residency they are SERVED with),
-//     so the gap is observable rather than silent.
 //   • THE STOREFRONT TOKEN STAYS IN `SecretsPort` (merchant-store.ts:16,47). This file resolves the shop
 //     DOMAIN through the registry; the CREDENTIAL is still the hand-provisioned `shopify_storefront_token`.
 //     B2's encrypted credential store (#186) is NOT read by serving. There is exactly ONE source of truth
@@ -50,6 +47,49 @@ import type {
 //   SERVABILITY (a DENY-LIST, per request — `servability`)
 //     • a row exists for this tenant and is NOT active ⇒ refuse the request.
 //     • no row (or no registry) ⇒ proceed, exactly as before D1.
+//
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// D2 — THE SERVING CONFIG (`region` + `groundingMode`), AND WHY REGION IS THE ONE FIELD THAT REFUSES.
+//
+// Before D2 both came from process-wide env, so every merchant on an instance shared one jurisdiction.
+// That is not a cosmetic defect. `region` decides the CONSENT REGIME:
+// `consentPermits(region, "ordinary", value)` is `region === "us" ? value !== "out" : value === "in"`
+// (widget-brain/src/consent-rules.ts). Serving an EU merchant under `"us"` therefore does not mislabel
+// anything — it silently converts an OPT-IN regime into an OPT-OUT one and writes cross-visit facts about
+// EU shoppers who never consented. One process serves every merchant, so the defect was guaranteed the
+// moment two jurisdictions shared an instance.
+//
+//   1. an ACTIVE row with a VALID region  ⇒ that row's `region` + `groundingMode`. Registry wins.
+//   2. NO row for this tenant (or no registry) ⇒ `envRegion` / `envGroundingMode`, the named fallback —
+//      the SAME rank `WIDGET_EMBED_KEYS` has for identity. This is how staging's `demo` tenant works.
+//   3. an ACTIVE row whose `region` is MISSING or NOT IN THE ENUM ⇒ REFUSE. Never the env value.
+//   4. an UNREADABLE registry ⇒ REFUSE (D1's rule, unchanged).
+//
+// WHY (3) REFUSES INSTEAD OF FALLING BACK — the decision, argued rather than asserted. The env fallback is
+// legitimate for IDENTITY because an absent row is an unambiguous fact: nobody claims this key, so the
+// operator's map is the only claim there is. An ACTIVE row with no usable region is not an absence — it is
+// a merchant we HAVE, whose jurisdiction we do not know. Substituting `MERCHANT_REGION` there is a
+// residency decision made by an env var that was never set for this merchant, which is exactly what the
+// legal review flagged and exactly why `NewMerchant.region` is required with no default
+// (merchant-registry-port.ts) and why `SHOPIFY_INSTALL_REGION` has "no silent default" (server.ts). It is
+// also the direction the consent engine itself already leans: `consentPermits` gives an UNKNOWN region the
+// STRICTER treatment (ADR-0015 Inv 3). The cost is bounded and loud — one merchant, not the instance;
+// visible as a 401/403 rather than as silent over-collection; reversible in one command
+// (`jobs/merchant.ts set --tenant <t> --region …`). A wrong region is not detectable after the fact; a
+// refused merchant is detectable within one page load. Fail closed.
+//
+// WHY `groundingMode` DOES **NOT** REFUSE. It decides whether the agent may use the merchant's catalog and
+// discuss competitors — a product-policy setting, not a legal one, and nothing downstream reads it as a
+// permission to process personal data. Taking a storefront offline over it would be a bigger harm than the
+// setting can cause, so an unusable value degrades to the MOST RESTRICTIVE mode (`"off"`) with a log,
+// rather than to the env value or to the permissive `"full"` default. Restrictive-and-serving beats
+// refusing here, and refusing beats guessing there; the asymmetry is the point.
+//
+// NEITHER CASE IS REACHABLE THROUGH THE PORT'S OWN WRITERS. `create` and `update` both `requireEnum` these
+// fields, and the Postgres DDL adds `NOT NULL CHECK (region IN (…))`. What IS reachable: `toRecord` casts
+// (`row.region as MerchantRegion`, postgres-merchant-registry.ts) and that adapter's own `migrate()` doc
+// comment notes a table left over from a different, older DDL would not retroactively gain the CHECK. So
+// this is a runtime guard on a hand-inserted or migrated row, not a guard against the adapter.
 //
 // WHY SERVABILITY IS A DENY-LIST AND NOT AN ALLOWLIST. The servable set is already bounded at mint: a
 // widget token only exists for a key the registry or the env map named. Making `/chat` ALSO demand a
@@ -120,7 +160,32 @@ export type MerchantSource = "registry" | "env";
  * log line and an audit record, so nothing attacker-influenced may appear among them (the same discipline
  * as `Refusal` in routes/shopify-install.ts:143-156).
  */
-export type ResolutionSurface = "embed-key-mint" | "chat" | "shopper-session" | "customer-login";
+export type ResolutionSurface = "embed-key-mint" | "chat" | "shopper-session" | "customer-login" | "grounding";
+
+/** The consent regime a region implies (ADR-0015). Same value set the `/chat` response has always used. */
+export type ConsentMode = "opt_in" | "opt_out";
+
+/**
+ * ADR-0015's region split, in ONE place: the US gets an opt-out NOTICE (memory defaults on, the shopper
+ * may decline); EVERY other region gets an opt-in PROMPT (memory defaults off, the shopper must accept).
+ *
+ * `undefined` — "we could not resolve a merchant for this response" — deliberately maps to the STRICTER
+ * regime, matching what `consentPermits` itself does with an absent region (ADR-0015 Inv 3). It is the one
+ * safe answer: telling a widget `opt_out` for a merchant we have not identified is how a European shopper
+ * would be shown a US notice, whereas the reverse merely over-asks.
+ */
+export function consentModeFor(region: MerchantRegion | undefined): ConsentMode {
+  return region === "us" ? "opt_out" : "opt_in";
+}
+
+/** The per-tenant serving policy D2 resolves alongside identity. */
+export interface ServingConfig {
+  /** Data-residency / consent regime. See the header for why this one refuses rather than defaulting. */
+  region: MerchantRegion;
+  groundingMode: MerchantGroundingMode;
+  /** `"registry"` when the tenant's own row supplied these; `"env"` when the named fallback did. */
+  source: MerchantSource;
+}
 
 /** The outcome of resolving an embed key or a shop domain to a tenant. */
 export type TenantResolution =
@@ -128,14 +193,19 @@ export type TenantResolution =
   /** A row exists and it is not `active`. Distinct from `unknown` so a caller cannot conflate "revoked"
    *  with "never heard of them" and reach for the env map. */
   | { kind: "revoked"; tenantId: string; status: MerchantStatus }
+  /** D2 — the row is active but carries no usable `region`. A THIRD kind, not folded into `revoked`:
+   *  they are different operator problems with different fixes (`set --region` vs `status --status`), and
+   *  D1's own comment on the /chat flags makes the same argument. */
+  | { kind: "region-unset"; tenantId: string }
   | { kind: "unknown" }
   /** The registry threw. NOT `unknown` — see the header on why an unreadable registry fails closed. */
   | { kind: "error" };
 
-/** The outcome of the per-request revocation check. */
+/** The outcome of the per-request revocation check, which since D2 also carries the serving config. */
 export type Servability =
-  | { kind: "servable"; source: MerchantSource; record?: MerchantRecord }
+  | { kind: "servable"; source: MerchantSource; record?: MerchantRecord; config: ServingConfig }
   | { kind: "revoked"; tenantId: string; status: MerchantStatus }
+  | { kind: "region-unset"; tenantId: string }
   | { kind: "error" };
 
 export interface MerchantResolverDeps {
@@ -152,6 +222,19 @@ export interface MerchantResolverDeps {
   embedKeys: Record<string, string>;
   /** `SHOPIFY_STORES`, read per call (not captured) so it stays a function like `parseStoreDomains`. */
   storeDomains: () => Record<string, string>;
+  /**
+   * `MERCHANT_REGION` — the process-wide value, which since D2 is a NAMED FALLBACK for a tenant the
+   * registry has no row for, at exactly the rank `WIDGET_EMBED_KEYS` holds for identity.
+   *
+   * REQUIRED, with no default here on purpose. A default would put the silent `"us"` back one layer down,
+   * where nobody reviewing a call site would see it — the same argument `NewMerchant.region` makes for
+   * being required ("a caller that does not know the region must find out, not inherit one",
+   * merchant-registry-port.ts). server.ts parses it once and passes it; a future caller must do the same
+   * or the compiler stops them.
+   */
+  envRegion: MerchantRegion;
+  /** `MERCHANT_GROUNDING_MODE`, same rank and same reason for being required. */
+  envGroundingMode: MerchantGroundingMode;
 }
 
 export interface MerchantResolver {
@@ -160,7 +243,8 @@ export interface MerchantResolver {
   readonly resolutionMode: "registry+env" | "registry" | "env";
   /** Publishable embed key → tenant, by the ALLOWLIST rule in the header. */
   resolveEmbedKey(key: unknown, surface: ResolutionSurface): Promise<TenantResolution>;
-  /** The per-request DENY-LIST check: is this already-identified tenant still servable? */
+  /** The per-request DENY-LIST check: is this already-identified tenant still servable, and under WHICH
+   *  jurisdiction? Both answers come from the ONE registry read, so /chat still costs one lookup a turn. */
   servability(tenantId: string, surface: ResolutionSurface): Promise<Servability>;
   /** Tenant → its storefront host. `undefined` covers BOTH "revoked" and "not configured", because every
    *  caller treats both the same way (404 / fixtures) and neither may be served. */
@@ -183,9 +267,33 @@ function nonBlank(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+// D2 — the two closed sets, duplicated here because the port keeps its own copies module-private
+// (merchant-registry-port.ts defines `REGIONS`/`GROUNDING_MODES` without `export`). Narrow, pure, and
+// checked against the port's exported TYPES, so a value added to `MerchantRegion` without being added here
+// is a compile error at `isRegion`'s predicate, not a silent runtime refusal.
+const REGIONS: readonly MerchantRegion[] = ["us", "eu", "uk", "other"];
+const GROUNDING_MODES: readonly MerchantGroundingMode[] = ["off", "general", "full"];
+const isRegion = (v: unknown): v is MerchantRegion =>
+  typeof v === "string" && (REGIONS as readonly string[]).includes(v);
+const isGroundingMode = (v: unknown): v is MerchantGroundingMode =>
+  typeof v === "string" && (GROUNDING_MODES as readonly string[]).includes(v);
+
 export function createMerchantResolver(deps: MerchantResolverDeps): MerchantResolver {
-  const { store, registry, embedKeys, storeDomains } = deps;
+  const { store, registry, embedKeys, storeDomains, envRegion, envGroundingMode } = deps;
+  // Fail fast at CONSTRUCTION, not per request — the same posture as `resolveEmbedKeys` and
+  // `assertMemoryAuthCoupling`, and for the same reason: this runs in the composition root, so a bad value
+  // makes the process refuse to boot instead of quietly serving every fallback tenant under a region
+  // nobody chose. The type already says these are required, but `packages/*/tsconfig.json` includes only
+  // `src`, so no compiler check reaches a test or a script that constructs this — this is what does.
+  if (!isRegion(envRegion) || !isGroundingMode(envGroundingMode))
+    throw new Error(
+      `createMerchantResolver: envRegion must be one of ${REGIONS.join(" | ")} and envGroundingMode one of ` +
+        `${GROUNDING_MODES.join(" | ")} — refusing to construct a resolver that would serve every ` +
+        `registry-less tenant under an undeclared jurisdiction`,
+    );
   const envHasKeys = Object.keys(embedKeys).length > 0;
+  /** The named D2 fallback, built once: what a tenant with NO registry row is served under. */
+  const envConfig: ServingConfig = { region: envRegion, groundingMode: envGroundingMode, source: "env" };
 
   /** Log-once-per-process de-dup, so a busy fallback cannot flood the log (the audit chain has its own,
    *  durable, TTL'd dedup). Per process is right for a LOG: a restart should say it again. */
@@ -287,10 +395,67 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
         `revokes it.`,
     }));
 
+  /**
+   * D2 — the refusal for an active row with no usable `region`. A DISTINCT action from
+   * `merchant.serving_refused` so an operator can alert on it separately: the fix is a config command, not
+   * a reactivation, and conflating the two would send whoever is paged to the wrong runbook.
+   */
+  const auditRegionUnset = (tenantId: string, surface: ResolutionSurface): Promise<void> =>
+    auditOnce(tenantId, `region-unset:${surface}`, () => ({
+      actor: "system:merchant-resolver",
+      action: "merchant.region_unset",
+      input: { tenantId, surface },
+      decision: {
+        served: false,
+        reason:
+          `the pl_merchant row for this tenant is active but carries no valid region ` +
+          `(one of ${REGIONS.join(" | ")}). region decides the CONSENT REGIME (ADR-0015), so it is ` +
+          `refused rather than inherited from MERCHANT_REGION — an inherited "us" would convert an ` +
+          `opt-in jurisdiction into opt-out silently, which nothing downstream could detect`,
+      },
+      reversalPath:
+        `${MERCHANT_CLI} set --tenant ${tenantId} --region us|eu|uk|other ` +
+        `(declare this merchant's actual residency and serving resumes on the next request; the row, its ` +
+        `embedKey and its status are untouched, so a storefront snippet that is already deployed starts ` +
+        `working again. Do NOT guess the value — the wrong one is undetectable after the fact.)`,
+    }));
+
+  /**
+   * D2 — a row's own serving config, or `null` when its `region` is unusable (the caller then refuses).
+   * `audit: false` for reads that are not themselves a serving decision (grounding), so a catalog lookup
+   * cannot append a governance row for a refusal /chat and the mint already record.
+   */
+  const configFor = (rec: MerchantRecord, surface: ResolutionSurface, audit = true): ServingConfig | null => {
+    if (!isRegion(rec.region)) {
+      logOnce(`region-unset:${rec.tenantId}`, () =>
+        console.error(
+          `[merchant] tenant "${rec.tenantId}" has an ACTIVE pl_merchant row with no valid region — ` +
+            `REFUSING to serve it. region decides the consent regime, so it is never inherited from ` +
+            `MERCHANT_REGION. Fix: ${MERCHANT_CLI} set --tenant ${rec.tenantId} --region us|eu|uk|other`,
+        ),
+      );
+      if (audit) void auditRegionUnset(rec.tenantId, surface);
+      return null;
+    }
+    // Not a legal boundary (see the header): degrade to the MOST RESTRICTIVE mode rather than take the
+    // merchant offline or inherit a permissive env default.
+    if (!isGroundingMode(rec.groundingMode)) {
+      logOnce(`grounding-unset:${rec.tenantId}`, () =>
+        console.warn(
+          `[merchant] tenant "${rec.tenantId}" has an unusable groundingMode; serving with "off" (the most ` +
+            `restrictive) rather than a default. Fix: ${MERCHANT_CLI} set --tenant ${rec.tenantId} ` +
+            `--grounding-mode off|general|full`,
+        ),
+      );
+      return { region: rec.region, groundingMode: "off", source: "registry" };
+    }
+    return { region: rec.region, groundingMode: rec.groundingMode, source: "registry" };
+  };
+
   /** The one registry read for a tenant id, with the fail-closed error posture applied once. */
   const rowFor = async (
     tenantId: string,
-    surface: string,
+    surface: ResolutionSurface,
   ): Promise<{ ok: true; record: MerchantRecord | null } | { ok: false }> => {
     if (!registry) return { ok: true, record: null };
     try {
@@ -313,12 +478,15 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
     if (!tenantId) return { kind: "error" };
     const row = await rowFor(tenantId, surface);
     if (!row.ok) return { kind: "error" };
-    if (!row.record) return { kind: "servable", source: "env" }; // no row ⇒ env-configured ⇒ unchanged
+    // No row ⇒ env-configured ⇒ unchanged, and it takes the NAMED env region/groundingMode (D2 rule 2).
+    if (!row.record) return { kind: "servable", source: "env", config: envConfig };
     if (row.record.status !== "active") {
       void auditRefusal(tenantId, row.record.status, surface);
       return { kind: "revoked", tenantId, status: row.record.status };
     }
-    return { kind: "servable", source: "registry", record: row.record };
+    const config = configFor(row.record, surface);
+    if (!config) return { kind: "region-unset", tenantId };
+    return { kind: "servable", source: "registry", record: row.record, config };
   };
 
   return {
@@ -343,6 +511,10 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
             void auditRefusal(row.tenantId, row.status, surface);
             return { kind: "revoked", tenantId: row.tenantId, status: row.status };
           }
+          // D2 — refuse HERE, not only at /chat. D1 already made this argument for revocation (a mint that
+          // succeeds and a turn that always 403s is a worse, later, more confusing failure); a merchant
+          // whose jurisdiction we cannot determine is the same shape of problem.
+          if (!configFor(row, surface)) return { kind: "region-unset", tenantId: row.tenantId };
           return { kind: "ok", tenantId: row.tenantId, source: "registry", record: row };
         }
       }
@@ -356,6 +528,8 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
       const s = await servability(envTenant, surface);
       if (s.kind === "error") return { kind: "error" };
       if (s.kind === "revoked") return { kind: "revoked", tenantId: envTenant, status: s.status };
+      // A stale env entry cannot rescue a row we refuse for residency either — same rule, same reason.
+      if (s.kind === "region-unset") return { kind: "region-unset", tenantId: envTenant };
 
       logOnce(`env:${surface}:${envTenant}`, () =>
         console.warn(
@@ -380,8 +554,12 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
       if (!row.ok) return undefined; // fail closed: an unreadable registry must not fall back to env
       if (row.record) {
         // A revoked merchant resolves to NOTHING — never to the env host. Otherwise a stale `SHOPIFY_STORES`
-        // entry would keep pulling a revoked merchant's live catalog into prompts.
-        return row.record.status === "active" ? row.record.shopDomain : undefined;
+        // entry would keep pulling a revoked merchant's live catalog into prompts. D2 extends that to a
+        // merchant we refuse for residency: no catalog is fetched for a store we will not serve. NOT
+        // audited here (`audit: false`) — /chat and the mint already record the refusal, and a grounding
+        // read is not itself a serving decision.
+        if (row.record.status !== "active") return undefined;
+        return configFor(row.record, "grounding", false) ? row.record.shopDomain : undefined;
       }
       return own(storeDomains(), tenantId);
     },
@@ -401,6 +579,7 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
         }
         if (row) {
           if (row.status !== "active") return { kind: "revoked", tenantId: row.tenantId, status: row.status };
+          if (!configFor(row, "shopper-session")) return { kind: "region-unset", tenantId: row.tenantId };
           return { kind: "ok", tenantId: row.tenantId, source: "registry", record: row };
         }
       }
@@ -417,6 +596,7 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
       const s = await servability(envTenant, "shopper-session");
       if (s.kind === "error") return { kind: "error" };
       if (s.kind === "revoked") return { kind: "revoked", tenantId: envTenant, status: s.status };
+      if (s.kind === "region-unset") return { kind: "region-unset", tenantId: envTenant };
       return { kind: "ok", tenantId: envTenant, source: "env" };
     },
   };

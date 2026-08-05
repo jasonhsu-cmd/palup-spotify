@@ -390,6 +390,8 @@ describe("D1 (8) the resolver itself — the ONE place the precedence rule lives
       registry,
       embedKeys: envMap({ "demo-embed-key": "demo" }),
       storeDomains: () => envMap({}),
+      envRegion: "us",
+      envGroundingMode: "full",
     });
     expect(await r.resolveEmbedKey(KEY, "embed-key-mint")).toMatchObject({ kind: "ok", tenantId: TENANT, source: "registry" });
     expect(await r.resolveEmbedKey("demo-embed-key", "embed-key-mint")).toMatchObject({ kind: "ok", tenantId: "demo", source: "env" });
@@ -405,6 +407,8 @@ describe("D1 (8) the resolver itself — the ONE place the precedence rule lives
       registry,
       embedKeys: envMap({}),
       storeDomains: () => envMap({}),
+      envRegion: "us",
+      envGroundingMode: "full",
     });
     expect(await r.servability("demo", "chat")).toMatchObject({ kind: "servable", source: "env" });
     expect(await r.servability(TENANT, "chat")).toMatchObject({ kind: "servable", source: "registry" });
@@ -417,6 +421,8 @@ describe("D1 (8) the resolver itself — the ONE place the precedence rule lives
       store: new InMemoryRuntimeStore(),
       embedKeys: envMap({ "demo-embed-key": "demo" }),
       storeDomains: () => envMap({ demo: "palup-skincare-jason.myshopify.com" }),
+      envRegion: "us",
+      envGroundingMode: "full",
     });
     expect(r.resolutionMode).toBe("env");
     expect(await r.resolveEmbedKey("demo-embed-key", "embed-key-mint")).toMatchObject({ kind: "ok", tenantId: "demo", source: "env" });
@@ -431,6 +437,8 @@ describe("D1 (8) the resolver itself — the ONE place the precedence rule lives
       registry,
       embedKeys: envMap({}),
       storeDomains: () => envMap({ demo: "palup-skincare-jason.myshopify.com", [TENANT]: "stale-env-host.myshopify.com" }),
+      envRegion: "us",
+      envGroundingMode: "full",
     });
     expect(await r.shopDomainFor(TENANT)).toBe(SHOP); // the registry row, not the stale env value
     expect(await r.shopDomainFor("demo")).toBe("palup-skincare-jason.myshopify.com"); // env fallback
@@ -453,6 +461,8 @@ describe("D1 (8) the resolver itself — the ONE place the precedence rule lives
       registry,
       embedKeys: envMap({ "demo-embed-key": "demo" }),
       storeDomains: () => envMap({ demo: "x.myshopify.com" }),
+      envRegion: "us",
+      envGroundingMode: "full",
     });
     expect(await r.resolveEmbedKey("demo-embed-key", "embed-key-mint")).toMatchObject({ kind: "error" });
     expect(await r.servability("demo", "chat")).toMatchObject({ kind: "error" });
@@ -465,7 +475,7 @@ describe("D1 (8) the resolver itself — the ONE place the precedence rule lives
     const store = new InMemoryRuntimeStore();
     vi.spyOn(store, "audit").mockRejectedValue(new Error("audit chain unavailable"));
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const r = createMerchantResolver({ store, registry, embedKeys: envMap({}), storeDomains: () => envMap({}) });
+    const r = createMerchantResolver({ store, registry, embedKeys: envMap({}), storeDomains: () => envMap({}), envRegion: "us", envGroundingMode: "full" });
     expect(await r.servability(TENANT, "chat")).toMatchObject({ kind: "revoked", status: "uninstalled" });
   });
 });
@@ -503,6 +513,8 @@ describe("D1 (9) grounding resolves its shop domain through the SAME resolver", 
       registry,
       embedKeys: Object.create(null),
       storeDomains: () => Object.assign(Object.create(null), { [TENANT]: "stale-env-host.myshopify.com" }),
+      envRegion: "us",
+      envGroundingMode: "full",
     });
     const secrets = createEnvSecrets();
     const creds = await resolveShopifyStore(TENANT, secrets, undefined, { shopDomainFor: (t) => r.shopDomainFor(t) });
