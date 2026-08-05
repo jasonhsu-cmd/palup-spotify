@@ -237,6 +237,15 @@ each deploy, so they must live in the workflow; dropping them silently reverts g
   non-breaking.
 - Grounding is cached per tenant on the `RuntimeStatePort` (TTL) with degrade-to-stale/safe-empty, so a
   slow/down Shopify never hangs `/chat`.
+- **Catalog ceiling — 1000 products (4 Storefront pages × 250).** The catalog is fetched by cursor
+  pagination and returned **only if complete**; a bigger catalog, a lost page, or a broken cursor makes
+  the fetch fail so the cache serves last-known-good (or safe-empty when cold) instead of a truncated
+  catalog. Truncation would make the agent deny products the merchant carries. Watch the
+  `[grounding.shopify]` log for a `reason` field — `catalog-ceiling-exceeded` (this merchant needs
+  relevance retrieval, not a bigger fetch — raising the ceiling alone puts every SKU into every prompt),
+  `pagination-discarded-partial` (transient Shopify failure mid-fetch; the previous catalog keeps
+  serving), `pagination-cursor-missing` / `pagination-cursor-stalled` (a Storefront response we refuse to
+  paginate on). Lines with `reason` carry `products` (how many were discarded) and never the token.
 
 ## One-time setup
 

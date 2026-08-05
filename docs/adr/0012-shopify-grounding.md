@@ -76,9 +76,20 @@
 - (+) Shippable and testable now (fixtures-first); live serving is human-gated per merchant.
 - (resolved) The live Shopify API surface + fields were verified against the **Storefront API v2026-07**
   docs (retrieved 2026-07-30) and the live fetch is implemented + running on staging against a real dev
-  store (private token via the SecretsPort; `*.myshopify.com` host guard; degrade-never-hang). Large
-  catalogs (>250 products) still need pagination (tracked); the query/fields should be re-verified when
-  Shopify bumps the API version.
+  store (private token via the SecretsPort; `*.myshopify.com` host guard; degrade-never-hang). The
+  query/fields should be re-verified when Shopify bumps the API version.
+- (resolved) **Catalogs larger than one page are now fetched whole, and one too large to serve fails
+  loudly.** The adapter follows `pageInfo.endCursor` into the connection's `after` argument (fields
+  verified against the v2026-07 docs, retrieved 2026-08-05) up to a hard ceiling of **4 pages × 250 =
+  1000 published products**, and returns **only a complete catalog**: crossing the ceiling, losing a
+  later page, or getting an unusable/non-advancing cursor all **throw** (with a `reason` on the
+  structured egress log) so the caching decorator degrades to last-known-good/safe-empty. Truncating was
+  rejected because the brain's prompt ("recommend ONLY from the CATALOG", "never invent products") turns
+  a missing product into the agent *denying* the merchant carries it — a confident false claim to a
+  shopper that looks healthy to every monitor — and because a partial catalog would be cached as
+  last-known-good for the whole TTL. Above 1000 SKUs the answer is relevance retrieval (fetch → index →
+  top-K), not a bigger prompt: `composeSystemPrompt` renders every product on every turn. Pagination is
+  fixture-tested against an injected fetch; it has **not** been exercised against a live store.
 - (−) **Allergen has no native Shopify field** (recollection, verify) — sourced from a product metafield
   or a merchant-authored PalUp field, else omitted (`StorePolicy.allergens` is optional). A product
   decision.

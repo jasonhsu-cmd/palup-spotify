@@ -76,9 +76,13 @@ describe("storefrontFetch (verified Storefront API 2026-07 call)", () => {
     expect(calls[0].init.headers["Shopify-Storefront-Private-Token"]).toBe("shptok_secret"); // server-side private token
     expect(calls[0].init.headers["X-Shopify-Storefront-Access-Token"]).toBeUndefined(); // not the public browser header
     const body = JSON.parse(calls[0].init.body);
-    expect(body.query).toContain("products(first: $first)");
+    // Cursor pagination: the connection is queried with `after` from the first request on (null = start).
+    // See shopify-grounding-pagination.test.ts for the primary-source citation of these field names.
+    expect(body.query).toContain("products(first: $first, after: $after)");
+    expect(body.query).toContain("pageInfo { hasNextPage endCursor }");
     expect(body.query).toContain("refundPolicy { body }");
     expect(body.variables.first).toBe(250);
+    expect(body.variables.after).toBeNull();
     expect(data.shop!.name).toBe("Acme Skincare");
   });
 
