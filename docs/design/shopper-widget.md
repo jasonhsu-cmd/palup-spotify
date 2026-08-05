@@ -67,7 +67,10 @@ drive** (timing / personalization / pitch-selection / escalation) vs. must not.
   **email consent** (in/out/unknown) · **SMS consent** (in/out/unknown — TCPA) · marketing-preference
   scope · **data-rights request** (access/delete). *Drives:* **gating** (no outbound without valid
   consent; anonymous → no PII, limited memory), personalization (identified → recall), compliance
-  (data-rights → honor the erasure cascade), channel eligibility. *Must not:* **unknown consent =
+  (data-rights → **honor the request within what exists**: affirm the right, record it as an audited
+  `data_rights.erasure_requested`, and say plainly what the system can and cannot do — there is no
+  erasure cascade over account/order data, nothing notifies a person, and no access/export path exists,
+  so the reply must promise none of them; see PR-P6), channel eligibility. *Must not:* **unknown consent =
   treat as no-consent**; anonymous → no PII leak, no assumed identity; consent-out → suppressed;
   never use another shopper's identity (isolation).
 - **Safety — inferred detection, escalation-biased, EXHAUSTIVELY tested (highest stakes):** none ·
@@ -266,6 +269,13 @@ surface.
 - **Still open:** "Powered by PalUp" badge, appearance/theming, the **human
   take-over handoff** UX, offline mode, and low-latency **transport (WebSocket, `<120ms` load)** —
   see `comms-and-messaging.md` §10 for the transport starting point.
+  **The widget no longer implies the handoff exists (PR-P6).** It used to latch into "Connecting you
+  with a person… A team member is joining this chat … your messages are saved and they'll see the whole
+  conversation" — three claims with no mechanism: `signals.handoff` (the only "a human took over" input)
+  has no production producer, no transcript is kept for a human, and nothing delivers an escalation to
+  anyone. The banner now claims only the audited flag, states that no one can join, and keeps the AI
+  disclosure in the header (which the old state replaced while the AI kept answering). Building the
+  producer + channel is still the open item; when it lands, the copy moves back with it.
 - **basic-mode-at-cap (invariant 14) is now ENFORCED, its UX is not.** The decision layer honours all
   three clauses — no proactive initiation, live chat continues to be answered, and the shopper is never
   shown the merchant's billing state — driven by a shared cost-cap registry that propagates across
