@@ -15,6 +15,12 @@ export interface ServingSignalContext {
   tenantId: string;
   /** Operator kill state for this scope (from the registry, server-side). */
   kill: boolean;
+  /**
+   * §8a inv 14 — this tenant (or the platform) is at its cost cap, from the shared cost-cap registry.
+   * Server-side like `kill`; NEVER taken from the client. A shopper who could set this could silence a
+   * merchant's agent, and a merchant's storefront must not be able to either.
+   */
+  atCap?: boolean;
   /** Merchant/geo jurisdiction (server config). */
   region: NonNullable<Signals["region"]>;
   /** Merchant "discuss competitors" mode (merchant policy). */
@@ -97,6 +103,9 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // server-controlled either way, no client influence.)
     // openIssues / safetyLatched omitted ⇒ sourced only from persisted session state
     kill: ctx.kill ? true : undefined,
+    // Same shape and same trust rule as `kill` directly above: omitted unless the SERVER says so, so a
+    // client-supplied `atCap` in the request body is ignored exactly like a client-supplied `kill`.
+    atCap: ctx.atCap ? true : undefined,
     // Quiet-hours clock is SERVER-derived (ctx), never the client's r.localHour. Only a valid 0–23
     // integer is honored; anything else ⇒ omitted ⇒ quiet-hours suppression simply does not apply.
     localHour:

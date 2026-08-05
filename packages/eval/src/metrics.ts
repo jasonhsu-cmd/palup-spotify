@@ -2,8 +2,10 @@
 // include `cost ≥85` and `latency ≥88`, and until this file existed neither had any measurement at all,
 // so neither could be reported, let alone gated).
 //
-// Scope discipline — this module MEASURES ONLY. It applies no threshold and returns no pass/fail; a later
-// PR decides what the numbers have to be. Nothing here can block a candidate.
+// Scope discipline — this module MEASURES ONLY. It applies no threshold and returns no pass/fail, and
+// nothing here can block a candidate. The threshold DECISION now lives in suites.ts: the `cost` and
+// `latency` suites are deliberately REPORT-ONLY (ungated) because the spec's 85/88 are 0-100 scores with
+// no defined scoring function or baseline — see each suite's `rationale`, which is printed with the run.
 //
 // Design notes (why it looks like this):
 //   • It lives in packages/eval, NOT in the ports or the brain. It is a decorator around whatever

@@ -13,6 +13,14 @@ export {
   type KillEntry,
 } from "./runtime-kill-registry.js";
 export {
+  matchedCostCap,
+  setCostCap,
+  clearCostCap,
+  costCapStatus,
+  type CostCapScope,
+  type CostCapEntry,
+} from "./cost-cap-registry.js";
+export {
   readOrchestratorState,
   recordAutoPromotion,
   recordAutoPromotionTx,

@@ -206,6 +206,21 @@ export interface Signals {
    */
   proactiveTrigger?: "exit_intent";
   /**
+   * §8a invariant 14 — the merchant (or the platform) has reached its cost/billing cap, so the agent runs
+   * in BASIC MODE: no proactive/outbound initiation, while live chat continues to be answered normally.
+   *
+   * SERVER-DERIVED, never client-set: it comes from the shared cost-cap registry
+   * (`state-postgres/src/cost-cap-registry.ts`) via `deriveServingSignals`, exactly like `kill`. A shopper
+   * who could set this could silence a merchant's agent; a merchant's own storefront must not be able to
+   * either.
+   *
+   * DELIBERATELY NOT `kill`. A kill halts the agent and hands off to a person. At cap the shopper must
+   * keep being served — "live chat continues" — because a merchant's billing state is not the shopper's
+   * problem and must never be visible to them. Suppression only: this signal can never grant a pitch,
+   * lift the safety latch, or enable outbound.
+   */
+  atCap?: boolean;
+  /**
    * The product/page the shopper is currently viewing (a short label from the embedding storefront), for
    * grounding the conversation to what they're looking at (§4 Contextual). UNTRUSTED merchant-page content
    * — sanitized (HTML stripped, newlines collapsed, the === fence defanged, capped) and fenced as DATA,

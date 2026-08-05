@@ -14,7 +14,7 @@ import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT, DEFAULT_CANARY_POWER } from "./canary-controller.js";
 import { applyCanaryVerdict } from "./canary-reaction.js";
 import { promoteToServing, monitorServing } from "./champion-promoter.js";
-import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, type KillScope, type KillEntry } from "@palup/state-postgres";
+import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, costCapStatus, setCostCap, clearCostCap, type KillScope, type KillEntry, type CostCapScope } from "@palup/state-postgres";
 import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices, type RuntimeStatePort } from "@palup/platform-ports";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -280,6 +280,28 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
     const b = (req.body ?? {}) as { scope?: KillScope };
     await disarmKill(runtimeStore, b.scope);
     return { scopes: await killStatus(runtimeStore) };
+  });
+  // §8a inv 14 — the cost circuit-breaker's operator surface. Separate from the kill routes above
+  // BECAUSE THE TWO MEAN DIFFERENT THINGS: a kill halts the agent and hands the shopper to a person; a
+  // cost cap puts it in BASIC MODE — no proactive initiation, live chat still answered, and the merchant's
+  // billing state never shown to the shopper. Overloading one flag with both would break the middle
+  // clause. These are the routes the registry's audit `reversalPath` names, so the reversal an immutable
+  // record promises is one an operator can actually run (NN#5 — the same discipline PR #166 applied after
+  // finding the kill switch's reversalPath pointing at an undeployed route).
+  app.get("/api/cost-cap", async () => ({ scopes: await costCapStatus(runtimeStore) }));
+  app.post("/api/cost-cap", async (req) => {
+    const b = (req.body ?? {}) as { scope?: CostCapScope; reason?: string };
+    // Default `global` matches /api/runtime-kill's default: the platform-wide COGS cap is the one an
+    // operator reaches for in an incident, and it is the SAFE direction (it only removes autonomy).
+    await setCostCap(runtimeStore, b.scope ?? "global", b.reason ?? "cost cap reached", undefined, "operator");
+    return { scopes: await costCapStatus(runtimeStore) };
+  });
+  app.post("/api/cost-cap/clear", async (req) => {
+    const b = (req.body ?? {}) as { scope?: CostCapScope };
+    // Clearing RESTORES autonomy, so it is attributed to `operator` in the audit rather than to the
+    // breaker — a machine may apply a cap, only a person lifts one.
+    await clearCostCap(runtimeStore, b.scope);
+    return { scopes: await costCapStatus(runtimeStore) };
   });
   app.post("/api/monitor", async (req) => {
     const b = (req.body ?? {}) as { qualityScore?: number; safetyPass?: boolean };
