@@ -114,6 +114,46 @@ widget stays up and degrades to escalation. It is also **not** an erasure — no
   `--reason`** — that string is the only record of who halted the platform.
 - Each run prints the measured decision→halt-confirmed latency, and confirms by **reading the registry
   back**; if the scope is not armed afterwards the command fails loudly instead of reporting success.
+
+## How to put the agent in basic mode (cost cap)
+
+§8a invariant 14 — *at the billing cap: no proactive; live chat continues; the customer never sees billing
+state*. **This is not a halt.** At cap the shopper is still answered normally; the agent just stops
+*initiating*. If you want to stop the agent, use the kill switch above instead.
+
+```
+pnpm cap:set    --scope global|tenant:<id> [--reason "you, and why"]
+pnpm cap:status
+pnpm cap:clear  --scope global|tenant:<id>|all
+```
+
+Same registry-and-CLI shape as the kill switch, and the **same `DATABASE_URL` requirement and caveats** —
+see *Getting `DATABASE_URL`* above; unset ⇒ the tool refuses rather than writing to a per-process store the
+deployed backend would never read. `--scope` is **never** defaulted: a forgotten flag would otherwise put
+every merchant on the platform into basic mode. `cap:set --scope all` does not exist; only `cap:clear` may
+widen to `all`.
+
+**What a cap actually changes** (`packages/widget-brain/src/brain.ts`, proactive rung):
+
+- A proactive exit-intent trigger goes **quiet** — `pitch: "none"`, empty reply, `flags: ["at_cap", …]`.
+  This holds even with a high-value cart and a satisfied shopper, which is the case a
+  conversion-maximising policy would most want to fire on.
+- **Reactive turns are untouched.** Product questions, support, and safety all behave exactly as normal —
+  a safety report still escalates. Cost never suppresses safety.
+- No reply mentions billing, plans, limits, quotas or usage, including when the shopper asks why the agent
+  went quiet. The `at_cap` flag is operator-facing only and never reaches shopper-visible text.
+
+**Direction of safety.** `cap:set` only ever *removes* autonomy and cannot spend money, so it is safe to
+apply automatically — that is what a circuit-breaker is. `cap:clear` *restores* autonomy, so the audit
+attributes a set to `cost-circuit-breaker` and a clear to `operator`: a machine may apply a cap, only a
+person lifts one. Adjusting the COGS cap **number** is a Policy change and is not done with this tool
+(`docs/design/cost-margin-telemetry.md`).
+
+**Not built yet, so that nobody assumes otherwise:** nothing automatically converts measured spend into a
+cap. The control plane measures cost, but an **operator sets the cap today**. The control-plane routes
+(`POST /api/cost-cap`, `POST /api/cost-cap/clear`) are the same registry, but that service is **not
+deployed** by `deploy-staging.yml`, so the CLI above is the only path that works — which is why the audit's
+`reversalPath` names the CLI first.
 - A halt propagates to every serving instance because the registry lives in the shared Cloud SQL store —
   which is exactly why `DATABASE_URL` must be the deployment's own.
 
