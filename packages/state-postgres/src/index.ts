@@ -1,5 +1,10 @@
 export { PostgresRuntimeStore } from "./postgres-runtime-store.js";
 export { PostgresVectorStore } from "./postgres-vector-store.js";
+// B1 adapter. Exported so C1's OAuth routes can wire it; NOTHING imports it yet (see the file header).
+export {
+  PostgresMerchantRegistry,
+  type PostgresMerchantRegistryOpts,
+} from "./postgres-merchant-registry.js";
 export { PgPoolSql, pgPoolSqlFromUrl, type Sql } from "./sql.js";
 export { createRuntimeStore } from "./factory.js";
 export { createVectorStore } from "./vector-factory.js";
