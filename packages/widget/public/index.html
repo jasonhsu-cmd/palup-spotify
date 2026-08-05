@@ -713,7 +713,13 @@
       if (c.availableForSale === true || c.availableForSale === false){
         const a = document.createElement("span");
         a.className = "rec-a"; a.setAttribute("data-testid","product-card-availability");
-        a.textContent = c.availableForSale ? "Available to buy now" : "Not available to buy right now";
+        // WORDED AS A STATUS, NOT A CALL TO ACTION, and the E2E test that asserts no add-to-cart/buy-now
+        // copy is what forced it: the CATALOG line the model reads says "available to buy now", but on a
+        // bordered card next to a price "Buy now" is such a strong CTA convention that it reads as a
+        // control — and there is no control, because this widget has no cart or checkout. These two words
+        // carry the same fact with no implied affordance, and neither states or implies a stock COUNT
+        // (§8a invariant 11 forbids manufactured scarcity, and no count exists in the data anyway).
+        a.textContent = c.availableForSale ? "Available" : "Currently unavailable";
         li.appendChild(a);
       }
       list.appendChild(li); rendered++;

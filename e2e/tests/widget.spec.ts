@@ -1094,7 +1094,10 @@ test.describe("E3 — product cards (mocked /chat seam)", () => {
     await send(page);
     const card = page.getByTestId("product-card").first();
     await expect(card).toContainText("Gentle Retinol Night Treatment");
-    await expect(card.getByTestId("product-card-availability")).toHaveText("Not available to buy right now");
+    // Status wording, not CTA wording — see the note in index.html's addProductCards. The catalog line the
+    // MODEL reads says "available to buy now"; a card next to a price cannot, because "Buy now" reads as a
+    // control and there is none. Same fact, no implied affordance, and no stock count in either direction.
+    await expect(card.getByTestId("product-card-availability")).toHaveText("Currently unavailable");
   });
 
   test("UNKNOWN availability makes NO availability claim at all — absent must never render as 'in stock'", async ({ page }) => {
