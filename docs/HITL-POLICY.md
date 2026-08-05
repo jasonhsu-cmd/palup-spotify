@@ -112,6 +112,35 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > fact that a narrowed catalog is a **partial** one, mitigated in-prompt by a rule forbidding "we don't
 > carry that" from mere absence but not eliminated.
 
+> **Product citations (`PRODUCT_CITATIONS` flag) — NOT yet flipped, no owner assigned (E2).**
+> `packages/widget-brain` can prefix each rendered CATALOG line with a per-turn citation tag
+> (`[P<n>-<nonce>]`), instruct the model to copy the tag for any product it names, then resolve the tags
+> back to product ids, strip every tag out of the reply, and attach the survivors to
+> `Decision.recommendedProducts`. These are **internal bookkeeping tags, stripped before the shopper sees
+> the reply** — *not* the Tier-3 source citations for external claims that
+> `docs/design/shopper-widget.md` §"Full (web-enabled)" describes, which remain unbuilt (no web port
+> exists). That adds a rule to the system prompt and asks the model to produce
+> something it does not produce today, so it **changes what the agent says** and is a run-time
+> behaviour/prompt change governed by §5 exactly like any other promotion: eval gate → shadow → canary →
+> **named human approval** → promote. **None of that has happened.**
+> Its inertness is structural, not just a default: the flag defaults OFF, **no `PRODUCT_CITATIONS` env
+> read exists anywhere in the repo**, and `widget-backend/src/server.ts` is **unchanged** (its
+> `createBrain` call passes seven positional arguments and never reaches this one), so flipping a flag
+> alone cannot turn it on. With it off, the prompt, every `Decision` and every reply are byte-identical to
+> before E1 *and* E2 — `packages/widget-brain/test/citations-flag-off.test.ts` re-runs E1's 37-probe
+> golden, which was captured on the commit before E1's implementation existed, through a recording model
+> port (so the system prompt itself is inside the assertion).
+> Three things a reviewer must weigh **at flip time**, none settled here:
+> (1) **Nothing here measures whether citing helps.** No real model has been run against this; the tests
+>     use a scripted model whose reply the test chooses. Citation *rate* and any effect on reply quality
+>     are unknown until the eval gate runs on a real model.
+> (2) **The field UNDER-REPORTS by construction.** A model that recommends a product in prose without
+>     copying its tag yields no entry, so `recommendedProducts` is a lower bound, never complete coverage.
+>     It is pinned as a defect by a test, not papered over.
+> (3) **It is not a billing basis.** Chaining `recommended → clicked → purchased` off this field is
+>     last-touch attribution, which **ADR-0007 §2 and `docs/PRICING.md` §2 forbid as a fee basis**. Any
+>     use of it in the outcome ledger would itself be a money/business-model boundary crossing.
+
 ## 6. How this is enforced in code
 
 - Every agent action is classified against this policy before execution. Boundary-crossing

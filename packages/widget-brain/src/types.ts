@@ -331,4 +331,28 @@ export interface Decision {
   /** Machine-checkable audit tags the eval harness grades against. */
   flags: string[];
   model: string;
+  /**
+   * PRODUCT CITATIONS (E2) — the merchant product ids this reply actually CITED, deduplicated, in the
+   * order the reply first cites each. Behind the PRODUCT_CITATIONS posture flag: OMITTED entirely (not
+   * `[]`, not `undefined`-valued) whenever the flag is off or nothing resolved, so the flag-off
+   * `Decision` and the /chat wire shape are unchanged.
+   *
+   * HOW IT IS PRODUCED, and why it can be trusted as far as it goes: the prompt renders a per-turn,
+   * per-line citation tag `[P<n>-<nonce>]` for each product in the CATALOG block; the model copies tags;
+   * resolution is a `hasOwnProperty`-guarded lookup in THAT turn's map with no fallback path (see
+   * ./citations.ts). So an id here is always a product the model was actually shown this turn — a forged,
+   * stale, invented or prototype-keyed tag resolves to nothing and is reported as `citations:dropped`.
+   *
+   * IT IS A LOWER BOUND, NEVER COMPLETE COVERAGE. A model that recommends a product in prose without
+   * copying its tag produces NO entry here — the mechanism cannot see a paraphrase. Absence of an id
+   * therefore means "not cited", never "not recommended". Any consumer that reads this as the full set of
+   * what the agent recommended will under-count, and any RATE computed from it measures the model's
+   * citation compliance, not its recommendation behaviour.
+   *
+   * NOT A BILLING BASIS. Chaining `recommended -> clicked -> purchased` off this field is LAST-TOUCH
+   * attribution, which ADR-0007 §2 and docs/PRICING.md §2 forbid as a fee basis ("conservative,
+   * incrementality-based attribution ... never last-touch inflation"). This is recommendation TELEMETRY:
+   * product cards, link-outs, per-product eval grading, merchant-facing "what did it suggest" reporting.
+   */
+  recommendedProducts?: string[];
 }
