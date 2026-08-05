@@ -54,8 +54,15 @@ export function computeRegressions(
     // at least `minCaseDrop` ACTUAL cases below the baseline's expected count before it counts as a
     // regression. The overall + floor checks still catch broad erosion and any safety/injection fail, so
     // this only suppresses statistical noise, never a real collapse.
+    //
+    // CAPPED AT THE LAYER SIZE (2026-08-05). A flat `>= minCaseDrop` made any layer SMALLER than
+    // minCaseDrop structurally exempt: with n=1 the largest possible caseDrop is 1, so `>= 2` could never
+    // hold and the layer could collapse 100%→0% with the gate still green. That was the live FAIRNESS
+    // layer (one case, and a committed baseline of 0.0 on top). Capping at `total` means a 1-case layer
+    // needs 1 case to drop while a 10-case layer still needs 2 — noise suppression is unchanged for every
+    // layer big enough for the guard to have meant anything.
     const caseDrop = Math.round(base * s.total) - s.pass;
-    const bad = belowTol && caseDrop >= minCaseDrop;
+    const bad = belowTol && caseDrop >= Math.min(minCaseDrop, s.total);
     const noiseSuppressed = belowTol && !bad;
     if (bad) regressions.push(`${layer} ${(now * 100).toFixed(0)}% < baseline ${(base * 100).toFixed(0)}% − ${layerTol * 100}pp (−${caseDrop} cases)`);
     const mark = bad ? " ⚠️" : noiseSuppressed ? " ~" : "";
