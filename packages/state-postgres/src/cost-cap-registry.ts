@@ -86,9 +86,13 @@ export async function setCostCap(
         action: "cost_cap.set",
         input: { scope, reason },
         decision: "basic_mode",
-        // Must name a path an operator can actually run (NN#5) — the same discipline PR #166 applied to
-        // the kill switch's own reversalPath after it was found naming an undeployed route.
-        reversalPath: "POST /api/cost-cap/clear",
+        // The CLI is named FIRST because it is the path that WORKS against the current deployment:
+        // deploy-staging.yml deploys only `palup-widget-staging` and no workflow deploys the control
+        // plane, so the HTTP route below is the operator console for when that service exists. Naming
+        // only the route — as this originally did — repeated the exact defect #166 fixed for the kill
+        // switch: a reversal path in an immutable record has to be one an operator can actually RUN
+        // (NN#5), and reachable-in-the-repo is not reachable-in-production.
+        reversalPath: "pnpm cap:clear --scope <scope> | POST /api/cost-cap/clear",
       },
       at,
     );
@@ -117,7 +121,7 @@ export async function clearCostCap(
         action: "cost_cap.clear",
         input: { scope: scope ?? "all" },
         decision: "cleared",
-        reversalPath: "POST /api/cost-cap",
+        reversalPath: "pnpm cap:set --scope <scope> | POST /api/cost-cap",
       },
       at,
     );
