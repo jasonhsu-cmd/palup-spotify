@@ -154,15 +154,22 @@ export function buildFlagOffBrain(model: ModelPort, probe: Probe): Brain {
 /**
  * Run the probe corpus through a freshly built brain per probe. Deterministic — `MockModelAdapter` is
  * temperature-free and the fixture catalog is static — so the capture is stable across runs/machines.
+ *
+ * `decorate` (E4, additive — the default is identity, so both existing callers are unaffected) lets a test
+ * ADD a signal to every probe before it runs. It exists for the strongest form of "the flag is off":
+ * supplying the new `signals.cartItems` on every rung of the ladder and still reproducing the golden
+ * proves the signal is not merely defaulted away but genuinely never consumed. Asserting only that an
+ * ABSENT signal changes nothing would prove much less.
  */
 export async function captureFlagOff(
   build: (model: ModelPort, probe: Probe) => Brain = buildFlagOffBrain,
+  decorate: (signals: Signals, probe: Probe) => Signals = (s) => s,
 ): Promise<ProbeCapture[]> {
   const out: ProbeCapture[] = [];
   for (const probe of FLAG_OFF_PROBES) {
     const model = new RecordingModelPort();
     const brain = build(model, probe);
-    const decision = await brain.decide(probe.signals, probe.message, probe.history);
+    const decision = await brain.decide(decorate(probe.signals, probe), probe.message, probe.history);
     out.push({ id: probe.id, decision, requests: model.requests });
   }
   return out;
