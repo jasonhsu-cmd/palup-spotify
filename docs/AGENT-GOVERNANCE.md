@@ -33,6 +33,23 @@ pipeline.
    records an attributable claim that a stage was run, not proof that it was. Thresholds are
    server-side constants (shared with the auto lane) precisely so the attestation cannot be passed by
    choosing lax bounds. Wire these to real measurement before enabling auto-optimize.
+
+   *A separate defect, and the more embarrassing one (fixed 2026-08-05).* An ordered, gated pipeline is
+   only meaningful if what it promotes actually reaches shoppers. `Policy` carries exactly two fields —
+   `styleDirective` and `proactivityDefault` (`packages/widget-brain/src/types.ts`) — and
+   **`proactivityDefault` never reached serving.** `widget-backend` built each turn's session without
+   passing a level, so the pitch budget was permanently `BUDGET["balanced"]`, and the session then
+   stamped `signals.proactivityLevel` unconditionally, which made the brain's own
+   `signals.proactivityLevel ?? policy.proactivityDefault` fallback dead code on every real request.
+   Measured at the route: promoted champions of `cautious` / `balanced` / `confident` all allowed
+   exactly 2 pitches.
+
+   So **half of everything this pipeline can produce was inert**, in both directions. A shadow/canary
+   run of a proactivity candidate measured *no difference* from the incumbent — it therefore passed the
+   gate looking safe and then changed nothing on promotion. The ceremony was intact and its subject was
+   not. Both halves are now route-covered; the lesson generalises: a gate over an unverified effect
+   measures the gate, not the change. **Anything added to `Policy` in future must ship with a
+   route-level test proving it reaches a shopper**, or the pipeline will guard it just as vacuously.
 3. **Humans own the boundary.** Any promotion that changes agent behavior, or that crosses
    a money/model/business-model line, is a human decision (`docs/HITL-POLICY.md`).
 
