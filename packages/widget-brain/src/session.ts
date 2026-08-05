@@ -7,15 +7,61 @@ import { classifySupportIntent, extractOrderId } from "./support.js";
 // and the one proactivity budget for the whole conversation (INV-E).
 
 const BUDGET: Record<ProactivityLevel, number> = { cautious: 1, balanced: 2, confident: 4 };
-const RESOLUTION = ["thanks", "thank you", "all set", "that fixed", "resolved", "got it", "perfect", "sorted"];
 const NEGATIVE_MOODS: Mood[] = ["frustrated", "upset", "anxious"];
+
+/**
+ * A shopper saying they are DONE. This used to be one flat `RESOLUTION` list that also contained
+ * "thanks", "thank you", "got it" and "perfect" — pure pleasantries — and a substring hit on any of them
+ * cleared every open issue. Measured consequence: "the bottle arrived cracked and leaking" then "thanks"
+ * emptied the ledger, and the next ordinary product question came back `mode: sales, pitch: cross_sell`.
+ * The identical conversation with "ok" instead of "thanks" stayed `support` / `no_pitch`.
+ *
+ * So a confirmation now needs an actual STATEMENT ABOUT THE ISSUE, not politeness. "thanks" alone is not
+ * enough; "thanks, that fixed it" is, because of the second clause. Bias is deliberate and one-sided: an
+ * issue held open too long only costs a pitch we chose not to make, while an issue dropped too early
+ * means pitching at a shopper holding a broken product (§8a invariant 13).
+ */
+export const CONFIRMED_RESOLVED = [
+  "all set",
+  "all sorted",
+  "sorted now",
+  "that fixed",
+  "that's fixed",
+  "thats fixed",
+  "it's fixed",
+  "its fixed",
+  "that worked",
+  "that did it",
+  "resolved",
+  "no longer an issue",
+  "sorted it",
+  "all good now",
+];
+
+/** Politeness is not a resolution — kept as an explicit, named list so the distinction is testable and
+ * so a future edit cannot quietly slide one of these back into `CONFIRMED_RESOLVED`. */
+export const PLEASANTRIES = ["thanks", "thank you", "cheers", "got it", "perfect", "great", "ok", "okay"];
+
+export function isResolutionConfirmed(lc: string): boolean {
+  return CONFIRMED_RESOLVED.some((r) => lc.includes(r));
+}
+
+/** The label `summarizeIssue` produces when the turn names no specific problem. */
+const GENERAL_ISSUE = "support";
+
+/** Cap the ledger so a shopper (or a loop) cannot grow session state without bound. Distinct support
+ * intents are few, so this is a backstop, not a working limit; the OLDEST entries are kept because the
+ * first-reported issue is the one most likely still genuinely unresolved. */
+const MAX_OPEN_ISSUES = 8;
+
+const dedupeIssues = (issues: string[]): string[] => [...new Set(issues)].slice(0, MAX_OPEN_ISSUES);
 
 /** A real, deterministic summary of a support issue (§6A: open_issues holds actual issues, not
  * `issue@N` placeholders) — the same classifier the brain uses, plus the order id when named. */
 function summarizeIssue(message: string): string {
   const intent = classifySupportIntent(message);
   const orderId = extractOrderId(message);
-  const base = intent === "general" ? "support" : intent;
+  const base = intent === "general" ? GENERAL_ISSUE : intent;
   return orderId ? `${base} #${orderId}` : base;
 }
 
@@ -111,12 +157,25 @@ export interface SessionOptions {
 }
 
 export async function createSession(brain: Brain, opts: SessionOptions = {}): Promise<Session> {
-  const level = opts.level ?? "balanced";
+  // Two DIFFERENT things, deliberately kept apart.
+  //
+  // `budgetLevel` sizes INV-E's one-per-conversation pitch budget and must always resolve to something.
+  //
+  // `explicitLevel` is what (if anything) we STAMP onto the signals we hand the brain. It used to be
+  // `opts.level ?? "balanced"` — always defined — so `send()` always set `signals.proactivityLevel`, and
+  // brain.ts's `signals.proactivityLevel ?? policy.proactivityDefault` fallback was DEAD CODE on every
+  // request that went through a Session. Leaving it undefined when the caller gave no level is what makes
+  // that fallback reachable, so a policy's own dial is honoured instead of being silently overwritten
+  // with "balanced".
+  const budgetLevel: ProactivityLevel = opts.level ?? "balanced";
+  const explicitLevel = opts.level;
   const restored = opts.sessionId && opts.store ? await opts.store.load(opts.sessionId) : undefined;
   const state: SessionState = restored
     ? {
         ...restored,
-        openIssues: [...restored.openIssues],
+        // Deduped on restore as well: a record written before this fix (or by any future bug) must not
+        // resurrect duplicates into a live session.
+        openIssues: dedupeIssues(restored.openIssues ?? []),
         // EVERY backfilled field is listed AFTER the spread with `??`, uniformly. A persisted record
         // written before a field existed lacks the key entirely, so the `??` supplies the default.
         //
@@ -166,7 +225,7 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
       // Merge carried state INTO signals so the stateless brain sees the latch + open issues.
       const merged: Signals = {
         ...signals,
-        proactivityLevel: signals.proactivityLevel ?? level,
+        proactivityLevel: signals.proactivityLevel ?? explicitLevel,
         safetyLatched: state.safetyLatched || Boolean(signals.safetyLatched),
         openIssues: [...state.openIssues, ...(signals.openIssues ?? [])],
         // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL, consumed only in brain.ts) —
@@ -211,10 +270,35 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
       if (d.mode === "safety") state.safetyLatched = true; // INV-A: latches for the conversation.
 
       if (d.mode === "support") {
-        // Resolution confirmation closes the open issue(s); otherwise record the REAL issue summary
-        // (§6A: a genuine issue, not an `issue@N` placeholder) on a first, uncarried support turn.
-        if (RESOLUTION.some((r) => lc.includes(r))) state.openIssues = [];
-        else if (!merged.openIssues?.length) state.openIssues = [summarizeIssue(message)];
+        // The ledger is a SET of the DISTINCT issues still open (§6A: real issues, not `issue@N`
+        // placeholders). Two things used to go wrong here, both measured before this change:
+        //
+        // (1) The recording arm was `else if (!merged.openIssues?.length)` — it fired ONLY when nothing
+        //     was open, so a second, DIFFERENT problem was silently dropped: "my order arrived late"
+        //     then "also the bottle arrived cracked and leaking" left the ledger at ["order_status"] and
+        //     never recorded the damage. support.ts's multi-issue rendering ("your X and your Y", "on
+        //     them", "either" — support.ts:530-534) was therefore unreachable dead code.
+        //
+        // (2) A BARE PLEASANTRY counted as a resolution and wiped everything, which re-armed pitching:
+        //     "cracked and leaking" -> ["damaged"] / no_pitch, then "thanks" -> [], then "do you have a
+        //     bigger size?" -> mode SALES, pitch CROSS_SELL. The same turns with "ok" instead of "thanks"
+        //     stayed support/no_pitch. One polite word was the whole difference, and §8a invariant 13
+        //     ("no pitch into complaint; resolve first") is exactly what it defeated.
+        //
+        // So: a pleasantry is not a confirmation, and a confirmation never closes an issue that THIS
+        // turn is reporting. When in doubt the issue STAYS OPEN — the failure mode of holding an issue
+        // too long is a missed pitch, and the failure mode of dropping one is pitching at a shopper
+        // holding a broken product.
+        const reported = summarizeIssue(message);
+        // Keyed off the INTENT, not the rendered label: a general question that happens to name an order
+        // renders as "support #1234", which is not equal to GENERAL_ISSUE but is not a new problem either.
+        const namesAProblem = classifySupportIntent(message) !== "general";
+        const isNewIssue = namesAProblem && !state.openIssues.includes(reported);
+        if (isNewIssue) {
+          state.openIssues = dedupeIssues([...state.openIssues, reported]);
+        } else if (isResolutionConfirmed(lc)) {
+          state.openIssues = [];
+        }
       }
 
       // §6A escalation_pending: an escalating turn arms it; a human handoff clears it (escalation hands
@@ -229,7 +313,7 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
 
       // INV-E: one budget across the whole conversation; switching modes never refills it.
       if (d.pitch !== "none") {
-        if (state.pitchesUsed >= BUDGET[level]) {
+        if (state.pitchesUsed >= BUDGET[budgetLevel]) {
           d = {
             ...d,
             pitch: "none",
