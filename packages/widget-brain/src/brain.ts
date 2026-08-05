@@ -641,14 +641,19 @@ export function createBrain(
       // it must run before the guardrail rungs below, several of which return early.
       if (sanitizeHistory(normalizeHistory(history)).dropped > 0) flags.push("history_sanitized");
 
-      // -1. Kill switch — an operator halt outranks everything. Stop all autonomous action and hand to
-      // a person; never generate a normal reply while halted (governance non-negotiable #4).
+      // -1. Kill switch — an operator halt outranks everything. Stop all autonomous action and flag it
+      // for a person; never generate a normal reply while halted (governance non-negotiable #4).
+      //
+      // It used to say "I'm handing you to a member of our team who'll take it from here", which claimed
+      // a live handoff that cannot happen: `signals.handoff` has no production producer (see types.ts)
+      // and there is no live-agent channel. The halt, the escalate flag and the audit row are all real;
+      // the handover is not, so the wording claims only the first three.
       if (signals.kill) {
         flags.push("kill_switch", "escalate", "no_autonomous_action", "no_pitch");
         return {
           mode: "support",
           reply:
-            "I've paused here — I'm handing you to a member of our team who'll take it from here. Thanks for your patience.",
+            "I've paused here — I can't keep helping with this right now, and I've flagged it for a person on our team. No one can join this chat, so please contact the store directly if it's urgent. Thanks for your patience.",
           pitch: "none",
           escalateToHuman: true,
           outbound: false,
@@ -690,8 +695,12 @@ export function createBrain(
         // medical advice itself) — recommends no product and never downplays.
         let reply: string;
         if (cls === "distress") {
+          // The emergency signpost is the load-bearing content and must never be diluted. What changed:
+          // "I'm connecting you with a person now" told someone in distress that help was arriving on
+          // this channel — the single most harmful place in the product to claim a handoff that does not
+          // exist, because they may wait for it instead of calling anyone. The flag is stated as a flag.
           reply =
-            "As an AI assistant, I'm really sorry you're going through this — you deserve real support. I'm connecting you with a person now, and if you're in danger please contact your local emergency services or a crisis line.";
+            "As an AI assistant, I'm really sorry you're going through this — you deserve real support. I can't put you through to a person from here, so if you're in danger please contact your local emergency services or a crisis line right now. I've flagged this for our team as well.";
         } else if (cls === "product_safety") {
           if (/\ballerg/.test(text)) {
             // Allergy/ingredient question: GROUND the answer in the catalog's actual ingredient lists
@@ -709,7 +718,7 @@ export function createBrain(
             const preUse = /before|last time|i'?ll be fine|will i be|should i|thinking of|planning to|is it safe|worried|worry|anxious|will (this|it)|going to|scared|nervous/.test(text);
             reply = preUse
               ? "As an AI assistant, I can't promise you'll be fine — with a past reaction I wouldn't assume it's nothing. A patch test before using it again is a sensible precaution, and if you're unsure it's worth checking with a doctor. I'm not able to give medical advice myself. Want me to bring in a person to help?"
-              : "As an AI assistant, I'm really sorry — that doesn't sound right and I wouldn't brush it off. I'm not able to give medical advice on a reaction, so if it continues or worries you the right step is to check with a doctor. I'm bringing in a person from our team to help right now.";
+              : "As an AI assistant, I'm really sorry — that doesn't sound right and I wouldn't brush it off. I'm not able to give medical advice on a reaction, so if it continues or worries you the right step is to check with a doctor. I've flagged this for a person on our team too.";
           }
         } else if (cls === "medical") {
           reply =
@@ -725,7 +734,7 @@ export function createBrain(
           reply =
             "I want to keep this respectful and genuinely help. If you'd like, I can connect you with a person on our team right now — just say the word, or we can keep going here. What would you prefer?";
         } else {
-          reply = "As an AI assistant, I understand — I'm bringing in a member of our team to help with this.";
+          reply = "As an AI assistant, I understand — I've flagged this for a member of our team to pick up.";
         }
         return {
           mode: "safety",
@@ -772,15 +781,36 @@ export function createBrain(
         };
       }
 
-      // 1.5b Data-rights / erasure (DSAR) — a "delete/erase my data" request is HONORED, never denied.
-      // The agent has no execution path, so it logs + routes the erasure to a person and confirms the
-      // cascade; it must NEVER deflect with "we don't store anything about you" (false + dismissive).
+      // 1.5b Data-rights / erasure (DSAR) — a "delete/erase my data" request is HONORED, never denied,
+      // and it must NEVER be deflected with "we don't store anything about you" (false + dismissive).
+      //
+      // WHAT THIS REPLY MAY CLAIM, and what it used to claim. The agent has no erasure execution path,
+      // so the only thing that actually happens on this turn is a RECORD: the flags below make the turn
+      // governance-relevant, so widget-backend/src/audit.ts writes an immutable
+      // `data_rights.erasure_requested` row (its own named action, added with this change — it used to
+      // land as a generic `escalation.to_human`, indistinguishable from a shipping complaint, which is a
+      // poor home for a request carrying a statutory response clock). "I've recorded your request" is
+      // exactly that row, and it is the strongest true claim available.
+      //
+      // Three claims were removed because nothing in this system can keep them:
+      //   • "handed it to our team to erase … your account, order history, subscriptions" — PalUp cannot
+      //     erase a merchant's account/order/subscription records at all; `eraseSubject`
+      //     (widget-memory/src/erasure.ts) deletes one vector namespace and `eraseTenant` throws
+      //     NotImplemented. Nothing hands the request to anyone either: no queue, notification or
+      //     console reads that audit row.
+      //   • "They'll confirm once it's complete" — there is no outbound path to confirm on. CommsPort
+      //     (packages/platform-ports/src/comms-port.ts) has no production consumer.
+      //   • "If you'd like a copy of your data … I can arrange that too" — there is NO export/subject-
+      //     access capability anywhere in packages/. That was an offer of a feature that does not exist.
+      // The shopper is pointed at the store instead, which is the one route that can actually finish an
+      // erasure today. Under-promising here is the point: a DSAR is exactly where a false reassurance
+      // costs a shopper a legal right.
       if (/\b(delete|erase|remove|wipe|forget)\b[^.!?]*\b(everything|all|my (data|info|information|account|details|records)|about me|me)\b|\bright to (be forgotten|erasure|delete)\b|\b(gdpr|ccpa|data[ -]?subject|dsar)\b/.test(text)) {
         flags.push("data_rights_erasure", "escalate", "no_pitch");
         return {
           mode: "support",
           reply:
-            "Absolutely — you have the right to have your data deleted, and I've logged that request and handed it to our team to erase the personal data we hold for you (your account, order history, subscriptions, and any saved preferences). They'll confirm once it's complete. If you'd like a copy of your data before it's removed, I can arrange that too.",
+            "Absolutely — you have the right to have your data deleted, and I'm not going to pretend we hold nothing. I've recorded your request on this conversation so it's on the record for the store's team. I can't carry out the deletion myself and I can't tell you when it will be done, so please also contact the store directly to follow it up — they can act on it and confirm.",
           pitch: "none",
           escalateToHuman: true,
           outbound: false,
@@ -850,7 +880,7 @@ export function createBrain(
         const gen = await model.complete({ messages: await groundedMessages(message, tenantId, "", history, signals.pageContext), temperature: 0, tenantId });
         if (replyOffersUngroundedDiscount(gen.text)) return discountGuardrail(); // (a) never serve an invented/injected discount
         const reply = stuck
-          ? "I'm sorry this has been frustrating — I'm connecting you with a person who can resolve it."
+          ? "I'm sorry this has been frustrating — I've flagged this for a person on our team who can resolve it."
           : `Let me help with that. ${gen.text}`;
         return { mode: "support", reply, pitch: "none", escalateToHuman: stuck, outbound: false, safetyClass: "none", flags, model: gen.model };
       }

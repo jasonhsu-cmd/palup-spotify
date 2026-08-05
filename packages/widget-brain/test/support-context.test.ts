@@ -11,11 +11,16 @@ const call = (message: string, o: { mood?: string; context?: SupportContext } = 
   handleSupport(commerce, "shopper-demo", message, o.mood, { enabled: false, shopperVerified: false }, o.context);
 
 describe("D1 — context-aware support fallback", () => {
-  it("escalation_pending signal → bridge (a person is still coming), not a restart", async () => {
+  it("escalation_pending signal → bridge (the issue is still flagged), not a restart", async () => {
     const r = await call("while I wait, which moisturizer is better?", { context: { openIssues: ["escalation_pending"] } });
     expect(r.escalate).toBe(true);
-    expect(r.reply).toMatch(/still (looking into|on)|team is|follow up|hang/i);
+    // P6 — the bridge states the RECORD ("still flagged … still open"), not an unknowable fact about a
+    // human ("a member of our team is still looking into this and will follow up shortly"): nothing
+    // delivers an escalation to a person, so the agent cannot know that. See
+    // packages/widget-brain/test/shopper-promise-honesty.test.ts.
+    expect(r.reply).toMatch(/still flagged|still open|hang/i);
     expect(r.reply).not.toMatch(/share your order number/i);
+    expect(r.reply).not.toMatch(/is (still )?(looking into|working on)/i);
   });
 
   it("an open issue on file → resumes it BY NAME, shows memory", async () => {
@@ -165,7 +170,7 @@ describe("D1c — refund-eligibility answer + replacement acceptance", () => {
   it("accepting a replacement after a damaged-item offer → arranges it, not a generic escalation (GS-3)", async () => {
     const r = await call("just send a new one.", { mood: "frustrated", context: { openIssues: ["defective"] } });
     expect(r.reply).toMatch(/replacement|send a new one|new one/i);
-    expect(r.reply).not.toMatch(/look into this|connected you with a member of our team/i); // not the generic complaint escalation
+    expect(r.reply).not.toMatch(/look into it and make it right|flagged this for a member of our team/i); // not the generic complaint escalation
     expect(r.escalate).toBe(true);
     expect(r.flags).toContain("replacement_routed");
   });

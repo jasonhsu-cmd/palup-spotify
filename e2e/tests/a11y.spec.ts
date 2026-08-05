@@ -209,15 +209,17 @@ test.describe("axe — WCAG 2.2 AA over the shopper widget's states", () => {
     await expectAxeClean(page, "mid-conversation");
   });
 
-  test("state 4 — escalation / human take-over handoff", async ({ page }) => {
+  test("state 4 — escalation / flagged-for-a-person notice", async ({ page }) => {
     await shopperLoad(page);
     await page.getByTestId("chat-input").fill("my face is burning after using it");
     await page.getByTestId("send").click();
-    // The real mock-mode brain classifies this as a product-safety report and escalates, which
-    // latches the widget into its human-handoff presentation (header recoloured, status rewritten).
+    // The real mock-mode brain classifies this as a product-safety report and escalates, which latches
+    // the widget into its escalation presentation (header recoloured, status rewritten). P6 changed the
+    // wording — it used to read "Connecting you with a person", which claimed a live handoff that has no
+    // production producer AND dropped the AI disclosure; the status now keeps both facts.
     await expect(page.getByTestId("handoff")).toBeVisible();
-    await expect(page.locator("#whStatus")).toHaveText("Connecting you with a person");
-    await expectAxeClean(page, "escalated / handoff latched");
+    await expect(page.locator("#whStatus")).toHaveText("AI assistant · flagged for a person");
+    await expectAxeClean(page, "escalated / flagged-for-a-person latched");
   });
 
   test("state 5 — offline + retry affordance", async ({ page }) => {

@@ -194,7 +194,7 @@ see open question **Q8**.
 | Stored in the browser's `localStorage`, namespaced per embed key so two merchants on the same origin never share it | `index.html:192,203-208` |
 | Scoped per merchant server-side; `::` is rejected inside either component so a crafted id cannot reach another subject's slot | `identity.ts:39-59` |
 | A client-supplied id is never trusted verbatim — it must pass a charset/length check or it is dropped | `identity.ts:64-74`, applied at `signals.ts:104`, `server.ts:636,702` |
-| Resettable: "Forget everything about me" erases server-side and mints a brand-new id locally | `index.html:320-333` |
+| Resettable: "Forget everything about me" erases server-side and mints a brand-new id locally — **only when `/forget` actually returns ok** (PR-P6). A failed call now keeps the id and says so, because rotating it would strand the un-erased notes under an id the shopper no longer holds | `forgetMe()` in `index.html` |
 
 ## 6. How long notes are kept — 30 days that slide from your last visit
 
@@ -237,10 +237,10 @@ see open question **Q8**.
 | Control | What it does today | Implementation |
 |---|---|---|
 | "Preferences" / "Health notes" toggles | Records the choice (`POST /consent`); stops future writes of that tier and stops that tier being surfaced at read time | `index.html:291-318,224-235`; `server.ts:584-645`; `runtime-consent-store.ts:60-81`; read-time gate `brain.ts:1135` |
-| "Forget everything about me" | Calls `POST /forget`, which erases the whole subject namespace (both tiers) via the vector port, audited; then the widget mints a fresh anonymous id | `index.html:310-333`; `server.ts:660-710`; `packages/widget-memory/src/erasure.ts:63-69` (`eraseSubject` → `deleteNamespace`) |
+| "Forget everything about me" | Calls `POST /forget`, which erases the whole subject namespace (both tiers) via the vector port, audited; **on an ok response** the widget then mints a fresh anonymous id and confirms. On a failure (network or non-ok) it changes nothing and tells the shopper nothing was deleted — PR-P6; it used to confirm success and rotate the id regardless of the response | `forgetMe()` in `index.html`; `POST /forget` in `server.ts`; `packages/widget-memory/src/erasure.ts` (`eraseSubject` → `deleteNamespace`) |
 | Clearing browser storage | Drops the id; nothing can be re-derived from it, so the shopper is effectively forgotten going forward (the server-side notes then age out on their own TTL) | `identity.ts:29-37`, `index.html:203-208` |
 
-**Three gaps counsel must be told about before this notice is published:**
+**Four gaps counsel must be told about before this notice is published:**
 
 1. **Turning a toggle off does not delete what is already stored.** The ADR calls for erasure-first
    withdrawal, and per-tier purge functions exist (`erasure.ts:77-96` `withdrawConsent2`,
@@ -256,6 +256,14 @@ see open question **Q8**.
    receives the request and to data that itself only lives in process memory. Until a durable adapter is
    merged, the notice must not promise deletion "from our systems". `/forget` also does **not** clear the
    shopper's consent record (`server.ts:708` erases the vector namespace only). See **Q9** and **Q11**.
+4. **"Forget everything about me" does not delete the conversation itself, and structurally cannot.**
+   `eraseSubject` deletes the subject's fact namespace only. The per-tenant **traffic log** keeps the
+   shopper's message and the agent's reply (`logTraffic`, `packages/widget-backend/src/canary.ts` —
+   redacted for cards/SSNs, keyed by a HASHED sessionId, trimmed to the last `TRAFFIC_KEEP_LAST` entries,
+   default 5,000), and there is no `anonId → sessionId` link anywhere in the code, so `/forget` cannot
+   reach it even in principle. The widget's own helper text now discloses this rather than implying a
+   total erase (PR-P6); a notice saying "we delete everything about you" would be false for this reason
+   before any other.
 
 ## 8. Logging
 
