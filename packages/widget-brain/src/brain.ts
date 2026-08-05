@@ -1188,9 +1188,12 @@ export function createBrain(
               // recall". This is the DEFAULT mode, so it shipped to every shopper. Until Tier 3 (governed
               // WEB retrieval, docs/design/shopper-widget.md:118-121) is built, "full" states its real
               // capability. RESTORE the citation allowance in the same PR that lands a WEB retrieval
-              // port — not before, and specifically NOT on the strength of E1: E1's CatalogRetrieverPort
-              // is Tier 1, first-party retrieval over the merchant's OWN catalog. It cites nothing
-              // external and changes nothing here.
+              // port — not before, and specifically NOT on the strength of E1 or E2. E1's
+              // CatalogRetrieverPort is Tier 1, first-party retrieval over the merchant's OWN catalog.
+              // E2's "citations" are INTERNAL bookkeeping tags over that same first-party catalog,
+              // stripped before the shopper ever sees the reply (citations.ts) — they are not SOURCE
+              // citations for an external claim, which is what this policy is about. Neither cites
+              // anything external and neither changes anything here.
               : "\nCOMPETITOR POLICY: You have NO web access or live sources, so you CANNOT cite a current competitor fact - never state one as current or certain, and never imply you looked it up. Give an honest GENERAL comparison from general knowledge (what to look for in this category), ground OUR side from the catalog, and redirect to the shopper's need. Never fabricate a competitor fact and never disparage.";
       }
       // Data residency / consent regime by jurisdiction — compliance enforced in CODE, never a POLICY.
