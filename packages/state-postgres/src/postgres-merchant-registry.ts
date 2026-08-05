@@ -52,10 +52,13 @@ import type { Sql } from "./sql.js";
 //      an arbitrary tenant. `migrate()` inherits the same posture: it cannot build the unique index over
 //      duplicate rows, so it surfaces that instead of continuing as if the invariant held.
 //
-// SQL INJECTION: every value below — including `shopDomain`, which arrives from a Shopify redirect in C1
-// and is therefore externally influenced — is a BOUND `$n` parameter. There is no string interpolation,
-// concatenation or template substitution anywhere in a statement in this file; the only dynamic part of
-// any query is its parameter array. Same discipline as postgres-runtime-store.ts / postgres-vector-store.ts.
+// SQL INJECTION: every VALUE below — including `shopDomain`, which arrives from a Shopify redirect in C1
+// and is therefore externally influenced — is a BOUND `$n` parameter. Being exact rather than sweeping:
+// the statements DO template-substitute one thing, the module-level `COLUMNS` constant (a fixed column
+// list, defined in this file, never derived from input — the same shape of substitution
+// postgres-runtime-store.ts:220-224 already uses for its `base` query text). No caller-supplied string
+// ever reaches query text: the only per-call input is the parameter array. Same discipline as
+// postgres-runtime-store.ts / postgres-vector-store.ts.
 //
 // NO SECRETS IN THIS TABLE. `pl_merchant` holds non-secret identity/config only. A merchant's
 // Storefront/delegate token stays in `SecretsPort` (widget-backend/src/merchant-store.ts:16,47) and must
