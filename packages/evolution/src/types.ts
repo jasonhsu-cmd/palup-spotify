@@ -128,13 +128,21 @@ export interface CandidateRecord {
   gate?: GateResult;
   seq: number;
   /**
-   * ADR-0014 T4 auto-optimize lane (engine-enforced stage completion). ABSENT on the human lifecycle —
-   * no human-path method reads it, so the human path is byte-for-byte unchanged. `gating: true` records
-   * that beginAutoOptimize verified a POSITIVE cross-family gating grade (the delta over engine.gate,
-   * which passes gating===undefined). The stage advances ONLY in order and ONLY on an engine-derived
-   * pass; the durable serving write refuses unless autoPromotable() re-derives ok from these markers.
+   * Staged promotion record (shadow → canary), for BOTH lanes as of 2026-08-05.
+   *
+   * It was previously auto-lane-only, and the comment here said "ABSENT on the human lifecycle — no
+   * human-path method reads it, so the human path is byte-for-byte unchanged". That was accurate and it
+   * was precisely the defect: it meant the human lane — the only lane an operator can drive — reached
+   * 100% of live traffic with no shadow and no canary, contradicting CLAUDE.md §3 NN#2. `beginStaging`
+   * now creates this for the human lane too and `humanPromotable` requires both markers.
+   *
+   * `gating` is OPTIONAL and is the marker that keeps the two lanes distinct: `beginAutoOptimize` sets
+   * it to `true` after verifying a POSITIVE cross-family grade, and `autoPromotable` requires it, so
+   * human-lane staging can never satisfy the auto lane. (It was typed as a required `true` while the
+   * record was auto-only; human staging leaves it absent. Nothing here typechecks — there is no root
+   * tsconfig and CI has no typecheck step — so this would not have been caught by the build.)
    */
-  auto?: { stage: AutoStage; gating: true; shadow?: StageMarker; canary?: StageMarker };
+  auto?: { stage: AutoStage; gating?: true; shadow?: StageMarker; canary?: StageMarker };
   /** Who approved this candidate (set by engine.approve) — the audit-of-record actor for any downstream
    * promotion. A serving-promotion path must bind its audit to THIS, never a caller-supplied string. */
   approvedBy?: string;
