@@ -79,22 +79,72 @@ const RL_WINDOW = posInt("RL_WINDOW_SECONDS", 60);
 // Widget tenant identity (T2/T3): the tenant is derived from a verified widget token. WIDGET_AUTH_REQUIRED
 // gates ENFORCEMENT — off during rollout (unauthenticated requests fall back to RUNTIME_TENANT); flip on
 // once the widget mints+sends a token and the signing secret is provisioned, retiring the fallback.
-// Publishable embed-key → merchantId registry (the key ships in the storefront snippet). JSON via env;
-// defaults to the demo tenant. NOT a secret — it only names which merchant a widget belongs to.
-function parseEmbedKeys(): Record<string, string> {
-  const map: Record<string, string> = Object.create(null); // null proto: no __proto__/constructor keys
-  const raw = process.env.WIDGET_EMBED_KEYS;
-  if (raw) {
-    try {
-      const o = JSON.parse(raw);
-      if (o && typeof o === "object") {
-        for (const [k, v] of Object.entries(o)) if (typeof v === "string" && v) map[k] = v; // values must be non-empty strings
-      }
-    } catch {
-      console.warn("[config] WIDGET_EMBED_KEYS is not valid JSON — using the demo default");
-    }
+// Publishable embed-key → merchantId registry (the key ships in the storefront snippet). JSON via env.
+// NOT a secret — it only names which merchant a widget belongs to.
+//
+// FAIL CLOSED (this used to fail OPEN onto the demo tenant). The previous version `console.warn`ed on
+// unparseable JSON, silently dropped any entry whose value wasn't a non-empty string, and then installed
+// `{"demo-embed-key":"demo"}` whenever the result was empty. A logged fallback is still a silent
+// fallback: a typo'd/truncated WIDGET_EMBED_KEYS substituted a DIFFERENT tenant registry than the one the
+// operator declared, and every downstream write is keyed by the tenantId that registry resolves —
+// sessions, the rate-limit buckets, the immutable audit log, telemetry, the traffic/canary log, consent
+// records, the memory namespace, the per-tenant champion/canary policy, AND the Shopify grounding
+// context. Concretely: merchant A's widget can no longer mint (its key isn't in the substituted
+// registry), so with WIDGET_AUTH_REQUIRED off it drops the Authorization header (widget/public/index.html
+// keeps `widgetToken = null` on a non-OK mint) and /chat, /consent and /forget all fall back to
+// RUNTIME_TENANT="demo" — merchant A's shoppers are then served the demo tenant's catalog/policies and
+// their state lands in the demo tenant's namespaces. That is the cross-tenant isolation invariant
+// (docs/design/security-data-path.md §2 + Inv 1; docs/design/shopper-widget.md "tenant isolation"), and
+// it also breaks NN#4: an operator arming a kill for `tenant-a` would not halt traffic being served as
+// `demo`.
+//
+// So: refuse to BOOT rather than serve a substituted registry. Mirrors the two precedents in this repo
+// rather than inventing a mechanism — `assertMemoryAuthCoupling` below (refuse to boot on a dangerous
+// config, exported taking plain values so a test can exercise it without touching real env) and
+// `createRuntimeStore`/`PALUP_REQUIRE_DATABASE_URL` (state-postgres/factory.ts: fail fast, never silently
+// degrade). `requireExplicitRegistry` reuses that SAME existing "this is a real deployment" signal (set
+// by the prod/staging deploy) rather than adding a new env var; local/dev/test, which set neither var,
+// keep the built-in demo default byte-identical to before.
+//
+// The error names the variable and the rule but never echoes the configured value (it is operator input
+// that lands in a boot log).
+export function resolveEmbedKeys(raw: string | undefined, requireExplicitRegistry: boolean): Record<string, string> {
+  const reject = (why: string): never => {
+    throw new Error(
+      `WIDGET_EMBED_KEYS ${why} — refusing to boot rather than silently serving the built-in ` +
+        `"demo-embed-key" -> "demo" registry in its place (a substituted registry collapses every ` +
+        `merchant onto the fallback tenant: see this function's own comment). Set WIDGET_EMBED_KEYS to ` +
+        `a JSON object of {"<publishable-embed-key>":"<tenantId>"} with non-empty string values.`,
+    );
+  };
+  if (raw === undefined || raw === "") {
+    // Nothing declared. Convenient for local/dev/demo; unacceptable for a real deployment, which must
+    // name its own tenants (staging declares the demo tenant explicitly — see deploy-staging.yml).
+    if (requireExplicitRegistry) return reject("is not set, but this is a real deployment (PALUP_REQUIRE_DATABASE_URL=true)");
+    const fallback: Record<string, string> = Object.create(null);
+    fallback["demo-embed-key"] = "demo";
+    return fallback;
   }
-  if (Object.keys(map).length === 0) map["demo-embed-key"] = "demo";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return reject("is not valid JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return reject("is not a JSON object");
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  // An explicitly EMPTY registry is unusable (no widget could ever mint) and is exactly the case that
+  // used to become the demo tenant.
+  if (entries.length === 0) return reject("declares no embed keys");
+  const map: Record<string, string> = Object.create(null); // null proto: no __proto__/constructor keys
+  for (const [k, v] of entries) {
+    // Reject the WHOLE registry on ANY bad entry rather than dropping it: a dropped merchant's widget
+    // cannot mint and then serves under the fallback tenant — the same collapse, one merchant at a time,
+    // and the old code did not even warn for that case (the map stayed non-empty).
+    if (!k) return reject("contains a blank embed key");
+    if (typeof v !== "string" || !v) return reject("maps an embed key to something other than a non-empty string tenant id");
+    map[k] = v;
+  }
   return map;
 }
 // Go-live #3 — couple memory enablement to enforced widget auth. During the WIDGET_AUTH_REQUIRED
@@ -191,6 +241,12 @@ export async function buildServer(opts?: {
   const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
   const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
   assertMemoryAuthCoupling(memoryServiceEnabled, WIDGET_AUTH_REQUIRED);
+  // Same fail-fast placement, same reason: both inputs are pure env reads with no I/O, so a rejected boot
+  // leaves no pool/DDL work behind. `PALUP_REQUIRE_DATABASE_URL` is the EXISTING marker the prod/staging
+  // deploy sets (state-postgres/factory.ts) — reused as the "real deployment" signal rather than adding a
+  // parallel env var that could drift from it. Resolved here (not lazily at the routes) so a bad registry
+  // can never reach a request.
+  const EMBED_KEYS = resolveEmbedKeys(process.env.WIDGET_EMBED_KEYS, process.env.PALUP_REQUIRE_DATABASE_URL === "true");
 
   // The shared run-time state store (Cloud SQL in prod via DATABASE_URL, in-memory locally). Tests can
   // inject a store so they can arm an operator kill on the SAME instance the request path reads. When a
@@ -350,7 +406,8 @@ export async function buildServer(opts?: {
   const WIDGET_TOKEN_TTL_SECONDS = posInt("WIDGET_TOKEN_TTL_SECONDS", 3_600);
   // `WIDGET_AUTH_REQUIRED` is computed once, at the very top of this function (before the fail-fast boot
   // guard) — reused here unchanged.
-  const EMBED_KEYS = parseEmbedKeys();
+  // `EMBED_KEYS` is resolved once, at the very top of this function (alongside the other fail-fast boot
+  // guards) — see `resolveEmbedKeys`.
   const widgetIdentity = createWidgetTokenIdentity(WIDGET_TOKEN_SECRET);
   // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
   // F4 (startup precondition): SHOPPER_AUTH is only ever HONORED when WIDGET_AUTH_REQUIRED is ALSO on —
@@ -914,10 +971,26 @@ export async function buildServer(opts?: {
       return { error: "paused" };
     }
 
-    // SUBJECT-SCOPED AUTH — same derivation as /consent and /chat. This endpoint is DESTRUCTIVE, so it
-    // is the one that most needed it: previously anyone who obtained another shopper's anonId could
-    // erase that shopper's memory. For a server-verified shopper the target is `acct:<shopperId>` and a
-    // supplied anonId is ignored, so a caller can only ever erase their OWN subject.
+    // SUBJECT-SCOPED AUTH — same derivation as /consent and /chat. This endpoint is DESTRUCTIVE, so it is
+    // the one that most needed it: for a server-verified shopper the PRIMARY target is `acct:<shopperId>`,
+    // derived server-side, and it is always erased.
+    //
+    // CORRECTED (2026-08-05, verified by reading this handler end to end): this comment previously
+    // concluded "so a caller can only ever erase their OWN subject." That is FALSE as written, and it
+    // contradicted this file's own code and comments ~30 lines apart in two ways:
+    //   (i) the shopper token is never REQUIRED here — an unauthenticated caller (or one who simply omits
+    //       the header) still reaches the guest path below with any well-formed anonId they hold. That is
+    //       the accepted C1 bearer-capability residual the paragraph ABOVE this one already states plainly
+    //       (named-owner decision, 2026-08-04, docs/MEMORY-GO-LIVE-CHECKLIST.md C1); and
+    //  (ii) on a VERIFIED turn the N1 block below deliberately ALSO erases a co-presented anonId, which
+    //       the server cannot distinguish from the caller's own — see its own comment for why that is a
+    //       safe trade rather than a new capability.
+    // What IS true and load-bearing, and is now pinned at the route level by
+    // consent-forget-account-namespace-unreachable.test.ts: the client-supplied `anonId` can only ever
+    // name a GUEST subject. `memorySubjectId` routes it through `validateAnonId`'s base32 charset
+    // (widget-memory/src/identity.ts), which admits no `:` and no lowercase — so no `acct:<shopperId>` id
+    // and no `::` namespace-injection string can pass. That boundary is what keeps C1's accepted exposure
+    // at "a 128-bit CSPRNG guest id" instead of the ENUMERABLE account subject of every signed-in shopper.
     const verifiedShopperId = await verifiedShopperIdFor(principal, tenantId, req.headers["x-shopper-token"], body.shopperToken);
     const subject = memorySubjectId({ verifiedShopperId, rawAnonId: body.anonId });
     if (!subject) {
