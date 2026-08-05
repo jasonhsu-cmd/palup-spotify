@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { AuditInput, MerchantRecord, MerchantRegion, MerchantRegistryPort, RuntimeStatePort } from "@palup/platform-ports";
 import { randomToken } from "../shopify-customer-account-identity.js";
+import { clientIpKey } from "../rate-limit.js";
 import {
   buildInstallAuthorizeUrl,
   createDelegateAccessToken,
@@ -118,6 +119,13 @@ export interface ShopifyInstallDeps {
   killCheck: (tenantId: string) => Promise<boolean>;
   /** Unix seconds. */
   now: () => number;
+  /**
+   * Per-IP rate limit for these PUBLIC, unauthenticated routes — `false` ⇒ refuse with 429. Every sibling
+   * public route in server.ts caps itself the same way (`/widget/token`, `/shopper/session`, the CAA
+   * routes, `/consent`). Without it, an anonymous caller can make this process compute an unbounded number
+   * of HMACs, and the audit chain that a completed install appends to is immutable and non-trimmable.
+   */
+  checkRateLimit?: (ipKey: string) => Promise<boolean>;
   pendingTtlSeconds?: number;
   /** Injectable only so a test can pin the generated embed key; production uses the CSPRNG default. */
   newEmbedKey?: () => string;
@@ -142,6 +150,8 @@ type Refusal =
   | "shop_mismatch"
   | "no_code"
   | "halted"
+  | "rate_limited"
+  | "internal_error"
   | "no_app_secret";
 
 /** An upstream/internal failure: the request was legitimate, we could not complete it. */
@@ -233,6 +243,19 @@ function logRefusal(where: "install" | "callback", reason: Refusal | Failure): v
  * asked. Everything is checked before anything is written.
  */
 export async function startInstall(deps: ShopifyInstallDeps, rawQuery: Record<string, unknown>): Promise<InstallStart> {
+  try {
+    return await startInstallInner(deps, rawQuery);
+  } catch {
+    // An outer catch so NO exception can reach the HTTP layer. Two reasons, both load-bearing: Fastify's
+    // default error handler puts `err.message` in the response body, and this function calls a SecretsPort,
+    // a kill registry and a state store — any of which could throw a message built from operator config. A
+    // uniform refusal is the only safe rendering. The swallowed error is deliberate: see `logRefusal`.
+    logRefusal("install", "internal_error");
+    return { ok: false, refused: "internal_error" };
+  }
+}
+
+async function startInstallInner(deps: ShopifyInstallDeps, rawQuery: Record<string, unknown>): Promise<InstallStart> {
   const params = normalizeOauthQuery(rawQuery);
   const secret = await deps.clientSecret();
   if (!secret) return { ok: false, refused: "no_app_secret" };
@@ -285,6 +308,22 @@ export async function startInstall(deps: ShopifyInstallDeps, rawQuery: Record<st
  *   11.  Audit, then the registry write (see the header for why this cannot be one transaction).
  */
 export async function completeInstall(
+  deps: ShopifyInstallDeps,
+  rawQuery: Record<string, unknown>,
+  cookieHeader: unknown,
+): Promise<InstallComplete> {
+  try {
+    return await completeInstallInner(deps, rawQuery, cookieHeader);
+  } catch {
+    // Same reasoning as `startInstall`'s outer catch, with more at stake: the values in scope inside this
+    // function include the app client secret, the authorization code, the parent access token and the
+    // delegate token. No exception may carry any of them (or a stack referencing them) to a response.
+    logRefusal("callback", "internal_error");
+    return { ok: false, refused: "internal_error" };
+  }
+}
+
+async function completeInstallInner(
   deps: ShopifyInstallDeps,
   rawQuery: Record<string, unknown>,
   cookieHeader: unknown,
@@ -435,7 +474,28 @@ const FAILED_PAGE = page("We couldn't finish the installation", "Nothing was cha
  * anyone, and both validate before they trust.
  */
 export function registerShopifyInstallRoutes(app: FastifyInstance, deps: ShopifyInstallDeps): void {
+  /**
+   * Per-IP cap, checked before any HMAC work. FAIL CLOSED, unlike `/widget/token`'s limiter, which
+   * deliberately fails OPEN ("minting is cheap"): these routes accrue durable, audited credential custody,
+   * so if the limiter itself is broken the right answer is to refuse, not to proceed uncapped.
+   */
+  const limited = async (req: { headers: Record<string, unknown>; ip: string }): Promise<boolean> => {
+    if (!deps.checkRateLimit) return false;
+    try {
+      const xff = req.headers["x-forwarded-for"];
+      const ipKey = clientIpKey(Array.isArray(xff) ? (xff[0] as string) : (xff as string | undefined), req.ip);
+      return !(await deps.checkRateLimit(ipKey));
+    } catch {
+      return true;
+    }
+  };
+
   app.get("/shopify/install", async (req, reply) => {
+    if (await limited(req)) {
+      logRefusal("install", "rate_limited");
+      reply.code(429).type("text/html");
+      return REFUSED_PAGE;
+    }
     const r = await startInstall(deps, (req.query ?? {}) as Record<string, unknown>);
     if (!r.ok) {
       logRefusal("install", r.refused);
@@ -452,6 +512,11 @@ export function registerShopifyInstallRoutes(app: FastifyInstance, deps: Shopify
   });
 
   app.get("/shopify/callback", async (req, reply) => {
+    if (await limited(req)) {
+      logRefusal("callback", "rate_limited");
+      reply.code(429).type("text/html");
+      return REFUSED_PAGE;
+    }
     const r = await completeInstall(deps, (req.query ?? {}) as Record<string, unknown>, req.headers.cookie);
     reply.type("text/html").header("cache-control", "no-store");
     // Clear the state cookie on every outcome: it is single-use, and leaving it set would keep a stale

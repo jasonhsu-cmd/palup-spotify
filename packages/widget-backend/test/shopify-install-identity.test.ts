@@ -7,6 +7,7 @@ import {
   buildInstallAuthorizeUrl,
   createDelegateAccessToken,
   exchangeInstallCode,
+  grantedScopesCover,
   isValidShopDomain,
   normalizeOauthQuery,
   signOauthQuery,
@@ -405,6 +406,18 @@ describe("shopify-install-identity — delegateAccessTokenCreate", () => {
     });
     expect(res).toBeNull();
     expect(message).toBe("unset");
+  });
+
+  it("grantedScopesCover honours the documented read/write implication, and refuses a short grant", () => {
+    // [S1] "Confirm the requested scopes" + "If you requested both the read and write access scopes for a
+    // resource, then check only for the write access scope."
+    expect(grantedScopesCover(["unauthenticated_read_product_listings"], ["unauthenticated_read_product_listings"])).toBe(true);
+    expect(grantedScopesCover(["read_orders"], ["write_orders"])).toBe(true); // write implies read
+    expect(grantedScopesCover(["write_orders"], ["read_orders"])).toBe(false); // read does NOT imply write
+    expect(grantedScopesCover(["a", "b"], ["a"])).toBe(false); // a merchant who granted less
+    expect(grantedScopesCover(["a"], [])).toBe(false); // nothing granted at all
+    expect(grantedScopesCover([], ["a"])).toBe(true); // nothing required is vacuously covered
+    expect(grantedScopesCover(["read_x"], ["write_y"])).toBe(false); // the implication is per-resource
   });
 
   it("defaults to the least-privilege Storefront scope this product actually reads", () => {

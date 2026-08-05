@@ -613,6 +613,9 @@ export async function buildServer(opts?: {
       // NN#4 — the SAME `matchedKill` the /chat path reads, so a halt at any of the three scopes
       // (global / tenant / agent) stops an install from beginning or completing.
       killCheck: async (tenantId) => (await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) !== null,
+      // Same per-IP bucket and reserved mint tenant every other public route uses (/widget/token,
+      // /shopper/session, the CAA routes) — one rate-limit mechanism, not a second one that could drift.
+      checkRateLimit: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
       now: nowSec,
     });
   }

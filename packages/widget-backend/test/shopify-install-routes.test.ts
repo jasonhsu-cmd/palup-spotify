@@ -182,6 +182,32 @@ async function auditFor(store: RuntimeStatePort, tenantId: string): Promise<Audi
   return store.readAudit({ tenantId });
 }
 
+/**
+ * A RuntimeStatePort that forwards EVERY method to `inner`, with named overrides on top. Written out
+ * explicitly rather than as `{...inner, ...overrides}` because `InMemoryRuntimeStore` is a CLASS: an object
+ * spread copies own fields only, silently dropping every prototype method. That bit this file once — the
+ * dropped `incrementWindow` made the fail-closed rate limiter refuse, which looked like a flow bug and was
+ * a test-double bug. Same shape as B2's `recordingStore` (#186).
+ */
+function delegating(inner: RuntimeStatePort, overrides: Partial<RuntimeStatePort>): RuntimeStatePort {
+  const base: RuntimeStatePort = {
+    get: (c, col, k) => inner.get(c, col, k),
+    put: (c, col, k, v, o) => inner.put(c, col, k, v, o),
+    delete: (c, col, k) => inner.delete(c, col, k),
+    list: (c, col) => inner.list(c, col),
+    append: (c, s, e) => inner.append(c, s, e),
+    readStream: (c, s, o) => inner.readStream(c, s, o),
+    incrementWindow: (c, k, w) => inner.incrementWindow(c, k, w),
+    sweepExpired: () => inner.sweepExpired(),
+    trimStream: (c, s, k) => inner.trimStream(c, s, k),
+    audit: (c, e, at) => inner.audit(c, e, at),
+    readAudit: (c, o) => inner.readAudit(c, o),
+    verifyAudit: (c, o) => inner.verifyAudit(c, o),
+    tx: (c, fn) => inner.tx(c, fn),
+  };
+  return { ...base, ...overrides };
+}
+
 /** Every secret-ish string this test knows about. None may appear anywhere observable. */
 const SECRETS = [APP_SECRET, PARENT_TOKEN, DELEGATE_TOKEN, AUTH_CODE];
 
@@ -593,16 +619,11 @@ describe("C1 fail-closed on every partial failure", () => {
 
   it("a failed AUDIT write never leaves a merchant registered (an unauditable governed write must not persist)", async () => {
     const store = new InMemoryRuntimeStore();
-    const failing: RuntimeStatePort = {
-      ...store,
-      get: (c, k, v) => store.get(c, k, v),
-      put: (c, k, v, val, o) => store.put(c, k, v, val, o),
-      delete: (c, k, v) => store.delete(c, k, v),
-      list: (c, k) => store.list(c, k),
+    const failing = delegating(store, {
       audit: async () => {
         throw new Error("audit sink unavailable");
       },
-    };
+    });
     const h = await harness({}, { store: failing });
     const { state, cookie } = await begin(h);
     const res = await callback(h, { state, cookie });
@@ -697,6 +718,89 @@ describe("C1 audit (NN#5) — every governed registry write is recorded, with a 
     // The tenant that WOULD have been created has an empty chain.
     expect(await auditFor(h.store, "acme-store")).toEqual([]);
     expect(await auditFor(h.store, INSTALL_APP_SCOPE)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+describe("C1 no unhandled exception can reach the response", () => {
+  it("a throwing KILL-SWITCH read on the INSTALL path is a uniform refusal, not a 500 carrying the message", async () => {
+    // Fastify's default error handler puts `err.message` in the body. `matchedKill` reads the store via
+    // `list`, and every dependency of this flow can throw a message built from operator config — so the
+    // outer catch is load-bearing, and this test is what proves it.
+    const boom = "STORE-INTERNAL-DETAIL-MUST-NOT-LEAK";
+    const inner = new InMemoryRuntimeStore();
+    const h = await harness({}, {
+      store: delegating(inner, {
+        list: async () => {
+          throw new Error(boom);
+        },
+      }),
+    });
+    const res = await h.app.inject({ method: "GET", url: `/shopify/install?${qs({ shop: SHOP, timestamp: String(Math.floor(Date.now() / 1000)) })}` });
+    expect(res.statusCode).toBe(400); // refused, NOT 500
+    expect(res.body).not.toContain(boom);
+    expectNoSecrets(res.body, "the refusal body");
+    // Nothing was minted: an install that could not check the kill switch must not proceed (NN#4).
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(h.sink.puts).toEqual([]);
+  });
+
+  it("a throwing store on the CALLBACK path never leaks the error and never registers a merchant", async () => {
+    const inner = new InMemoryRuntimeStore();
+    let armed = false;
+    const h = await harness({}, {
+      store: delegating(inner, {
+        delete: async (c, col, k) => {
+          if (armed) throw new Error("STORE-INTERNAL-DETAIL-LEAKED");
+          return inner.delete(c, col, k);
+        },
+      }),
+    });
+    const { state, cookie } = await begin(h);
+    armed = true;
+    const res = await callback(h, { state, cookie });
+    expect([400, 502]).toContain(res.statusCode);
+    expect(res.body).not.toContain("STORE-INTERNAL-DETAIL-LEAKED");
+    expectNoSecrets(res.body, "the failure body");
+    expect(await h.registry.lookupByShopDomain(SHOP, { includeInactive: true })).toBeNull();
+    expect(h.sink.puts).toEqual([]);
+  });
+});
+
+describe("C1 the public routes are rate-limited like every sibling", () => {
+  it("caps per IP and FAILS CLOSED — a broken limiter refuses rather than proceeding uncapped", async () => {
+    const h = await harness();
+    // The limiter is wired in the composition root against the shared store's window counter. Drive enough
+    // requests through the (unauthenticated) install route to exceed the default per-IP window.
+    let sawLimit = false;
+    for (let i = 0; i < 200; i++) {
+      const res = await h.app.inject({
+        method: "GET",
+        url: `/shopify/install?${qs({ shop: SHOP, timestamp: String(Math.floor(Date.now() / 1000)) })}`,
+        headers: { "x-forwarded-for": "203.0.113.9" },
+      });
+      if (res.statusCode === 429) {
+        sawLimit = true;
+        break;
+      }
+    }
+    expect(sawLimit, "the install route must be per-IP rate limited").toBe(true);
+  });
+});
+
+describe("C1 the `demo` tenant collision is LOUD, never a cross-tenant merge", () => {
+  it("a shop whose derived tenant id is already taken by another shop FAILS — it never merges into it", async () => {
+    const registry = createInMemoryMerchantRegistry();
+    // The built-in fallback tenant id (server.ts:53,125), already registered to a DIFFERENT shop.
+    await registry.create({ tenantId: "demo", shopDomain: "someone-elses-store.myshopify.com", embedKey: "demo-embed-key", region: "us" });
+    const h = await harness({}, { registry });
+    const { state, cookie } = await begin(h, "demo.myshopify.com");
+    const res = await callback(h, { state, cookie, shop: "demo.myshopify.com" });
+    expect(res.statusCode).toBe(502); // loud failure
+    // The existing `demo` tenant is untouched and still points at its own shop.
+    const demo = (await registry.lookupByTenantId("demo"))!;
+    expect(demo.shopDomain).toBe("someone-elses-store.myshopify.com");
+    expect(await registry.lookupByShopDomain("demo.myshopify.com", { includeInactive: true })).toBeNull();
   });
 });
 
