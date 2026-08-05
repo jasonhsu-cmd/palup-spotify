@@ -10,7 +10,7 @@ import {
   type Consent,
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY, normalizeHistory } from "@palup/widget-brain";
-import type { RuntimeStatePort, ModelPort, VectorPort, Principal } from "@palup/platform-ports";
+import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort } from "@palup/platform-ports";
 import {
   createWidgetTokenIdentity,
   mintWidgetToken,
@@ -18,12 +18,13 @@ import {
   mintShopperToken,
   shopperIdTenant,
   createEnvSecrets,
+  createAesGcmCrypto,
   createStoreTelemetry,
   createMeteringModelPort,
   createRedactingModelPort,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, PostgresMerchantRegistry, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -44,6 +45,12 @@ import {
   type CallbackResult,
 } from "./customer-account-flow.js";
 import { parseStoreDomains } from "./merchant-store.js";
+import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE, DELEGATE_SCOPES_DEFAULT } from "./shopify-install-identity.js";
+import {
+  registerShopifyInstallRoutes,
+  INSTALL_SCOPES_DEFAULT,
+  type MerchantCredentialSink,
+} from "./routes/shopify-install.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
 // multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
@@ -219,6 +226,20 @@ export async function buildServer(opts?: {
   /** ADR-0018 test seam: inject the outbound fetch used by the CAA OAuth routes (discovery/token/JWKS)
    * so route tests never hit the network. Prod uses the global fetch. */
   caaFetch?: typeof globalThis.fetch;
+  /** C1 test seam (mirrors `caaFetch`): the outbound fetch used by the Shopify install routes for the
+   * token exchange and `delegateAccessTokenCreate`. Prod uses the global fetch. */
+  installFetch?: typeof globalThis.fetch;
+  /** C1 test seam: the MerchantRegistryPort the install routes write to. Prod builds a
+   * `PostgresMerchantRegistry` over the SAME pool the runtime store opened, when DATABASE_URL is set. */
+  merchantRegistry?: MerchantRegistryPort;
+  /**
+   * C1 — encrypted per-merchant credential custody for the delegate token. NOT CONSTRUCTED IN PRODUCTION
+   * YET: the only implementation is B2's `createMerchantCredentialStore` (#186), which is unmerged, so
+   * today this arrives only from a test. Absent ⇒ the install routes are NOT REGISTERED (see the gate
+   * below). That is deliberate, not an oversight: an install that minted a delegate token and then had
+   * nowhere to store it would leave a live Shopify credential with no custody and no revocation path.
+   */
+  merchantCredentials?: MerchantCredentialSink;
   /**
    * PR-8 test seam — mirrors `createMemoryService`'s own `enabled` override (service.ts), and is
    * subject to the EXACT SAME safeguard: honored ONLY under a real test runner (VITEST=true /
@@ -514,7 +535,96 @@ export async function buildServer(opts?: {
   // NN#4 — no new credential custody may begin/accrue for a halted tenant/agent (mirrors the /chat gate).
   const caaKillCheck = async (tenant: string): Promise<boolean> => (await matchedKill(store, { tenantId: tenant, agentType: RUNTIME_AGENT_TYPE })) !== null;
 
+  // ── C1 — Shopify app install (OAuth authorization code grant → delegate access token) ──────────────
+  //
+  // WHAT THIS DOES AND DOES NOT DO. It records an install in `pl_merchant` (B1) and custodies the
+  // merchant's delegate token (B2). It does NOT make the merchant servable: every tenancy read on the
+  // serving path above still comes from env vars (EMBED_KEYS, parseStoreDomains, MERCHANT_REGION,
+  // MERCHANT_GROUNDING_MODE) and the Storefront token still comes from `resolveShopifyStore`'s SecretsPort
+  // lookup. Cutting those over is D1/D2. See routes/shopify-install.ts's header for the full list.
+  //
+  // FULLY-CONFIGURED-OR-ABSENT, the same posture as CAA_ENABLED: every precondition below is individually
+  // load-bearing and a missing one means the routes are never registered (404), not that they half-work.
+  //   • SHOPIFY_APP_CLIENT_ID          — the app's OAuth client id (not a secret; it ships in the URL).
+  //   • SHOPIFY_INSTALL_REDIRECT_URI   — must ALSO be registered as an allowed redirect URL on the app.
+  //   • SHOPIFY_INSTALL_REGION         — REQUIRED, no default. `NewMerchant.region` is required on purpose
+  //     (merchant-registry-port.ts:89-91): the silent `"us"` fallback below is a residency decision made by
+  //     an unset env var, and the legal review flagged exactly that. Shopify's callback carries no
+  //     residency signal, so an operator declares it or the feature stays off.
+  //   • the app client secret in the SecretsPort under the APP-scoped sentinel — read once here for the
+  //     gate, and again per request inside the flow so a rotation needs no redeploy.
+  //   • a durable MerchantRegistryPort — DATABASE_URL must be set. An in-memory registry is deliberately
+  //     NOT accepted: it would forget every install on the next cold start while reporting success, which
+  //     is the same class of failure `kill-switch.ts` refuses (a store nobody else can see).
+  //   • credential custody — B2's `createMerchantCredentialStore` (#186), built over the SAME
+  //     composition-root `secrets` and the SAME runtime store, so the delegate token is encrypted at rest
+  //     under a per-(tenant, scope) key and its write is audited atomically inside B2's own transaction.
+  //     It needs the per-tenant key `MEMORY_ENCRYPTION_KEY__merchant-cred` provisioned in `PALUP_SECRETS`
+  //     for each installing merchant. That key CANNOT be checked at boot (it is per-tenant, and the tenant
+  //     is unknown until a merchant installs), so a missing one surfaces at install time as a refusal:
+  //     `CryptoPort.encrypt` throws, B2 writes nothing at all, and the callback returns 502 having created
+  //     no row and no credential. Fail-closed, and the honest place for the failure — reported for
+  //     docs/DEPLOY.md (contended, so not edited here).
+  const SHOPIFY_APP_CLIENT_ID = process.env.SHOPIFY_APP_CLIENT_ID;
+  const SHOPIFY_INSTALL_REDIRECT_URI = process.env.SHOPIFY_INSTALL_REDIRECT_URI;
+  const SHOPIFY_INSTALL_REGION: MerchantRegion | undefined = (() => {
+    const r = process.env.SHOPIFY_INSTALL_REGION;
+    return r === "us" || r === "eu" || r === "uk" || r === "other" ? r : undefined; // no silent default
+  })();
+  const SHOPIFY_INSTALL_SCOPES = process.env.SHOPIFY_INSTALL_SCOPES || INSTALL_SCOPES_DEFAULT;
+  const SHOPIFY_DELEGATE_SCOPES = (process.env.SHOPIFY_DELEGATE_SCOPES ?? DELEGATE_SCOPES_DEFAULT.join(","))
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // Read at boot for the GATE only (an unprovisioned secret must make the feature absent, not 500 later).
+  const shopifyAppSecretPresent = Boolean(await secrets.get(SHOPIFY_APP_SECRET_SCOPE, SHOPIFY_APP_CLIENT_SECRET_NAME));
+  // Reuses the pool the runtime store already opened (never a second pg.Pool — the same HIGH finding that
+  // made createVectorStore share `runtimeResult.sql`).
+  const merchantRegistry: MerchantRegistryPort | undefined =
+    opts?.merchantRegistry ?? (runtimeResult.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : undefined);
+  // B2's store satisfies `MerchantCredentialSink` STRUCTURALLY (`put(tenantId, token, {actor})`), so this is
+  // an assignment with no adapter. `createAesGcmCrypto(secrets)` is the same CryptoPort construction
+  // widget-memory uses; the `merchant-cred` key scope keeps a memory-key compromise from exposing merchant
+  // credentials (crypto-port key separation).
+  const merchantCredentials: MerchantCredentialSink | undefined =
+    opts?.merchantCredentials ?? createMerchantCredentialStore(store, createAesGcmCrypto(secrets));
+  const SHOPIFY_INSTALL_ENABLED = Boolean(
+    SHOPIFY_APP_CLIENT_ID &&
+      SHOPIFY_INSTALL_REDIRECT_URI &&
+      SHOPIFY_INSTALL_REGION &&
+      shopifyAppSecretPresent &&
+      SHOPIFY_DELEGATE_SCOPES.length > 0 &&
+      merchantRegistry &&
+      merchantCredentials,
+  );
+
   const app = Fastify({ logger: false });
+
+  if (SHOPIFY_INSTALL_ENABLED) {
+    // Idempotent DDL, exactly like the runtime/vector stores' own `migrate()` — one more table in the
+    // existing database, never a new cloud resource. Only for the real Postgres adapter; an injected
+    // registry (test seam) has no migration.
+    if (merchantRegistry instanceof PostgresMerchantRegistry) await merchantRegistry.migrate();
+    registerShopifyInstallRoutes(app, {
+      store,
+      registry: merchantRegistry!,
+      credentials: merchantCredentials!,
+      clientSecret: () => secrets.get(SHOPIFY_APP_SECRET_SCOPE, SHOPIFY_APP_CLIENT_SECRET_NAME),
+      fetchFn: opts?.installFetch ?? globalThis.fetch,
+      clientId: SHOPIFY_APP_CLIENT_ID!,
+      redirectUri: SHOPIFY_INSTALL_REDIRECT_URI!,
+      requestedScopes: SHOPIFY_INSTALL_SCOPES,
+      delegateScopes: SHOPIFY_DELEGATE_SCOPES,
+      region: SHOPIFY_INSTALL_REGION!,
+      // NN#4 — the SAME `matchedKill` the /chat path reads, so a halt at any of the three scopes
+      // (global / tenant / agent) stops an install from beginning or completing.
+      killCheck: async (tenantId) => (await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) !== null,
+      // Same per-IP bucket and reserved mint tenant every other public route uses (/widget/token,
+      // /shopper/session, the CAA routes) — one rate-limit mechanism, not a second one that could drift.
+      checkRateLimit: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
+      now: nowSec,
+    });
+  }
 
   // `store`/`vector` surface which adapter is actually live (security review, MEDIUM — same rationale as
   // the [boot] log line above): "postgres" in every real deploy (DATABASE_URL set), "memory" only in
