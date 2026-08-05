@@ -22,6 +22,32 @@ export interface TelemetryEvent {
   mode?: string;
   pitch?: string;
   escalate?: boolean;
+  /**
+   * E3 — RECOMMENDATION TELEMETRY: the merchant product ids this turn's reply actually CITED, in the
+   * order it cited them (`Decision.recommendedProducts`, widget-brain). Present only on a `"turn"` event,
+   * and only when something resolved; the key is omitted entirely otherwise, so a turn that recommended
+   * nothing and a turn where the mechanism is off are byte-identical rows.
+   *
+   * IT IS NOT A BILLING BASIS, and this is the constraint that governs the field rather than a caveat on
+   * it. Chaining `recommended -> clicked -> purchased` off these ids is LAST-TOUCH attribution, which
+   * ADR-0007 §2 and docs/PRICING.md §2 explicitly forbid as a fee basis ("conservative,
+   * incrementality-based attribution ... never last-touch inflation ... the billing form of
+   * engagement-maxxing"). Any fee derived from this field would breach that ADR, and doing so would
+   * itself be a money/business-model boundary crossing under docs/HITL-POLICY.md. What it IS for:
+   * merchant-facing "what did it suggest" reporting, per-product eval grading, and debugging.
+   *
+   * IT UNDER-COUNTS BY CONSTRUCTION. It is derived from the citation mechanism, so it inherits every one
+   * of that mechanism's limits: a model that recommends a product in PROSE without copying its tag
+   * produces no entry, and citations are minted only on the clean sales path, so a proactive exit-intent
+   * turn reports nothing at all. Absence of an id means "not cited", never "not recommended". Any RATE
+   * computed from this measures the model's citation COMPLIANCE, not its recommendation behaviour —
+   * which is why `rollupEvents` below deliberately does not aggregate it into the cost rollup: an
+   * aggregate over an under-counting field is a number that looks measured and is not.
+   *
+   * PII-free like every other field here: product ids are merchant catalog identifiers, never shopper
+   * data, and no title, price or reply text is carried.
+   */
+  recommendedProductIds?: string[];
   /** ISO timestamp; stamped by the adapter on record if the caller omits it. */
   at?: string;
 }

@@ -28,6 +28,13 @@ import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUN
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
+// E3 — the ONLY server.ts change this wave makes, and it carries no flag of its own: both functions
+// return `{}` unless the `Decision` already carries cited products, and this composition root cannot
+// produce one that does (the `createBrain` call below passes seven positional arguments, so
+// PRODUCT_CITATIONS and PRODUCT_CARDS stay at their `false` defaults). Forwarding is therefore inert by
+// construction here, exactly as the retriever is in E1. See recommendation-telemetry.ts for the
+// not-a-billing-basis constraint that governs the telemetry half.
+import { recommendationTelemetryFields, recommendationWireFields } from "./recommendation-telemetry.js";
 import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
@@ -1841,7 +1848,7 @@ export async function buildServer(opts?: {
       // end-to-end turn latency the model-port decorator can't see. PII-free (no message/reply). Under
       // the server-derived tenant; fail-open like logTraffic.
       void telemetry
-        .record(serving, { kind: "turn", agentType: RUNTIME_AGENT_TYPE, servedBy: policy.id, mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, latencyMs: Date.now() - turnStart })
+        .record(serving, { kind: "turn", agentType: RUNTIME_AGENT_TYPE, servedBy: policy.id, mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, latencyMs: Date.now() - turnStart, ...recommendationTelemetryFields(d) })
         .catch(() => {});
       // T9 — logTraffic is the choke point that redacts message/reply and hashes sessionId at the
       // write boundary (see canary.ts), so no raw shopper PII lands in the shadow-grading log at rest.
@@ -1902,6 +1909,16 @@ export async function buildServer(opts?: {
         // the widget cannot render an empty bubble. JSON.stringify drops it, keeping the wire response
         // byte-identical to before on every turn that has no offer.
         resumeOffer,
+        // E3 — the cited products, and the display fields a widget renders as cards. Spread LAST and
+        // contributing NO KEY unless the decision carried them, so the serialized body of every turn that
+        // cites nothing (which is every turn today) is byte-identical to before this line existed —
+        // pinned by chat-wire-flag-off.test.ts against a golden captured on the previous commit.
+        //
+        // These are what the agent CITED, which is weaker than what it recommended: the mechanism cannot
+        // see a paraphrase, so it UNDER-REPORTS, and a client rendering these as "everything the
+        // assistant suggested" will under-display. They are NOT a billing basis — see
+        // recommendation-telemetry.ts.
+        ...recommendationWireFields(d),
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;

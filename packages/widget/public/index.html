@@ -135,6 +135,21 @@
   .mm-confirm{ font-size:12px; color:var(--fg) }
   .mm-confirm[hidden]{ display:none }
 
+  /* E3 — product cards for the products a reply CITED. Fully inert until the server sends
+     `recommendedProductCards`, which it cannot while the PRODUCT_CARDS posture flag is off. Reuses this
+     file's OWN token set exactly as the PR-11b consent UI does (--panel/--line/--muted/--fg, the 12px
+     radius the .consent card already uses) — no new colour, radius or spacing is introduced. The console
+     design system (.claude/skills/palup-design-system) governs the MERCHANT and ADMIN consoles; this
+     widget is a separate, merchant-embedded surface with its own tokens, and mixing the two here would
+     put console colours on a shopper's storefront. */
+  .recs{ align-self:stretch; max-width:100%; margin:2px 0 }
+  .recs-h{ display:block; font-size:11.5px; color:var(--muted); margin:0 0 6px 2px }
+  .rec-list{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px }
+  .rec{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; padding:9px 11px; border:1px solid var(--line); border-radius:12px; background:var(--panel) }
+  .rec-t{ font-size:13px; color:var(--fg); font-weight:600; flex:1 1 auto; min-width:0; overflow-wrap:anywhere }
+  .rec-p{ font-size:13px; color:var(--fg); flex:0 0 auto }
+  .rec-a{ flex-basis:100%; font-size:11.5px; color:var(--muted) }
+
   /* ---- prefers-reduced-motion — MUST STAY LAST IN THIS STYLESHEET -------------------------------
      A media query contributes no specificity, so this block only wins by being declared after the
      animations it cancels (`.msg{animation:pop}`, `.typing i{animation:blink}`). It previously sat
@@ -644,6 +659,70 @@
     if (on && !t){ t = document.createElement("div"); t.id="typing"; t.className="typing"; t.innerHTML='<span class="sr-only">Assistant is typing…</span><i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i>'; msgs.appendChild(t); msgs.scrollTop=msgs.scrollHeight; }
     else if (!on && t){ t.remove(); }
   }
+  // E3 — PRODUCT CARDS for the products the reply CITED.
+  //
+  // THE HEADING IS THE HONESTY DECISION HERE, and it is deliberately weaker than the field name. The
+  // server field is `recommendedProductCards`, but the prompt rule behind it asks the model to tag any
+  // product it "recommends, names, or discusses" (widget-brain/src/citations.ts), so a product the agent
+  // talked the shopper OUT of is in this list too. "Recommended for you" would be a claim the data does
+  // not support, so the heading says MENTIONED.
+  //
+  // AND THIS BLOCK UNDER-DISPLAYS. It shows what the model CITED, not what it recommended: a reply that
+  // names a product in prose without copying its tag produces no card at all, and a proactive
+  // exit-intent nudge produces none ever. So the absence of a card never means the agent did not suggest
+  // something — which is why the cards are an aside BELOW the reply and never a replacement for reading
+  // it, and why nothing here is phrased as "these are the N products for you".
+  //
+  // WHAT A CARD DELIBERATELY IS NOT: not a link, and not an add-to-cart. `Product`
+  // (platform-ports/src/grounding-port.ts) carries no url, and this system has no cart or checkout
+  // capability at all — either affordance would be a shopper-visible promise of something that does not
+  // exist (the class of defect #185 removed and widget-backend/test/shopper-promise-guard.ts guards).
+  //
+  // Availability mirrors the CATALOG rule the model itself reads: stated only when the server actually
+  // reported it. An ABSENT `availableForSale` renders NO availability line — never "in stock", never a
+  // count, never "only a few left" (§8a invariant 11).
+  //
+  // All merchant text goes in via textContent, never innerHTML: the title arrives from the merchant's own
+  // catalog, which is untrusted content.
+  function addProductCards(cards){
+    if (!Array.isArray(cards) || cards.length === 0) return;   // absent, [] and malformed all render nothing
+    const wrap = document.createElement("div");
+    wrap.className = "recs";
+    const h = document.createElement("span");
+    h.className = "recs-h"; h.setAttribute("data-testid","product-cards-heading");
+    h.textContent = "Mentioned in this reply";
+    wrap.appendChild(h);
+    const list = document.createElement("ul");
+    // Explicit role="list" alongside the <ul>: `list-style:none` strips list semantics in Safari/VoiceOver,
+    // so the count ("list of 2 items") is lost without it.
+    list.className = "rec-list"; list.setAttribute("data-testid","product-cards"); list.setAttribute("role","list");
+    list.setAttribute("aria-label","Products mentioned in this reply");
+    let rendered = 0;
+    for (const c of cards){
+      if (!c || typeof c !== "object" || typeof c.title !== "string") continue;
+      const li = document.createElement("li");
+      li.className = "rec"; li.setAttribute("data-testid","product-card"); li.setAttribute("role","listitem");
+      const t = document.createElement("span"); t.className = "rec-t"; t.textContent = c.title;
+      li.appendChild(t);
+      if (typeof c.price === "string" && c.price){
+        const p = document.createElement("span"); p.className = "rec-p"; p.textContent = c.price;
+        li.appendChild(p);
+      }
+      // Three-state, exactly as the server sends it: true / false / key absent. Only an explicit boolean
+      // produces a line, so "we don't know" stays silent rather than becoming a claim either way.
+      if (c.availableForSale === true || c.availableForSale === false){
+        const a = document.createElement("span");
+        a.className = "rec-a"; a.setAttribute("data-testid","product-card-availability");
+        a.textContent = c.availableForSale ? "Available to buy now" : "Not available to buy right now";
+        li.appendChild(a);
+      }
+      list.appendChild(li); rendered++;
+    }
+    if (!rendered) return;
+    wrap.appendChild(list);
+    msgs.appendChild(wrap); msgs.scrollTop = msgs.scrollHeight;
+  }
+
   // INV-D resume offer. Uses role="status" so a screen reader hears it after the reply without stealing
   // focus, and the same muted token as the other system lines so it reads as an aside, not a message.
   function addResumeOffer(text){
@@ -688,6 +767,37 @@
     el.appendChild(b); msgs.appendChild(el); msgs.scrollTop = msgs.scrollHeight;
   }
 
+  // E4 — the shopper's cart, from the MERCHANT PAGE, as ids and quantities only.
+  //
+  // The widget has never known the cart and must not start guessing: `window.PALUP.cart` is an OPT-IN
+  // hook the embedding storefront fills in, exactly like `window.PALUP.pageContext`. No storefront sets
+  // it today, so the key is simply absent from every real request — the same posture as mood/cart/
+  // proactivity after #185.
+  //
+  // ONLY `productId` AND `quantity` LEAVE THE BROWSER, and the object is REBUILT rather than spread, so a
+  // storefront that hands us a whole line item (title, price, image, discount, customer note) sends none
+  // of it. That is a privacy floor as well as an injection one: the server re-derives every display
+  // string from the merchant's own catalog anyway (widget-brain/src/brain.ts `renderCartBlock`), so
+  // anything else here would be data collected for no purpose.
+  //
+  // A MALFORMED CART IS DROPPED WHOLE, and a cart where every line is malformed sends nothing rather than
+  // an empty array — `[]` is a positive statement that the cart is EMPTY, and claiming that because we
+  // failed to parse the input would be a falsehood in the direction of suppressing help.
+  function cartSignal(){
+    const raw = (window.PALUP && window.PALUP.cart);
+    if (!Array.isArray(raw)) return {};
+    const items = [];
+    for (const e of raw){
+      if (!e || typeof e !== "object") continue;
+      const productId = typeof e.productId === "string" ? e.productId.trim() : "";
+      if (!productId) continue;
+      const quantity = e.quantity;
+      if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity < 1) continue;
+      items.push({ productId: productId, quantity: quantity });
+    }
+    return items.length ? { cartItems: items } : {};
+  }
+
   $("#f").addEventListener("submit", (e) => {
     e.preventDefault();
     const message = $("#in").value.trim(); if (!message) return;
@@ -699,7 +809,7 @@
     // Shopper request: demoSignals() is `{}` here unless the page was opened with ?palupDebug=1, so the
     // only signals a real shopper ever sends are the merchant page's own pageContext and (once memory is
     // live and consented) their anonId.
-    const signals = { ...demoSignals(), pageContext: (window.PALUP && window.PALUP.pageContext) || undefined, ...(memoryEnabled && memState.anonId ? { anonId: memState.anonId } : {}) };
+    const signals = { ...demoSignals(), pageContext: (window.PALUP && window.PALUP.pageContext) || undefined, ...cartSignal(), ...(memoryEnabled && memState.anonId ? { anonId: memState.anonId } : {}) };
     // Stable idempotency key per turn, REUSED on retry, so a replayed request the server already
     // processed is de-duplicated (never double-counts the pitch budget or double-audits).
     const idempotencyKey = (isRetry && lastSend && lastSend.idempotencyKey)
@@ -723,6 +833,9 @@
       if (r.status === 401){ await ensureToken(true); r = await doFetch(); } // token expired → refresh once
       if (!r.ok) throw new Error("http " + r.status);
       const d = await r.json(); add(d.reply, "agent", d); onChatMeta(d); if (d.escalate) enterHandoff();
+      // E3 — the cited products, as an aside BELOW the reply, never spliced into it. Inert today: the
+      // server cannot send this field while the PRODUCT_CARDS posture flag is off.
+      addProductCards(d.recommendedProductCards);
       // §6 INV-D — "offered, not pushed". A SEPARATE, quieter line after the answer, never spliced into it,
       // and only when the server sent one (the server gates it: once per conversation, and never while an
       // issue is open, safety is latched, an escalation is pending, or the mood is negative). Rendered as a
@@ -754,7 +867,7 @@
     // "just browsing" shopper still sees nothing, spends no inference, and burns no pitch budget.
     if (exitIntentFired()) return;                        // at most once per session; never re-fires
     markExitIntentFired();                                // mark BEFORE the request so it can never double-fire
-    const signals = { ...demoSignals(), proactiveTrigger: trigger, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined, ...(memoryEnabled && memState.anonId ? { anonId: memState.anonId } : {}) };
+    const signals = { ...demoSignals(), proactiveTrigger: trigger, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined, ...cartSignal(), ...(memoryEnabled && memState.anonId ? { anonId: memState.anonId } : {}) };
     const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
     try {
       await ensureToken(false);
