@@ -1,4 +1,4 @@
-import type { ModelPort, ModelRequest, ModelResponse } from "./model-port.js";
+import type { EmbedRequest, EmbedResponse, ModelPort, ModelRequest, ModelResponse } from "./model-port.js";
 
 // PII redaction guardrail (security-data-path §3). A shopper can paste highly sensitive data into a
 // chat (a payment card, an SSN) that the agent NEVER needs to see or store. This redacts that class of
@@ -64,9 +64,18 @@ export function redactPII(text: string): string {
  * Wrap a ModelPort so shopper-turn content is PII-redacted before it reaches the provider. The system
  * prompt (role "system") is trusted PalUp content and is left untouched — redacting it could corrupt
  * instructions. Everything else (user + prior assistant turns) is redacted.
+ *
+ * `embed` (optional) gets the SAME egress guardrail — an embedded shopper query or catalog text leaves for
+ * the provider exactly like a completion does (port-interfaces.md: the adapter enforces PII minimization
+ * before the request leaves). There is no trusted "system" text in a batch, so every text is redacted.
+ * The capability is FORWARDED ONLY IF THE INNER ADAPTER HAS IT: this decorator must neither drop a real
+ * capability (a caller would read "cannot embed" from an adapter that can — a silent false negative) nor
+ * fabricate one (a stub that throws would make an absence look like a failure).
  */
 export function createRedactingModelPort(inner: ModelPort): ModelPort {
-  return {
+  // Bound, so a class-based adapter (e.g. VertexModelAdapter) keeps its `this`.
+  const innerEmbed = inner.embed?.bind(inner);
+  const port: ModelPort = {
     async complete(req: ModelRequest): Promise<ModelResponse> {
       const messages = req.messages.map((m) =>
         m.role === "system" ? m : { ...m, content: redactPII(m.content) },
@@ -74,4 +83,9 @@ export function createRedactingModelPort(inner: ModelPort): ModelPort {
       return inner.complete({ ...req, messages });
     },
   };
+  if (innerEmbed) {
+    port.embed = async (req: EmbedRequest): Promise<EmbedResponse> =>
+      innerEmbed({ ...req, texts: req.texts.map(redactPII) });
+  }
+  return port;
 }
