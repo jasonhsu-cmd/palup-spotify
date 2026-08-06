@@ -46,16 +46,17 @@ because C1 does.** Restricting memory to signed-in shoppers would have dissolved
 and not taken, because it costs the guest-memory feature entirely._
 
 _**REOPENED 2026-08-06 — do not read the paragraph above as settled.** The owner approved revisiting C1, and
-[`ADR-0019`](adr/0019-server-issued-guest-identity.md) (merged as PR #214, Status **Proposed** — merging
-records the proposal, it does not accept it) makes the case for a **server-generated** guest id carried in a
-signed token, so the subject comes from a verified claim. What forced the reopening: the B12(b)
+[`ADR-0019`](adr/0019-server-issued-guest-identity.md) is now **ACCEPTED (named owner, 2026-08-06)**: the
+guest id becomes **server-generated** and carried in a signed token, so the subject comes from a verified
+claim. Accepted means the DECISION is settled — it is still **unbuilt**, and `security-reviewer` sign-off
+remains outstanding and gates the implementation. What forced the reopening: the B12(b)
 carry-over was built and reverted the same day because reading a client-named namespace on a verified turn
 fails the **F1** attack test by construction. The 2026-08-04 rationale rejected a server-issued credential on
 **theft resistance** — correctly, as far as that goes, since the credential shares storage with the id — but
 the property that matters is **claim verification**, i.e. whether the server can establish the id belongs to
 its caller at all. ADR-0019 would close **C8** and **C10**, moot **C9**, mostly close **C1**, and unblock
-**B12(b)**; **C14 stays deferred**. ADR-0019 is **Proposed and unbuilt, so nothing below is closed yet** —
-but a signer accepting C1/C8/C9/C10 today should know a superseding proposal exists and is owner-approved in
+**B12(b)**; **C14 stays deferred**. ADR-0019 is **Accepted but UNBUILT, so nothing below is closed yet** —
+but a signer accepting C1/C8/C9/C10 today should know a superseding decision exists and is owner-approved in
 direction._
 
 ---
@@ -96,20 +97,23 @@ These cannot be closed by engineering work. They are the reason this checklist e
 These are known, bounded, and not planned to be fixed before go-live. The named owner must accept them in
 writing — silence is not acceptance.
 
-> **PROPOSED CHANGE TO THIS ENTIRE SET — [`ADR-0019`](adr/0019-server-issued-guest-identity.md), owner
-> approved reopening C1 on 2026-08-06.** Every row below that descends from **C1** does so because nothing
+> **ACCEPTED CHANGE TO THIS ENTIRE SET, NOT YET BUILT — [`ADR-0019`](adr/0019-server-issued-guest-identity.md),
+> ACCEPTED by the named owner 2026-08-06.** Every row below that descends from **C1** does so because nothing
 > proves a client-supplied `anonId` belongs to its caller. ADR-0019 makes the id **server-generated** and
 > delivered in a signed `typ:"guest"` token, so the guest subject comes from a *verified claim* — which
 > would close **C8** and **C10**, moot **C9**, mostly close **C1** (residual: a stolen token, i.e. the
 > device access C1 already accepts), and unblock **B12(b)**. **C14 stays deferred by explicit decision.**
 >
 > **The rows below still describe TODAY'S behaviour and are what a signer is accepting right now** —
-> ADR-0019 is Proposed, unbuilt, and closes nothing until Accepted. It corrects one thing recorded in C1
+> ADR-0019 is Accepted as a DECISION but is **unbuilt**, and an accepted decision closes no row: each of
+> C1/C8/C9/C10 changes only when the code does, and `security-reviewer` sign-off is still outstanding and
+> gates that code. It corrects one thing recorded in C1
 > itself: C1 rejected "binding the id to a server-issued credential" by judging it on **theft resistance**,
 > where it adds little because the credential shares storage with the id. The property that matters is
 > **claim verification** — whether the server can establish the id belongs to its caller at all — and that
-> is what the F1 attack test exercises and what B12(b) requires. If ADR-0019 is Accepted, sign that instead
-> of accepting C1/C8/C9/C10 as they stand.
+> is what the F1 attack test exercises and what B12(b) requires. **Because ADR-0019 IS now accepted, sign
+> it rather than accepting C1/C8/C9/C10 as they stand** — signing these four would be signing a posture the
+> owner has already decided to replace.
 
 | # | Residual | Why it is bounded |
 |---|---|---|

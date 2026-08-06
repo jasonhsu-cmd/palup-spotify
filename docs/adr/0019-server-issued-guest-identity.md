@@ -1,8 +1,16 @@
-# ADR-0019: Server-issued guest identity (signed guest token) — Proposed
+# ADR-0019: Server-issued guest identity (signed guest token) — Accepted (implementation gated on security review)
 
-- **Status: Proposed.** Replace the **client-minted** `anonId` with a **server-generated** guest id
-  delivered in a **PalUp-signed guest token** (`typ:"guest"`), and derive the guest memory subject from the
-  *verified claim* instead of from client input. Enables nothing on its own; builds nothing until Accepted.
+- **Status: ACCEPTED by the named owner, 2026-08-06.** Replace the **client-minted** `anonId` with a
+  **server-generated** guest id delivered in a **PalUp-signed guest token** (`typ:"guest"`), and derive the
+  guest memory subject from the *verified claim* instead of from client input. The **decision** is settled;
+  this record still **enables and builds nothing by itself**.
+- **`security-reviewer` sign-off is OUTSTANDING, and no implementation may land without it.** The sign-off
+  block below was originally written as "required before Accepted". The owner accepted the decision on
+  2026-08-06 with that item still open, so it is **relocated to gate IMPLEMENTATION rather than acceptance**
+  — recorded here rather than quietly reworded. That is not a weakened gate: this ADR contains no code, and
+  CLAUDE.md §4.4 requires `security-reviewer` to pass on anything touching auth or customer data, which is
+  every line the task list below would produce. The protection is identical; only the point at which it
+  applies moved, and it moved to the point where code actually exists to review.
 - **This REVERSES a recorded named-owner decision.** `MEMORY-GO-LIVE-CHECKLIST.md` C1 —
   "`anonId` is a bearer capability" — was **ACCEPTED AS IS** on 2026-08-04, and that acceptance is cited
   there as load-bearing for **C8, C10 and C14** and as the reason **B12(a)** was withdrawn. Reopening it is
@@ -209,10 +217,16 @@ reconsidered on its own once this lands.
 7. Update `MEMORY-GO-LIVE-CHECKLIST.md` C1/C8/C9/C10/B12 and ADR-0015's residual set to match what
    actually shipped — not what this ADR proposed.
 
-## Governance sign-off (required before Accepted)
+## Governance sign-off
 
-- [ ] **Named owner** (jason.hsu@framy.co) accepts reversing C1's 2026-08-04 acceptance, and the four C
-      rows being rewritten rather than only C1.
+- [x] **Named owner** (jason.hsu@framy.co) accepts reversing C1's 2026-08-04 acceptance, and the four C
+      rows being rewritten rather than only C1. — **DONE 2026-08-06.**
 - [ ] **`security-reviewer`** signs off, attacking invariant 3 (no client-proposed id) and invariant 5
-      (F1 preserved) first — those two carry the whole design.
-- [ ] Confirmed **before** `MEMORY_ADR_ACCEPTED` is flipped, per *why this window closes*.
+      (F1 preserved) first — those two carry the whole design. **OUTSTANDING — this now gates
+      IMPLEMENTATION, not acceptance (see the Status block). Task 1 of the list above may not merge until
+      it passes.** It has not been run: nobody should read the owner's acceptance as covering it, because
+      the owner is not the reviewer and this ADR touches guest identity and customer data (CLAUDE.md §4.4).
+- [x] Confirmed **before** `MEMORY_ADR_ACCEPTED` is flipped, per *why this window closes*. — **VERIFIED
+      2026-08-06:** `MEMORY_ADR_ACCEPTED` is `false` (`packages/widget-memory/src/flag.ts`) and
+      `MEMORY_ENABLED` is set in no environment, so no fact has ever been written and the compatibility-free
+      window is still open.
