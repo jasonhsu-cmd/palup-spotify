@@ -54,6 +54,7 @@ export { createOperatorTokenIdentity } from "./operator-identity.js";
 export { mintStepUp, verifyStepUp, STEPUP_MAX_AGE_MS, STEPUP_CLOCK_SKEW_MS, type StepUpClaims, type StepUpResult } from "./step-up.js";
 export { createWidgetTokenIdentity, mintWidgetToken } from "./widget-token-identity.js";
 export { createShopperTokenIdentity, mintShopperToken } from "./shopper-token-identity.js";
+export { createGuestTokenIdentity, mintGuestToken, renewGuestToken, type GuestClaims } from "./guest-token-identity.js";
 export { redactPII, createRedactingModelPort } from "./redaction.js";
 export type { TelemetryPort, TelemetryEvent, TelemetryRollup } from "./telemetry-port.js";
 export { createStoreTelemetry, rollupEvents } from "./telemetry-port.js";
