@@ -71,8 +71,11 @@ export interface MergeCtx {
  * cross-subject read of the guest namespace, so every call writes exactly one `merge` audit row — with
  * `count` distinguishing a real migration (>0) from a read that moved nothing (0) — carrying BOTH the
  * source (guest) and destination (account) subject refs, so an operator can reconstruct which account
- * received which guest's facts even when nothing moved. Safe to call on every verified turn, which is
- * exactly what the production caller does.
+ * received which guest's facts even when nothing moved. **Because every call now writes a row (including
+ * no-ops), the eventual production caller (task 10) must fire this only on a RECORDED SHOPPER
+ * AUTHORISATION per (aid, account) pair — R2-1, invariant 9 — NOT on every verified turn.** An every-turn
+ * caller would append a `count:0` row to the append-only audit log on every message; the authorisation
+ * gate is what bounds that. (There is no production caller yet; task 10 is legal-gated on Q19.)
  *
  * Because the source survives, a fact DROPPED by Inv 9 on one call can still follow on a later one — if
  * the shopper grants Consent 2 for the account afterwards, the next call picks it up. Under the old MOVE
