@@ -9,6 +9,7 @@ import { lookupConsent } from "@palup/state-postgres";
 import { subjectNamespace, accountSubjectId } from "@palup/widget-memory";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // SUBJECT-SCOPED AUTH — the memory subject is now derived from the SERVER-VERIFIED shopper principal
 // (`acct:<shopperId>`), not from a client-supplied `anonId`.
@@ -28,8 +29,12 @@ const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
 // token's tenant or the cross-shop check rejects the token.
 const ATTACKER_SHOPPER_ID = "shopify:demo:attacker-1";
 const VICTIM_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // a well-formed anonId the attacker "obtained"
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`, never a
+// bare client-typed `anonId` (invariant 4). See the per-test comments below for how each case's INTENT
+// is preserved under this shift.
+const GUEST_SECRET = "gsecret";
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
 function armAuth(): void {
@@ -37,6 +42,7 @@ function armAuth(): void {
   process.env.WIDGET_AUTH_REQUIRED = "true";
   process.env.SHOPPER_AUTH = "true";
   process.env.SHOPPER_TOKEN_SECRET = SHOPPER_SECRET;
+  process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
 }
 const attackerToken = () => mintShopperToken(SHOPPER_SECRET, ATTACKER_SHOPPER_ID, "shopify", 3_600);
 
@@ -72,25 +78,31 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     await app.close();
   });
 
-  // REVISED (security review round 3, N1 — HIGH). This test's ORIGINAL assertion was that a verified
-  // shopper's supplied anonId is ALWAYS ignored by /forget, full stop — proven by the victim's fact
-  // surviving. N1 (round 3) found the flip side of that same rule: it also meant a signed-in shopper's
-  // OWN "forget everything" could never reach their genuine pre-sign-in guest-era facts (the shipped
-  // widget's forgetMe() sends exactly this shape — token + the just-superseded anonId), so /forget
-  // returned `{ok:true}` while erasing nothing, contradicting the UI's "Done — I've cleared what I
-  // remembered." Server-side there is no way to distinguish "my own real guest-era anonId" from "a
-  // stranger's anonId I obtained" — both look identical (a validated, well-formed anonId presented
-  // alongside a verified token) — so N1 requires /forget to erase BOTH namespaces whenever a validated
-  // anonId is presented, accepting that this reopens the scenario this test used to lock closed.
+  // RE-EXPRESSED (ADR-0019 task 4/9, 2026-08-06) — under task 4 the premise of the ORIGINAL N1 test no
+  // longer holds, and the new truth is a genuine STRENGTHENING, not a weakening, so it is re-expressed
+  // rather than force-passed.
   //
-  // THIS IS A DELIBERATE, DOCUMENTED TRADE-OFF, not an oversight: the "an ANONYMOUS guest is unchanged"
-  // test right below already proves that ANY caller — with NO shopper token at all — can erase
-  // VICTIM_ANON_ID's data merely by knowing it (the pre-existing, accepted C1 bearer-capability residual,
-  // docs/MEMORY-GO-LIVE-CHECKLIST.md). So a verified shopper who ALSO erases a co-presented anonId is
-  // not granted any capability an unauthenticated caller didn't already have. What is UNCHANGED, and
-  // still verified below: the account subject itself is ALWAYS erased too — a supplied anonId is
-  // additive, never a substitute for it.
-  it("N1 — POST /forget by a verified shopper ALSO erases a co-presented anonId's namespace (no new capability: the unauthenticated guest path already allows this — see 'an ANONYMOUS guest is unchanged' below)", async () => {
+  // The ORIGINAL test proved: a verified shopper who co-presents a validated `body.anonId` gets that
+  // namespace erased too (a DELIBERATE, documented trade-off — the shipped widget's `forgetMe()` sends
+  // the shopper token PLUS the just-superseded guest anonId in the request body, and the server cannot
+  // tell "my own real guest-era anonId" apart from "a stranger's anonId I obtained", both being a
+  // validated string in the body). Invariant 4 removes `body.anonId` from this derivation ENTIRELY — the
+  // guest side of /forget (primary subject AND this co-presented-namespace branch alike) now comes ONLY
+  // from a VERIFIED `x-guest-token`. A plain client-typed anonId in the body is therefore no longer a
+  // credential for ANYTHING here, so the exact attack shape this test used to send (shopper token +
+  // `body.anonId: VICTIM_ANON_ID`) can no longer touch the victim's namespace at all — the class of
+  // exposure N1 accepted as a trade-off is closed for this transport.
+  //
+  // The underlying LEGITIMATE capability N1 protected — a signed-in shopper's real pre-sign-in guest-era
+  // facts being reachable on "forget everything" — still exists and is exercised, unchanged in spirit,
+  // by forget.test.ts's own N1 case, which now presents that guest identity as a valid `x-guest-token`
+  // (the post-task-4 widget contract). The exact "no new capability" argument this test made ALSO still
+  // holds for that transport: presenting a valid signed `x-guest-token` naming ANY anonId — attacker or
+  // not — erases that namespace regardless of whether a shopper token also accompanies it (see "an
+  // ANONYMOUS guest is unchanged" below, which pins that ANY caller holding such a token can do this with
+  // no shopper token at all). So nothing here is a new hole; it is the OLD hole's transport requirement
+  // getting strictly harder (a signed credential, not a typed string).
+  it("N1 RE-EXPRESSED — a verified shopper's /forget with a VICTIM anonId in the BODY (no x-guest-token) leaves the victim's namespace untouched: invariant 4 closes the old body-anonId co-presentation trade-off", async () => {
     armAuth();
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
@@ -107,18 +119,18 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     const res = await app.inject({
       method: "POST",
       url: "/forget",
-      headers: { "x-shopper-token": attackerToken() },
-      payload: { anonId: VICTIM_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": attackerToken() }, // deliberately NO x-guest-token
+      payload: { anonId: VICTIM_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN }, // body.anonId is now IGNORED (invariant 4)
     });
 
     expect(res.statusCode).toBe(200);
-    // N1: the co-presented namespace is erased too (see the doc comment above for why this is safe/intended).
+    // The victim's namespace is genuinely untouched — a bare body.anonId never reached the guest-subject
+    // derivation at all.
     const survivors = await vector.query(victimNs, { text: "", k: 10 });
-    expect(survivors).toEqual([]);
-    // UNCHANGED: the primary target is still the ACCOUNT subject, derived server-side — never the
-    // supplied anonId alone. The attacker's own (empty) account subject is erased too (2 audit entries).
+    expect(survivors.map((s) => s.id)).toEqual(["victim-1"]);
+    // Only the attacker's OWN (empty) account subject was erased — one audit entry, not two.
     const log = await store.readAudit({ tenantId: "demo" });
-    expect(log.filter((r) => r.action === "erase.subject").length).toBe(2);
+    expect(log.filter((r) => r.action === "erase.subject").length).toBe(1);
     await app.close();
   });
 
@@ -181,7 +193,56 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     await app.close();
   });
 
-  it("an ANONYMOUS guest is unchanged — no verified principal, so the validated anonId is still the subject", async () => {
+  it("THE ATTACK (recall), NO TOKEN AT ALL: a caller with no shopper AND no guest token cannot recall by naming a victim's anonId (invariant 4 — the signals.ts fallback the tasks-4/9 review caught)", async () => {
+    // The reviewer's uncovered case: memory ON, no x-shopper-token, no x-guest-token, just a client
+    // signals.anonId = victim. Before the fix, `deriveServingSignals` fell back to the client anonId
+    // (signals.ts) so recall keyed off it. Now memorySubject is undefined ⇒ signals.anonId undefined ⇒
+    // no recall, no read of the victim namespace.
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const victimNs = subjectNamespace("demo", VICTIM_ANON_ID);
+    await vector.upsert(victimNs, [
+      {
+        id: "victim-secret",
+        text: "shopper is allergic to tree nuts",
+        metadata: { text: "shopper is allergic to tree nuts", class: "ordinary", expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+      },
+    ]);
+    const queried: string[] = [];
+    const origQuery = vector.query.bind(vector);
+    vi.spyOn(vector, "query").mockImplementation(async (ns: string, q: never) => {
+      queried.push(ns);
+      return origQuery(ns, q);
+    });
+    const modelCalls: ModelRequest[] = [];
+    const modelPort: ModelPort = { async complete(req: ModelRequest) { modelCalls.push(req); return { text: "ok", model: "spy" }; } };
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      // NO x-shopper-token, NO x-guest-token — only the merchant widget token and a client-named anonId.
+      payload: {
+        sessionId: "attack-recall-notoken",
+        message: "what do you remember about me?",
+        signals: { cart: "empty", anonId: VICTIM_ANON_ID },
+        widgetToken: DEMO_WIDGET_TOKEN,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(queried, "the victim namespace was read from a bare client anonId — invariant 4 fallback").not.toContain(victimNs);
+    const everythingSent = modelCalls.flatMap((c) => c.messages.map((m) => m.content)).join(" ");
+    expect(everythingSent).not.toContain("tree nuts");
+    await app.close();
+  });
+
+  // REVISED (ADR-0019 task 4/9) — this test's premise changed: a guest no longer gets ANY subject from a
+  // bare client-supplied anonId. The guest subject now comes EXCLUSIVELY from a VERIFIED `x-guest-token`
+  // (invariant 4). Intent preserved: a guest presenting a valid token for THEIR OWN anonId can still
+  // erase it (the underlying capability is unchanged); a guest presenting nothing — just a bare string —
+  // gets NO subject at all. "A stranger's [id] cannot be asserted via a bare client string" now holds
+  // even more strongly than before: a bare string is no longer even sufficient to assert ONE'S OWN id.
+  it("an ANONYMOUS guest is unchanged — no verified principal, so a VALID x-guest-token is still the subject (a bare client string alone no longer is)", async () => {
     armAuth();
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
@@ -195,11 +256,25 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     ]);
 
     const app = await buildServer({ store, vectorPort: vector });
-    // No x-shopper-token at all ⇒ the guest owns this subject and may erase it.
-    const res = await app.inject({
+
+    // A bare client-supplied anonId with NO token is no longer enough to name any subject at all — the
+    // record must survive an unaccompanied body.anonId.
+    const bare = await app.inject({
       method: "POST",
       url: "/forget",
       payload: { anonId: VICTIM_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(bare.statusCode).toBe(400);
+    expect(await vector.query(ns, { text: "", k: 10 })).not.toEqual([]);
+
+    // With a VALID x-guest-token for that SAME anonId — no x-shopper-token at all — the guest still owns
+    // and may erase this subject: the underlying capability is unchanged, only the credential got
+    // stronger.
+    const res = await app.inject({
+      method: "POST",
+      url: "/forget",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VICTIM_ANON_ID),
+      payload: { widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(await vector.query(ns, { text: "", k: 10 })).toEqual([]); // genuinely erased
@@ -219,11 +294,14 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     const store = new InMemoryRuntimeStore();
     const app = await buildServer({ store, vectorPort: createInMemoryVectorStore() });
 
+    // ADR-0019 task 4/9 — the guest subject now comes ONLY from a VERIFIED `x-guest-token`, never
+    // `body.anonId` (invariant 4); the property under test (an invalid shopper token doesn't authorize
+    // an account subject) is orthogonal to that transport, so it is exercised the same way here.
     const res = await app.inject({
       method: "POST",
       url: "/consent",
-      headers: { "x-shopper-token": "not-a-real-token" },
-      payload: { anonId: VICTIM_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": "not-a-real-token", ...guestTokenHeader(GUEST_SECRET, "demo", VICTIM_ANON_ID) },
+      payload: { memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     // Recorded against the ANON subject (guest path), and no account subject was invented.
@@ -237,11 +315,12 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     const app = await buildServer({ store, vectorPort: createInMemoryVectorStore() });
     const foreignToken = mintShopperToken(SHOPPER_SECRET, "shopify:other-tenant:x", "shopify", 3_600);
 
+    // ADR-0019 task 4/9 — same rationale as above: the guest subject now needs a verified x-guest-token.
     const res = await app.inject({
       method: "POST",
       url: "/consent",
-      headers: { "x-shopper-token": foreignToken },
-      payload: { anonId: VICTIM_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": foreignToken, ...guestTokenHeader(GUEST_SECRET, "demo", VICTIM_ANON_ID) },
+      payload: { memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     // Fell back to the guest path; nothing was written under the foreign shopper's account subject.

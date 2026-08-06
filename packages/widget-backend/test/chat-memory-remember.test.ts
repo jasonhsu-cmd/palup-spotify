@@ -3,6 +3,7 @@ import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // Shopper-disposition program PR-8 — persistence wiring: `remember()` is now called POST-DECISION on
 // the /chat clean path (previously it was never called anywhere). Still fully INERT in real production
@@ -19,8 +20,10 @@ const VALID_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // base32, passes vali
 // assertion identical to before this change.
 const WIDGET_SECRET = "wsecret";
 const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`.
+const GUEST_SECRET = "gsecret";
 
 function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: ModelRequest[] } {
   const calls: ModelRequest[] = [];
@@ -41,6 +44,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
   it("an ordinary distilled fact is written to the vector port and audited (write.ordinary) — remember() really was called", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -50,10 +54,11 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
     const res = await app.inject({
       method: "POST",
       url: "/chat",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
       payload: {
         sessionId: "mem-remember-1",
         message: "I like fragrance-free stuff",
-        signals: { cart: "empty", anonId: VALID_ANON_ID },
+        signals: { cart: "empty" },
         widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
@@ -161,6 +166,7 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
   it("PR-6 Finding H — the model threaded into the memory service is redaction-wrapped: a pasted card/SSN in the shopper turn never reaches the model port", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -169,10 +175,11 @@ describe("PR-8 — remember() wired into /chat, post-decision, on the clean path
     const res = await app.inject({
       method: "POST",
       url: "/chat",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
       payload: {
         sessionId: "mem-redact-1",
         message: "my card is 4111 1111 1111 1111, please use it on file",
-        signals: { cart: "empty", anonId: VALID_ANON_ID },
+        signals: { cart: "empty" },
         widgetToken: DEMO_WIDGET_TOKEN,
       },
     });

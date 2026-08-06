@@ -3,6 +3,7 @@ import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken, mintS
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // PR-11b — POST /forget: the data-RIGHTS erasure endpoint (widget-memory/src/erasure.ts's `eraseSubject`,
 // reused unchanged). Same (tenantId, anonId) derivation + guards as /consent (chat-consent-record.test.ts):
@@ -26,8 +27,12 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
   };
 }
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`, never
+// `body.anonId` (invariant 4). Every case below that used to pin a subject via a client anonId now
+// crafts a real guest token for that SAME anonId with this secret instead.
+const GUEST_SECRET = "gsecret";
 
 // Security review (Finding 2) — the boot guard now asserts on the SAME predicate that actually arms
 // memory in-process (`memoryServiceEnabled`), so every test below using the `memoryEnabled` seam must
@@ -70,6 +75,7 @@ describe("POST /forget", () => {
   it("erases a subject's stored fact and audits erase.subject (no raw anonId in the audit trail)", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -78,11 +84,17 @@ describe("POST /forget", () => {
     await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "forget-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "forget-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
 
-    const res = await app.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN } });
+    const res = await app.inject({
+      method: "POST",
+      url: "/forget",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { widgetToken: DEMO_WIDGET_TOKEN },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBe(0);
@@ -94,10 +106,16 @@ describe("POST /forget", () => {
   });
 
   it("no-ops safely when nothing was ever stored for this subject", async () => {
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const app = await buildServer({ store, vectorPort: vector });
-    const res = await app.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID } });
+    const res = await app.inject({
+      method: "POST",
+      url: "/forget",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: {},
+    });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
     await app.close();
@@ -106,6 +124,7 @@ describe("POST /forget", () => {
   it("works regardless of memoryEnabled: a memory-DISABLED instance sharing the same store+vector can still erase what a memory-ENABLED instance wrote", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -113,7 +132,8 @@ describe("POST /forget", () => {
     await writerApp.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "forget-2", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "forget-2", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
     await writerApp.close();
@@ -121,7 +141,12 @@ describe("POST /forget", () => {
     // A fresh app instance sharing the SAME store+vector, this time WITHOUT the memoryEnabled seam — the
     // real-production posture (double gate off).
     const disabledApp = await buildServer({ store, vectorPort: vector });
-    const res = await disabledApp.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN } });
+    const res = await disabledApp.inject({
+      method: "POST",
+      url: "/forget",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { widgetToken: DEMO_WIDGET_TOKEN },
+    });
     expect(res.statusCode).toBe(200);
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBe(0);
     await disabledApp.close();
@@ -131,6 +156,7 @@ describe("POST /forget", () => {
     process.env.WIDGET_TOKEN_SECRET = "wsecret";
     process.env.WIDGET_AUTH_REQUIRED = "true";
     process.env.WIDGET_EMBED_KEYS = JSON.stringify({ "a-key": "tenant-a", "b-key": "tenant-b" });
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -142,16 +168,16 @@ describe("POST /forget", () => {
     await app.inject({
       method: "POST",
       url: "/chat",
-      headers: { authorization: "Bearer " + tokenA },
-      payload: { sessionId: "forget-3", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID } },
+      headers: { authorization: "Bearer " + tokenA, ...guestTokenHeader(GUEST_SECRET, "tenant-a", VALID_ANON_ID) },
+      payload: { sessionId: "forget-3", message: "I like fragrance-free stuff", signals: {} },
     });
     expect((await vector.query("tenant-a::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
 
     const res = await app.inject({
       method: "POST",
       url: "/forget",
-      headers: { authorization: "Bearer " + tokenB },
-      payload: { anonId: VALID_ANON_ID },
+      headers: { authorization: "Bearer " + tokenB, ...guestTokenHeader(GUEST_SECRET, "tenant-b", VALID_ANON_ID) },
+      payload: {},
     });
     expect(res.statusCode).toBe(200);
     expect((await vector.query("tenant-a::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
@@ -168,6 +194,7 @@ describe("POST /forget", () => {
   it("N1 — a signed-in shopper presenting BOTH their shopper token and their validated guest anonId gets BOTH namespaces erased", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     armShopperAuth();
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
@@ -178,7 +205,8 @@ describe("POST /forget", () => {
     await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "n1-guest-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "n1-guest-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
 
@@ -192,13 +220,15 @@ describe("POST /forget", () => {
     const acctNamespace = "demo::acct:" + SHOPPER_ID;
     expect((await vector.query(acctNamespace, { text: "", k: 10 })).length).toBeGreaterThan(0);
 
-    // 3. "Forget everything" — the shipped widget's own forgetMe() sends BOTH the shopper token AND the
-    // superseded guest anonId (index.html `prevAnonId`) in the same request.
+    // 3. "Forget everything" — the widget sends BOTH the shopper token AND the superseded guest anonId,
+    // the LATTER now as a validly-signed `x-guest-token` (ADR-0019 task 4/9 — invariant 4 dropped the old
+    // `body.anonId`/`prevAnonId` transport; a real client must present its own guest identity the same
+    // verified way /chat does).
     const res = await app.inject({
       method: "POST",
       url: "/forget",
-      headers: { "x-shopper-token": shopperToken() },
-      payload: { anonId: VALID_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": shopperToken(), ...guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID) },
+      payload: { widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true });
@@ -249,6 +279,7 @@ describe("POST /forget", () => {
   it("NN#4 — an operator kill switch halts /forget: 503, nothing erased, no audit entry", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
@@ -256,12 +287,18 @@ describe("POST /forget", () => {
     await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "forget-4", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "forget-4", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
 
     await armKill(store, "global", "operator-halt");
-    const res = await app.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN } });
+    const res = await app.inject({
+      method: "POST",
+      url: "/forget",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { widgetToken: DEMO_WIDGET_TOKEN },
+    });
     expect(res.statusCode).toBe(503);
     expect((await vector.query("demo::" + VALID_ANON_ID, { text: "", k: 10 })).length).toBeGreaterThan(0);
     const log = await store.readAudit({ tenantId: "demo" });

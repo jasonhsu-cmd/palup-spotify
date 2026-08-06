@@ -3,6 +3,7 @@ import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken, mintS
 import { armKill } from "@palup/state-postgres";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // THE DEFECT THIS LOCKS (pre-existing on main, NOT introduced by any memory PR):
 // the widget's "What I remember" panel renders its toggles from LOCAL storage —
@@ -33,8 +34,14 @@ const SHOPPER_SECRET = "shopper-secret";
 const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
 const SHOPPER_ID = "shopify:demo:48291";
 const GUEST_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // base32, passes validateAnonId
+// ADR-0019 task 4/9 — the guest memory subject (what /consent records against AND what /chat's
+// `memoryActive` report is computed for) now comes ONLY from a VERIFIED `x-guest-token`, never
+// `body.anonId` / `signals.anonId` (invariant 4). Every case below needs this header for `memorySubject`
+// to resolve at all — without it, `memoryActive` is omitted entirely (see the "INERT" case).
+const GUEST_SECRET = "gsecret";
+const guestToken = () => guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON_ID);
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET", "MERCHANT_REGION"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET", "MERCHANT_REGION", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
 function armAuth(): void {
@@ -42,6 +49,7 @@ function armAuth(): void {
   process.env.WIDGET_AUTH_REQUIRED = "true";
   process.env.SHOPPER_AUTH = "true";
   process.env.SHOPPER_TOKEN_SECRET = SHOPPER_SECRET;
+  process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
 }
 const shopperToken = () => mintShopperToken(SHOPPER_SECRET, SHOPPER_ID, "shopify", 3_600);
 
@@ -73,7 +81,8 @@ describe("manage-panel honesty — /chat reports the EFFECTIVE memory state, and
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-us-unknown", message: "I like unscented soap", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { sessionId: "s-us-unknown", message: "I like unscented soap", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     expect(res.statusCode).toBe(200);
@@ -100,12 +109,14 @@ describe("manage-panel honesty — /chat reports the EFFECTIVE memory state, and
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-us-out", message: "I like unscented soap", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { sessionId: "s-us-out", message: "I like unscented soap", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     expect(res.json().memoryActive).toEqual({ ordinary: false, special: false });
@@ -129,7 +140,8 @@ describe("manage-panel honesty — /chat reports the EFFECTIVE memory state, and
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-eu-unknown", message: "I like unscented soap", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { sessionId: "s-eu-unknown", message: "I like unscented soap", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     expect(res.json().memoryActive).toEqual({ ordinary: false, special: false });
@@ -152,12 +164,14 @@ describe("manage-panel honesty — /chat reports the EFFECTIVE memory state, and
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "unknown", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "unknown", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
     });
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-special", message: "hi", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { sessionId: "s-special", message: "hi", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     expect(res.json().memoryActive).toEqual({ ordinary: true, special: true });
@@ -193,7 +207,8 @@ describe("manage-panel honesty — /chat reports the EFFECTIVE memory state, and
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-c14", message: "I like unscented soap", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { sessionId: "s-c14", message: "I like unscented soap", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     expect(res.json().memoryActive).toEqual({ ordinary: true, special: false });
@@ -212,7 +227,8 @@ describe("manage-panel honesty — /chat reports the EFFECTIVE memory state, and
     const out = await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "out", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(out.json().memoryActive).toEqual({ ordinary: false, special: true });
 
@@ -221,7 +237,8 @@ describe("manage-panel honesty — /chat reports the EFFECTIVE memory state, and
     const unknown = await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "unknown", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "unknown", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(unknown.json().memoryActive).toEqual({ ordinary: true, special: false });
     await app.close();
@@ -244,7 +261,8 @@ describe("manage-panel honesty — /chat reports the EFFECTIVE memory state, and
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-kill", message: "I like unscented soap", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { sessionId: "s-kill", message: "I like unscented soap", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     // The field reports what their CONSENT permits — unchanged by the halt. Showing "off" here would

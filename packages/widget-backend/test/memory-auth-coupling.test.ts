@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { InMemoryRuntimeStore, createInMemoryVectorStore } from "@palup/platform-ports";
 import { buildServer, assertMemoryAuthCoupling } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // Go-live #3 — couple memory enablement to enforced widget auth. During the WIDGET_AUTH_REQUIRED
 // rollout window (default off) POST /consent and the DESTRUCTIVE POST /forget are callable
@@ -16,8 +17,10 @@ import { buildServer, assertMemoryAuthCoupling } from "../src/server.js";
 
 const VALID_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // base32, passes validateAnonId's charset+length bound
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "WIDGET_EMBED_KEYS"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "WIDGET_EMBED_KEYS", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`.
+const GUEST_SECRET = "gsecret";
 
 describe("assertMemoryAuthCoupling — pure boot-time guard", () => {
   it("throws when memory is live but widget auth is NOT enforced", () => {
@@ -69,6 +72,7 @@ describe("in the required configuration (memory live via the test seam + WIDGET_
     process.env.WIDGET_TOKEN_SECRET = "wsecret";
     process.env.WIDGET_AUTH_REQUIRED = "true";
     process.env.WIDGET_EMBED_KEYS = JSON.stringify({ "acme-key": "acme" });
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const app = await buildServer({ store, vectorPort: vector, memoryEnabled: true });
@@ -77,16 +81,16 @@ describe("in the required configuration (memory live via the test seam + WIDGET_
     const consentRes = await app.inject({
       method: "POST",
       url: "/consent",
-      headers: { authorization: "Bearer " + token },
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "out" },
+      headers: { authorization: "Bearer " + token, ...guestTokenHeader(GUEST_SECRET, "acme", VALID_ANON_ID) },
+      payload: { memoryOrdinary: "in", memorySpecial: "out" },
     });
     expect(consentRes.statusCode).toBe(200);
 
     const forgetRes = await app.inject({
       method: "POST",
       url: "/forget",
-      headers: { authorization: "Bearer " + token },
-      payload: { anonId: VALID_ANON_ID },
+      headers: { authorization: "Bearer " + token, ...guestTokenHeader(GUEST_SECRET, "acme", VALID_ANON_ID) },
+      payload: {},
     });
     expect(forgetRes.statusCode).toBe(200);
     await app.close();
@@ -104,17 +108,24 @@ describe("memory OFF (real production posture) — byte-identical to before this
   });
 
   it("/consent and /forget remain reachable unauthenticated when WIDGET_AUTH_REQUIRED is unset (inert rollout posture unchanged)", async () => {
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const app = await buildServer({ store });
 
     const consentRes = await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "out" },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { memoryOrdinary: "in", memorySpecial: "out" },
     });
     expect(consentRes.statusCode).toBe(200);
 
-    const forgetRes = await app.inject({ method: "POST", url: "/forget", payload: { anonId: VALID_ANON_ID } });
+    const forgetRes = await app.inject({
+      method: "POST",
+      url: "/forget",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: {},
+    });
     expect(forgetRes.statusCode).toBe(200);
     await app.close();
   });

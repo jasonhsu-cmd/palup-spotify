@@ -3,6 +3,7 @@ import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { lookupConsent, armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // PR-11a — server-side consent-record plumbing, end-to-end: the /consent capture endpoint + the
 // signals.ts wiring that replaces the old hardcoded consent.memoryOrdinary/memorySpecial="unknown" with
@@ -20,6 +21,10 @@ const VALID_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // base32, passes vali
 // assertion identical to before this change.
 const WIDGET_SECRET = "wsecret";
 const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token` (invariant
+// 4), never `body.anonId` / `signals.anonId`. Every case below that used to pin a subject via a client
+// anonId now crafts a real guest token for that SAME anonId with this secret instead.
+const GUEST_SECRET = "gsecret";
 
 function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: ModelRequest[] } {
   const calls: ModelRequest[] = [];
@@ -32,7 +37,7 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
   };
 }
 
-const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS", "WIDGET_AUTH_REQUIRED", "PALUP_SECRETS"];
+const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_EMBED_KEYS", "WIDGET_AUTH_REQUIRED", "PALUP_SECRETS", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
 describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => {
@@ -62,6 +67,7 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     process.env.MERCHANT_REGION = "eu";
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -71,14 +77,16 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     const consentRes = await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(consentRes.statusCode).toBe(200);
 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "eu-2", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "eu-2", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(upsertSpy).toHaveBeenCalled();
@@ -91,6 +99,7 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     // MERCHANT_REGION left unset -> defaults to "us" (server.ts).
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const upsertSpy = vi.spyOn(vector, "upsert");
@@ -100,7 +109,8 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "us-1", message: "I like fragrance-free stuff", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "us-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(upsertSpy).toHaveBeenCalled();
@@ -140,6 +150,7 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     process.env.PALUP_SECRETS = JSON.stringify({ demo: { MEMORY_ENCRYPTION_KEY: "test-key-for-demo" } });
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     for (const region of ["us", "eu", "uk", "other"]) {
       process.env.MERCHANT_REGION = region;
       const store = new InMemoryRuntimeStore();
@@ -151,12 +162,14 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
       await app.inject({
         method: "POST",
         url: "/consent",
-        payload: { anonId: VALID_ANON_ID, memoryOrdinary: "unknown", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
+        headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+        payload: { memoryOrdinary: "unknown", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
       });
       const res = await app.inject({
         method: "POST",
         url: "/chat",
-        payload: { sessionId: `special-${region}`, message: "I have a tree-nut allergy", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+        headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+        payload: { sessionId: `special-${region}`, message: "I have a tree-nut allergy", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
       });
       expect(res.statusCode).toBe(200);
       expect(upsertSpy).toHaveBeenCalled();
@@ -195,6 +208,7 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
   it("the consent store is TENANT-SCOPED: tenant A's consent record is invisible to tenant B", async () => {
     process.env.WIDGET_TOKEN_SECRET = "wsecret";
     process.env.WIDGET_EMBED_KEYS = JSON.stringify({ "a-key": "tenant-a", "b-key": "tenant-b" });
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const app = await buildServer({ store });
 
@@ -202,8 +216,8 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     const consentRes = await app.inject({
       method: "POST",
       url: "/consent",
-      headers: { authorization: "Bearer " + tokenA },
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "in" },
+      headers: { authorization: "Bearer " + tokenA, ...guestTokenHeader(GUEST_SECRET, "tenant-a", VALID_ANON_ID) },
+      payload: { memoryOrdinary: "in", memorySpecial: "in" },
     });
     expect(consentRes.statusCode).toBe(200);
 
@@ -248,12 +262,14 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
 
   describe("POST /consent", () => {
     it("records consent bound to the server-derived subject and returns ok", async () => {
+      process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
       const store = new InMemoryRuntimeStore();
       const app = await buildServer({ store });
       const res = await app.inject({
         method: "POST",
         url: "/consent",
-        payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "out" },
+        headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+        payload: { memoryOrdinary: "in", memorySpecial: "out" },
       });
       expect(res.statusCode).toBe(200);
       expect(await lookupConsent(store, { tenantId: "demo", anonId: VALID_ANON_ID })).toEqual({
@@ -305,12 +321,14 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
     });
 
     it("is audited (consent.record)", async () => {
+      process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
       const store = new InMemoryRuntimeStore();
       const app = await buildServer({ store });
       await app.inject({
         method: "POST",
         url: "/consent",
-        payload: { anonId: VALID_ANON_ID, memoryOrdinary: "in", memorySpecial: "out" },
+        headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+        payload: { memoryOrdinary: "in", memorySpecial: "out" },
       });
       const log = await store.readAudit({ tenantId: "demo" });
       expect(log.map((r) => r.action)).toContain("consent.record");

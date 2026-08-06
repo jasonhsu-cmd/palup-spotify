@@ -1,5 +1,4 @@
 import type { Signals, CartLineItemRef, Consent } from "@palup/widget-brain";
-import { validateAnonId } from "@palup/widget-memory";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -211,11 +210,14 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // dropped to `undefined` (never thrown), exactly like an invalid mood/cart enum above. Recall stays
     // inert regardless (the flag.ts double gate), so this is wiring-correctness ahead of go-live, not a
     // live capability.
-    // SUBJECT-SCOPED AUTH: the server-derived subject WINS when supplied. Without this the recall path
-    // (brain.ts's `memory.recall({ anonId: signals.anonId })`) would keep reading the raw client value
-    // while writes went to the bound subject — a verified shopper could read another subject's facts by
-    // supplying their anonId, and the read-time consent gate would be evaluated against the CALLER's
-    // consent record rather than the record whose facts were read. Both surfaced in security review.
-    anonId: ctx.memorySubject ?? validateAnonId(typeof r.anonId === "string" ? r.anonId : undefined),
+    // SUBJECT-SCOPED AUTH (ADR-0019 task 4, invariant 4): the memory subject is SERVER-DERIVED ONLY —
+    // `ctx.memorySubject` is a verified shopper's `acct:` id or a verified `x-guest-token`'s anonId. There
+    // is NO fallback to the client's `r.anonId`. The prior `?? validateAnonId(r.anonId)` fallback was the
+    // F1 hole the tasks-4/9 security review caught: with no token, `memorySubject` is undefined and recall
+    // (brain.ts's `memory.recall({ anonId: signals.anonId })`) would key off the raw client value — letting
+    // a caller read any namespace by naming its id, with the read-time consent gate evaluated against the
+    // CALLER's record, not the victim's. Dropping the fallback closes it: no credential ⇒ no
+    // `signals.anonId` ⇒ no recall, no write.
+    anonId: ctx.memorySubject,
   };
 }

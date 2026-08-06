@@ -3,6 +3,7 @@ import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken, mintS
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { lookupConsent } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // P3 (2) — REGRESSION PIN, not a behavior change.
 //
@@ -51,8 +52,10 @@ const FORGED_SUBJECTS = [
   "abcdefghijklmnop", // lowercase (outside the base32 charset)
 ];
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`.
+const GUEST_SECRET = "gsecret";
 
 function armAuth(): void {
   process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
@@ -148,14 +151,36 @@ describe("the ACCOUNT namespace is unreachable from the client-supplied anonId (
     await app.close();
   });
 
-  it("the accepted C1 residual is unchanged and still disclosed: a well-formed GUEST id needs no token at all", async () => {
-    // Deliberately asserts the ACCEPTED exposure so this file cannot be read as claiming more than is
-    // true. If a later change ever closes C1, this expectation is the one that must be revisited —
-    // consciously, with the checklist row.
+  // REVISED (ADR-0019 task 4/9, 2026-08-06) — this test's title used to read "a well-formed GUEST id
+  // needs no token at all". That is no longer true, and this is a genuine narrowing of C1, not a
+  // reviewer artifact to paper over: invariant 4 means the guest memory subject now comes ONLY from a
+  // VERIFIED `x-guest-token`, never a bare client-typed `anonId`. What is STILL true, and is what C1's
+  // acceptance actually rests on (no NAMED-OWNER re-review needed): a guest still needs no SHOPPER
+  // token — `/forget` remains fully reachable by an unauthenticated caller, PROVIDED they present a
+  // validly-signed guest token for the id they name. Both halves are pinned below so a future change
+  // cannot silently re-widen the bare-string hole this closed, nor silently add a shopper-token
+  // requirement nobody decided on.
+  it("the accepted C1 residual is unchanged and still disclosed: no SHOPPER token is needed — but a bare client-typed GUEST id no longer works; it now needs its OWN valid signed x-guest-token", async () => {
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const app = await buildServer({ store, vectorPort: vector });
-    const res = await app.inject({ method: "POST", url: "/forget", payload: { anonId: GUEST_ANON_ID } });
+
+    // A bare, client-typed anonId with no token at all is now REJECTED outright — invariant 4 closed
+    // this half of C1 (no fallback to a client-named id, guest or otherwise).
+    const bare = await app.inject({ method: "POST", url: "/forget", payload: { anonId: GUEST_ANON_ID } });
+    expect(bare.statusCode).toBe(400);
+    expect((await store.readAudit({ tenantId: "demo" })).map((r) => r.action)).not.toContain("erase.subject");
+
+    // But NO shopper token is required either — the SAME guest id, presented as a validly-signed
+    // `x-guest-token`, still erases with zero authentication beyond that token. This is the residual
+    // C1's acceptance actually names: reachable by anyone who holds the token, not gated on sign-in.
+    const res = await app.inject({
+      method: "POST",
+      url: "/forget",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON_ID),
+      payload: {},
+    });
     expect(res.statusCode).toBe(200);
     expect((await store.readAudit({ tenantId: "demo" })).map((r) => r.action)).toContain("erase.subject");
     await app.close();

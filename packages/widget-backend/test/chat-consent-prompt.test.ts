@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // PR-11c — contextual in-the-moment health-consent prompt: the deferred follow-up to PR-11b. When
 // memory is live AND the shopper's CURRENT message reveals special-category (health/allergy/medical)
@@ -25,8 +26,10 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
   };
 }
 
-const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED"];
+const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`.
+const GUEST_SECRET = "gsecret";
 
 // Security review (Finding 2) — the boot guard now asserts on the SAME predicate that actually arms
 // memory in-process (`memoryServiceEnabled`), so every test below using the `memoryEnabled` seam must
@@ -99,20 +102,23 @@ describe("PR-11c — /chat carries a contextual consentPrompt='special' signal",
   it("absent once memorySpecial is already recorded 'in' (already have it — don't nag)", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const modelPort = distillingModel([{ text: "shopper has a tree-nut allergy" }]);
     const app = await buildServer({ store, modelPort, memoryEnabled: true });
     const consentRes = await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "unknown", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { memoryOrdinary: "unknown", memorySpecial: "in", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(consentRes.statusCode).toBe(200);
 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s4", message: "I'm allergic to tree nuts", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "s4", message: "I'm allergic to tree nuts", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().consentPrompt).toBeUndefined();
@@ -122,19 +128,22 @@ describe("PR-11c — /chat carries a contextual consentPrompt='special' signal",
   it("absent once memorySpecial is already recorded 'out' (they declined — don't nag)", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const app = await buildServer({ store, memoryEnabled: true });
     const consentRes = await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "unknown", memorySpecial: "out", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { memoryOrdinary: "unknown", memorySpecial: "out", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(consentRes.statusCode).toBe(200);
 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s5", message: "I'm allergic to tree nuts", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "s5", message: "I'm allergic to tree nuts", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().consentPrompt).toBeUndefined();
