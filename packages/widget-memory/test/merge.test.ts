@@ -3,7 +3,8 @@ import { createInMemoryVectorStore, InMemoryRuntimeStore, createEnvSecrets, type
 import { createBrain, createSession, MockModelAdapter } from "@palup/widget-brain";
 import { createMemoryService } from "../src/service.js";
 import { mergeGuestIntoAccount } from "../src/merge.js";
-import { subjectNamespace } from "../src/identity.js";
+import { subjectNamespace, accountSubjectId } from "../src/identity.js";
+import { subjectRef } from "../src/audit.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
@@ -148,6 +149,122 @@ describe("merge — mergeGuestIntoAccount", () => {
 
     const log = await runtimeStore.readAudit({ tenantId: "acme" });
     expect(log.map((r) => r.action)).toContain("merge");
+  });
+
+  // F-8 (ADR-0019 Revision 2, task 7 — corrects C9's "the carry-over records only the SOURCE ref" gap).
+  // An operator reading the immutable log must be able to tell WHICH ACCOUNT received a guest's facts,
+  // not just which guest was read. Both refs must be the existing keyed-HMAC `subjectRef` — never a raw
+  // id, never fact text.
+  describe("F-8 — the merge audit carries BOTH the source (guest) and destination (account) subject refs", () => {
+    it("a merge that moves facts records subjectRef (source) AND destSubjectRef (destination), both keyed-HMAC", async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const service = createMemoryService({
+        vector,
+        audit: runtimeStore,
+        distiller: fixedDistiller(["prefers fragrance-free"]),
+        enabled: true,
+      });
+      const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-f8", region: "us", consent1: "in", consent2: "unknown" };
+      await service.remember(ctx, { message: "m", reply: "r" });
+
+      await mergeGuestIntoAccount(
+        { vector, audit: runtimeStore, hmacKey: "test-key" },
+        { tenantId: "acme", anonId: "guest-f8", accountId: "acct-f8", consent2: "unknown" },
+      );
+
+      const log = await runtimeStore.readAudit({ tenantId: "acme" });
+      const mergeRow = log.find((r) => r.action === "merge");
+      expect(mergeRow, "no merge audit row was written").toBeDefined();
+      const input = mergeRow!.input as { subjectRef?: string; destSubjectRef?: string };
+      expect(input.subjectRef).toBe(subjectRef("acme", "guest-f8", "test-key"));
+      expect(input.destSubjectRef).toBe(subjectRef("acme", accountSubjectId("acct-f8"), "test-key"));
+      expect(input.destSubjectRef).not.toBe(input.subjectRef);
+
+      // Never the raw id or fact text, in either ref.
+      const serialized = JSON.stringify(mergeRow);
+      expect(serialized).not.toContain("guest-f8");
+      expect(serialized).not.toContain("acct-f8");
+      expect(serialized).not.toContain("fragrance-free");
+    });
+
+    it("a zero-move merge on an EMPTY guest namespace still audits — count 0, both refs present (C9: an unaudited cross-subject read)", async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+
+      const result = await mergeGuestIntoAccount(
+        { vector, audit: runtimeStore, hmacKey: "test-key" },
+        { tenantId: "acme", anonId: "guest-empty", accountId: "acct-empty", consent2: "unknown" },
+      );
+      expect(result.merged).toBe(0);
+
+      const log = await runtimeStore.readAudit({ tenantId: "acme" });
+      const mergeRow = log.find((r) => r.action === "merge");
+      expect(mergeRow, "the empty-namespace read was an unaudited cross-subject read (C9)").toBeDefined();
+      expect(mergeRow!.decision).toMatchObject({ count: 0 });
+      const input = mergeRow!.input as { subjectRef?: string; destSubjectRef?: string };
+      expect(input.subjectRef).toBe(subjectRef("acme", "guest-empty", "test-key"));
+      expect(input.destSubjectRef).toBe(subjectRef("acme", accountSubjectId("acct-empty"), "test-key"));
+    });
+
+    it("a zero-move merge where every candidate is ALREADY HELD by the account still audits — count 0, both refs present", async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const service = createMemoryService({
+        vector,
+        audit: runtimeStore,
+        distiller: fixedDistiller(["prefers fragrance-free"]),
+        enabled: true,
+      });
+      const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-f8-dup", region: "us", consent1: "in", consent2: "unknown" };
+      await service.remember(ctx, { message: "m", reply: "r" });
+
+      const deps = { vector, audit: runtimeStore, hmacKey: "test-key" };
+      const mergeCtx = { tenantId: "acme", anonId: "guest-f8-dup", accountId: "acct-f8-dup", consent2: "unknown" as const };
+      await mergeGuestIntoAccount(deps, mergeCtx); // first call moves the fact
+
+      const result = await mergeGuestIntoAccount(deps, mergeCtx); // second call: nothing new to move
+      expect(result.merged).toBe(0);
+
+      const log = await runtimeStore.readAudit({ tenantId: "acme" });
+      const mergeRows = log.filter((r) => r.action === "merge");
+      expect(mergeRows.length, "the second (no-op) call was an unaudited cross-subject read (C9)").toBe(2);
+      const secondRow = mergeRows[1];
+      expect(secondRow.decision).toMatchObject({ count: 0 });
+      const input = secondRow.input as { subjectRef?: string; destSubjectRef?: string };
+      expect(input.subjectRef).toBe(subjectRef("acme", "guest-f8-dup", "test-key"));
+      expect(input.destSubjectRef).toBe(subjectRef("acme", accountSubjectId("acct-f8-dup"), "test-key"));
+    });
+
+    it("a zero-move merge where a special fact is DROPPED by Inv 9 still audits — count 0, both refs present", async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const service = createMemoryService({
+        vector,
+        audit: runtimeStore,
+        distiller: fixedDistiller(["shopper has a tree-nut allergy"]),
+        enabled: true,
+        secrets: keyedSecrets("acme"),
+      });
+      const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-f8-special", region: "us", consent1: "in", consent2: "in" };
+      await service.remember(ctx, { message: "m", reply: "r" });
+
+      const result = await mergeGuestIntoAccount(
+        { vector, audit: runtimeStore, hmacKey: "test-key" },
+        { tenantId: "acme", anonId: "guest-f8-special", accountId: "acct-f8-special", consent2: "unknown" },
+      );
+      expect(result.merged).toBe(0); // dropped, never promoted under sign-up ToS
+
+      const log = await runtimeStore.readAudit({ tenantId: "acme" });
+      const mergeRow = log.find((r) => r.action === "merge");
+      expect(mergeRow, "the Inv-9-dropped read was an unaudited cross-subject read (C9)").toBeDefined();
+      expect(mergeRow!.decision).toMatchObject({ count: 0 });
+      const input = mergeRow!.input as { subjectRef?: string; destSubjectRef?: string };
+      expect(input.subjectRef).toBe(subjectRef("acme", "guest-f8-special", "test-key"));
+      expect(input.destSubjectRef).toBe(subjectRef("acme", accountSubjectId("acct-f8-special"), "test-key"));
+      // Never the fact text, even though it was read and dropped.
+      expect(JSON.stringify(mergeRow)).not.toContain("tree-nut");
+    });
   });
 
   // Shopper-disposition program PR-8 — `SessionState.sessionDisposition` (widget-brain's TRANSIENT,

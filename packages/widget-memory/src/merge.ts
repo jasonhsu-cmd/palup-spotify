@@ -65,10 +65,14 @@ export interface MergeCtx {
  * Audited guest -> account fact CARRY-OVER (ADR-0015 Tier 2). Ordinary facts always follow;
  * special-category facts follow ONLY when `ctx.consent2 === "in"` (Inv 9).
  *
- * The guest namespace is left INTACT (see the module header for why). Calling this repeatedly is safe and
- * silent: it migrates only ids the account does not already hold, returns `{merged: 0}` when there is
- * nothing new, and writes an audit row ONLY when something actually moved. Safe to call on every verified
- * turn, which is exactly what the production caller does.
+ * The guest namespace is left INTACT (see the module header for why). Calling this repeatedly is safe:
+ * it migrates only ids the account does not already hold, returning `{merged: 0}` when there is nothing
+ * new. It is NOT silent, though (F-8/C9, ADR-0019 Revision 2 task 7): every call is itself a
+ * cross-subject read of the guest namespace, so every call writes exactly one `merge` audit row — with
+ * `count` distinguishing a real migration (>0) from a read that moved nothing (0) — carrying BOTH the
+ * source (guest) and destination (account) subject refs, so an operator can reconstruct which account
+ * received which guest's facts even when nothing moved. Safe to call on every verified turn, which is
+ * exactly what the production caller does.
  *
  * Because the source survives, a fact DROPPED by Inv 9 on one call can still follow on a later one — if
  * the shopper grants Consent 2 for the account afterwards, the next call picks it up. Under the old MOVE
@@ -96,13 +100,34 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
     );
   }
   const anonNamespace = subjectNamespace(ctx.tenantId, ctx.anonId);
-  const accountNamespace = subjectNamespace(ctx.tenantId, accountSubjectId(ctx.accountId));
+  const destAnonId = accountSubjectId(ctx.accountId);
+  const accountNamespace = subjectNamespace(ctx.tenantId, destAnonId);
+
+  // F-8/C9 (ADR-0019 Revision 2 task 7) — every call below this point audits exactly once, carrying BOTH
+  // subject refs, whatever `count` turns out to be. The querying of `anonNamespace` a few lines down is
+  // itself the cross-subject read C9 is about: it happens whether or not anything ends up migrating, so
+  // it must never be silent. `recordMerge` is the ONE place that writes the audit row, so every return
+  // path below goes through it — no path can silently skip it.
+  const recordMerge = (count: number) =>
+    deps.audit.audit(
+      { tenantId: ctx.tenantId },
+      buildMemoryAudit({
+        action: "merge",
+        tenantId: ctx.tenantId,
+        anonId: ctx.anonId,
+        destAnonId,
+        count,
+        hmacKey: deps.hmacKey,
+      }),
+    );
 
   const matches = await deps.vector.query(anonNamespace, { text: "", k: QUERY_LIMIT });
-  // Cheap exit: no guest facts means no second query and NO audit row. The production caller runs on
-  // every verified turn that presents a guest anonId, so "nothing happened" must cost nothing and must
-  // not be recorded — Inv 6 forbids a silent ACTION, not doing nothing.
-  if (matches.length === 0) return { merged: 0 };
+  // No guest facts: nothing to migrate, but the guest namespace was still READ under an account
+  // principal — that cross-subject read is recorded (count 0), never silently skipped.
+  if (matches.length === 0) {
+    await recordMerge(0);
+    return { merged: 0 };
+  }
 
   // Copying is not self-limiting the way the old MOVE was (it erased its own source), so idempotence has
   // to come from CONTENT: migrate only ids the account does not already hold. Without this, every turn
@@ -119,17 +144,19 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
     toMigrate.push({ id: match.id, text: meta?.text, metadata: match.metadata });
   }
 
-  if (toMigrate.length === 0) return { merged: 0 }; // nothing moved ⇒ nothing to audit
+  // Nothing new to move (already held, or dropped by Inv 9) — still a cross-subject read of a
+  // non-empty guest namespace, so it is still recorded (count 0), not skipped.
+  if (toMigrate.length === 0) {
+    await recordMerge(0);
+    return { merged: 0 };
+  }
 
   await deps.vector.upsert(accountNamespace, toMigrate);
   // THE GUEST NAMESPACE IS DELIBERATELY LEFT ALONE — see this module's header. It is not orphaned: it
   // stops being written to once the shopper is signed in, so the scheduled retention sweep (B4) reclaims
   // it on the ordinary TTL. Minimisation by expiry, with no deletion primitive for an attacker to reach.
 
-  await deps.audit.audit(
-    { tenantId: ctx.tenantId },
-    buildMemoryAudit({ action: "merge", tenantId: ctx.tenantId, anonId: ctx.anonId, count: toMigrate.length, hmacKey: deps.hmacKey }),
-  );
+  await recordMerge(toMigrate.length);
 
   return { merged: toMigrate.length };
 }
