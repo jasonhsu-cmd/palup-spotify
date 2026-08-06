@@ -165,6 +165,21 @@ describe("POST /widget/guest — MINT vs RENEW (R2-3)", () => {
     }
   });
 
+  it("IC-2: a malformed/oversized guestToken body never 500s and is never coerced into a namespace", async () => {
+    arm();
+    const app = await server(true);
+    try {
+      for (const bad of [{ guestToken: 42 }, { guestToken: { a: 1 } }, { guestToken: "x".repeat(20_000) }, { guestToken: null }, {}]) {
+        const res = await post(app, bad as Record<string, unknown>);
+        expect(res.statusCode, `body ${JSON.stringify(bad).slice(0, 30)} should mint fresh, not 500`).toBe(200);
+        const claims = await createGuestTokenIdentity(GUEST_SECRET).verify(JSON.parse(res.body).guestToken, { tenantId: TENANT });
+        expect(claims?.tid).toBe(TENANT); // always a fresh server-signed token bound to this tenant
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   it("a token from ANOTHER tenant is not renewed here — a fresh THIS-tenant guest is minted (C3)", async () => {
     arm();
     const app = await server(true);
