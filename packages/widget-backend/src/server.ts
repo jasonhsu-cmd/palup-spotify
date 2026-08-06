@@ -16,6 +16,9 @@ import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion
 import {
   createWidgetTokenIdentity,
   mintWidgetToken,
+  createGuestTokenIdentity,
+  mintGuestToken,
+  renewGuestToken,
   createShopperTokenIdentity,
   mintShopperToken,
   shopperIdTenant,
@@ -579,6 +582,13 @@ export async function buildServer(opts?: {
   // `createMerchantResolver` above as the named FALLBACK behind the merchant registry, and every embed-key
   // lookup goes through `merchants.resolveEmbedKey`.
   const widgetIdentity = createWidgetTokenIdentity(WIDGET_TOKEN_SECRET);
+  // ADR-0019 — guest identity. A SEPARATE secret from the widget/shopper token secrets (R2-4): a
+  // compromise of one token type must not forge another. Absent ⇒ `guestIdentity.verify` always yields
+  // null and `POST /widget/guest` cannot mint, which is the correct inert state while the feature is
+  // unprovisioned/off. TTL matches the ordinary retention window (sliding; the widget renews before expiry).
+  const GUEST_TOKEN_SECRET = process.env.GUEST_TOKEN_SECRET;
+  const GUEST_TOKEN_TTL_SECONDS = posInt("GUEST_TOKEN_TTL_SECONDS", 30 * 24 * 3_600); // 30d, matches ORDINARY_TTL
+  const guestIdentity = createGuestTokenIdentity(GUEST_TOKEN_SECRET);
   // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
   // F4 (startup precondition): SHOPPER_AUTH is only ever HONORED when WIDGET_AUTH_REQUIRED is ALSO on —
   // it needs a VERIFIED widget tenant to cross-check the shopper's tenant against (F1); under the
@@ -881,6 +891,58 @@ export async function buildServer(opts?: {
       return { error: "invalid or unconfigured embed key" };
     }
     return { token: mintWidgetToken(WIDGET_TOKEN_SECRET, resolved.tenantId, WIDGET_TOKEN_TTL_SECONDS), expiresInSeconds: WIDGET_TOKEN_TTL_SECONDS };
+  });
+
+  // ADR-0019 Revision 2, Task 3 — `POST /widget/guest`: MINT or RENEW the signed guest identity token.
+  // Its OWN route (never the cacheable GET /widget/token — R2-6, F-6): a per-visitor secret must not share
+  // a response with a per-tenant one. `Cache-Control: no-store` always. The token's tenant comes from the
+  // VERIFIED widget token (never a client value — C1/R2-5); no valid widget token ⇒ 401. LAZY (R2-6/F-7):
+  // mints only when the tenant's memory posture is live — off everywhere today, so it issues nothing,
+  // keeping a durable identifier from being handed out pre-consent for a dormant feature. NO PER-SUBJECT
+  // STORE WRITE (F-14/invariant 11): pure HMAC; the only store touch is the fail-open per-IP rate counter,
+  // which is not per-subject. MINT vs RENEW (R2-3): a presented VALID own-tenant token is renewed (same
+  // aid, new exp); anything else — absent, expired, wrong-tenant, forged — is a FRESH mint (a new guest),
+  // never a renewal of a token this browser cannot prove.
+  app.post("/widget/guest", async (req, reply) => {
+    reply.header("Cache-Control", "no-store");
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open: minting is a pure HMAC, and the write path (/chat) is separately capped */
+    }
+    // Tenant comes from the verified widget token ONLY — a guest id must be bound to a verified tenant,
+    // never the RUNTIME_TENANT fallback.
+    const authHeader = req.headers["authorization"];
+    const widgetToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+    const merchantPrincipal = await widgetIdentity.authenticate(widgetToken);
+    if (merchantPrincipal.kind !== "merchant") {
+      reply.code(401);
+      return { error: "a valid widget token is required to mint a guest identity" };
+    }
+    const tenantId = merchantPrincipal.merchantId;
+    // LAZY: no mint unless memory is live AND a guest secret is provisioned. Both are false today, so this
+    // returns `{enabled:false}` and issues no identifier — the inert state R2-6 requires.
+    if (!memoryServiceEnabled || !GUEST_TOKEN_SECRET) {
+      return { enabled: false };
+    }
+    // RENEW if the caller presents a VALID own-tenant token (verify enforces signature+typ+tid+expiry);
+    // otherwise MINT fresh. `verify(..,{tenantId})` rejects a foreign-tenant or expired token, so those
+    // fall through to a fresh mint bound to THIS tenant (C3) rather than renewing something unprovable.
+    const presented = (req.body as { guestToken?: unknown } | undefined)?.guestToken;
+    if (typeof presented === "string" && presented) {
+      const claims = await guestIdentity.verify(presented, { tenantId });
+      if (claims) {
+        const renewed = renewGuestToken(GUEST_TOKEN_SECRET, presented, GUEST_TOKEN_TTL_SECONDS);
+        if (renewed) return { anonId: renewed.anonId, guestToken: renewed.token, expiresInSeconds: GUEST_TOKEN_TTL_SECONDS };
+      }
+    }
+    const minted = mintGuestToken(GUEST_TOKEN_SECRET, tenantId, GUEST_TOKEN_TTL_SECONDS);
+    return { anonId: minted.anonId, guestToken: minted.token, expiresInSeconds: GUEST_TOKEN_TTL_SECONDS };
   });
 
   // ADR-0017 T2/T4 — mint a shopper session token from a verified Shopify App-Proxy request. Reached via
