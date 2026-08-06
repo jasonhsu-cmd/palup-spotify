@@ -143,6 +143,37 @@ describe("guest token — tenant binding (invariant 7, R2-5)", () => {
   });
 });
 
+describe("guest token — contract boundaries the route layer (task 3/4) depends on", () => {
+  // N1 — document the permissive-vs-strict contrast in one place: no `tenantId` accepts any tenant's
+  // token (so a tenant-scoped route MUST pass it — carry-forward condition C1), passing it enforces.
+  it("verify is PERMISSIVE without tenantId and STRICT with it — the contract task 3 must honour", async () => {
+    const id = createGuestTokenIdentity(SECRET);
+    const { token } = mintGuestToken(SECRET, TID, 300);
+    expect(await id.verify(token)).not.toBeNull(); // no opts → any tenant (caller must scope)
+    expect(await id.verify(token, { tenantId: TID })).not.toBeNull();
+    expect(await id.verify(token, { tenantId: "other-shop" })).toBeNull();
+  });
+
+  // N2 — the "exactly one dot" edge cases: leading-dot and trailing/empty-sig must not parse.
+  it("a leading-dot or empty-signature credential never verifies", async () => {
+    const id = createGuestTokenIdentity(SECRET);
+    const { token } = mintGuestToken(SECRET, TID, 300);
+    const body = token.split(".")[0];
+    expect(await id.verify(`.${hmacSign(SECRET, "")}`)).toBeNull(); // leading dot, empty body
+    expect(await id.verify(`${body}.`)).toBeNull(); // trailing dot, empty sig
+  });
+
+  // N3 — C2 boundary: a validly-signed token whose aid is NOT a valid anonId still verifies here and
+  // returns the raw aid. That is deliberate — running validateAnonId is the CONSUMER's job (task 4),
+  // before the aid keys a namespace. This test documents that the token layer does NOT do it, so the
+  // obligation is not silently assumed to live here.
+  it("verify returns the raw aid even when it is not a valid anonId — validateAnonId is the consumer's job (C2)", async () => {
+    const id = createGuestTokenIdentity(SECRET);
+    const lower = craftSigned(SECRET, { typ: "guest", tid: TID, aid: "not-a-valid-anonid", exp: 9999999999 });
+    expect(await id.verify(lower)).toEqual({ anonId: "not-a-valid-anonid", tid: TID });
+  });
+});
+
 describe("guest token — never throws (adapter contract)", () => {
   it("garbage, empty, and unconfigured-secret inputs all yield null rather than throwing", async () => {
     const id = createGuestTokenIdentity(SECRET);
