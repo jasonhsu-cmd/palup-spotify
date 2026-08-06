@@ -589,6 +589,20 @@ export async function buildServer(opts?: {
   const GUEST_TOKEN_SECRET = process.env.GUEST_TOKEN_SECRET;
   const GUEST_TOKEN_TTL_SECONDS = posInt("GUEST_TOKEN_TTL_SECONDS", 30 * 24 * 3_600); // 30d, matches ORDINARY_TTL
   const guestIdentity = createGuestTokenIdentity(GUEST_TOKEN_SECRET);
+  // ADR-0019 Revision 2, Task 4 — THE ONE guest-subject derivation. The guest memory subject comes from a
+  // VERIFIED guest token in the `x-guest-token` header, bound to THIS tenant (C1: always pass tenantId),
+  // and NEVER from `body.anonId` / `signals.anonId` (invariant 4 — no fallback to a client-named id; that
+  // fallback is exactly what failed the F1 attack test). Returns the validated `anonId` (C2: validateAnonId
+  // even though the token minted it, so a forged-but-signed lowercase/`::` aid can never key a namespace)
+  // or `undefined`. Every route (/chat, /consent, /forget) calls THIS, so they cannot disagree on whose
+  // memory a request touches, and C13's derivation-drift risk cannot reach the guest side.
+  const guestAnonIdFrom = async (req: { headers: Record<string, unknown> }, tenantId: string): Promise<string | undefined> => {
+    const h = req.headers["x-guest-token"];
+    const tok = typeof h === "string" ? h : Array.isArray(h) ? h[0] : undefined;
+    if (!tok) return undefined;
+    const claims = await guestIdentity.verify(tok, { tenantId });
+    return claims ? validateAnonId(claims.anonId) : undefined;
+  };
   // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
   // F4 (startup precondition): SHOPPER_AUTH is only ever HONORED when WIDGET_AUTH_REQUIRED is ALSO on —
   // it needs a VERIFIED widget tenant to cross-check the shopper's tenant against (F1); under the
@@ -1267,7 +1281,8 @@ export async function buildServer(opts?: {
     // path unchanged. This is what stops someone holding another shopper's anonId from setting THEIR
     // consent.
     const verifiedShopperId = await verifiedShopperIdFor(principal, tenantId, req.headers["x-shopper-token"], body.shopperToken);
-    const subject = memorySubjectId({ verifiedShopperId, rawAnonId: body.anonId });
+    // Task 4: guest subject from the VERIFIED x-guest-token, never body.anonId (invariant 4).
+    const subject = memorySubjectId({ verifiedShopperId, rawAnonId: await guestAnonIdFrom(req, tenantId) });
     const isTriStateConsent = (v: unknown): v is Consent => v === "in" || v === "out" || v === "unknown";
     if (!subject || !isTriStateConsent(body.memoryOrdinary) || !isTriStateConsent(body.memorySpecial)) {
       reply.code(400);
@@ -1435,10 +1450,13 @@ export async function buildServer(opts?: {
     // and no `::` namespace-injection string can pass. That boundary is what keeps C1's accepted exposure
     // at "a 128-bit CSPRNG guest id" instead of the ENUMERABLE account subject of every signed-in shopper.
     const verifiedShopperId = await verifiedShopperIdFor(principal, tenantId, req.headers["x-shopper-token"], body.shopperToken);
-    const subject = memorySubjectId({ verifiedShopperId, rawAnonId: body.anonId });
+    // Task 4: guest subject from the VERIFIED x-guest-token, never body.anonId (invariant 4). Derived once
+    // and reused for the guest-era erase below.
+    const guestTokenAnonId = await guestAnonIdFrom(req, tenantId);
+    const subject = memorySubjectId({ verifiedShopperId, rawAnonId: guestTokenAnonId });
     if (!subject) {
       reply.code(400);
-      return { error: "invalid anonId" };
+      return { error: "no verified subject to forget" };
     }
 
     await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: subject });
@@ -1454,11 +1472,10 @@ export async function buildServer(opts?: {
     // token entirely. Only fires when the presented `anonId` is (a) well-formed (`validateAnonId`) and
     // (b) actually a DIFFERENT namespace from the account subject (a guest calling /forget with no
     // shopper token already goes through the `subject` erase above and must not double-audit itself).
-    if (verifiedShopperId) {
-      const guestAnonId = validateAnonId(typeof body.anonId === "string" ? body.anonId : undefined);
-      if (guestAnonId && guestAnonId !== subject) {
-        await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: guestAnonId });
-      }
+    if (verifiedShopperId && guestTokenAnonId && guestTokenAnonId !== subject) {
+      // The guest-era namespace, named by the VERIFIED guest token (not a client string), erased on the
+      // same signed-in /forget so the UI's "I've cleared what I remembered" is true across both subjects.
+      await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: guestTokenAnonId });
     }
     return { ok: true };
   });
@@ -1666,8 +1683,10 @@ export async function buildServer(opts?: {
       // anything client-asserted.
       const verifiedShopperId =
         shopperPrincipal.kind === "shopper" && shopperPrincipal.verified ? shopperPrincipal.shopperId : undefined;
+      // Task 4: the guest anonId is the VERIFIED x-guest-token claim, never `signals.anonId`.
+      const guestAnonId = memoryService ? await guestAnonIdFrom(req, tenantId) : undefined;
       const memorySubject = memoryService
-        ? memorySubjectId({ verifiedShopperId, rawAnonId: body.signals?.anonId })
+        ? memorySubjectId({ verifiedShopperId, rawAnonId: guestAnonId })
         : undefined;
       // BLOCK-1 fix (security-review remediation, PR #152) — restrictive-merge consent across the
       // guest/account subjects on sign-in (mergeAccountConsent, widget-memory/src/consent.ts — see its
@@ -1696,9 +1715,9 @@ export async function buildServer(opts?: {
       let consentRecord: ConsentRecord | undefined;
       if (memorySubject) {
         const accountRecord = await lookupConsent(store, { tenantId, anonId: memorySubject });
-        validatedGuestAnonId = verifiedShopperId
-          ? validateAnonId(typeof body.signals?.anonId === "string" ? body.signals.anonId : undefined)
-          : undefined;
+        // Task 4: the guest side of the restrictive merge is the SAME verified-token anonId, consulted
+        // only when a shopper is signed in (a guest turn's `memorySubject` already IS that anonId).
+        validatedGuestAnonId = verifiedShopperId ? guestAnonId : undefined;
         const guestRecord = validatedGuestAnonId ? await lookupConsent(store, { tenantId, anonId: validatedGuestAnonId }) : undefined;
         const merged = validatedGuestAnonId ? mergeAccountConsent(accountRecord, guestRecord) : accountRecord;
         consentRecord = merged;
