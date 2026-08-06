@@ -3,15 +3,14 @@ name: ci
 # Mirrors build-automation.md §3c: typecheck → unit/port-contract → self-improvement eval gate →
 # application E2E. No auto-deploy: promotion to prod is a human action (locked decision §1).
 on:
-  # `main` only, NOT "**". Previously every PR produced TWO identical runs (one `push` on the branch,
-  # one `pull_request`), which halved effective runner concurrency and made "which run is authoritative?"
-  # ambiguous for anything reading check results. The `pull_request` run is strictly better evidence:
-  # actions/checkout on that event checks out refs/pull/N/merge — the head ALREADY MERGED WITH base —
-  # whereas the branch `push` run tests the head in isolation. PRs are covered by `pull_request`; main is
-  # covered here. A branch with no PR gets no CI, which is intended: work reaches main only via a PR.
+  # main ONLY (owner decision 2026-08-07). PER-PR CI IS DISABLED: pull requests are gated LOCALLY by
+  # `.claude/scripts/merge-gate.sh`, which runs these same five steps on the merger's machine before a
+  # merge — so a GitHub Actions outage can never block a merge, and CI minutes are reserved for the deploy
+  # path. This run on `push: main` is kept ONLY as the gate `deploy-staging.yml` keys off
+  # (`workflow_run: [ci]`, deploys iff conclusion == success), so nothing red reaches staging. A branch
+  # with no PR still gets no CI; work reaches main only via a PR, now gated locally at merge time.
   push:
     branches: [main]
-  pull_request:
 
 # One run per PR (or per ref). A force-push supersedes its own in-flight run instead of competing with
 # it for a runner. Safe because every consumer treats a `cancelled` conclusion as NOT green.
