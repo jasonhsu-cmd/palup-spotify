@@ -244,23 +244,36 @@ is new engineering.
 
 ---
 
-## Q11 — "Expiry enforced on read" vs actual deletion; and storage is currently non-durable
+## Q11 — "Expiry enforced on read" vs actual deletion
 
-**What the code does.** Expired facts are filtered out at read time and never renewed (`service.ts:154`). The
-sweep that actually deletes them (`packages/widget-memory/src/retention.ts:69-100`) has **no caller in serving
-code** — the `store.sweepExpired()` at `server.ts:964` is the unrelated runtime-KV sweep. Separately, the only
-`VectorPort` adapter that exists is in-memory (`packages/platform-ports/src/vector-port.ts:117-159`, wired at
-`server.ts:198`), so today facts would live in the serving process only, and `/forget` would reach just the
-instance handling the request.
+> **UPDATED 2026-08-06 — half of this question has dissolved; the other half is now sharper.** Both premises
+> behind the second half are obsolete: **storage is durable** (`PostgresVectorStore` is merged and live in
+> staging), and **the sweep is scheduled** (daily, via Cloud Scheduler). The title previously read
+> "…; and storage is currently non-durable" and that clause has been dropped. The **first** half stands and
+> is the live decision.
 
-**The decision.** Does a retention commitment in the notice/DPA require *deletion* on schedule, or is
-"never served after expiry" sufficient for the period between expiry and sweep? And separately: **until a
-durable adapter exists, may the notice/DPA make any retention or erasure representation at all**, given
-that today's answer to "how long is it kept" is "until the process restarts" and today's answer to "is it
-deleted when I ask" is "on the one instance that received the request"? Engineering intends both a
-scheduled sweep and a durable adapter — a durable adapter is in development on a **separate, unmerged
-branch** and is not part of the code described in these drafts — but counsel should state the requirement
-so it is built to spec rather than to convenience.
+**What the code does.** Expired facts are filtered out at read time and never renewed (`service.ts:154`).
+The sweep that actually deletes them (`packages/widget-memory/src/retention.ts:69-100`) still has **no caller
+in serving code** — the `store.sweepExpired()` at `server.ts:964` is the unrelated runtime-KV sweep — but it
+now runs **daily at 03:17 UTC** as a scheduled Cloud Run Job (`docs/DEPLOY.md`, "Retention sweep"). Facts are
+stored durably in Cloud SQL Postgres whenever `DATABASE_URL` is set, so they survive restart, are shared
+across instances, and `POST /forget` is a real cross-instance deletion — proven physical against a live
+Postgres 16 server (`packages/widget-backend/test/b6-erasure-real-postgres.test.ts`).
+
+**The decision (still open).** Does a retention commitment in the notice/DPA require *deletion* on schedule,
+or is "never served after expiry" sufficient for the window between expiry and the next sweep? That window
+is now bounded at roughly **24 hours** rather than unbounded, which is what makes the question answerable —
+counsel should say whether a bounded gap of that size is acceptable, and whether it must be stated to
+shoppers.
+
+**Two facts to weigh, neither of which the earlier version could offer.** The schedule is a property of a
+**deployment**, not of this code, so it must be confirmed per environment and could silently lapse; and **no
+sweep has yet deleted anything** — every run so far reported `visited=0`, because memory is off and no fact
+exists to expire, so the delete-and-audit path is evidenced by tests rather than by production execution.
+
+**Withdrawn premise, recorded so the change is visible:** this question previously also asked whether the
+notice/DPA could make *any* retention or erasure representation at all while storage was non-durable, on the
+grounds that "how long is it kept" answered "until the process restarts". That no longer applies.
 
 ---
 
@@ -318,15 +331,29 @@ being linked to their account, and is the irreversibility (the pre-merge namespa
 
 ---
 
-## Q16 — Encryption at rest for special-category facts is a stated invariant that is not implemented
+## Q16 — Encryption at rest for special-category facts ~~is a stated invariant that is not implemented~~ — IMPLEMENTED; only the copy question remains
 
-**What the code does.** ADR-0015 Invariant 9 and the "Consequences" section require special-category facts to
-be encrypted at rest. There is **no encryption in `packages/widget-memory`** — the only `node:crypto` uses are
-`randomUUID`, `randomBytes` and the audit `sha256` (`service.ts:1`, `identity.ts:1`, `audit.ts:1`).
-Application-layer AES-256-GCM exists elsewhere for OAuth grants
-(`packages/widget-backend/src/customer-grant-store.ts:28-48`) and is not applied here. There is also no
-at-rest store to encrypt yet (Q11). Engineering intends to close this before enablement; that intent is
-recorded in `memory-dpa-addendum-draft.md` §7 item 1 and nowhere else inspectable in this repository.
+> **RESOLVED 2026-08-06 — the premise is obsolete. Do not rule on "not implemented".** Special-category
+> facts **are** encrypted at rest: `packages/widget-memory/src/service.ts` applies **AES-256-GCM** through a
+> `CryptoPort` (`packages/platform-ports/src/crypto-port.ts`) to a health fact's `text`,
+> `disposition[].value` and `sourceQuote` *before* the storage adapter sees them, and it is **fail-closed** —
+> with no tenant key configured the write is **refused** rather than stored in the clear, with a
+> `write.refused` audit. Checklist **B2 — MET (PR #150)**; the key is provisioned (**B8**). The durable
+> at-rest store this depended on also exists now (**B1**), so the "no store to encrypt yet" qualifier is gone
+> too.
+>
+> **Ordinary facts are still NOT encrypted** — that distinction is real and worth counsel's attention, since
+> the invariant only ever required it for the special class.
+>
+> ~~**What the code does.** ADR-0015 Invariant 9 and the "Consequences" section require special-category
+> facts to be encrypted at rest. There is **no encryption in `packages/widget-memory`** — the only
+> `node:crypto` uses are `randomUUID`, `randomBytes` and the audit `sha256`. Application-layer AES-256-GCM
+> exists elsewhere for OAuth grants and is not applied here. There is also no at-rest store to encrypt yet
+> (Q11). Engineering intends to close this before enablement; that intent is recorded in
+> `memory-dpa-addendum-draft.md` §7 item 1 and nowhere else inspectable in this repository.~~
+>
+> On that last clause: the intent is now inspectable — **`docs/MEMORY-GO-LIVE-CHECKLIST.md`** is an itemised
+> gate list (A1–A7 / B1–B12 / C1–C14) with status and evidence per row.
 
 **Copy hazard flagged for counsel.** ADR-0015's *illustrative* Consent-2 prompt copy contains the phrase
 "I'll keep it encrypted" (`docs/adr/0015-cross-visit-memory-eu-consent-gated.md:105-108`). The copy actually
@@ -364,9 +391,26 @@ Not code questions — listed so they are not forgotten:
 
 ---
 
-## Q18 — The manage panel displays "off" while ordinary memory is being written (US default)
+## Q18 — ~~The manage panel displays "off" while ordinary memory is being written (US default)~~ — FIXED
 
-**What the code does.** The "What I remember" panel's two checkboxes are rendered checked **only when the
+> **RESOLVED 2026-08-06 — this defect was fixed and the question no longer needs a ruling.** The panel used
+> to bind its checkboxes to the value in the browser's own storage, so the tri-state `"unknown"` rendered
+> "off" while the US opt-out regime (`!== "out"`) was permitting writes. Both `/chat` and `/consent` now
+> return **`memoryActive`** — the effective write capability for the subject actually being served, derived
+> from the same input object `remember()`'s own consent gate consumes — and the widget renders that
+> (`packages/widget/public/index.html`, `memoryActive`). Panel and write path therefore **cannot** disagree.
+> Checklist **B11 — MET (PR #152)**, verified by execution in
+> `packages/widget-backend/test/manage-panel-honesty.test.ts`, which asserts the reported field against the
+> real upsert count on the same turn.
+>
+> **What counsel may still want to rule on** is the underlying regime, not the UI: under the US opt-out
+> default, a shopper who has never answered *is* written about, and the panel now says so honestly rather
+> than hiding it. That is **Q5**'s write/read asymmetry question, which stays open. The
+> displayed-state-versus-processing mismatch this question was about is gone.
+>
+> The superseded description follows, kept so the change is visible rather than silent.
+
+**What the code did (superseded).** The "What I remember" panel's two checkboxes are rendered checked **only when the
 stored value is literally `"in"`** (`packages/widget/public/index.html:291-296,298-303`). A US shopper who
 has never answered sits at `consent1 = "unknown"` — the opt-out card's primary button ("Got it")
 deliberately makes no server call, because only a deviation from the regional default is recorded

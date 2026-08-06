@@ -163,12 +163,18 @@ or was never explicitly "in", the note is not surfaced at all.
 > answers has `consent1 = "unknown"`, which *permits the write* (`consent.ts:51`) but *blocks every read*
 > (`brain.ts:459`) and every retention renewal (`service.ts:164`). See open question **Q5**.
 
-> ⚠️ Counsel — a second asymmetry, in the UI. The manage panel's checkboxes render as **checked only when
-> the stored value is literally `"in"`** (`packages/widget/public/index.html:291-296,298-303`). Under the
-> US opt-out default a shopper who has never answered sits at `"unknown"` — so the panel displays
-> "Preferences: off" **while ordinary notes are in fact permitted and being written** (`consent.ts:51`).
-> Displayed state and actual processing disagree in exactly the default US configuration. This bears
-> directly on whether the consent artifact is valid; see **Q18**.
+> ⚠️ Counsel — **corrected 2026-08-06: the UI asymmetry described here was FIXED and this callout is
+> withdrawn.** The superseded version said the manage panel's checkboxes render checked only when the stored
+> value is literally `"in"`, so under the US opt-out default a never-answered shopper saw "Preferences: off"
+> while ordinary notes were being written — displayed state and actual processing disagreeing in exactly the
+> default configuration. Both `/chat` and `/consent` now return **`memoryActive`**, the effective write
+> capability for the subject actually served, and the widget renders that, so the two cannot disagree
+> (checklist **B11 — MET, PR #152**; asserted against the real upsert count in
+> `manage-panel-honesty.test.ts`).
+>
+> **What survives is the regime, not the mismatch:** under the US opt-out default a shopper who has never
+> answered *is* written about — the panel now discloses that instead of contradicting it. Whether that regime
+> makes the consent artifact valid is **Q5**, still open. See **Q18** for the resolved history.
 
 ## 4. Health information gets its own, separate consent
 
@@ -347,10 +353,17 @@ Counsel must reconcile the append-only audit log against erasure requests — se
   cross-visit memory.
 - Regional scope is currently a **deploy-level** setting (`MERCHANT_REGION`, default `"us"`,
   `server.ts:293-296`), not per-shopper geolocation. See **Q10**.
-- It does **not** describe encryption at rest for health notes. ADR-0015 Invariant 9 calls for it and
-  **it is not implemented** — there is no encryption anywhere in `packages/widget-memory` (searched the
-  package; the only `node:crypto` uses are `randomUUID`, `randomBytes` and the audit `sha256`). No
-  shopper-facing copy may say health notes are kept encrypted. Note that ADR-0015's own draft Consent-2
+- **Corrected 2026-08-06 — encryption at rest for health notes IS implemented, and the prohibition below is
+  withdrawn.** The superseded text said it was "not implemented — there is no encryption anywhere in
+  `packages/widget-memory`" and therefore that **no shopper-facing copy may say health notes are kept
+  encrypted**. That instruction would now suppress a true and reassuring statement.
+  `packages/widget-memory/src/service.ts` applies **AES-256-GCM** via a `CryptoPort` to a health note's text,
+  disposition value and source quote before storage, **fail-closed** (no tenant key ⇒ the write is refused,
+  not stored in the clear, with a `write.refused` audit). Checklist **B2 — MET (PR #150)**, key provisioned
+  per **B8**. Two limits for whoever writes the shopper-facing copy: this covers **health notes only** —
+  ordinary notes are **not** encrypted, so copy must not generalise — and it is application-layer encryption
+  before the store, not a statement about the database's own at-rest encryption or its backups. Note that
+  ADR-0015's own draft Consent-2
   prompt copy contains the phrase "I'll keep it encrypted"
   (`docs/adr/0015-cross-visit-memory-eu-consent-gated.md:105-108`); the prompt copy actually shipped in the
   widget does **not** make that claim (`index.html:277`), and it must not be reintroduced until the control
