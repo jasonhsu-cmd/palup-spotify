@@ -29,7 +29,7 @@ import {
   createRedactingModelPort,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, PostgresMerchantRegistry, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -601,7 +601,23 @@ export async function buildServer(opts?: {
     const tok = typeof h === "string" ? h : Array.isArray(h) ? h[0] : undefined;
     if (!tok) return undefined;
     const claims = await guestIdentity.verify(tok, { tenantId });
-    return claims ? validateAnonId(claims.anonId) : undefined;
+    if (!claims) return undefined;
+    const anonId = validateAnonId(claims.anonId);
+    if (!anonId) return undefined;
+    // ADR-0019 Task 5 / R2-7 (invariant 8): a REVOKED aid verifies as anonymous. Every memory-touching
+    // route derives its guest subject through THIS helper, so consulting the revocation record here enforces
+    // invariant 8 everywhere at once (a signed, non-expired token whose aid the shopper has since revoked
+    // via forget-me yields no subject → no recall, no write). FAIL CLOSED: if the store read throws we cannot
+    // confirm the credential is still live, so we treat it as revoked (return anonymous) rather than risk
+    // honouring a revoked token — the same fail-closed bias the consent path uses (unknown ⇒ no memory). The
+    // cost is that a runtime-state outage degrades all guest memory to anonymous, which is acceptable and
+    // matches how the rest of the feature fails under store distress.
+    try {
+      if (await isGuestRevoked(store, { tenantId, anonId })) return undefined;
+    } catch {
+      return undefined;
+    }
+    return anonId;
   };
   // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
   // F4 (startup precondition): SHOPPER_AUTH is only ever HONORED when WIDGET_AUTH_REQUIRED is ALSO on —
@@ -970,7 +986,21 @@ export async function buildServer(opts?: {
     const presented = (req.body as { guestToken?: unknown } | undefined)?.guestToken;
     if (typeof presented === "string" && presented) {
       const claims = await guestIdentity.verify(presented, { tenantId });
+      // ADR-0019 Task 5 / R2-7 (IC-1): NEVER renew a REVOKED aid — renewing would resurrect a credential
+      // the shopper invalidated via forget-me (a stolen copy would keep working forever by refreshing before
+      // each expiry). A revoked (or unconfirmable) aid falls through to a FRESH mint: the browser gets a new,
+      // empty anonymous identity instead of the revoked one. FAIL CLOSED on a store error — minting fresh is
+      // always safe (it never hands back the revoked aid), so an outage degrades to "always mint", never
+      // "renew a revoked token".
+      let revoked = true;
       if (claims) {
+        try {
+          revoked = await isGuestRevoked(store, { tenantId, anonId: claims.anonId });
+        } catch {
+          revoked = true;
+        }
+      }
+      if (claims && !revoked) {
         const renewed = renewGuestToken(GUEST_TOKEN_SECRET, presented, GUEST_TOKEN_TTL_SECONDS);
         if (renewed) return { anonId: renewed.anonId, guestToken: renewed.token, expiresInSeconds: GUEST_TOKEN_TTL_SECONDS };
       }
@@ -1496,6 +1526,20 @@ export async function buildServer(opts?: {
       // The guest-era namespace, named by the VERIFIED guest token (not a client string), erased on the
       // same signed-in /forget so the UI's "I've cleared what I remembered" is true across both subjects.
       await eraseSubject({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: guestTokenAnonId });
+    }
+    // ADR-0019 Task 5 / R2-7 (invariant 8): forget-me REVOKES the guest credential it just erased. Rotating
+    // away from a token must actually invalidate it, not leave a working copy in a thief's hands — after this,
+    // `guestAnonIdFrom` and the RENEW path both see the aid as revoked and yield anonymous / mint fresh. Keyed
+    // on the VERIFIED guest aid ONLY (never body.anonId — that would be a C10 denial primitive — and never the
+    // `acct:` subject, which is not a guest token). Written AFTER the erase: the erase is the load-bearing
+    // data-rights guarantee; revocation is anti-theft hardening layered on top. Best-effort on a store error —
+    // a failed revoke never un-erases, and a 500 here would falsely tell the shopper the erase failed.
+    if (guestTokenAnonId) {
+      try {
+        await revokeGuest(store, { tenantId, anonId: guestTokenAnonId, hmacKey: AUDIT_HMAC_SECRET });
+      } catch {
+        /* best-effort: the erase above is the guarantee; the token expires on its own even if this write missed */
+      }
     }
     return { ok: true };
   });
