@@ -3,6 +3,13 @@
 # is rejected and THIS SCRIPT IS THE ENTIRE GATE. `mergeStateStatus: CLEAN` means "no conflicts", NOT
 # "checks passed" — never treat it as a pass signal.
 #
+# LOCAL GATE (owner decision 2026-08-07). GitHub CI (`ci.yml`) no longer runs on pull requests — it runs
+# only on `push: main`, purely as the deploy gate. So this script RUNS THE FIVE GATE STEPS LOCALLY against
+# the PR head before merging, instead of reading a GitHub Actions run. Rationale: a GitHub Actions outage
+# must not be able to block a merge, and CI minutes are reserved for the deploy path. Trust model is
+# unchanged (no branch protection; the merger runs this honestly); what is lost is CI's clean room, so it
+# checks out the PR head on a CLEAN working tree and runs there.
+#
 # Kept in the repo (not session tmp) because the previous copy vanished with a session and had to be
 # rebuilt from memory — a gate you can lose is a gate you will eventually skip.
 #
@@ -12,8 +19,10 @@ set -uo pipefail
 PR="${1:?usage: merge-gate.sh <pr>}"
 R="${MERGE_GATE_REPO:-jasonhsu-cmd/palup-spotify}"
 
-# The five gate steps ci.yml must actually run. HARDCODED ON PURPOSE — never derived from the PR's own
-# ci.yml, or a PR that deletes a gate step would be measured against its own weakened definition.
+# The five gate steps. HARDCODED ON PURPOSE — never derived from the PR's own ci.yml, or a PR that
+# deletes a gate step would be measured against its own weakened definition. Used TWICE below: to run the
+# gate locally, and (by the no-weakening check) to guard against a PR deleting these names from ci.yml,
+# which still runs them on push:main as the deploy gate.
 EXPECT=(
   "Typecheck"
   "Unit + port-contract tests"
@@ -36,28 +45,36 @@ read -r BASE DRAFT STATE HEAD <<<"$(gh pr view "$PR" -R "$R" \
 [ "${#HEAD}" -eq 40 ] || die "head sha is not a full 40-char sha — the API will not match a short sha"
 echo "head: $HEAD"
 
-RUN=$(gh api "repos/$R/actions/runs?event=pull_request&head_sha=$HEAD&per_page=100" \
-      --jq '[.workflow_runs[] | select(.path==".github/workflows/ci.yml")] | sort_by(.run_number) | last')
-[ -n "$RUN" ] && [ "$RUN" != null ] || die "no ci.yml run for head $HEAD (absent, not merely pending)"
+# --- LOCAL execution of the five gate steps against the PR head (replaces reading a GitHub CI run) ------
+# A dirty tree would mean we test something other than the PR head — refuse rather than measure the wrong
+# thing (the same failure class as the empty-diff bug guarded below).
+[ -z "$(git status --porcelain)" ] || die "working tree is dirty — commit or stash before running the gate"
 
-read -r RSTATUS RCONCL RID RBASE <<<"$(jq -rn --argjson r "$RUN" \
-  '[$r.status, ($r.conclusion//"null"), $r.id, ($r.pull_requests[0].base.sha//"null")]|@tsv')"
-echo "ci run $RID: status=$RSTATUS conclusion=$RCONCL base=$RBASE"
+git fetch -q origin main || die "cannot fetch origin/main"
+[ "$(git rev-parse origin/main)" = "$MAIN" ] || die "local origin/main is not the repo's main head — re-fetch and re-run"
 
-[ "$RSTATUS" = completed ] || die "ci is '$RSTATUS' — not completed"
-# ONLY success. skipped/neutral/cancelled/timed_out/action_required are NOT passes.
-[ "$RCONCL" = success ] || die "ci conclusion is '$RCONCL', not success"
+# Check out the PR head locally. This MUTATES your checkout on purpose — you are merging this PR.
+gh pr checkout "$PR" -R "$R" >/dev/null 2>&1 || die "cannot check out PR #$PR"
+LOCALHEAD=$(git rev-parse HEAD)
+[ "$LOCALHEAD" = "$HEAD" ] || die "checked-out head $LOCALHEAD != PR head $HEAD (a force-push during the gate?)"
 
-# Freshness oracle: GitHub records the base the run was computed against. If main has moved, the green
-# proves the PR passed against an OLDER main, not against what we are merging into.
-[ "$RBASE" = "$MAIN" ] || die "STALE GREEN — ci ran against base $RBASE but main is now $MAIN. Update the branch and let ci re-run."
+# Freshness: the branch must contain CURRENT main, or a green proves nothing about what we merge into.
+git merge-base --is-ancestor "$MAIN" HEAD || die "STALE — branch does not contain current main ($MAIN); rebase onto main and re-run"
 
-STEPS=$(gh api "repos/$R/actions/runs/$RID/jobs" --jq '.jobs[].steps[] | "\(.name)\t\(.conclusion)"')
-for s in "${EXPECT[@]}"; do
-  line=$(printf '%s\n' "$STEPS" | grep -F -m1 "$s	") || die "gate step MISSING from the run: '$s'"
-  [ "${line##*	}" = success ] || die "gate step '$s' concluded '${line##*	}'"
-  echo "  ok  $s"
-done
+echo "running the gate LOCALLY at $LOCALHEAD (GitHub CI does not gate PRs — owner decision 2026-08-07)"
+pnpm install --frozen-lockfile >/tmp/gate.log 2>&1 || { tail -25 /tmp/gate.log >&2; die "pnpm install --frozen-lockfile failed"; }
+# Browsers for the E2E steps. Non-fatal: they are usually already present; --with-deps is skipped so no sudo.
+pnpm exec playwright install chromium >>/tmp/gate.log 2>&1 || echo "  (playwright install warned — continuing; browsers likely already present)"
+gate_step() {
+  echo "  .. $1"
+  if ! eval "$2" >/tmp/gate.log 2>&1; then tail -30 /tmp/gate.log >&2; die "LOCAL gate step FAILED: '$1'"; fi
+  echo "  ok  $1"
+}
+gate_step "Typecheck" "pnpm typecheck"
+gate_step "Unit + port-contract tests" "pnpm test"
+gate_step "Self-improvement eval gate (safety floor + no-regression)" "pnpm eval"
+gate_step "Application E2E (blocking pre-promotion gate)" "pnpm e2e"
+gate_step "Control-plane self-improvement E2E (mock)" "pnpm e2e:monitor"
 
 # The diff MUST be fetched. A transient failure once left this empty and every check below "passed" over
 # nothing while still merging — an absent measurement reading as a pass. Retry, then refuse.
@@ -118,3 +135,6 @@ MAIN2=$(gh api "repos/$R/git/ref/heads/main" --jq .object.sha)
 
 echo "GATE PASS #$PR — merging at $HEAD"
 gh pr merge "$PR" -R "$R" --squash --delete-branch --match-head-commit "$HEAD"
+
+# The PR branch we checked out is now deleted — land the operator back on fresh main, not a dangling ref.
+git checkout -q main 2>/dev/null && git pull -q origin main 2>/dev/null || echo "  (note: check out main manually; the merged PR branch is gone)"

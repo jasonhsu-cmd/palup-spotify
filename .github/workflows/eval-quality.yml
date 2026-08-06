@@ -1,20 +1,13 @@
 name: eval-quality (live judge on merge)
 
-# Auto-runs the LIVE 190-case judge on merge to main WHEN a model-dependent change lands, so quality
-# drift surfaces itself instead of relying on anyone remembering `eval:full`. DORMANT until you set
-# variable JUDGE_ENABLED=true + secret ANTHROPIC_API_KEY. GCP auth is Workload Identity Federation,
-# reusing the secrets set by scripts/setup-staging.sh (GCP_WIF_PROVIDER, GCP_DEPLOY_SA, GCP_PROJECT) —
-# no long-lived key. Skipped (main stays green) until enabled. See docs/DEPLOY.md.
+# The LIVE 190-case judge. MANUAL-ONLY (owner decision 2026-08-07): the auto `push: main` trigger was
+# removed as part of disabling GitHub CI — run it on demand ("Run workflow") when you want a live-model
+# quality read, e.g. after a model change. DORMANT regardless until you set variable JUDGE_ENABLED=true +
+# secret ANTHROPIC_API_KEY. GCP auth is Workload Identity Federation, reusing the secrets set by
+# scripts/setup-staging.sh (GCP_WIF_PROVIDER, GCP_DEPLOY_SA, GCP_PROJECT) — no long-lived key. The local
+# `pnpm eval` gate (run by merge-gate.sh) covers the deterministic mock-model eval on every merge; this
+# live judge is a separate, on-demand check. See docs/DEPLOY.md.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "packages/widget-brain/**"
-      - "packages/eval/cases/**"
-      - "packages/judge/**"
-      - "packages/model-vertex/src/**"
-      - ".github/eval-baseline.json"
-      - ".github/workflows/eval-quality.yml"
   workflow_dispatch:
 
 jobs:
