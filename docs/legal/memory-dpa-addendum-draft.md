@@ -25,12 +25,22 @@ the processing that **would** occur after a human-only flip of that constant. Li
 Scope: cross-visit shopper memory only. Other processing (chat serving, the traffic/shadow-grading log,
 telemetry, Shopify order lookups, marketing comms) is out of scope here and belongs in the base DPA.
 
-**Storage is non-durable today, and that qualifies §8 and §9.** The only `VectorPort` adapter in the repo
-is an in-memory reference implementation (§5), so as the code stands there is no at-rest fact store: facts
-would live in the serving process, be lost on restart, and not be shared between instances. Retention,
-erasure and data-subject-request statements below describe what the code does **to whatever store it is
-given** — they are not representations about durable data. A durable adapter is in development on a
-separate, unmerged branch and is **not** part of the code described here.
+> **CORRECTION — 2026-08-06: storage IS durable, and §8/§9 are therefore NO LONGER qualified by this.**
+> `PostgresVectorStore` (`packages/state-postgres/src/postgres-vector-store.ts`) is merged on `main`,
+> selected whenever `DATABASE_URL` is set, and live in staging (`GET /health` reports
+> `"vector":"postgres"`); the go-live checklist records it as **B1 — MET**. Counsel should read §8
+> (retention) and §9 (erasure) as representations about **durable, at-rest data**, which makes them
+> stronger obligations than the superseded paragraph allowed for — there is now a real at-rest fact store to
+> encrypt, retain, and erase. Erasure against that adapter has been proven by execution against a live
+> Postgres 16 server, including that deletion is physical rather than a filtered read
+> (`packages/widget-backend/test/b6-erasure-real-postgres.test.ts`; checklist **B6**).
+>
+> ~~**Storage is non-durable today, and that qualifies §8 and §9.** The only `VectorPort` adapter in the
+> repo is an in-memory reference implementation (§5), so as the code stands there is no at-rest fact store:
+> facts would live in the serving process, be lost on restart, and not be shared between instances.
+> Retention, erasure and data-subject-request statements below describe what the code does **to whatever
+> store it is given** — they are not representations about durable data. A durable adapter is in development
+> on a separate, unmerged branch and is **not** part of the code described here.~~
 
 ## 1. Roles
 
@@ -74,8 +84,13 @@ Explicitly **not** collected by design: demographics, psychographics, and inferr
    consent per tier, and append them to the model prompt as fenced data that may only add caution
    (`service.ts:141-189`; `packages/widget-brain/src/brain.ts:1126-1156`, read-time gate `brain.ts:458-460`).
 6. **Retention maintenance** — TTL-on-read drop plus throttled sliding renewal (`service.ts:154,158-168`);
-   a reclamation sweep function exists but is unscheduled (`packages/widget-memory/src/retention.ts:69-100`).
-   The renewal half is **unreachable on the current wiring** — see §8.
+   a reclamation sweep (`packages/widget-memory/src/retention.ts:69-100`) which, **corrected 2026-08-06, is
+   now scheduled** — a Cloud Run Job runs it **daily at 03:17 UTC** in staging via Cloud Scheduler, verified
+   by a forced run against the live database (`docs/DEPLOY.md`, "Retention sweep"; checklist **B4**). Two
+   limits to record: the schedule is a property of a **deployment**, not of this code, so it must be
+   confirmed per environment; and **no sweep has yet deleted anything** (every run reported `visited=0`
+   because memory is off and nothing exists to expire), so the delete-and-audit path is evidenced by tests
+   rather than by production execution. The renewal half is **unreachable on the current wiring** — see §8.
 7. **Erasure** — whole-subject erasure on shopper request (`packages/widget-memory/src/erasure.ts:63-69`,
    route `server.ts:660-710`).
 8. **Audit** — every one of the above is logged (`audit.ts:11-21`).

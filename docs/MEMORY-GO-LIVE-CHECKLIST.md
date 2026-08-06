@@ -15,7 +15,15 @@ and production behaviour is byte-identical to before the program.
 missing), or **ACCEPT** (a residual risk that must be consciously signed off rather than fixed). An item
 being "in a PR" is *not* met — merged and verified is met.
 
-_Last updated: 2026-08-04. Update the status column in the same PR that closes an item._
+_Last updated: 2026-08-06. Update the status column in the same PR that closes an item._
+
+_**2026-08-06 — §B is now 11 MET of 12.** B4 (retention sweep scheduled daily via Cloud Scheduler, with a
+dedicated least-privilege invoker), B5 (`AUDIT_HMAC_SECRET` provisioned, granted and verified mounted on the
+live service — it took three steps, not two: the runtime service account also needs
+`roles/secretmanager.secretAccessor`, because `roles/editor` deliberately excludes
+`secretmanager.versions.access`), B6 (erasure proven physical against a real Postgres 16 server, and
+mutation-verified) and B8 (encryption key provisioned, 44 bytes) all closed. **B12 is the only §B row still
+open**, and 2026-08-06 established why by execution — see its row._
 
 _PRs #144 (B9), #145 (B1), #146 (A1/A2 drafts), #150 (B2), #151 (B3/B4) have all landed on `main` — see
 those rows for evidence. #146 landed DRAFTS only; A1/A2 stay OPEN until counsel executes them. #152
@@ -36,6 +44,19 @@ access to the victim's browser, at which point little downstream is preventable 
 id was judged not worth its cost. This decision is load-bearing for the §C set: **C8, C10 and C14 stand
 because C1 does.** Restricting memory to signed-in shoppers would have dissolved all four; it was considered
 and not taken, because it costs the guest-memory feature entirely._
+
+_**REOPENED 2026-08-06 — do not read the paragraph above as settled.** The owner approved revisiting C1, and
+**ADR-0019** (`docs/adr/0019-server-issued-guest-identity.md`, PR #214 — not yet merged, so the path is a
+forward reference) proposes making the guest id **server-generated** and carried in a signed token, so the
+subject comes from a verified claim. What forced the reopening: the B12(b)
+carry-over was built and reverted the same day because reading a client-named namespace on a verified turn
+fails the **F1** attack test by construction. The 2026-08-04 rationale rejected a server-issued credential on
+**theft resistance** — correctly, as far as that goes, since the credential shares storage with the id — but
+the property that matters is **claim verification**, i.e. whether the server can establish the id belongs to
+its caller at all. ADR-0019 would close **C8** and **C10**, moot **C9**, mostly close **C1**, and unblock
+**B12(b)**; **C14 stays deferred**. ADR-0019 is **Proposed and unbuilt, so nothing below is closed yet** —
+but a signer accepting C1/C8/C9/C10 today should know a superseding proposal exists and is owner-approved in
+direction._
 
 ---
 

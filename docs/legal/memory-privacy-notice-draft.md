@@ -28,15 +28,28 @@ default (`docs/adr/0015-cross-visit-memory-eu-consent-gated.md:9-16`; mirrored i
 **we have not verified who signed it, what they reviewed, or that it constitutes legal advice**, and it is
 not a sign-off on this notice.
 
-**Storage is not durable today.** The only `VectorPort` adapter that exists in this repo is an in-memory
-reference implementation (`packages/platform-ports/src/vector-port.ts:117-159`), wired at
-`packages/widget-backend/src/server.ts:198`; we searched all of `packages/` and found no other adapter. So
-if the feature were enabled as it stands, notes would live only inside the serving process: they would be
-lost on restart or redeploy, they would not be shared between instances, and a "forget me" call would
-reach only the instance that happened to receive it. **Every retention and erasure statement below
-describes what the code does to the store it is given — not a promise about durable data, because there is
-no durable store yet.** A durable adapter is in development on a separate, unmerged branch; it is not part
-of the code this notice describes. See **Q11**.
+> **CORRECTION — 2026-08-06. Storage IS durable now; the paragraph below was true when written and is no
+> longer.** `PostgresVectorStore` (`packages/state-postgres/src/postgres-vector-store.ts`) is merged on
+> `main` and is selected automatically whenever `DATABASE_URL` is set
+> (`packages/state-postgres/src/vector-factory.ts`); the go-live checklist records this as **B1 — MET**.
+> Staging runs it today (`GET /health` reports `"vector":"postgres"`).
+>
+> **This correction makes the notice's obligations STRONGER, not weaker**, so counsel should re-read §6
+> (retention) and §7 (erasure) without the qualifier that follows: notes would survive restart and be
+> shared across instances, and a "forget me" is a real, cross-instance deletion rather than a
+> single-process one. Erasure against the real adapter has since been proven by execution against a live
+> Postgres 16 server, including that deletion is physical rather than a filtered read
+> (`packages/widget-backend/test/b6-erasure-real-postgres.test.ts`; checklist **B6**).
+>
+> ~~**Storage is not durable today.** The only `VectorPort` adapter that exists in this repo is an
+> in-memory reference implementation (`packages/platform-ports/src/vector-port.ts:117-159`), wired at
+> `packages/widget-backend/src/server.ts:198`; we searched all of `packages/` and found no other adapter.
+> So if the feature were enabled as it stands, notes would live only inside the serving process: they would
+> be lost on restart or redeploy, they would not be shared between instances, and a "forget me" call would
+> reach only the instance that happened to receive it. **Every retention and erasure statement below
+> describes what the code does to the store it is given — not a promise about durable data, because there
+> is no durable store yet.** A durable adapter is in development on a separate, unmerged branch; it is not
+> part of the code this notice describes. See **Q11**.~~
 
 Everything below is therefore written as *"what would happen once enabled"*. Line numbers are as of commit
 `fea7c0d`.
@@ -212,9 +225,17 @@ see open question **Q8**.
   is **no absolute ceiling** anywhere in the code. Any shopper-facing copy must say "30 days after your
   last visit", never "kept for 30 days". See open question **Q2**.
 - An expired note is never served and never renewed, even before anything deletes it (`service.ts:154`).
-- A sweep function that actually deletes expired records exists (`retention.ts:69-100`) — see open question
-  **Q11**: it is **not scheduled by any code in this repo today**, so between expiry and deletion an
-  expired note is unreadable but still present.
+- A sweep function that actually deletes expired records exists (`retention.ts:69-100`). **Corrected
+  2026-08-06:** it is now **scheduled in the staging environment** — a Cloud Run Job runs `pnpm sweep`
+  **daily at 03:17 UTC** via Cloud Scheduler, verified by a forced run that completed successfully against
+  the live database (`docs/DEPLOY.md`, "Retention sweep"; checklist **B4**). The earlier statement that it
+  was "not scheduled by any code in this repo" remains **literally** true and is why it read as it did —
+  the schedule is deployment infrastructure, not repository code — but the consequence counsel needs has
+  changed: an expired note is now unreadable **and** reclaimed within about a day, rather than unreadable
+  but retained indefinitely. Two limits to state plainly: the schedule is **per environment**, so it is a
+  property of a deployment rather than of this code, and **no sweep has yet deleted anything** (every run
+  so far reported `visited=0`, because memory is off and no note exists to expire), so the delete-and-audit
+  path is proven by unit and integration tests rather than by production execution.
 
 > ⚠️ Counsel — **the sliding renewal cannot currently fire on the wired path.** Renewal requires
 > `consent1`/`consent2 === "in"` on the recall context (`service.ts:164`), but the only production caller
@@ -229,8 +250,11 @@ see open question **Q8**.
 > assumption — stated as an assumption, not a decision — is that the sliding model is the intended one, so
 > it is the one described above. See **Q2**.
 
-> ⚠️ Counsel: none of this describes durable data. See §0 — the only fact-storage adapter in the repo is
-> in-memory, so today "kept for 30 days" is bounded above by the lifetime of the serving process.
+> ⚠️ Counsel — **corrected 2026-08-06: this DOES describe durable data.** The superseded version of this
+> callout said the only fact-storage adapter was in-memory, so "kept for 30 days" was bounded above by the
+> lifetime of the serving process. `PostgresVectorStore` is merged and live in staging (see the §0
+> correction), so 30 days is a real retention period against a durable store, and the sliding window is the
+> only thing that extends it.
 
 ## 7. Your controls
 
@@ -250,12 +274,20 @@ see open question **Q8**.
 2. **There is no "show me / export what you remember" path.** No route in `packages/widget-backend/src`
    reads a subject's notes back to the shopper. Erasure is implemented; access/portability is not. See
    **Q7**.
-3. **"Forget everything about me" is not a durable deletion guarantee today.** The call does what the code
-   says — it deletes the whole subject namespace from the store it is pointed at and audits the action —
-   but that store is the in-memory adapter (§0), so the erasure applies only to the serving instance that
-   receives the request and to data that itself only lives in process memory. Until a durable adapter is
-   merged, the notice must not promise deletion "from our systems". `/forget` also does **not** clear the
-   shopper's consent record (`server.ts:708` erases the vector namespace only). See **Q9** and **Q11**.
+3. **"Forget everything about me" — corrected 2026-08-06: this IS a durable deletion now.** The superseded
+   version of this item said the erasure reached only the serving instance that received the request,
+   because the only store was the in-memory adapter, and concluded that the notice "must not promise
+   deletion from our systems". Both premises are obsolete: `PostgresVectorStore` is merged and live (see the
+   §0 correction), so the call deletes from the shared database, and deletion has been proven **physical**
+   against a real Postgres 16 server — asserted by querying the underlying table directly, so a soft-delete
+   or filtered read could not pass, and mutation-verified by breaking the delete and watching the proof fail
+   (`packages/widget-backend/test/b6-erasure-real-postgres.test.ts`; checklist **B6**). The notice may now
+   describe deletion from our systems for **fact notes**. Two carve-outs survive unchanged and still matter:
+   `/forget` does **not** clear the shopper's consent record (`server.ts` erases the vector namespace only —
+   see **C11**, where retaining it is the intended behaviour because opting out is a separate,
+   forward-looking control), and whole-**tenant** erasure still throws `NotImplemented`
+   (`packages/widget-memory/src/erasure.ts`), which bears on the Shopify `shop/redact` obligation rather
+   than on a shopper request. See **Q9** and **Q11**.
 4. **"Forget everything about me" does not delete the conversation itself, and structurally cannot.**
    `eraseSubject` deletes the subject's fact namespace only. The per-tenant **traffic log** keeps the
    shopper's message and the agent's reply (`logTraffic`, `packages/widget-backend/src/canary.ts` —

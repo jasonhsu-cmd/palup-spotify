@@ -65,8 +65,13 @@ and **special-category (health) facts** — the latter behind a *separate* expli
   `region = us` → notice + store, with a clear **opt-out** that stops writes and triggers erasure.
 
 ### Tier 2 — Signed-up (identified account)
-- On sign-up/login, **merge the anonymous id's facts into the account namespace** (a one-time, audited
-  migration), then continue under the account. Consent is the account ToS — **except** special-category
+- On sign-up/login, **carry the anonymous id's facts into the account namespace** (an audited **COPY** —
+  amended 2026-08-06 from "a one-time migration", which deleted the guest namespace; see
+  `packages/widget-memory/src/merge.ts`'s header. Deleting made an attacker holding a victim's `anonId`
+  able to both take the victim's facts and destroy them, and it broke "the guest remains usable" — signing
+  out would wipe guest-era memory. The copy is repeatable and idempotent by content; the guest namespace
+  is reclaimed on the ordinary TTL by the scheduled retention sweep instead), then continue under the
+  account. Consent is the account ToS — **except** special-category
   facts, which **still require the separate explicit health consent** (Consent 2) and are never folded
   into sign-up ToS; **erasure is by account**; the **relationship** states (VIP / subscriber / lapsed)
   derive from account + order history.
