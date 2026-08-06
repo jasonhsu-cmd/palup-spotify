@@ -160,10 +160,19 @@ to *how* we build.
 .claude/            Build-time agents, skills, commands, settings  (see .claude/README below)
 docs/               Architecture, governance, HITL policy, design system, ADRs
 docs/adr/           Architecture Decision Records — the "why"
-packages/           built: platform-ports, widget-brain, widget-backend, widget, eval, judge,
-                    model-vertex, evolution, control-plane. Not yet built: agent-runtime, design-system, consoles
+packages/           built: platform-ports, widget-brain, widget-backend, widget, state-postgres,
+                    widget-memory, eval, judge, model-vertex, evolution, control-plane.
+                    Not yet built: agent-runtime, design-system, consoles
 palup-*.html        UI visual source of truth
 ```
+
+**Two "built" packages are deliberately not live — do not assume otherwise from their test coverage.**
+`widget-memory` (cross-visit shopper memory) is fully **INERT**: `isMemoryEnabled()` requires both
+`MEMORY_ENABLED` *and* the hardcoded `MEMORY_ADR_ACCEPTED` const, which is `false`
+(`packages/widget-memory/src/flag.ts`). Flipping it is a **human-only** step gated on
+`docs/MEMORY-GO-LIVE-CHECKLIST.md` — never a build agent's, and never as a side effect of other work. And
+`control-plane` is built and tested but **deployed nowhere**, so every operator surface it exposes is
+unreachable in staging; the CLI jobs (`pnpm kill:arm`, `pnpm cap:set`) are the working path today.
 
 ## 7. When you are unsure
 
