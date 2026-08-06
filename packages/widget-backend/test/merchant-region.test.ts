@@ -14,6 +14,7 @@ import type {
 } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
 import { createMerchantResolver, consentModeFor } from "../src/merchant-resolver.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 // D2 — PER-TENANT REGION. The residency gap D1 named and deliberately left open
@@ -50,7 +51,11 @@ const ENV_KEYS = [
   "WIDGET_AUTH_REQUIRED",
   "SHOPIFY_STORES",
   "PALUP_SECRETS",
+  "GUEST_TOKEN_SECRET",
 ];
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`, never
+// `body.anonId` / `signals.anonId` (invariant 4).
+const GUEST_SECRET = "gsecret";
 afterEach(() => {
   ENV_KEYS.forEach((k) => delete process.env[k]);
   vi.restoreAllMocks();
@@ -177,6 +182,7 @@ describe("D2 (2) it is the WRITE GATE that moves, not just the reported label", 
     // "unknown" as ALLOWED and a fact about an EU shopper was persisted. `consentPermits` for a non-US
     // region requires an explicit "in".
     process.env.WIDGET_AUTH_REQUIRED = "true"; // the memory boot guard (assertMemoryAuthCoupling)
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const vector = createInMemoryVectorStore();
     const upsert = vi.spyOn(vector, "upsert");
     const { app } = await serve(await twoRegionRegistry(), {
@@ -185,7 +191,12 @@ describe("D2 (2) it is the WRITE GATE that moves, not just the reported label", 
       memoryEnabled: true,
     });
     const m = await mint(app, EU_KEY);
-    const res = await chat(app, m.token, "eu-write", { anonId: GUEST_ANON_ID });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { authorization: `Bearer ${m.token}`, ...guestTokenHeader(GUEST_SECRET, EU_TENANT, GUEST_ANON_ID) },
+      payload: { sessionId: "eu-write", message: "do you have a moisturizer for dry skin?", signals: {} },
+    });
     expect(res.statusCode).toBe(200);
     // The report and reality are pinned together, so neither can drift into lying alone.
     expect(res.json().memoryActive).toEqual({ ordinary: false, special: false });
@@ -195,6 +206,7 @@ describe("D2 (2) it is the WRITE GATE that moves, not just the reported label", 
 
   it("US merchant, same instance, same turn shape: the opt-out regime still writes", async () => {
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const vector = createInMemoryVectorStore();
     const upsert = vi.spyOn(vector, "upsert");
     const { app } = await serve(await twoRegionRegistry(), {
@@ -203,7 +215,12 @@ describe("D2 (2) it is the WRITE GATE that moves, not just the reported label", 
       memoryEnabled: true,
     });
     const m = await mint(app, US_KEY);
-    const res = await chat(app, m.token, "us-write", { anonId: GUEST_ANON_ID });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: { authorization: `Bearer ${m.token}`, ...guestTokenHeader(GUEST_SECRET, US_TENANT, GUEST_ANON_ID) },
+      payload: { sessionId: "us-write", message: "do you have a moisturizer for dry skin?", signals: {} },
+    });
     expect(res.json().memoryActive).toEqual({ ordinary: true, special: false });
     expect(upsert).toHaveBeenCalled();
     await app.close();
@@ -211,14 +228,15 @@ describe("D2 (2) it is the WRITE GATE that moves, not just the reported label", 
 
   it("POST /consent answers with the MERCHANT's regime too (the manage panel must not disagree with /chat)", async () => {
     process.env.MERCHANT_REGION = "us"; // the process says opt-out...
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const registry = await twoRegionRegistry();
     const { app } = await serve(registry);
     const eu = await mint(app, EU_KEY);
     const res = await app.inject({
       method: "POST",
       url: "/consent",
-      headers: { authorization: `Bearer ${eu.token}` },
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "unknown", memorySpecial: "unknown" },
+      headers: { authorization: `Bearer ${eu.token}`, ...guestTokenHeader(GUEST_SECRET, EU_TENANT, GUEST_ANON_ID) },
+      payload: { memoryOrdinary: "unknown", memorySpecial: "unknown" },
     });
     expect(res.statusCode).toBe(200);
     // ...but "unknown" is NOT a grant in the EU, and this endpoint is what the panel renders.

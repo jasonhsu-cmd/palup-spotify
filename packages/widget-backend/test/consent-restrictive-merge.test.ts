@@ -3,6 +3,7 @@ import { armKill, lookupConsent } from "@palup/state-postgres";
 import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken, mintShopperToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // BLOCK-1 (security-review remediation, PR #152) — sign-in must never silently VOID an explicit
 // opt-out. Subject-scoped auth (identity.ts `memorySubjectId`) rebinds the memory subject from the raw
@@ -21,8 +22,16 @@ const SHOPPER_SECRET = "shopper-secret";
 const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
 const SHOPPER_ID = "shopify:demo:48291";
 const GUEST_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // base32, passes validateAnonId
+// ADR-0019 task 4/9 — the guest memory subject (both what /consent records against AND what /chat's
+// restrictive-merge reads) now comes ONLY from a VERIFIED `x-guest-token`, never `body.anonId` /
+// `signals.anonId` (invariant 4). Every call below that needs the GUEST_ANON_ID subject to actually
+// resolve — so the merge/write-through this file exercises really runs — now presents this header
+// instead. Calls that deliberately test "a supplied anonId is IGNORED for a verified shopper" keep
+// sending `body.anonId` unchanged (that property is orthogonal to the guest-token transport).
+const GUEST_SECRET = "gsecret";
+const guestToken = () => guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON_ID);
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET", "MERCHANT_REGION"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET", "MERCHANT_REGION", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
 function armAuth(): void {
@@ -30,6 +39,7 @@ function armAuth(): void {
   process.env.WIDGET_AUTH_REQUIRED = "true";
   process.env.SHOPPER_AUTH = "true";
   process.env.SHOPPER_TOKEN_SECRET = SHOPPER_SECRET;
+  process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
 }
 const shopperToken = () => mintShopperToken(SHOPPER_SECRET, SHOPPER_ID, "shopify", 3_600);
 
@@ -57,7 +67,8 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     const consentRes = await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(consentRes.statusCode).toBe(200);
 
@@ -65,21 +76,22 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     const guestChat = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "guest-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { sessionId: "guest-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(guestChat.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled();
 
     // 3. THE SAME PERSON signs in with a verified shopper token — their browser still legitimately holds
-    // the old guest anonId, which the widget continues to send.
+    // the old guest identity, which the widget continues to send (now as a verified x-guest-token).
     const signedInChat = await app.inject({
       method: "POST",
       url: "/chat",
-      headers: { "x-shopper-token": shopperToken() },
+      headers: { "x-shopper-token": shopperToken(), ...guestToken() },
       payload: {
         sessionId: "signed-in-1",
         message: "I like fragrance-free stuff",
-        signals: { anonId: GUEST_ANON_ID },
+        signals: {},
         widgetToken: DEMO_WIDGET_TOKEN,
       },
     });
@@ -190,18 +202,19 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
 
-    // 2. Signs in and this turn STILL echoes the old guest anonId (the browser legitimately still holds
-    //    it) — this is the turn where the merge discovers the guest "out" and (N2) durably writes it
-    //    through to the account record. The write is refused THIS turn too (sanity, already proven by
-    //    BLOCK-1's own test above).
+    // 2. Signs in and this turn STILL echoes the old guest identity (the browser legitimately still holds
+    //    it, now as a verified x-guest-token) — this is the turn where the merge discovers the guest
+    //    "out" and (N2) durably writes it through to the account record. The write is refused THIS turn
+    //    too (sanity, already proven by BLOCK-1's own test above).
     const echoedTurn = await app.inject({
       method: "POST",
       url: "/chat",
-      headers: { "x-shopper-token": shopperToken() },
-      payload: { sessionId: "durable-1a", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": shopperToken(), ...guestToken() },
+      payload: { sessionId: "durable-1a", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(echoedTurn.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled();
@@ -242,14 +255,15 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     // Signing in triggers the SERVER-derived write-through onto the account subject.
     await app.inject({
       method: "POST",
       url: "/chat",
-      headers: { "x-shopper-token": shopperToken() },
-      payload: { sessionId: "audit-fidelity-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": shopperToken(), ...guestToken() },
+      payload: { sessionId: "audit-fidelity-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     const entries = (await store.readAudit({ tenantId: "demo" })).filter((r) => r.action === "consent.record");
@@ -288,15 +302,16 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     await armKill(store, "global", "operator-halt");
 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      headers: { "x-shopper-token": shopperToken() },
-      payload: { sessionId: "kill-wt-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": shopperToken(), ...guestToken() },
+      payload: { sessionId: "kill-wt-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().flags).toContain("kill_switch"); // the turn really was halted
@@ -378,11 +393,13 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
       memorySpecial: "unknown",
     });
 
-    // Token expires (sessionStorage, 1h TTL) -> a new tab is a SIGNED-OUT client with the same anonId.
+    // Token expires (sessionStorage, 1h TTL) -> a new tab is a SIGNED-OUT client presenting the same
+    // guest identity — now as its own verified x-guest-token, the only way a guest turn gets a subject.
     const signedOutTurn = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "c14-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { sessionId: "c14-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(signedOutTurn.statusCode).toBe(200);
     // THE DISCLOSED HOLE: a fact is written despite the explicit opt-out, because the guest row says
@@ -408,16 +425,18 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
 
     // Guest "out", then a signed-in echo turn durably writes "out" onto the account.
-    await app.inject({ method: "POST", url: "/consent", payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
-    await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken() }, payload: { sessionId: "ord-1", message: "hi", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN } });
+    await app.inject({ method: "POST", url: "/consent", headers: guestToken(), payload: { memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
+    await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken(), ...guestToken() }, payload: { sessionId: "ord-1", message: "hi", signals: {}, widgetToken: DEMO_WIDGET_TOKEN } });
     upsertSpy.mockClear();
 
     // STEP (2) ONLY, in the string's numbering: opt in on the ACCOUNT subject, WITHOUT first
-    // neutralising the guest subject (step 1). This is the order that does NOT work.
+    // neutralising the guest subject (step 1). This is the order that does NOT work. `anonId` in the
+    // body is deliberately kept (unchanged, no x-guest-token) to show it is IGNORED for a verified
+    // shopper's /consent — orthogonal to the guest-token transport this file otherwise migrated to.
     await app.inject({ method: "POST", url: "/consent", headers: { "x-shopper-token": shopperToken() }, payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN } });
 
-    // A turn still presenting the stale guest anonId re-asserts "out" — the opt-in is undone.
-    const turn = await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken() }, payload: { sessionId: "ord-2", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN } });
+    // A turn still presenting the stale guest identity re-asserts "out" — the opt-in is undone.
+    const turn = await app.inject({ method: "POST", url: "/chat", headers: { "x-shopper-token": shopperToken(), ...guestToken() }, payload: { sessionId: "ord-2", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN } });
     expect(turn.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled(); // still denied — doing (2) BEFORE (1) does not reverse it
     await app.close();
@@ -466,15 +485,16 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: GUEST_ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestToken(),
+      payload: { memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
 
-    // 2. Signs in, echoes the guest anonId once -> N2 durably writes "out" to the account.
+    // 2. Signs in, echoes the guest identity once -> N2 durably writes "out" to the account.
     await app.inject({
       method: "POST",
       url: "/chat",
-      headers: { "x-shopper-token": shopperToken() },
-      payload: { sessionId: "c7-1", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": shopperToken(), ...guestToken() },
+      payload: { sessionId: "c7-1", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     // 3. The SAME shopper then explicitly, authentically opts back IN via /consent while signed in.
@@ -486,14 +506,14 @@ describe("BLOCK-1 — restrictive-merge consent across guest/account subjects on
     });
     expect(optInRes.statusCode).toBe(200);
 
-    // 4. A later chat turn that STILL echoes the (now-stale) guest anonId: the merge re-resolves "out"
+    // 4. A later chat turn that STILL echoes the (now-stale) guest identity: the merge re-resolves "out"
     // (guest "out" wins outright over the account's fresh "in") and N2 re-durabilizes it — the shopper's
     // explicit opt-in is overridden again, this time durably.
     const overriddenTurn = await app.inject({
       method: "POST",
       url: "/chat",
-      headers: { "x-shopper-token": shopperToken() },
-      payload: { sessionId: "c7-2", message: "I like fragrance-free stuff", signals: { anonId: GUEST_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: { "x-shopper-token": shopperToken(), ...guestToken() },
+      payload: { sessionId: "c7-2", message: "I like fragrance-free stuff", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(overriddenTurn.statusCode).toBe(200);
     expect(upsertSpy).not.toHaveBeenCalled();

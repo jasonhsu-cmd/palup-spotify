@@ -5,6 +5,7 @@ import type { AuditRecord, MerchantRegistryPort, RuntimeStatePort, VectorPort } 
 import { armKill, disarmKill } from "@palup/state-postgres";
 import { subjectNamespace, accountSubjectId, recordSubject, listSubjects } from "@palup/widget-memory";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE } from "../src/shopify-install-identity.js";
 import {
   WEBHOOK_SEEN_COLLECTION,
@@ -56,7 +57,11 @@ const GUEST_ANON = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const ACCOUNT_SUBJECT = accountSubjectId(`shopify:${TENANT}:${CUSTOMER_ID}`);
 const OTHER_ACCOUNT_SUBJECT = accountSubjectId(`shopify:${TENANT}:${OTHER_CUSTOMER_ID}`);
 
-const ENV_KEYS = ["PALUP_SECRETS", "WIDGET_EMBED_KEYS", "SHOPIFY_STORES", "SHOPIFY_APP_CLIENT_ID"];
+const ENV_KEYS = ["PALUP_SECRETS", "WIDGET_EMBED_KEYS", "SHOPIFY_STORES", "SHOPIFY_APP_CLIENT_ID", "GUEST_TOKEN_SECRET"];
+// ADR-0019 task 4/9 — incidental fallout, not this file's concern: `/consent`'s guest subject now comes
+// ONLY from a VERIFIED `x-guest-token` (invariant 4), so the JSON-parsing-encapsulation test below needs
+// one purely to get a 200 back; it is not testing anything about memory/consent semantics.
+const GUEST_SECRET = "gsecret";
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
 // ── Signing, exactly as Shopify documents it for WEBHOOKS (a different scheme from the OAuth query
@@ -285,13 +290,16 @@ describe("C2 — HMAC over the RAW body, or nothing happens", () => {
   it("the raw-body parser is ENCAPSULATED: sibling JSON routes still get a PARSED body", async () => {
     // If the webhook plugin's catch-all parser leaked to the root scope, every other route in the
     // server would start receiving a Buffer instead of an object. `/consent` reads `req.body.anonId`.
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const h = await harness();
     await seedMerchant(h.registry);
+    // No widget token here ⇒ this call resolves under RUNTIME_TENANT ("demo") — the unauthenticated
+    // rollout-window fallback (server.ts), unrelated to the acme-store TENANT this file otherwise tests.
     const res = await h.app.inject({
       method: "POST",
       url: "/consent",
-      headers: { "content-type": "application/json" },
-      payload: JSON.stringify({ anonId: GUEST_ANON, memoryOrdinary: "in", memorySpecial: "out" }),
+      headers: { "content-type": "application/json", ...guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON) },
+      payload: JSON.stringify({ memoryOrdinary: "in", memorySpecial: "out" }),
     });
     expect(res.statusCode, `/consent must still parse JSON; got ${res.body}`).toBe(200);
     expect(JSON.parse(res.body)).toMatchObject({ ok: true });

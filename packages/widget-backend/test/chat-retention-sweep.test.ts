@@ -4,6 +4,7 @@ import type { ModelPort, ModelRequest, VectorPort } from "@palup/platform-ports"
 import { armKill } from "@palup/state-postgres";
 import { subjectNamespace } from "@palup/widget-memory";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // Closes the retention-sweep gap (ADR-0015 Inv 4 — "expiry is enforced, not aspirational").
 // `sweepExpired` (widget-memory/src/retention.ts) had no production caller: TTL-on-read (service.ts
@@ -23,8 +24,12 @@ const NAMESPACE = subjectNamespace("demo", VALID_ANON_ID); // unauthenticated /c
 // assertion identical to before this change.
 const WIDGET_SECRET = "wsecret";
 const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+// ADR-0019 task 4/9 — the sweep's subject (`memorySubject`, server.ts) now comes ONLY from a VERIFIED
+// `x-guest-token`, never `signals.anonId` (invariant 4). Tests that need the sweep to actually FIRE must
+// present one.
+const GUEST_SECRET = "gsecret";
 
 // Security review (Finding 7) — the sweep is fire-and-forget (server.ts), so a test asserting the
 // physical delete happened must not race it: poll with a bounded wait instead of assuming the
@@ -63,6 +68,7 @@ describe("POST /chat — opportunistic per-subject retention sweep (ADR-0015 Inv
   it("physically DELETES an already-expired fact for the subject served this turn, and audits ttl_sweep", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     await seedExpiredFact(vector);
@@ -71,7 +77,8 @@ describe("POST /chat — opportunistic per-subject retention sweep (ADR-0015 Inv
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "sweep-1", message: "hello", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "sweep-1", message: "hello", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
 
@@ -179,6 +186,7 @@ describe("POST /chat — opportunistic per-subject retention sweep (ADR-0015 Inv
   it("a sweep failure cannot break the shopper's turn (fail-open), but IS surfaced to the operator (Finding 1 — never silently swallowed)", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     await seedExpiredFact(vector);
@@ -189,7 +197,8 @@ describe("POST /chat — opportunistic per-subject retention sweep (ADR-0015 Inv
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "sweep-6", message: "hello", signals: { anonId: VALID_ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { sessionId: "sweep-6", message: "hello", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().reply).toBeTruthy();

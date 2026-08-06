@@ -3,6 +3,7 @@ import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { subjectNamespace } from "@palup/widget-memory";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // THE GAP THIS CLOSES (B7, 2026-08-05). Sliding retention (ADR-0015 Inv 4 amendment) re-stamps a
 // still-consented fact's expiry when the shopper RETURNS, so 30 days of INACTIVITY expires it rather
@@ -24,8 +25,14 @@ const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
 const ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "MERCHANT_REGION"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "MERCHANT_REGION", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+// ADR-0019 task 4/9 — the guest memory subject BOTH /consent records against AND /chat's consent LOOKUP
+// key off now come ONLY from a VERIFIED `x-guest-token` (invariant 4); the vector NAMESPACE the renewal
+// actually slides is still found via the pre-existing `signals.anonId` recall fallback (signals.ts,
+// untouched by task 4). So a test whose /chat turn must see a just-recorded consent value needs this
+// header on BOTH calls, for the SAME anonId, or the lookup silently misses and falls back to "unknown".
+const GUEST_SECRET = "gsecret";
 
 const quietModel: ModelPort = { async complete(_req: ModelRequest) { return { text: "Here is a suggestion.", model: "spy" }; } };
 
@@ -75,6 +82,7 @@ describe("B7 — sliding retention actually fires through /chat (it never could 
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
     process.env.MERCHANT_REGION = "us";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const app = await buildServer({ store, vectorPort: vector, modelPort: quietModel, memoryEnabled: true });
@@ -82,13 +90,15 @@ describe("B7 — sliding retention actually fires through /chat (it never could 
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: ANON_ID, memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", ANON_ID),
+      payload: { memoryOrdinary: "out", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     const before = await seedFact(vector, ANON_ID, 5);
     await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-renew-out", message: "what do you recommend for dry skin?", signals: { anonId: ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", ANON_ID),
+      payload: { sessionId: "s-renew-out", message: "what do you recommend for dry skin?", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     expect(await expiryOf(vector, ANON_ID)).toBe(before); // untouched
@@ -118,6 +128,7 @@ describe("B7 — sliding retention actually fires through /chat (it never could 
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
     process.env.MERCHANT_REGION = "eu";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const app = await buildServer({ store, vectorPort: vector, modelPort: quietModel, memoryEnabled: true });
@@ -125,13 +136,15 @@ describe("B7 — sliding retention actually fires through /chat (it never could 
     await app.inject({
       method: "POST",
       url: "/consent",
-      payload: { anonId: ANON_ID, memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", ANON_ID),
+      payload: { memoryOrdinary: "in", memorySpecial: "unknown", widgetToken: DEMO_WIDGET_TOKEN },
     });
     const before = await seedFact(vector, ANON_ID, 5);
     await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-renew-eu-in", message: "what do you recommend for dry skin?", signals: { anonId: ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", ANON_ID),
+      payload: { sessionId: "s-renew-eu-in", message: "what do you recommend for dry skin?", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
 
     const after = await expiryOf(vector, ANON_ID);

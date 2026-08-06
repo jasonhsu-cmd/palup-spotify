@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken, mintShopperToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { buildServer } from "../src/server.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // BLOCK-2 (security-review remediation, PR #152) — the shipped widget (packages/widget/public/index.html)
 // sends `x-shopper-token` on /chat but NOT on /consent or /forget, so a signed-in shopper's own
@@ -22,14 +23,17 @@ const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
 const SHOPPER_ID = "shopify:demo:77001";
 const GUEST_ANON_ID = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // base32, passes validateAnonId
 
-const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET"];
+const ENV_KEYS = ["WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "SHOPPER_AUTH", "SHOPPER_TOKEN_SECRET", "GUEST_TOKEN_SECRET"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`.
+const GUEST_SECRET = "gsecret";
 
 function armAuth(): void {
   process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
   process.env.WIDGET_AUTH_REQUIRED = "true";
   process.env.SHOPPER_AUTH = "true";
   process.env.SHOPPER_TOKEN_SECRET = SHOPPER_SECRET;
+  process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
 }
 const shopperToken = () => mintShopperToken(SHOPPER_SECRET, SHOPPER_ID, "shopify", 3_600);
 
@@ -63,11 +67,15 @@ describe("BLOCK-2 — POST /forget must reach the account subject for a signed-i
     expect((await vector.query(acctNs, { text: "", k: 10 })).length).toBeGreaterThan(0);
 
     // The OLD (buggy) forgetMe() request shape: content-type + widget Bearer only, NO x-shopper-token —
-    // exactly what packages/widget/public/index.html sent before the client-side fix.
+    // exactly what packages/widget/public/index.html sent before the client-side fix. (ADR-0019 task 4/9:
+    // the guest id itself must now travel as a VERIFIED `x-guest-token`, not `body.anonId` — invariant 4 —
+    // so this otherwise-unauthenticated call presents ITS OWN guest token to reach a real guest subject;
+    // the point under test — no x-shopper-token means the ACCOUNT subject is never reached — is unchanged.)
     const res = await app.inject({
       method: "POST",
       url: "/forget",
-      payload: { anonId: GUEST_ANON_ID, widgetToken: DEMO_WIDGET_TOKEN },
+      headers: guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON_ID),
+      payload: { widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true }); // the UI would report success here...

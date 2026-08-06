@@ -10,6 +10,7 @@ import { armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
 import { createMerchantResolver, MERCHANT_RESOLUTION_COLLECTION } from "../src/merchant-resolver.js";
 import { resolveShopifyStore, SHOPIFY_TOKEN_SECRET } from "../src/merchant-store.js";
+import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 // D1 — REGISTRY-BACKED KEYS + REVOCATION. The cutover C1 (#189) explicitly did not attempt.
@@ -49,7 +50,10 @@ const ENV_KEYS = [
   "PALUP_SECRETS",
   "PALUP_REQUIRE_DATABASE_URL",
   "CAA_REDIRECT_URI",
+  "GUEST_TOKEN_SECRET",
 ];
+// ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`.
+const GUEST_SECRET = "gsecret";
 afterEach(() => {
   ENV_KEYS.forEach((k) => delete process.env[k]);
   vi.restoreAllMocks();
@@ -336,6 +340,7 @@ describe("D1 (5) the `demo` tenant decision: env stays an EXPLICIT, NAMED fallba
 // ───────────────────────────────────────────────────────────────────────────────────────────────────
 describe("D1 (6) DATA-RIGHTS paths are deliberately NOT gated on servability", () => {
   it("POST /forget still works for an uninstalled merchant (erasure must outlive the install)", async () => {
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const registry = await activeRegistry();
     const { app } = await serve(registry);
     const m = await mint(app, KEY);
@@ -343,8 +348,8 @@ describe("D1 (6) DATA-RIGHTS paths are deliberately NOT gated on servability", (
     const res = await app.inject({
       method: "POST",
       url: "/forget",
-      headers: { authorization: `Bearer ${m.token}` },
-      payload: { anonId: VALID_ANON_ID },
+      headers: { authorization: `Bearer ${m.token}`, ...guestTokenHeader(GUEST_SECRET, TENANT, VALID_ANON_ID) },
+      payload: {},
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ok: true });
@@ -352,6 +357,7 @@ describe("D1 (6) DATA-RIGHTS paths are deliberately NOT gated on servability", (
   });
 
   it("POST /consent still works for an uninstalled merchant (withdrawal is a data-subject right)", async () => {
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
     const registry = await activeRegistry();
     const { app } = await serve(registry);
     const m = await mint(app, KEY);
@@ -359,8 +365,8 @@ describe("D1 (6) DATA-RIGHTS paths are deliberately NOT gated on servability", (
     const res = await app.inject({
       method: "POST",
       url: "/consent",
-      headers: { authorization: `Bearer ${m.token}` },
-      payload: { anonId: VALID_ANON_ID, memoryOrdinary: "out", memorySpecial: "out" },
+      headers: { authorization: `Bearer ${m.token}`, ...guestTokenHeader(GUEST_SECRET, TENANT, VALID_ANON_ID) },
+      payload: { memoryOrdinary: "out", memorySpecial: "out" },
     });
     expect(res.statusCode).toBe(200);
     await app.close();
