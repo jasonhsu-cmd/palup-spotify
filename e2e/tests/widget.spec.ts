@@ -13,6 +13,30 @@ const DEBUG = "/?palupDebug=1";
 const fireExitIntent = (page: Page) =>
   page.evaluate(() => document.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, clientY: 0 })));
 
+// ADR-0019 task 8 — the widget now fetches a SERVER-ISSUED guest token from POST /widget/guest and presents
+// it as the `x-guest-token` header (never a client-minted anonId in the body/signals). These "memory ON"
+// tests mock that endpoint the same way they mock /chat — a real browser running the REAL widget, only the
+// network faked. Tokens INCREMENT, so a forget-me rotation (which mints a fresh identity) is observable as a
+// changed stored token. Returns a getter for the last-issued token so a test can assert what the widget holds.
+function mockGuestToken(page: Page) {
+  const issued: string[] = [];
+  return {
+    async route() {
+      await page.route("**/widget/guest", async (route) => {
+        issued.push(`GUEST-TOKEN-${issued.length + 1}`);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ guestToken: issued[issued.length - 1], anonId: `SERVERMINTEDANONID${issued.length}`, expiresInSeconds: 2_592_000 }),
+        });
+      });
+    },
+    first: () => issued[0],
+    current: () => issued[issued.length - 1],
+    count: () => issued.length,
+  };
+}
+
 test("sales turn returns a grounded reply with a value-aligned pitch", async ({ page }) => {
   await page.goto(DEBUG); // the decision badge asserted below is debug-only
   await page.getByTestId("chat-input").fill("tell me about the serum");
@@ -205,12 +229,16 @@ test.describe("PR-11b — memory OFF (default, real unmocked backend): fully ine
 });
 
 test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () => {
-  test("opt_in (EU/UK): first-run prompt shown once, accepting posts consent + anonId persists + is sent on the next turn + manage panel reflects it", async ({
+  test("opt_in (EU/UK): first-run prompt shown once, accepting posts consent + guest token persists + is sent on the next turn + manage panel reflects it", async ({
     page,
   }) => {
+    const guest = mockGuestToken(page);
+    await guest.route();
     let consentBody: Record<string, unknown> | null = null;
+    let consentHeaders: Record<string, string> | null = null;
     await page.route("**/consent", async (route) => {
       consentBody = route.request().postDataJSON();
+      consentHeaders = route.request().headers();
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
     });
     const chatResponse = (extra: Record<string, unknown> = {}) =>
@@ -227,10 +255,11 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
         ...extra,
       });
     let secondChatBody: Record<string, unknown> | null = null;
+    let secondChatHeaders: Record<string, string> | null = null;
     let chatCalls = 0;
     await page.route("**/chat", async (route) => {
       chatCalls++;
-      if (chatCalls === 2) secondChatBody = route.request().postDataJSON();
+      if (chatCalls === 2) { secondChatBody = route.request().postDataJSON(); secondChatHeaders = route.request().headers(); }
       await route.fulfill({ status: 200, contentType: "application/json", body: chatResponse() });
     });
 
@@ -249,23 +278,28 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
 
     // postConsent's own fetch is fire-and-forget from the click handler's point of view — poll for it.
     await expect.poll(() => consentBody).toBeTruthy();
+    // ADR-0019 invariant 4 — the body no longer carries a client anonId; the subject is derived server-side
+    // from the VERIFIED x-guest-token header the widget presents.
     expect(consentBody).toMatchObject({ memoryOrdinary: "in", memorySpecial: "unknown" });
-    const anonId = (consentBody as { anonId?: string }).anonId as string;
-    expect(anonId).toMatch(/^[A-Z2-7]{16,64}$/);
+    expect(Object.prototype.hasOwnProperty.call(consentBody, "anonId")).toBe(false);
+    expect((consentHeaders as unknown as Record<string, string>)["x-guest-token"]).toBe(guest.first());
 
-    const storedAnonId = await page.evaluate(() => {
+    // The widget stores the TOKEN (never a raw anonId) — F-13.
+    const stored = await page.evaluate(() => {
       const k = Object.keys(localStorage).find((key) => key.startsWith("palup.widget.memory"));
-      return k ? JSON.parse(localStorage.getItem(k) as string).anonId : null;
+      return k ? (JSON.parse(localStorage.getItem(k) as string) as { guestToken?: string; anonId?: string }) : null;
     });
-    expect(storedAnonId).toBe(anonId);
+    expect(stored?.guestToken).toBe(guest.first());
+    expect(stored?.anonId, "F-13: the client must store the token only, never the raw aid").toBeUndefined();
 
-    // A subsequent /chat call now carries the anonId.
+    // A subsequent /chat call now carries the guest token in the header (not the signals body).
     await page.getByTestId("chat-input").fill("another question");
     await page.getByTestId("send").click();
     await expect.poll(() => secondChatBody).toBeTruthy();
-    expect(((secondChatBody as { signals?: Record<string, unknown> })?.signals as Record<string, unknown>)?.anonId).toBe(anonId);
+    expect(Object.prototype.hasOwnProperty.call((secondChatBody as { signals?: Record<string, unknown> })?.signals ?? {}, "anonId")).toBe(false);
+    expect((secondChatHeaders as unknown as Record<string, string>)["x-guest-token"]).toBe(guest.first());
 
-    // The prompt never reappears for this (unchanged) anonId.
+    // The prompt never reappears for this (unchanged) identity.
     await expect(page.locator('[data-testid="consent-prompt"]')).toHaveCount(0);
 
     // Manage panel reflects the accepted preferences consent. No drawer to open — the panel is part of
@@ -276,17 +310,21 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
     await expect(page.locator('[data-testid="manage-memory-toggle-special"]')).not.toBeChecked();
   });
 
-  test("opt_out (US): notice shown once, declining posts an explicit opt-out, toggling health-notes on posts consent, and forget-me erases + mints a new anonId", async ({
+  test("opt_out (US): notice shown once, declining posts an explicit opt-out, toggling health-notes on posts consent, and forget-me erases + mints a new guest token", async ({
     page,
   }) => {
+    const guest = mockGuestToken(page);
+    await guest.route();
     const consentBodies: Record<string, unknown>[] = [];
+    const consentHeaders: Record<string, string>[] = [];
     await page.route("**/consent", async (route) => {
       consentBodies.push(route.request().postDataJSON());
+      consentHeaders.push(route.request().headers());
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
     });
-    let forgetBody: Record<string, unknown> | null = null;
+    let forgetHeaders: Record<string, string> | null = null;
     await page.route("**/forget", async (route) => {
-      forgetBody = route.request().postDataJSON();
+      forgetHeaders = route.request().headers();
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
     });
     await page.route("**/chat", async (route) => {
@@ -321,26 +359,33 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
     await expect(prompt).toHaveCount(0);
 
     await expect.poll(() => consentBodies.length).toBe(1);
+    // ADR-0019 — the body carries no client anonId; the subject is the verified x-guest-token header's aid.
     expect(consentBodies[0]).toMatchObject({ memoryOrdinary: "out", memorySpecial: "unknown" });
-    const firstAnonId = consentBodies[0].anonId as string;
+    expect(Object.prototype.hasOwnProperty.call(consentBodies[0], "anonId")).toBe(false);
+    expect(consentHeaders[0]["x-guest-token"]).toBe(guest.first());
 
     await page.locator('[data-testid="manage-memory-toggle-special"]').check();
     await expect.poll(() => consentBodies.length).toBe(2);
-    expect(consentBodies[1]).toMatchObject({ anonId: firstAnonId, memorySpecial: "in" });
+    expect(consentBodies[1]).toMatchObject({ memorySpecial: "in" });
+    expect(consentHeaders[1]["x-guest-token"], "the SAME guest identity across turns").toBe(guest.first());
 
     await page.locator('[data-testid="manage-memory-forget"]').click();
-    await expect.poll(() => forgetBody).toBeTruthy();
-    expect((forgetBody as { anonId?: string }).anonId).toBe(firstAnonId);
+    await expect.poll(() => forgetHeaders).toBeTruthy();
+    // forget-me presents the guest token so the server erases + REVOKES that aid (task 5).
+    expect((forgetHeaders as unknown as Record<string, string>)["x-guest-token"]).toBe(guest.first());
 
     const confirmation = page.locator('[data-testid="manage-memory-confirmation"]');
     await expect(confirmation).toBeVisible();
     await expect(confirmation).toHaveText("Done — I've cleared what I remembered and started fresh.");
 
-    const newAnonId = await page.evaluate(() => {
+    // The subject is reset: the widget minted a FRESH server-issued token (the old aid is now revoked).
+    await expect.poll(() => guest.count()).toBeGreaterThan(1);
+    const newToken = await page.evaluate(() => {
       const k = Object.keys(localStorage).find((key) => key.startsWith("palup.widget.memory"));
-      return k ? JSON.parse(localStorage.getItem(k) as string).anonId : null;
+      return k ? (JSON.parse(localStorage.getItem(k) as string) as { guestToken?: string }).guestToken : null;
     });
-    expect(newAnonId).not.toBe(firstAnonId);
+    expect(newToken).toBe(guest.current());
+    expect(newToken).not.toBe(guest.first());
   });
 
   // Manage-panel honesty — the DOM half of packages/widget-backend/test/manage-panel-honesty.test.ts.
@@ -531,8 +576,8 @@ test.describe("PR-11c — memory ON (mocked /chat seam): the special-consent pro
 
     await expect.poll(() => consentBody).toBeTruthy();
     expect(consentBody).toMatchObject({ memorySpecial: "in" });
-    const anonId = (consentBody as { anonId?: string }).anonId as string;
-    expect(anonId).toMatch(/^[A-Z2-7]{16,64}$/);
+    // ADR-0019 invariant 4 — no client anonId in the body; the subject is the verified x-guest-token's aid.
+    expect(Object.prototype.hasOwnProperty.call(consentBody, "anonId")).toBe(false);
   });
 
   test("'No' posts memorySpecial='out'; the prompt shows at most once per session even across repeated health messages", async ({ page }) => {
@@ -771,6 +816,8 @@ test.describe("P10 — conversation continuity across a closed tab (the safety l
     // Needs the memory-enabled path, which the double gate (MEMORY_ADR_ACCEPTED) never turns on in this
     // real backend — so /chat is mocked exactly like the PR-11b cases above. The assertion is at the
     // storage layer, which is where the two subsystems either stay separate or quietly merge.
+    const guest = mockGuestToken(page);
+    await guest.route();
     await page.route("**/consent", (route) =>
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) }),
     );
@@ -811,15 +858,19 @@ test.describe("P10 — conversation continuity across a closed tab (the safety l
         return { conv: pick("palup.widget.conversation"), mem: pick("palup.widget.memory") };
       });
 
+    // The memory identity may still be settling (bootstrap fetch) — poll until the token is stored.
+    await expect.poll(async () => (await readStore()).mem?.guestToken).toBeTruthy();
     const before = await readStore();
     expect(before.conv?.sessionId, "the conversation id is persisted durably").toBe(sid(bodies[0]));
-    expect(before.mem?.anonId).toBeTruthy();
+    expect(before.mem?.guestToken).toBeTruthy();
 
     await page.getByTestId("manage-memory-forget").click();
     await expect(page.getByTestId("manage-memory-confirmation")).toBeVisible();
 
+    // The forget rotates to a fresh server-minted token — poll until the rotation lands.
+    await expect.poll(async () => (await readStore()).mem?.guestToken).not.toBe(before.mem?.guestToken);
     const after = await readStore();
-    expect(after.mem?.anonId, "the memory subject is reset — that is what this control is for").not.toBe(before.mem?.anonId);
+    expect(after.mem?.guestToken, "the memory subject is reset — that is what this control is for").not.toBe(before.mem?.guestToken);
     expect(after.conv?.sessionId, "the conversation, and its safety latch, is NOT this control's business").toBe(
       before.conv?.sessionId,
     );
@@ -961,14 +1012,17 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
         }),
       }),
     );
-  const anonId = (page: Page) =>
+  // ADR-0019 task 8 — the durable memory identity is the SERVER-ISSUED guest token now, not a client anonId.
+  const guestTokenOf = (page: Page) =>
     page.evaluate(() => {
       const k = Object.keys(localStorage).find((key) => key.startsWith("palup.widget.memory"));
-      return k ? (JSON.parse(localStorage.getItem(k) as string) as { anonId?: string }).anonId : undefined;
+      return k ? (JSON.parse(localStorage.getItem(k) as string) as { guestToken?: string }).guestToken : undefined;
     });
   const okJson = { status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) };
 
-  test("a FAILED /forget does not claim success, and keeps the anonId so the shopper can retry", async ({ page }) => {
+  test("a FAILED /forget does not claim success, and keeps the guest token so the shopper can retry", async ({ page }) => {
+    const guest = mockGuestToken(page);
+    await guest.route();
     await page.route("**/consent", (route) => route.fulfill(okJson));
     await page.route("**/forget", (route) =>
       route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "boom" }) }),
@@ -979,18 +1033,20 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
     await expect(page.getByTestId("manage-memory")).toBeVisible();
-    const before = await anonId(page);
-    expect(before).toBeTruthy();
+    await expect.poll(() => guestTokenOf(page)).toBeTruthy();
+    const before = await guestTokenOf(page);
 
     await page.getByTestId("manage-memory-forget").click();
     const confirmation = page.getByTestId("manage-memory-confirmation");
     await expect(confirmation).toBeVisible();
     await expect(confirmation).not.toContainText("Done");
     await expect(confirmation).toContainText(/couldn't|could not/);
-    expect(await anonId(page), "rotating the id on failure would strand the un-erased facts forever").toBe(before);
+    expect(await guestTokenOf(page), "rotating the identity on failure would strand the un-erased facts forever").toBe(before);
   });
 
-  test("a SUCCESSFUL /forget still confirms and still rotates the id", async ({ page }) => {
+  test("a SUCCESSFUL /forget still confirms and still rotates the identity", async ({ page }) => {
+    const guest = mockGuestToken(page);
+    await guest.route();
     await page.route("**/consent", (route) => route.fulfill(okJson));
     await page.route("**/forget", (route) => route.fulfill(okJson));
     await memoryOnChat(page);
@@ -999,11 +1055,12 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
     await expect(page.getByTestId("manage-memory")).toBeVisible();
-    const before = await anonId(page);
+    await expect.poll(() => guestTokenOf(page)).toBeTruthy();
+    const before = await guestTokenOf(page);
 
     await page.getByTestId("manage-memory-forget").click();
     await expect(page.getByTestId("manage-memory-confirmation")).toContainText("Done — I've cleared what I remembered");
-    expect(await anonId(page)).not.toBe(before);
+    await expect.poll(() => guestTokenOf(page)).not.toBe(before);
   });
 
   test("the panel does not claim to delete more than eraseSubject deletes", async ({ page }) => {
