@@ -1663,10 +1663,10 @@ export async function buildServer(opts?: {
       // Deliberately a separate registry from `kill`: a kill halts and hands off, while at cap the shopper
       // must keep being served. See state-postgres/src/cost-cap-registry.ts.
       const costCap = await matchedCostCap(store, { tenantId });
-      // PR-11a (ADR-0015 T12) — look up this subject's server-recorded memory-consent BEFORE deriving
-      // signals, using the SAME validated anonId deriveServingSignals will itself derive from
-      // body.signals.anonId (validateAnonId is pure/idempotent, so validating it here too is safe and
-      // keeps deriveServingSignals itself unaware of any store). No valid anonId ⇒ nothing to key a
+      // PR-11a (ADR-0015 T12; ADR-0019 task 4) — look up this subject's server-recorded memory-consent
+      // BEFORE deriving signals, keyed on `memorySubject` — the SAME server-derived subject
+      // deriveServingSignals now uses (the verified x-guest-token's anonId or the shopper's acct: id, NOT
+      // a client `signals.anonId`). No subject ⇒ nothing to key a
       // lookup on (mirrors the remember() "no subject key" guard below) ⇒ consentRecord stays undefined
       // ⇒ deriveServingSignals's own `ctx.consent?.… ?? "unknown"` fail-closed default applies.
       // Only reach the consent store when memory is actually live (memoryService constructed). While the
