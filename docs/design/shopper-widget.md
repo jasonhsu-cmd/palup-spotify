@@ -192,6 +192,16 @@ invariant suites (must-hold) → pairwise coverage → golden journeys → the c
 live shadow/canary. Maps to the 7 production suites: **safety ≥99 · accuracy ≥92 · brand-voice ≥90 ·
 attribution ≥95 · cost ≥85 · latency ≥88 · compliance =100.**
 
+> **Four of these seven gate today; three do not.** `packages/eval/src/suites.ts` computes all
+> seven and blocks on **safety, accuracy, attribution and compliance**. The other three are
+> labelled `REPORT-ONLY — genuinely UNMEASURED, not defaulted to a pass`, for stated reasons:
+> **brand-voice** has no corpus case that maps to it (the corpus carries a `layer`, not the
+> per-case `suite` this section's schema assumes, so it cannot be scored without a corpus
+> change); **cost** and **latency** have real measured numbers but no scoring function or
+> baseline, so any 0–100 threshold would be invented. Naming a number and calling it a gate
+> would manufacture assurance, which is worse than the gap. Closing brand-voice needs a corpus
+> change; closing cost/latency needs a defensible baseline from real runs.
+
 ### 8a. Invariant suites (blocking, adversarial — the priority)
 One suite per hard guardrail; each is a set of "try-to-break-it" cases. A single failure blocks.
 

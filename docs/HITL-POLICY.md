@@ -217,3 +217,46 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 If you cannot confidently place an action in "auto-allowed," it is "requires approval."
 Reversibility and stakes decide; cost, model, and business-model impact always decide
 toward a human.
+
+## 8. Statutory obligations — the one case §7 cannot decide
+
+§7 resolves ambiguity toward a human. That is right for every *discretionary* action, and wrong
+for one class: an obligation **the law imposes on us with a deadline**, where not acting is
+itself the violation. A GDPR erasure is the live example — `customers/redact` and `shop/redact`
+carry a **30-day** completion requirement (Shopify's privacy-law compliance docs), so "queue it
+for a human" is not a safe default. If nobody answers, we have broken the law rather than
+avoided a risk.
+
+**The distinction that resolves it:** the agent is not *choosing* to delete. The law is. So the
+human decision that §7 is reaching for does not exist here — there is no "may we?" to approve.
+What a human is genuinely needed for is different, and narrower:
+
+1. **Whether we can meet the obligation at all.** Our erasure is partial today (`eraseTenant`
+   throws `NotImplemented`; a guest namespace is `randomBytes(16)` and cannot be named from a
+   Shopify customer id; the traffic log is not keyed by `anonId`). A request we cannot fully
+   satisfy is a legal exposure a person must know about.
+2. **Anything the erasure would take with it** that is not the subject's — blast radius.
+3. **A dispute** about whether the requester is who they claim to be.
+
+**Therefore:**
+
+- An action that is **statutorily mandated, deadline-bound, and scoped to the requester's own
+  data** is **auto-allowed to proceed**, and must be **recorded as an obligation** the moment it
+  arrives — with its deadline, what was done, and **what could not be done** — never silently
+  dropped and never blocked on a human who may not answer.
+- The obligation record is the human's entry point: it is **visible before the deadline**, and a
+  human may intervene, but their **non-response cannot cause a breach**.
+- **Everything else about customer data stays under §7.** A deletion we chose, a bulk operation,
+  anything crossing beyond the requester's own data, or anything whose scope we cannot bound —
+  those still require approval. This section is a narrow carve-out for *compelled* acts, not a
+  general licence over customer data.
+- **It never widens autonomy.** A statutory obligation can only compel the *minimum* act the law
+  requires. It is not a reason to delete more, to act faster than the deadline demands, or to
+  skip an audit record.
+
+**Status: DRAFTED, NOT ENACTED.** This resolves a gap found while building the GDPR webhooks
+(the handlers already defer-with-a-dated-obligation rather than dropping or executing blindly),
+but it is a policy decision with legal consequences and it needs the named owner's sign-off — and
+should have counsel's eye on the 30-day figure and on point 1's exposure. Until then, treat the
+webhook handlers' current behaviour as the interim position, not as policy.
+
