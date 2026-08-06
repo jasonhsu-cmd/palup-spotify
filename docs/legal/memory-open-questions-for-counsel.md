@@ -483,3 +483,41 @@ decide now than to unwind from shipped code and a published notice.
 **Companions:** ADR-0019 R2-1/R2-2; ADR-0015's special-category amendment (the ratified basis this touches);
 `memory-privacy-notice-draft.md` (the shopper-facing copy that would carry the answer to part 2);
 `memory-dpa-addendum-draft.md` §3 (special-category categories).
+
+### Owner's proposed answer — 2026-08-06 (a DIRECTION for counsel to confirm, NOT a legal sign-off)
+
+The named owner (jason.hsu@framy.co) has proposed a resolution. **It is recorded here as the owner's chosen
+design direction and the answer to route to counsel — it does not itself satisfy the Art-9 lawful-basis
+question, which remains a legal determination this document exists to obtain.** The owner is not counsel;
+this narrows what counsel is asked, it does not close the gate.
+
+The proposal, in the owner's words: *"the guest consent may cover the transfer, provided the consent prompt
+explicitly says something like: 'Remember this health information across visits and add it to your account
+if you later sign in.'"* Mapped onto the three parts:
+
+- **Part 1 → guest consent CAN cover the transfer**, on condition the transfer is disclosed **at the moment
+  Consent 2 is given**. Counsel is asked to confirm this is sufficient under Art-9 (and Q1's US state list),
+  rather than to decide it open-ended.
+- **Part 2 → the disclosure goes in the CONSENT-2 prompt, NOT the sign-in (R2-1) prompt.** This is the
+  important structural consequence: the transfer is disclosed to the shopper **about their own data, at
+  guest-consent time**, so the R2-1 carry-over prompt stays disclosure-free and **B1 is not reopened**. The
+  privacy trade-off part 2 worried about (naming health data at sign-in, to a possibly-different person) is
+  avoided rather than accepted — the "different person" never sees a health-specific prompt.
+- **Part 3 → still open for counsel.** Whether disclosing the transfer up front brings it inside the
+  2026-08-04 ratification, or needs a documented amendment, is exactly the confirmation this question seeks.
+
+**What this changes in the build, once counsel confirms:** the shipped Consent-2 prompt
+(`packages/widget/public/index.html` `showSpecialConsentPrompt`, currently the generic "some health
+information" copy) gains a clause disclosing the future account transfer. That is **health-consent copy**, so
+it also falls under **A5** (legal review of consent wording) — the exact clause must be lawyer-approved
+before it ships, not just its intent.
+
+**Two things the owner's direction does NOT settle, flagged for counsel rather than resolved here:**
+- Whether R2-2's **account-side** requirement (destination must ALSO have Consent 2 = "in") still stands, or
+  whether up-front guest transfer-consent alone suffices. R2-2's both-sides rule was a *security* measure
+  against a third party pulling a victim's data; with server-issued identity (ADR-0019) + the R2-1
+  authorisation already preventing that, counsel should say whether the account-side gate is legally
+  required or is now belt-and-suspenders. **The build keeps both-sides until told otherwise** — the stricter
+  reading, safe by default.
+- Whether "if you later sign in" is specific enough, or the copy must name that the data moves to a
+  *durable account record* under different retention. A copy question for A5.

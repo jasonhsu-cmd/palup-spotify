@@ -453,6 +453,15 @@ the wrong one. **Legal sign-off is still required** — R2-1 prevents the cross-
 consenting to it, but counsel must confirm that a both-sides rule is the right basis for Art-9 carry-over at
 all.
 
+**Owner direction, 2026-08-06 (routed to counsel as Q19, not yet a legal sign-off):** the transfer is to be
+disclosed **up front, in the Consent-2 prompt** — *"Remember this health information across visits and add it
+to your account if you later sign in"* — so guest consent (with that disclosure) is the proposed basis for
+the carry-over. Structural consequence worth stating: because the disclosure lands at the guest's **own**
+health-consent moment, the **R2-1 sign-in prompt stays disclosure-free and B1 is not reopened** — the
+person who signs in never sees a health-specific prompt about a prior session. The build keeps R2-2's
+account-side gate until counsel says otherwise (the stricter reading). The new Consent-2 clause is
+health-consent copy, so it also needs A5 legal-copy approval before it ships. See Q19.
+
 ## R2-3 (fixes F-3) — MINT and RENEW are two different operations
 
 The contradiction was treating one operation as both. Split them, and the invariants stop fighting:
