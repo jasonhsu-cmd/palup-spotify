@@ -75,6 +75,21 @@ These cannot be closed by engineering work. They are the reason this checklist e
 These are known, bounded, and not planned to be fixed before go-live. The named owner must accept them in
 writing — silence is not acceptance.
 
+> **PROPOSED CHANGE TO THIS ENTIRE SET — [`ADR-0019`](adr/0019-server-issued-guest-identity.md), owner
+> approved reopening C1 on 2026-08-06.** Every row below that descends from **C1** does so because nothing
+> proves a client-supplied `anonId` belongs to its caller. ADR-0019 makes the id **server-generated** and
+> delivered in a signed `typ:"guest"` token, so the guest subject comes from a *verified claim* — which
+> would close **C8** and **C10**, moot **C9**, mostly close **C1** (residual: a stolen token, i.e. the
+> device access C1 already accepts), and unblock **B12(b)**. **C14 stays deferred by explicit decision.**
+>
+> **The rows below still describe TODAY'S behaviour and are what a signer is accepting right now** —
+> ADR-0019 is Proposed, unbuilt, and closes nothing until Accepted. It corrects one thing recorded in C1
+> itself: C1 rejected "binding the id to a server-issued credential" by judging it on **theft resistance**,
+> where it adds little because the credential shares storage with the id. The property that matters is
+> **claim verification** — whether the server can establish the id belongs to its caller at all — and that
+> is what the F1 attack test exercises and what B12(b) requires. If ADR-0019 is Accepted, sign that instead
+> of accepting C1/C8/C9/C10 as they stand.
+
 | # | Residual | Why it is bounded |
 |---|---|---|
 | C1 | **`anonId` is a bearer capability — for ANONYMOUS GUESTS ONLY (narrowed), and only for data written AFTER sign-in with the principal actually sent.** Read literally, not as a general closure: **closed for data written after sign-in, once the client sends the principal** — `x-shopper-token`, now sent on `/chat`, `/consent`, AND `/forget` alike (PR #152 fixed the latter two, which the shipped widget previously omitted it from). Two things this does **not** close: (i) neither `/consent` nor `/forget` actually *requires* the shopper token — an attacker simply omits it and the request falls back to the unauthenticated `anonId` path exactly as before, for **any** caller, well-formed guest id in hand; (ii) guest-era facts are never migrated into the account (B12(b), unbuilt), so a shopper with guest history stays fully bearer-exposed on that guest-era data even after signing in. **This row is the unfixed root cause behind C14's acceptance, C8, C10, and the withdrawal of B12(a)** — every remedy attempted for those needed a way to tell whether a client-supplied `anonId` belongs to its caller, and there is none. **DECIDED — ACCEPTED AS IS (named-owner decision, 2026-08-04).** The owner's rationale, recorded because it is what makes the acceptance reasonable rather than merely convenient: **the realistic way to obtain someone's `anonId` is access to their browser, and once an attacker has that, very little downstream can be prevented anyway** — so hardening the id (server-issued, signed, HttpOnly) buys less than it appears to, and would not help at all in the shared-browser case that dominates the threat. Two alternatives were considered and NOT taken: binding the id to a server-issued credential (rejected as above), and restricting memory to signed-in shoppers only — which would have dissolved this row along with C8, C10 and C14, at the cost of the entire guest-memory feature. **The consequence to sign knowingly:** accepting this row is what keeps C8, C10, and C14 standing, because each descends from it; a signer accepting C1 is accepting that set, not one row. | 128-bit CSPRNG (not enumerable), per-tenant, rate-limited, kill-guarded. Blast radius is the victim's own preferences; this **does** include read access — `/chat` recall queries the victim's namespace and can surface their fact text into the model's reply for whoever holds their `anonId` (pre-existing behavior, not introduced or changed by this PR — the prior "no read access" claim here was false before this PR too). No cross-tenant reach; orders/account untouched. |
