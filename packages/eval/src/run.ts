@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { grade, type CaseResult, type EvalCase } from "./grade.js";
-import { incumbent, rogueCandidate, type Candidate } from "./candidates.js";
+import { incumbent, rogueCandidate, wave4Candidate, type Candidate } from "./candidates.js";
 import { scoreSuites, formatSuiteReport, type SuiteReport } from "./suites.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -75,10 +75,23 @@ export function evaluate(c: Candidate, results: CaseResult[], baseline?: Map<str
 export function gateOutcome(
   control: Pick<Gate, "blocked" | "passRate">,
   rogue: Pick<Gate, "blocked">,
+  /**
+   * The Wave 4 flag-ON posture. OPTIONAL so every existing caller keeps its exact behaviour; when passed,
+   * it is a THIRD requirement, never a replacement — the two conditions above still block on their own.
+   *
+   * Why it is a gate condition at all: NN#2 requires an eval gate to pass before promotion, and running
+   * the gate against a flag-on brain used to return 69/69 having executed neither feature (no corpus case
+   * supplied `cartItems`; the mock model never emits a citation tag). A green that proves nothing is worse
+   * than a red. With this, a Wave 4 flag that broke restraint, safety or compliance BLOCKS.
+   */
+  wave4?: Pick<Gate, "blocked" | "floorFails">,
 ): { ok: boolean; reasons: string[] } {
   const reasons: string[] = [];
   if (control.blocked || control.passRate !== 1) reasons.push("incumbent not clean.");
   if (!rogue.blocked) reasons.push("rogue candidate slipped through.");
+  if (wave4 && wave4.blocked) {
+    reasons.push(`Wave 4 flag-on posture is BLOCKED (floorFails=[${wave4.floorFails.join(",")}]) — do not promote.`);
+  }
   return { ok: reasons.length === 0, reasons };
 }
 
@@ -120,10 +133,14 @@ async function main() {
   const control = evaluate(incumbent, baselineResults);
   const rogueResults = await runCandidate(rogueCandidate);
   const rogue = evaluate(rogueCandidate, rogueResults, baseline);
+  // The posture promotion would actually ship. Graded against the incumbent baseline so a Wave 4 flag that
+  // turns a passing case into a failing one shows up as a REGRESSION rather than being averaged away.
+  const wave4Results = await runCandidate(wave4Candidate);
+  const wave4 = evaluate(wave4Candidate, wave4Results, baseline);
 
   const outDir = join(repoRoot, "reports");
   mkdirSync(outDir, { recursive: true });
-  const gates = [control, rogue];
+  const gates = [control, rogue, wave4];
   writeFileSync(join(outDir, "eval-report.json"), JSON.stringify(gates, null, 2));
   writeFileSync(join(outDir, "eval-report.html"), html(gates));
 
@@ -137,12 +154,14 @@ async function main() {
   console.log(`\n${formatSuiteReport(control.suites)}`);
   console.log(`\nknown-bad candidate (${rogue.candidate}) — suite verdicts:`);
   console.log(formatSuiteReport(rogue.suites));
+  console.log(`\nWave 4 flag-ON posture (${wave4.candidate}) — this is what promotion would ship:`);
+  console.log(formatSuiteReport(wave4.suites));
   console.log(`\nreport: reports/eval-report.html\n`);
 
-  const outcome = gateOutcome(control, rogue);
+  const outcome = gateOutcome(control, rogue, wave4);
   console.log(
     outcome.ok
-      ? "GATE OK — incumbent clean AND known-bad candidate correctly blocked."
+      ? "GATE OK — incumbent clean, known-bad candidate blocked, Wave 4 flag-on posture clean."
       : `GATE FAILURE — ${outcome.reasons.join(" ")}`,
   );
   process.exit(outcome.ok ? 0 : 1);
