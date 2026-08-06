@@ -507,6 +507,66 @@ secrets/variables incl. `STAGING_ENABLED=true`). The manual equivalent:
   deterministic and already runs in CI on every PR, so it isn't re-run on a timer; trigger this only to
   check the live model (e.g. after Google updates the `gemini-2.5-flash` alias).
 
+## Retention sweep (B4) — the job that makes expiry real
+
+`sweepAllSubjects` and the `pnpm sweep` entrypoint are **built and tested; nothing schedules them.** Until
+something does, retention is enforced only *opportunistically*, on a returning shopper's own `/chat` turn —
+so a shopper who never comes back is **never physically reclaimed**, which is precisely the gap
+`MEMORY-GO-LIVE-CHECKLIST.md` B4 exists to close. Expiry that nothing runs is aspirational, and
+ADR-0015 Inv 4 says it must not be.
+
+**Schedule this BEFORE flipping `MEMORY_ADR_ACCEPTED`.** With memory off nothing is ever written, so the
+job simply reports zeros — there is no reason to wait, and §D step 7 asks for it in that order so the
+mechanism is proven before the first real write exists to depend on it.
+
+The job needs the **same** `DATABASE_URL` and `AUDIT_HMAC_SECRET` as the service (its audit `subjectRef`s
+must correlate with serving's — `retention-sweep.ts` mirrors server.ts's own fallback to
+`SHOPPER_TOKEN_SECRET`), plus the tenants to visit. **There is no tenant registry to enumerate**, by
+design: a deletion job must not discover its own targets. It sweeps the union of `SHOPIFY_STORES` keys and
+a comma-separated `SWEEP_TENANTS`, and **exits 1 with `no tenants configured` if both are empty** rather
+than silently succeeding over nothing.
+
+```bash
+# 1. Create the job (same image/source as the service; --command overrides the server entrypoint)
+gcloud run jobs deploy palup-retention-sweep \
+  --source . --region us-central1 --project palup-jason \
+  --command pnpm --args sweep \
+  --set-secrets "DATABASE_URL=palup-database-url:latest,AUDIT_HMAC_SECRET=${AUDIT_HMAC_SECRET_NAME}:latest" \
+  --set-env-vars "^@^SWEEP_TENANTS=demo@PALUP_REQUIRE_DATABASE_URL=true"
+
+# 2. Run it once by hand and READ THE OUTPUT before scheduling anything
+gcloud run jobs execute palup-retention-sweep --region us-central1 --project palup-jason --wait
+
+# 3. Schedule daily once step 2 looks right
+gcloud scheduler jobs create http palup-retention-sweep-daily \
+  --location us-central1 --schedule "17 3 * * *" --time-zone UTC \
+  --uri "https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/palup-jason/jobs/palup-retention-sweep:run" \
+  --http-method POST --oauth-service-account-email "$RUN_INVOKER_SA"
+```
+
+**Verify the run, don't assume it** — per-tenant the job prints
+`visited=… deleted=… retired=… failed=… remaining=…`, and:
+
+- `remaining > 0` means `SWEEP_MAX_SUBJECTS` capped the run and work is left for the next one — printed,
+  never silent.
+- A **halted** tenant is skipped *before* anything is deleted (`[sweep] tenant=… HALTED by kill switch`) —
+  NN#4 holds for destructive background work too.
+- The process **exits non-zero** on any tenant failure, so a Cloud Run Job surfaces the run as unhealthy
+  instead of reporting success.
+- Confirm the `ttl_sweep` audit entries actually land in the **durable** sink (B5) — audit-before-delete
+  means a destructive action is never invisible, but that only holds if the sink is the Postgres
+  hash-chained log rather than a per-process in-memory store. Check `/health` reports `store: postgres`.
+
+> **B5 note, verified 2026-08-06 against the deployed staging config:** `AUDIT_HMAC_SECRET` is **not
+> mounted** (no `AUDIT_HMAC_SECRET_NAME` repo variable is set) and `SHOPPER_TOKEN_SECRET` is absent, so the
+> effective key is **undefined** today. The hash **chain** is unaffected — it is an unkeyed
+> `sha256(canonicalize(base))` (`platform-ports/src/audit-hash.ts`) — but `subjectRef` degrades to an
+> unsalted digest, which `widget-memory/src/audit.ts` states is fine for a 128-bit guest `anonId` and
+> **NOT safe for a low-entropy `acct:` subject**, and `server.ts` skips the identity audit entirely while
+> it is unset. Provision it (create the Secret Manager secret, then set `AUDIT_HMAC_SECRET_NAME`) **before**
+> memory is enabled, not after — the same "before the first real write" rule the checklist's rollback note
+> applies to B5/B6.
+
 ## Local
 
 ```bash
