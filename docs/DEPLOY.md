@@ -526,13 +526,24 @@ design: a deletion job must not discover its own targets. It sweeps the union of
 a comma-separated `SWEEP_TENANTS`, and **exits 1 with `no tenants configured` if both are empty** rather
 than silently succeeding over nothing.
 
+> **`--set-cloudsql-instances` is NOT optional.** Verified 2026-08-06: the service carries the
+> `run.googleapis.com/cloudsql-instances: palup-jason:us-central1:palup-staging` annotation and
+> `DATABASE_URL` is a **`/cloudsql/` unix-socket** URL (checked without printing the value). A job without
+> the same attachment has no socket to open and cannot connect at all — it will not "degrade", it will fail
+> every run. Mount `AUDIT_HMAC_SECRET` only once B5 is done; naming a secret that does not exist makes
+> `gcloud` itself fail.
+
 ```bash
-# 1. Create the job (same image/source as the service; --command overrides the server entrypoint)
+# 1. Create the job. `--command pnpm --args sweep` overrides the image's CMD ["pnpm","backend"];
+#    the `pnpm` launcher is on PATH in the runtime image (Dockerfile: corepack enable, PNPM_HOME=/pnpm).
 gcloud run jobs deploy palup-retention-sweep \
   --source . --region us-central1 --project palup-jason \
   --command pnpm --args sweep \
-  --set-secrets "DATABASE_URL=palup-database-url:latest,AUDIT_HMAC_SECRET=${AUDIT_HMAC_SECRET_NAME}:latest" \
+  --set-cloudsql-instances palup-jason:us-central1:palup-staging \
+  --set-secrets "DATABASE_URL=palup-staging-database-url:latest" \
   --set-env-vars "^@^SWEEP_TENANTS=demo@PALUP_REQUIRE_DATABASE_URL=true"
+# …and once B5 has provisioned the audit key, add it so the job's subjectRefs match serving's:
+#   --set-secrets "DATABASE_URL=palup-staging-database-url:latest,AUDIT_HMAC_SECRET=<secret-name>:latest"
 
 # 2. Run it once by hand and READ THE OUTPUT before scheduling anything
 gcloud run jobs execute palup-retention-sweep --region us-central1 --project palup-jason --wait
@@ -543,6 +554,12 @@ gcloud scheduler jobs create http palup-retention-sweep-daily \
   --uri "https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/palup-jason/jobs/palup-retention-sweep:run" \
   --http-method POST --oauth-service-account-email "$RUN_INVOKER_SA"
 ```
+
+> **Not verified in this session:** the exact `gcloud run jobs deploy` flag list. This session denies
+> `gcloud * deploy *` (settings.json — the guard that stops an agent deploying anything), which also blocks
+> reading that subcommand's `--help`. The flags above match SDK 532.0.0's documented surface and the
+> secret/instance names ARE verified against the live service, but treat step 1 as "run it once and read
+> the error" rather than known-good. Steps 2–3 use no denied verb and are ordinary.
 
 **Verify the run, don't assume it** — per-tenant the job prints
 `visited=… deleted=… retired=… failed=… remaining=…`, and:
