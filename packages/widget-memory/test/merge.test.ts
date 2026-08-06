@@ -7,9 +7,11 @@ import { subjectNamespace } from "../src/identity.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
-// ADR-0015 Tier 2 (Decision: "Signed-up" bullet) + Invariant 9: guest -> account merge is a ONE-TIME,
-// AUDITED migration; special-category facts are NEVER auto-folded into the account's sign-up ToS — they
-// migrate ONLY when Consent 2 is separately granted for the account, otherwise dropped.
+// ADR-0015 Tier 2 (Decision: "Signed-up" bullet) + Invariant 9: guest -> account carry-over is an AUDITED
+// COPY — repeatable and idempotent by content, NOT a one-time move (B12(b); see merge.ts's header for why
+// deleting the guest namespace was a data-theft vector). Special-category facts are NEVER auto-folded into
+// the account's sign-up ToS — they follow ONLY when Consent 2 is separately granted for the account,
+// otherwise dropped. Copy-not-move specifics live in b12-copy-not-move.test.ts.
 
 function fixedDistiller(facts: string[]): FactDistiller {
   // PR-8: FactDistiller.distill() returns candidate OBJECTS ({text, disposition?}), not bare strings.
@@ -25,7 +27,12 @@ function keyedSecrets(...tenantIds: string[]): SecretsPort {
 }
 
 describe("merge — mergeGuestIntoAccount", () => {
-  it("moves ordinary facts anon -> account and fully empties the anon namespace (one-time migration)", async () => {
+  // B12(b): this used to assert the anon namespace was EMPTIED. It is now deliberately left intact —
+  // copy, never move — so that (a) signing out does not wipe guest memory ("the guest remains usable")
+  // and (b) an attacker holding a victim's `anonId` cannot DESTROY the victim's facts, which is what made
+  // the withdrawn version a data-theft vector rather than the read exposure C1 already accepts. See
+  // merge.ts's header and b12-copy-not-move.test.ts.
+  it("copies ordinary facts anon -> account and LEAVES the anon namespace intact (guest stays usable)", async () => {
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
     const service = createMemoryService({
@@ -44,13 +51,13 @@ describe("merge — mergeGuestIntoAccount", () => {
     expect(result.merged).toBe(1);
 
     const anonMatches = await vector.query(subjectNamespace("acme", "guest-merge"), { text: "", k: 10 });
-    expect(anonMatches).toEqual([]);
+    expect(anonMatches, "the guest namespace was emptied — copy-not-move must leave it alone").toHaveLength(1);
 
     const acctCtx: MemoryCtx = { tenantId: "acme", anonId: "acct:acct-1", region: "us", consent1: "in", consent2: "unknown" };
     expect(await service.recall(acctCtx)).toEqual([{ text: "prefers fragrance-free", class: "ordinary" }]);
   });
 
-  it("a second merge for the same anonId is a no-op (anon already gone) — no double-count", async () => {
+  it("a second merge for the same anonId is a no-op — no double-count (now by CONTENT: the source survives, so only ids the account lacks migrate)", async () => {
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
     const service = createMemoryService({
