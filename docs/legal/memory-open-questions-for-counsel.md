@@ -429,3 +429,57 @@ undermine the validity, transparency, or fairness of the consent artifact — an
 affirmative `"in"` when the US shopper acknowledges the notice (which also resolves Q5(b)), or (c) defer
 writes until an explicit choice exists? All three are code changes, and (b) and (c) change what data is
 collected — so this should be decided before, not after, the copy is finalized.
+
+---
+
+## Q19 — May special-category (Art-9) data be carried from a guest subject to an account subject on a "both sides opted in" basis? (ADR-0019 R2-2 — NEW, and it amends a decision counsel already ratified)
+
+> **This is the one gate left on ADR-0019's guest→account carry-over (task 10).** Owner re-accepted the
+> design 2026-08-06; `security-reviewer` cleared it over three passes. Neither the reviewer nor the owner can
+> answer this — it is a lawful-basis question, and it **modifies the special-category basis counsel ratified
+> on 2026-08-04** (ADR-0015's amendment), so it needs a fresh look rather than being treated as settled.
+
+**Background counsel needs, in plain terms.** A shopper can use the widget two ways on one device: signed
+**out** (a "guest", keyed by a browser-held id) and signed **in** (an "account"). Cross-visit memory can hold
+ordinary preference notes and — behind a *separate* explicit health consent (Consent 2) — **special-category
+(Art-9) health notes**. ADR-0019 lets a shopper who built up guest notes carry them into their account when
+they sign in. The security-relevant history: an earlier design let the *account holder's* consent alone
+authorise migrating the *guest's* health notes, which on a shared/family device meant person B could pull
+person A's health data into B's account. That is now prevented by (i) an explicit shopper authorisation
+prompt that discloses nothing about the other session (R2-1), and (ii) the rule in question here.
+
+**What the code will do (R2-2).** A special-category note carries over **only if BOTH** the source (guest)
+subject recorded `memorySpecial === "in"` **AND** the destination (account) subject recorded
+`memorySpecial === "in"`. Either side `unknown` or `out` ⇒ the note is dropped, never promoted. Ordinary
+notes follow the ordinary consent rule and are out of scope of *this* question. Implementable exactly as
+stated — the consent store can read both subjects' records on one request
+(`packages/state-postgres/src/runtime-consent-store.ts:137`); the current code gates on the destination
+only (`packages/widget-memory/src/merge.ts:59-61,117`), which is the defect R2-2 corrects.
+
+**The decision — three parts, please answer each:**
+
+1. **Is "both subjects recorded an explicit Consent 2 = in" a sufficient lawful basis** under GDPR Art. 9
+   (and any applicable US state health-privacy law — see Q1's list) to **move** special-category data from a
+   guest-keyed subject to an account-keyed subject? Or does Art-9 require consent obtained *specifically for
+   the account context* (i.e. the guest-era Consent 2 does not transfer, and the fact must be re-consented
+   under the account before it may live there)?
+2. **Does the shopper-authorisation step (R2-1) need to name health data explicitly** to be valid — e.g.
+   must the carry-over prompt say "including health-related notes", accepting that this discloses to the
+   signed-in shopper that health notes exist — or is the both-sides Consent-2 gate sufficient without a
+   health-specific disclosure at the carry-over moment? (This trades against a privacy harm: naming health
+   data in the prompt re-introduces a disclosure R2-1 was designed to avoid. Counsel should weigh which risk
+   governs.)
+3. **Does R2-2 change your 2026-08-04 ratification** of ADR-0015's special-category model, and if so how?
+   That ratification covered *writing* special-category notes under Consent 2; it did not contemplate
+   *carrying them between subjects*. Confirm whether the both-sides rule is within the ratified basis or
+   needs a documented amendment.
+
+**Why it must be settled before build, not after.** The answer changes what the carry-over code may do and
+what the R2-1 prompt must say. If (1) is "re-consent required under the account", the carry-over drops all
+guest-era health notes until the account separately opts in — a materially different feature. If (2) is
+"must name health data", the prompt copy changes and a privacy trade-off is reopened. Both are cheaper to
+decide now than to unwind from shipped code and a published notice.
+
+**Companions:** ADR-0019 R2-1/R2-2; ADR-0015's special-category amendment (the ratified basis this touches);
+`memory-privacy-notice-draft.md` (the shopper-facing copy that would carry the answer to part 2);
+`memory-dpa-addendum-draft.md` §3 (special-category categories).

@@ -1,38 +1,39 @@
-# ADR-0019: Server-issued guest identity (signed guest token) — security-cleared (Revision 2); pending owner re-acceptance + legal
+# ADR-0019: Server-issued guest identity (signed guest token) — security-cleared + owner-accepted (Revision 2); ONE gate left (legal)
 
-> ## `security-reviewer` gate: CLEARED on the third pass. Two HUMAN gates and nothing built.
+> ## Security gate CLEARED, owner re-accepted. ONE human gate remains (legal). Nothing built.
 >
-> **CURRENT STATE (read this first).** Revision 2 (at the bottom of this file) has passed
-> `security-reviewer`: first draft BLOCKED (six findings) → corrected → re-BLOCKED on one finding (B1) →
-> B1 remediated → **third review PASS on B1, 2026-08-06.** The build-time security gate CLAUDE.md §4.4
-> requires is now satisfied for the design.
+> **CURRENT STATE (read this first).** Revision 2 (at the bottom of this file) is:
+> - **security-cleared** — three `security-reviewer` passes: BLOCK (6 findings) → BLOCK (B1) → **PASS on
+>   B1, 2026-08-06** (the §4.4 gate for the design);
+> - **owner-accepted** — jason.hsu@framy.co re-accepted the corrected design 2026-08-06, superseding the
+>   pre-BLOCK acceptance the reviews invalidated.
 >
-> **This does NOT make the ADR buildable-in-full.** Two gates remain, both HUMAN and neither yet given —
-> no human has accepted anything since this cleared:
-> - **Owner re-acceptance.** The 2026-08-06 owner acceptance was on pre-BLOCK text the review then
->   invalidated; it does not carry to Revision 2.
-> - **Legal** on R2-2's both-sides Art-9 rule — outside the reviewer's competence, explicitly unmet.
+> **ONE gate remains, and it is not the owner's to give:** **legal** on R2-2's both-sides Art-9 rule —
+> whether "both subjects opted in" is a sufficient lawful basis to carry special-category (health) data
+> between subjects at all. Outside the reviewer's competence and the owner's. Brief for counsel:
+> `docs/legal/memory-open-questions-for-counsel.md` **Q19**.
 >
-> **Tasks 1–9 of Revision 2's list are design-approved; task 10 (the carry-over) is security-cleared but
-> gated on the two human sign-offs above.** Every task's eventual CODE gets its own review (§4.4), and the
-> build-time conditions the reviews named still bind. Nothing is built; `MEMORY_ADR_ACCEPTED` is `false`.
+> **Tasks 1–9 of Revision 2's list are cleared to build; task 10 (the carry-over) is gated only on that
+> legal sign-off.** Every task's eventual CODE gets its own §4.4 review, the named build-time conditions
+> bind, and a named human still merges the governance-touching PRs. Nothing is built; `MEMORY_ADR_ACCEPTED`
+> is `false`.
 >
 > The historical record of all three reviews follows — kept so the trail draft → block → correction →
 > re-block → correction → PASS stays legible, and because the design took three passes to clear a disclosure
 > the author kept re-introducing. Sequence: design → owner accepted → reviewed → BLOCK → Revision 2 →
 > re-reviewed → BLOCK on B1 → B1 remediated → **third review → PASS on B1.**
 
-- **Status: SECURITY-CLEARED (Revision 2, third review PASS 2026-08-06); PENDING owner re-acceptance +
-  legal.** The security block is lifted for the design; the two human gates in the banner remain. The
-  original *Accepted by the named owner, 2026-08-06* — that acceptance stands as a matter of record but
-  **is not a licence to build**, because F-1 and F-8 below
+- **Status: SECURITY-CLEARED + OWNER-ACCEPTED (Revision 2, 2026-08-06); PENDING legal only.** The security
+  block is lifted and the named owner has re-accepted the corrected design; the single remaining gate is
+  legal (R2-2, Q19). The **superseded** *Accepted by the named owner, 2026-08-06 (pre-BLOCK)* — that first
+  acceptance stands as a matter of record but **was not a licence to build**, because F-1 and F-8 below
   show it was given on the strength of two claims in this document that are wrong in the direction that
-  matters. The **direction** — replace the client-minted `anonId` with a **server-generated** id delivered in
+  matters. The re-acceptance above is on the corrected text, after the reviews. The **direction** — replace the client-minted `anonId` with a **server-generated** id delivered in
   a **PalUp-signed guest token**, and derive the guest subject from the *verified claim* — survives review.
   The **specification does not**.
-- This record **enables and builds nothing.** With the security gate cleared, tasks 1–9 are design-approved;
-  task 10 is security-cleared but held by the two human gates above. No task authorises itself, and each
-  task's code gets its own §4.4 review.
+- This record **enables and builds nothing.** With the security gate cleared and the owner re-accepted,
+  tasks 1–9 are cleared to build; task 10 is held only by the legal gate (Q19). No task authorises itself,
+  and each task's code gets its own §4.4 review.
 - **CORRECTION (F-4) — the shared-secret justification in the earlier draft was factually wrong.** It said
   this "reuses `WIDGET_TOKEN_SECRET` via the `typ`-claim separation that `shopper-token-identity.ts` already
   justifies over per-token-type secrets". **No such precedent exists.** Shopper tokens use a *separate*
@@ -347,8 +348,10 @@ checked against a primary source.
 ## Governance sign-off
 
 - [x] **Named owner** (jason.hsu@framy.co) accepted reversing C1's 2026-08-04 acceptance — **2026-08-06.**
-      **⚠️ SUPERSEDED IN EFFECT:** F-1 and F-8 show the acceptance was given on two claims that are wrong,
-      so it does not carry to the corrected design. **Re-acceptance required.**
+      **⚠️ SUPERSEDED IN EFFECT (this line is the FIRST review's record):** F-1 and F-8 showed that
+      acceptance was given on two wrong claims, so it did not carry to the corrected design and re-acceptance
+      was required. **RESOLVED: the owner re-accepted Revision 2 on 2026-08-06** after the third-review PASS
+      — see the current *Sign-offs still required* block, which is authoritative over this historical line.
 - [ ] **`security-reviewer`** — **RUN 2026-08-06: BLOCK.** Six design blockers, eight conditions; see above.
       Not a pass, and not waivable by the owner: the reviewer is the gate CLAUDE.md §4.4 requires for auth
       and customer data.
@@ -589,10 +592,15 @@ a deployment setting this ADR does not describe.
       **PASS on B1** after the prompt string itself was corrected (see *Revision 2 — third review* below).
       The build-time §4.4 gate for the DESIGN is satisfied. Each task's eventual CODE still gets its own
       review, and the named build-time conditions bind.
-- [ ] **Owner re-acceptance** — the 2026-08-06 acceptance was on pre-BLOCK text the reviews invalidated; the
-      design changed three times since. **Not given** — this security clearance is not owner acceptance.
+- [x] **Owner re-acceptance** — **GIVEN 2026-08-06 by jason.hsu@framy.co, on Revision 2 as security-cleared.**
+      A fresh acceptance of the corrected design, distinct from the superseded 2026-08-06 pre-BLOCK one:
+      covers reversing C1 and rewriting C8/C9/C10, the direction and specification of Revision 2, and the
+      residuals in *what this does NOT close* (device access, C9, C7, F-10's double-copy erasure gap, a
+      lost token losing access until expiry, backups, widget XSS). Does **not** cover the legal question
+      below, and does not build anything.
 - [ ] **Legal** — R2-2's both-sides Art-9 rule. Confirmed by the reviewer as out of their competence and
-      still unmet.
+      still unmet. **Brief for counsel prepared 2026-08-06:** `docs/legal/memory-open-questions-for-counsel.md`
+      **Q19**. This is the ONLY remaining gate on task 10.
 - [ ] **Named human merger** for the implementation PRs (governance-touching).
 
 ---

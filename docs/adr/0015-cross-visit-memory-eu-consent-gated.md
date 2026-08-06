@@ -19,7 +19,7 @@
   region). This amendment resolves the *retention* opens only; the overall **Status stays Proposed** until
   the full `Accepted` + `MEMORY_ADR_ACCEPTED` go-live flip (named-owner + `security-reviewer` + legal,
   human-only). Implemented INERT in `packages/widget-memory` (`retention.ts`/`service.ts`/`consent.ts`).
-- **Amendment SECURITY-CLEARED, pending owner re-acceptance + legal (2026-08-06):**
+- **Amendment SECURITY-CLEARED + OWNER-ACCEPTED, pending LEGAL only (2026-08-06):**
   [`ADR-0019`](0019-server-issued-guest-identity.md) replaces the **client-minted** `anonId` with a
   **server-generated** id in a PalUp-signed `typ:"guest"` token, so the guest subject is derived from a
   *verified claim* rather than client input. It reverses this residual set's **C1** acceptance
@@ -28,8 +28,8 @@
   an earlier version of this bullet said it would "close C8, C10, moot C9" — C8/C10 are narrowed rather than
   closed (a caller cannot NAME another subject but can still PRESENT one it holds), and C9 is NOT mooted
   because the carry-over is itself an unaudited cross-subject read.**
-  **Nothing is closed: ADR-0019 is security-cleared (third review) but UNBUILT and gated on owner
-  re-acceptance + legal**, so the rows in
+  **Nothing is closed: ADR-0019 is security-cleared + owner-accepted but UNBUILT and gated on LEGAL only
+  (R2-2 Art-9, counsel Q19)**, so the rows in
   `MEMORY-GO-LIVE-CHECKLIST.md` still record today's behaviour, and **C14 stays deferred**. It must still
   land BEFORE `MEMORY_ADR_ACCEPTED` is flipped: no fact has ever been written, so the switch is free now and
   unfixable-without-trusting-the-client afterwards — which makes resolving the block time-sensitive rather
