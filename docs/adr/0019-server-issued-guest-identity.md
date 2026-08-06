@@ -1,26 +1,44 @@
-# ADR-0019: Server-issued guest identity (signed guest token) — Accepted (implementation gated on security review)
+# ADR-0019: Server-issued guest identity (signed guest token) — BLOCKED by security review; owner re-acceptance required
 
-- **Status: ACCEPTED by the named owner, 2026-08-06.** Replace the **client-minted** `anonId` with a
-  **server-generated** guest id delivered in a **PalUp-signed guest token** (`typ:"guest"`), and derive the
-  guest memory subject from the *verified claim* instead of from client input. The **decision** is settled;
-  this record still **enables and builds nothing by itself**.
-- **`security-reviewer` sign-off is OUTSTANDING, and no implementation may land without it.** The sign-off
-  block below was originally written as "required before Accepted". The owner accepted the decision on
-  2026-08-06 with that item still open, so it is **relocated to gate IMPLEMENTATION rather than acceptance**
-  — recorded here rather than quietly reworded. That is not a weakened gate: this ADR contains no code, and
-  CLAUDE.md §4.4 requires `security-reviewer` to pass on anything touching auth or customer data, which is
-  every line the task list below would produce. The protection is identical; only the point at which it
-  applies moved, and it moved to the point where code actually exists to review.
+> ## ⛔ `security-reviewer` returned **BLOCK** — 2026-08-06
+>
+> **Implementation may not begin.** Six design-level blockers, eight conditions. The full review is
+> summarised in *Security review outcome* below. **Two of the blockers invalidate statements the owner relied
+> on when accepting**, so the 2026-08-06 acceptance does not carry over to the corrected design and
+> **re-acceptance is required**. This is recorded at the top rather than in a footnote because a reader who
+> stops after the Status line must not come away thinking this design is cleared to build.
+>
+> Sequence, so the record is unambiguous: the design was written, the owner accepted it, `security-reviewer`
+> was then run at the owner's request and blocked it. The block is the current state.
+
+- **Status: BLOCKED (security review, 2026-08-06).** Previously *Accepted by the named owner, 2026-08-06* —
+  that acceptance stands as a matter of record but **is not a licence to build**, because F-1 and F-8 below
+  show it was given on the strength of two claims in this document that are wrong in the direction that
+  matters. The **direction** — replace the client-minted `anonId` with a **server-generated** id delivered in
+  a **PalUp-signed guest token**, and derive the guest subject from the *verified claim* — survives review.
+  The **specification does not**.
+- This record **enables and builds nothing**, and now blocks the task list below rather than authorising it.
+- **CORRECTION (F-4) — the shared-secret justification in the earlier draft was factually wrong.** It said
+  this "reuses `WIDGET_TOKEN_SECRET` via the `typ`-claim separation that `shopper-token-identity.ts` already
+  justifies over per-token-type secrets". **No such precedent exists.** Shopper tokens use a *separate*
+  secret (`SHOPPER_TOKEN_SECRET`, `server.ts:374,601`) **in addition to** `typ` separation, alongside
+  `WIDGET_TOKEN_SECRET` (`server.ts:581`); `token-codec.ts:1-6` justifies sharing the **codec**, never the
+  key. Verified independently. The consequence is the opposite of what the draft claimed: one key compromise
+  would yield merchant-tenant impersonation **and** forgeable guest tokens for any `aid` — i.e. squatting
+  restored, the exact failure this design asserts is structurally impossible.
 - **This REVERSES a recorded named-owner decision.** `MEMORY-GO-LIVE-CHECKLIST.md` C1 —
   "`anonId` is a bearer capability" — was **ACCEPTED AS IS** on 2026-08-04, and that acceptance is cited
   there as load-bearing for **C8, C10 and C14** and as the reason **B12(a)** was withdrawn. Reopening it is
   the whole point of this ADR, and the owner approved doing so on **2026-08-06**.
 - **Owner (named):** jason.hsu@framy.co. **Plane:** run-time (shopper identity for cross-visit memory).
 - **Governance-touching** (customer data + the identity that gates it). `security-reviewer` required.
-- **Depends on nothing new being provisioned:** reuses `WIDGET_TOKEN_SECRET` (already mounted as secret
-  `widget-token-secret`) via the `typ`-claim separation that `shopper-token-identity.ts` already justifies
-  over per-token-type secrets. No new Secret Manager entry, and therefore no repeat of the missing-IAM-grant
-  deploy failure that B5 hit on 2026-08-06.
+- ~~**Depends on nothing new being provisioned:** reuses `WIDGET_TOKEN_SECRET` … via the `typ`-claim
+  separation that `shopper-token-identity.ts` already justifies over per-token-type secrets. No new Secret
+  Manager entry, and therefore no repeat of the missing-IAM-grant deploy failure that B5 hit.~~
+  **STRUCK — F-4: the precedent is imaginary (see the correction above).** An open owner decision replaces
+  it: provision a separate `GUEST_TOKEN_SECRET`, or knowingly accept a widened blast radius plus
+  rotation-equals-data-loss. The extra Secret Manager entry does reintroduce the missing-IAM-grant
+  operational risk — that is a **cost to weigh, not an argument** for sharing the key.
 - **Deferred, deliberately:** **C14** (an authenticated opt-out not governing that browser's signed-out
   turns) becomes *fixable* under this design but is **NOT fixed here** — see *Deferred* below.
 
@@ -94,7 +112,13 @@ re-point.
 Six pieces. Each is additive; the guest identity is inert until the widget presents a token.
 
 1. **`mintGuestToken` / `createGuestTokenIdentity`** in `packages/platform-ports`, mirroring
-   `shopper-token-identity.ts` exactly: HMAC-SHA256 + base64url over `{typ:"guest", aid:<anonId>, exp}`,
+   `shopper-token-identity.ts` exactly: HMAC-SHA256 + base64url over `{typ:"guest", aid:<anonId>, exp}`
+   — **F-5: plus a mandatory `tid` (tenant) claim, which this draft omitted.** Both existing token types are
+   tenant-bound and cross-checked (`server.ts:640`); a guest token carrying no `tid` is valid at EVERY
+   tenant, so one subject id would key `A::aid` and `B::aid`, breaking the per-tenant property ADR-0015
+   Inv 8 asserts and re-identifying one browser across merchants via the unhashed id in
+   `subject-index.ts:18`. Verification must reject a `tid` that differs from the verified merchant principal.
+   Then:
    `constantTimeEqual` signature check, **anonymous on ANY failure** (absent/unconfigured secret, tampered
    signature, wrong `typ`, malformed claims, expiry) and never throwing. `typ:"guest"` gives token-type
    separation, so a widget or shopper token can never verify as a guest principal and vice versa.
@@ -102,21 +126,53 @@ Six pieces. Each is additive; the guest identity is inert until the widget prese
    (`widget-memory/src/identity.ts` — 128 bits of `randomBytes`, base32, inside `validateAnonId`'s bound).
    **The mint endpoint MUST NOT accept a client-proposed id.** This single rule is what makes squatting
    structurally impossible and is the property `security-reviewer` should attack first.
-3. **Minted on the existing `GET /widget/token` call**, which the widget already makes at boot — no new
+3. **⚠️ F-6 + F-7 both land here — reconsider the endpoint.** `GET /widget/token` sets no `Cache-Control`
+   (`server.ts:857-884`), which is safe *only because* its response is identical for every visitor of a
+   merchant. Putting a **per-visitor secret** on it means any shared cache — browser, corporate proxy, or a
+   CDN anyone would reasonably front a public widget with — hands **one guest identity to many shoppers**,
+   with no attacker involved. At minimum this needs `Cache-Control: no-store`; better, mint on a separate
+   POST, which also decouples it from the 401 re-mint in F-3. Separately (F-7), minting at boot issues a
+   durable identifier to **every visitor of every merchant, pre-consent, for a feature that is off
+   everywhere** — today nothing mints until `/chat` confirms `memoryEnabled` (`index.html:328-345,560`).
+   Keep the mint conditional on the tenant's memory posture, or do not persist it client-side until memory
+   is live. The original text follows.
+   **Minted on the existing `GET /widget/token` call**, which the widget already makes at boot — no new
    endpoint, no extra round-trip. It stays **unauthenticated**, which is correct: creating a *fresh*
    anonymous identity is an unprivileged act (as it is in Firebase anonymous sign-in). Already rate-limited
    per IP (`RL_IP`/`RL_WINDOW`); note that limiter is **fail-open** by design, so minting must remain cheap
    and side-effect-free.
 4. **Sliding TTL aligned to retention.** Re-mint when the token is within a threshold of `exp`, mirroring
    the sliding 30-day fact retention (`ORDINARY_TTL_DAYS`/`SPECIAL_TTL_DAYS`, re-stamped from last
-   activity per ADR-0015's 2026-08-04 amendment). A token that does expire corresponds to facts that have
-   also expired, so no data is ever stranded behind a dead credential.
+   activity per ADR-0015's 2026-08-04 amendment). ~~A token that does expire corresponds to facts that have
+   also expired, so no data is ever stranded behind a dead credential.~~
+   **⛔ UNDERSPECIFIED — F-3 blocks this piece.** The struck sentence is unproven: token slide and fact
+   re-stamping fire on *different events* (a page load vs a chat turn), and client storage eviction is
+   independent of both. Worse, this piece and Invariant 3 **contradict each other** — "every mint produces a
+   fresh id" cannot coexist with "a slide preserves the same `aid`" unless a distinct renewal path exists,
+   and none is defined here. Concretely, the widget re-fetches `/widget/token` on any `/chat` 401
+   (`index.html:839`), which under Invariant 3 silently issues a NEW identity and orphans the shopper's
+   memory. **Before task 1 this must specify a renewal path that takes the TOKEN (never a raw id), verifies
+   signature and `typ`, re-issues the same `aid`, and REFUSES an expired token** — without that last rule the
+   TTL is decorative and a stolen guest token is renewable forever.
 5. **ONE derivation helper, used by `/chat`, `/consent` and `/forget`.** C13 already records two
    independent shopper-principal derivations as a drift risk; a third derivation would make that worse.
+   **F-12 corrects the reasoning:** a shared *guest* helper does not unify C13's two *shopper* derivations
+   (`server.ts:1605-1606` inline vs `verifiedShopperIdFor`, `server.ts:629-642`) — and after this change a
+   drift between them causes a **cross-subject copy** rather than a narrow inconsistency, so **C13 must be
+   closed before the carry-over ships**, not treated as a follow-up.
    Consequently **`signals.anonId` ceases to be an input** — the guest subject becomes server-derived like
    `tenantId` and `shopperId`, which is what `signals.ts`'s own trust-boundary doctrine has always said
    should be true of anything that grants treatment.
-6. **Only then, B12(b):** the guest→account carry-over fires when a verified **guest** token and a
+6. **⛔ F-1 + F-2 BLOCK THIS PIECE — do not build it as written.** Firing merely because two credentials
+   co-exist on one request is the defect: on a shared browser, person A's guest token is legitimately present
+   when person B signs in, so A's facts — including Art-9 health facts — are copied durably into B's account
+   and recalled into B's prompts. And `merge.ts:59-61,117` gates special-category migration on the
+   **destination account's** Consent 2, never the source subject's, so B's own consent authorises migrating
+   A's health data. Before this ships: pick a mitigation (an explicit one-time shopper confirmation per guest
+   id; or bind a guest identity to the first shopper it is seen with and refuse any other; or drop the
+   carry-over and ship identity-only), gate on **both** subjects' consent, and get **legal** on the
+   cross-person Art-9 case. The original text follows.
+   **Only then, B12(b):** the guest→account carry-over fires when a verified **guest** token and a
    verified **shopper** token are both present on the same request. F1 holds, because the server is no
    longer trusting a client-named namespace. The merge stays a **COPY** (see `merge.ts`'s header) — the
    guest namespace survives so signing out does not wipe guest memory, and the scheduled retention sweep
@@ -127,9 +183,9 @@ Six pieces. Each is additive; the guest identity is inert until the widget prese
 | row | today | after |
 |---|---|---|
 | **C1** — `anonId` is a bearer capability | ACCEPTED AS IS; named as the root cause of the three below | **Mostly closed.** Residual: a *stolen token* — device access, which C1 already accepts by name |
-| **C8** — cross-subject consent oracle / denial primitive | Open: `lookupConsent` runs against a **caller-supplied** `anonId` | **Closed.** A caller can only ever present their own verified id |
-| **C9** — that cross-subject read is unaudited | Open | **Moot.** No cross-subject read remains to audit |
-| **C10** — third party durably denies a victim's memory | Open: `POST /consent` for a victim's `anonId` | **Closed.** A victim's subject cannot be named |
+| **C8** — cross-subject consent oracle / denial primitive | Open: `lookupConsent` runs against a **caller-supplied** `anonId` | **NARROWED, not closed (corrected per F-8).** A caller cannot *name* another subject, but can still *present* one it holds — stolen token, or a shared browser where the credential is legitimately there. The residual is C1's device access |
+| **C9** — that cross-subject read is unaudited | Open | **NOT moot (corrected per F-8).** The carry-over is itself a cross-subject read, and it is unaudited when nothing moves (`merge.ts:105,122`) and records only the *source* ref when it does (`merge.ts:129-132`) — so C9's complaint survives verbatim |
+| **C10** — third party durably denies a victim's memory | Open: `POST /consent` for a victim's `anonId` | **NARROWED, not closed (corrected per F-8).** Naming a victim's subject becomes impossible; presenting a held credential does not |
 | **B12(b)** — guest-era fact stranding | Open, blocked on F1 | **Unblocked** |
 | **C2** — subject-scoped auth | Closed only for verified turns | **Strengthened** — the guest side is verified too |
 
@@ -139,8 +195,14 @@ Stated explicitly so a signer is not accepting more than is true:
 
 - **Device access.** A stolen token works. Unavoidable, and exactly the residual C1 accepts.
 - **The shared-browser case**, which C1 identifies as the *dominant* threat. Server-issued ids do not help:
-  on a shared device the credential is legitimately present. What limits the damage there is **copy-not-move**
-  — the previous person never loses their facts.
+  on a shared device the credential is legitimately present.
+  **CORRECTED per F-1 — the earlier claim here was wrong.** It said "what limits the damage there is
+  copy-not-move — the previous person never loses their facts". Copy-not-move addresses **LOSS**; the harm on
+  a shared browser is **DISCLOSURE** — one person's facts, including Art-9 health facts, ending up durably
+  inside another person's account and recalled into their prompts. Nothing in this design as specified limits
+  that, which is why F-1 blocks it. A mitigation must be chosen and written in before task 1: an explicit
+  one-time shopper confirmation per guest id, or binding a guest identity to the first shopper it is seen
+  with and refusing carry-over for any other, or dropping the carry-over and shipping identity-only.
 - **XSS in our own widget** could read the token from `localStorage`. A **partitioned `HttpOnly` cookie**
   (CHIPS, Baseline "newly available" since December 2025) would place it out of JavaScript's reach
   entirely, and is the natural next hardening step. **Deliberately out of scope for v1:** older browsers
@@ -217,16 +279,69 @@ reconsidered on its own once this lands.
 7. Update `MEMORY-GO-LIVE-CHECKLIST.md` C1/C8/C9/C10/B12 and ADR-0015's residual set to match what
    actually shipped — not what this ADR proposed.
 
+## Security review outcome — BLOCK (2026-08-06)
+
+Attacked in the order this ADR nominated. **Invariant 3 held** against the existing `/widget/token` handler
+(`server.ts:878-883` derives the claim server-side; `JSON.stringify` leaves no claim-injection path) — but
+fails at the renewal path (F-3). **Invariant 5's test stays green, its property does not** (F-1).
+
+### Blockers — implementation may not begin
+
+| # | Sev | Finding |
+|---|---|---|
+| **F-1** | HIGH | **The carry-over discloses one person's facts to another.** On the shared/kiosk browser C1 calls the *dominant* threat: A chats as guest, B signs in on the same browser, A's guest token is legitimately present, and the carry-over fires because two credentials co-exist on one request — copying A's Art-9 facts durably into B's account, recalled into B's prompts, surviving A's forget-me. **This ADR's answer — "copy-not-move limits the damage" — addresses LOSS. The harm is DISCLOSURE.** Copy-not-move does nothing about it. Also a cross-subject memory-poisoning path. |
+| **F-2** | HIGH | **Art-9 migration is gated on the DESTINATION account's consent.** `merge.ts:59-61,117` reads `consent2` as the *account's*; the source subject's own `memorySpecial` is never consulted. So B grants themselves health-memory consent and thereby authorises migration of A's health facts. Enforces Inv 9 against the wrong record even same-person. **Needs legal.** |
+| **F-3** | HIGH | **Invariants 3 and 6 contradict each other, and the renewal path is unspecified.** "Every mint produces a fresh id" vs "a slide preserves the same `aid`" cannot both hold without a distinct signature-verifying renewal path, which this ADR never defines. Concretely: the widget re-fetches `/widget/token` on any `/chat` 401 (`index.html:839`), so under Invariant 3 that silently issues a NEW identity and orphans the shopper's memory — unreachable and un-erasable by them. Decision 4's "no data is ever stranded behind a dead credential" is unproven: token slide and fact re-stamping are driven by different events. |
+| **F-4** | HIGH | **The shared-secret justification cited a precedent that does not exist** — see the Status correction. Also makes rotating `widget-token-secret` an irreversible customer-data-loss event, since the `aid` is recoverable only from the token. |
+| **F-5** | MED-HIGH | **No `tid` claim, so no cross-shop check is possible.** Both existing token types are tenant-bound and cross-checked (`server.ts:640`). A guest token carrying only `{typ,aid,exp}` is valid at *every* tenant, so one subject id keys `A::aid` and `B::aid` — breaking the per-tenant property ADR-0015 Inv 8 asserts, and re-identifying one browser across merchants via the unhashed id in `subject-index.ts:18`. |
+| **F-6** | MED | **A per-visitor credential placed on a cacheable GET.** `GET /widget/token` sets no `Cache-Control` (`server.ts:857-884`) — safe today *because* the response is identical for every visitor of a merchant. Adding a per-visitor secret means any shared cache hands **one guest identity to many shoppers**. No attacker required. |
+
+### Conditions to satisfy during implementation
+
+**F-7** minting a durable identifier at boot, pre-consent, while memory is off everywhere (today nothing
+mints until `/chat` confirms `memoryEnabled`) · **F-8** "Closed" overstates C8/C10 — the honest wording is
+"narrowed to the device-access residual C1 accepts" — and **C9 is not moot**: the carry-over is itself an
+unaudited cross-subject read (`merge.ts:105,122` return early with no audit) and when it does audit it
+records only the *source* ref (`merge.ts:129-132`), so an operator cannot reconstruct whose facts went where
+· **F-9** the merge's recorded reversal path in `audit.ts:51` still says the guest namespace is DELETED,
+which copy-not-move made false · **F-10** after a carry-over the same facts exist twice, so a signed-out
+`/forget` erases one copy while the widget still says "I've cleared what I remembered" — the C6 class of UI
+dishonesty, re-created · **F-11** no revocation of an issued guest token (no `jti`, no server state at
+verify); forget-me rotates the client id while the old token stays valid. A restrictive-only
+`aid → revokedAt` record would be safe — it is keyed on a *server-minted* id, so it reintroduces neither
+withdrawn failure mode · **F-12** C13's two shopper-principal derivations are untouched and their blast
+radius grows: a drift now causes a cross-subject copy · **F-13** make Invariant 4 unconditional (no flag —
+a re-enable path would be a squatting re-entry), stop carrying the raw `aid` alongside the token, and still
+run it through `validateAnonId` before it keys a namespace · **F-14** keep the mint side-effect-free — **no
+store write at mint time**, or the fail-open limiter becomes an unauthenticated write amplifier.
+
+### Verified safe, so the block is scoped rather than blanket
+
+No postMessage identity-fixation path (`index.html:615-617`, exact-origin checked) · no credential-in-logs
+path (Fastify logging off `server.ts:768`; audit refs keyed) · the design genuinely builds **no link table**,
+and neither withdrawn branch's failure mode reappears as a persistent table · the compatibility-free window
+claim is true.
+
+### What the review did NOT verify
+
+No build and no test were run — every finding is from reading source. The two withdrawn branches were
+confirmed to exist but not read; their withdrawal rationale was taken from the checklist. Browser
+storage-partitioning/eviction behaviour (F-3's stranding analysis) and the CHIPS Baseline claim were not
+checked against a primary source.
+
 ## Governance sign-off
 
-- [x] **Named owner** (jason.hsu@framy.co) accepts reversing C1's 2026-08-04 acceptance, and the four C
-      rows being rewritten rather than only C1. — **DONE 2026-08-06.**
-- [ ] **`security-reviewer`** signs off, attacking invariant 3 (no client-proposed id) and invariant 5
-      (F1 preserved) first — those two carry the whole design. **OUTSTANDING — this now gates
-      IMPLEMENTATION, not acceptance (see the Status block). Task 1 of the list above may not merge until
-      it passes.** It has not been run: nobody should read the owner's acceptance as covering it, because
-      the owner is not the reviewer and this ADR touches guest identity and customer data (CLAUDE.md §4.4).
-- [x] Confirmed **before** `MEMORY_ADR_ACCEPTED` is flipped, per *why this window closes*. — **VERIFIED
-      2026-08-06:** `MEMORY_ADR_ACCEPTED` is `false` (`packages/widget-memory/src/flag.ts`) and
-      `MEMORY_ENABLED` is set in no environment, so no fact has ever been written and the compatibility-free
-      window is still open.
+- [x] **Named owner** (jason.hsu@framy.co) accepted reversing C1's 2026-08-04 acceptance — **2026-08-06.**
+      **⚠️ SUPERSEDED IN EFFECT:** F-1 and F-8 show the acceptance was given on two claims that are wrong,
+      so it does not carry to the corrected design. **Re-acceptance required.**
+- [ ] **`security-reviewer`** — **RUN 2026-08-06: BLOCK.** Six design blockers, eight conditions; see above.
+      Not a pass, and not waivable by the owner: the reviewer is the gate CLAUDE.md §4.4 requires for auth
+      and customer data.
+- [x] Confirmed **before** `MEMORY_ADR_ACCEPTED` is flipped — **VERIFIED 2026-08-06:** the const is `false`
+      and `MEMORY_ENABLED` is set in no environment, so no fact has ever been written and the window is open.
+- [ ] **LEGAL (new, from F-2)** — Art-9 data migrating on the destination account holder's consent. ADR-0015's
+      special-category amendment was legally ratified; this changes its basis.
+- [ ] **Owner decision (new, from F-4)** — whether to provision a separate `GUEST_TOKEN_SECRET` or accept a
+      widened blast radius plus rotation-equals-data-loss. It cannot rest on the misread precedent.
+- [ ] **Named human merger** for the resulting PRs (governance-touching: HITL boundary set + the C-row
+      residual list), CLAUDE.md §4 step 7.
