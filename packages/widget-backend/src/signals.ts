@@ -124,9 +124,10 @@ export interface ServingSignalContext {
    */
   memorySubject?: string;
   /**
-   * E4 — the CART_LINE_ITEMS posture flag, at this layer. Default OFF (and `server.ts` does not pass it),
-   * so `signals.cartItems` is not even PARSED in production: the returned object has no `cartItems` key
-   * and `cart` keeps its pre-E4 behaviour exactly. Gated here as well as in the brain because parsing
+   * E4 — the CART_LINE_ITEMS posture flag, at this layer. `server.ts` now passes it, from the same
+   * `CART_LINE_ITEMS` env read that feeds the brain's own gate. Default OFF ⇒ `signals.cartItems` is not
+   * even PARSED: the returned object has no `cartItems` key and `cart` keeps its pre-E4 behaviour
+   * exactly. Gated here as well as in the brain because parsing
    * client input is itself an attack surface, and because turning this on changes what `cart` means for a
    * request that carries line items — a run-time behaviour change governed by docs/HITL-POLICY.md §5.
    */

@@ -37,13 +37,13 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 // READ THIS FIRST — TWO THINGS ABOUT THIS JOB ARE TRUE AND UNCOMFORTABLE.
 //
-// 1. NOTHING READS THIS CORPUS ON ANY LIVE PATH. E1 built the reader — `createCatalogRetriever`
-//    (../catalog-retriever.ts) and the brain's CATALOG_RETRIEVAL flag — but that flag defaults OFF, there
-//    is no env read for it anywhere in the repo, and `server.ts` does not compose the retriever at all.
-//    Enabling it changes what the shopper agent grounds on, which is a run-time behaviour change needing
-//    the eval gate, shadow, canary and a named human's approval (CLAUDE.md §3.2, HITL-POLICY §5). So a
-//    written corpus STILL changes no shopper-visible behaviour today. (Updated by E1; before it, no
-//    reader existed at all.)
+// 1. NOTHING READS THIS CORPUS IN ANY ENVIRONMENT TODAY — but the path now EXISTS. E1 built the reader
+//    (`createCatalogRetriever`, ../catalog-retriever.ts) and `server.ts` now composes it when
+//    `CATALOG_RETRIEVAL=true`. That flag is unset everywhere, so a written corpus still changes no
+//    shopper-visible behaviour; what changed is that enabling it is now possible to shadow and canary at
+//    all, which is what the eval gate, shadow, canary and named-human approval actually require
+//    (CLAUDE.md §3.2, HITL-POLICY §5). (Updated by E1, then by the Wave 4 composition change; before E1
+//    no reader existed at all.)
 //
 // 2. THE VERTEX ADAPTER CAN EMBED (#192/B3), so a deployment configured for Vertex no longer reports
 //    `no-embed-capability` — this comment said the opposite until E1 corrected it. `ModelPort.embed?()`

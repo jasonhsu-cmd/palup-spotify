@@ -5,11 +5,13 @@ import { dirname, join } from "node:path";
 import {
   createBrain,
   createSession,
+  DEFAULT_CATALOG_RETRIEVAL_K,
   type Policy,
   type Signals,
   type Consent,
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY, normalizeHistory } from "@palup/widget-brain";
+import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
 import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort } from "@palup/platform-ports";
 import {
   createWidgetTokenIdentity,
@@ -28,12 +30,11 @@ import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUN
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
-// E3 — the ONLY server.ts change this wave makes, and it carries no flag of its own: both functions
-// return `{}` unless the `Decision` already carries cited products, and this composition root cannot
-// produce one that does (the `createBrain` call below passes seven positional arguments, so
-// PRODUCT_CITATIONS and PRODUCT_CARDS stay at their `false` defaults). Forwarding is therefore inert by
-// construction here, exactly as the retriever is in E1. See recommendation-telemetry.ts for the
-// not-a-billing-basis constraint that governs the telemetry half.
+// E3 — both functions return `{}` unless the `Decision` already carries cited products, so they are inert
+// for any turn E2 did not cite on. They are no longer inert BY CONSTRUCTION: this composition root now
+// reads PRODUCT_CITATIONS/PRODUCT_CARDS and can produce such a Decision (see the Wave 4 flag block below).
+// The flags still default OFF, so an environment that sets nothing behaves exactly as before.
+// See recommendation-telemetry.ts for the not-a-billing-basis constraint that governs the telemetry half.
 import { recommendationTelemetryFields, recommendationWireFields } from "./recommendation-telemetry.js";
 import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
@@ -483,6 +484,61 @@ export async function buildServer(opts?: {
   // brain/support.ts layer independently re-requires a server-VERIFIED shopper before ever auto-executing
   // — this flag alone can never grant autonomy to an anonymous shopper.
   const SUBSCRIPTION_SELFSERVE = process.env.SUBSCRIPTION_SELFSERVE === "true";
+  // ─── WAVE 4 (E1–E4) POSTURE FLAGS ──────────────────────────────────────────────────────────────────
+  // Read here, defaulted OFF, threaded into every brain exactly like SUBSCRIPTION_SELFSERVE above.
+  //
+  // WHY THESE ARE COMPOSED AT ALL. E1–E4 each shipped deliberately un-composed, on the reasoning that "a
+  // flag alone cannot turn this on" (catalog-retriever.ts's own header). That bought inertness at the cost
+  // of UNPROMOTABILITY: NN#2's pipeline is `gate → shadow(0%) → canary(1–5%) → human approve → promote`,
+  // and shadow/canary put a FRACTION OF REAL TRAFFIC through the candidate — which cannot happen when the
+  // composition root is structurally incapable of building a flag-on brain. There was no code path to
+  // canary. The repo's own precedent settles the governance question the other way: SUBSCRIPTION_SELFSERVE
+  // (ADR-0016) and SHOPPER_AUTH (ADR-0017) are equally behaviour-changing and equally governed, and both
+  // are env-read right here. What keeps a posture flag safe is the eval gate plus a named human's
+  // promotion — not the absence of a wire. The gate can now SEE E2 and E4 (packages/eval, #204); before
+  // that it was green having executed neither, which is why this wiring waited for it.
+  //
+  // Turning any of these ON in a real environment remains a human promotion decision (HITL-POLICY §5).
+  const CATALOG_RETRIEVAL = process.env.CATALOG_RETRIEVAL === "true";
+  const CATALOG_RETRIEVAL_K = posInt("CATALOG_RETRIEVAL_K", DEFAULT_CATALOG_RETRIEVAL_K);
+  const PRODUCT_CITATIONS = process.env.PRODUCT_CITATIONS === "true";
+  const PRODUCT_CARDS = process.env.PRODUCT_CARDS === "true";
+  const CART_LINE_ITEMS = process.env.CART_LINE_ITEMS === "true";
+  // E3 attaches display fields to the ids E2 cited, so cards WITHOUT citations is inert rather than
+  // broken (recommendation-telemetry.ts returns `{}` for a Decision with no cited products). Warn like
+  // SUBSCRIPTION_SELFSERVE's own unmet-prerequisite check above — the degrade is safe, never a bypass.
+  if (PRODUCT_CARDS && !PRODUCT_CITATIONS) {
+    console.warn("[config] PRODUCT_CARDS=true has no effect without PRODUCT_CITATIONS=true (E3 attaches cards to the product ids E2 cites) — no cards will be served.");
+  }
+  // E1 — the query side of the catalog corpus, constructed ONLY when the flag is on, so a deployment that
+  // never enables retrieval reads no manifest and spends nothing. Metered under its OWN agentType,
+  // distinct from the turn's RUNTIME_AGENT_TYPE: this is per-shopper-turn EMBEDDING spend while the turn
+  // itself is generation, and a cost review must be able to tell them apart (ADR-0013, and the explicit
+  // requirement in catalog-retriever.ts's COST + AUDIT note that the composition root must do this).
+  const catalogRetriever = CATALOG_RETRIEVAL
+    ? createCatalogRetriever({
+        store,
+        vector: vectorPort,
+        model: createMeteringModelPort(activeModelPort, telemetry, { agentType: CATALOG_RETRIEVAL_AGENT_TYPE }),
+      })
+    : undefined;
+  // THE COST OF WIRING THESE, MADE VISIBLE. Before this change, enabling Wave 4 required editing code;
+  // now an env var suffices. That is a real reduction in friction and it is the honest trade for making
+  // shadow/canary possible at all (HITL-POLICY §5). The compensating control is that an enabled flag can
+  // never be SILENT: it is announced at boot, for the same reason D1's env fallback is (#169 happened
+  // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
+  // shadow, canary and a named human's approval before any of these is set in a real environment — this
+  // line does not authorize it, it makes skipping it visible.
+  const wave4On = Object.entries({ CATALOG_RETRIEVAL, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS })
+    .filter(([, v]) => v)
+    .map(([k]) => k);
+  if (wave4On.length > 0) {
+    console.warn(
+      `[config] WAVE 4 POSTURE FLAGS ARE ON: ${wave4On.join(", ")} — these change what the shopper agent ` +
+        "sees and says. HITL-POLICY §5 requires a recorded eval gate, shadow, canary and a NAMED HUMAN'S " +
+        "approval before this posture serves real traffic. If that did not happen, unset them.",
+    );
+  }
   // One brain per active policy (champion + any canary), built lazily and cached by policy id. The
   // brain is tenant-agnostic (grounding tenant rides each request via signals.tenantId); this cache is
   // per-server-instance.
@@ -496,7 +552,18 @@ export async function buildServer(opts?: {
     const key = `${tenantId}::${policy.id}`;
     let b = brains.get(key);
     if (!b) {
-      b = createBrain(meteredModel, grounding, policy, commerce, "shopper-demo", memoryPort, SUBSCRIPTION_SELFSERVE);
+      b = createBrain(
+        meteredModel, grounding, policy, commerce, "shopper-demo", memoryPort, SUBSCRIPTION_SELFSERVE,
+        // Positions 8–10 — the disposition flags (ADR-0018). These have NO env read anywhere in the repo
+        // and stay off. Passed EXPLICITLY at their defaults rather than left implicit: reaching Wave 4's
+        // positions requires naming them, and a bare `undefined` here would be indistinguishable from a
+        // wiring bug of the exact kind this call site just had. Wiring them is a separate decision under
+        // their own ADR — not this change's to make.
+        /* dispositionStyle */ false, /* dispositionBehavioral */ false, /* dispositionClassifier */ false,
+        // Positions 11–16 — Wave 4. `catalogRetriever` is `undefined` unless CATALOG_RETRIEVAL is set, so
+        // the retrieval rung has nothing to call and falls back to the full catalog exactly as before.
+        catalogRetriever, CATALOG_RETRIEVAL, CATALOG_RETRIEVAL_K, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS,
+      );
       brains.set(key, b);
     }
     return b;
@@ -1665,6 +1732,11 @@ export async function buildServer(opts?: {
         tenantId,
         kill: Boolean(kill),
         atCap: Boolean(costCap),
+        // E4 — THE SECOND GATE. `cartLineItemsEnabled` appears twice by design: here it decides whether a
+        // client's `cartItems` is PARSED AT ALL (parsing untrusted input is its own attack surface), and in
+        // `createBrain` above it decides whether the parsed value is CONSUMED. One env var must open both,
+        // or the feature is half-on: parsed and ignored, or consumed and never supplied.
+        cartLineItemsEnabled: CART_LINE_ITEMS,
         // D2 — THIS MERCHANT's residency and grounding posture (their `pl_merchant` row when they have
         // one, the named env fallback when they do not), never the process's. `signals.region` is what
         // `memoryConsentInputs` below feeds to `decideMemoryWrite`, so this line is the actual consent

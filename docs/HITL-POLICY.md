@@ -100,13 +100,22 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > `CatalogRetrieverPort` returns for the shopper's turn, instead of rendering the merchant's whole
 > catalog. That changes **what the agent sees and therefore what it says**, so it is a run-time
 > behaviour/prompt change governed by §5 exactly like any other promotion: eval gate → shadow → canary →
-> **named human approval** → promote. **None of that has happened.**
-> Its inertness is structural, not just a default: the flag defaults OFF, **no `CATALOG_RETRIEVAL` env
-> read exists anywhere in the repo**, and `widget-backend/src/server.ts` **does not construct the
-> retriever at all**, so flipping a flag alone cannot turn it on — enabling it requires a deliberate
-> composition change reviewed as part of the promotion. With it off, the prompt, every `Decision` and
-> every reply are byte-identical to before the change (pinned by
-> `packages/widget-brain/test/retrieval-flag-off.test.ts` against a golden captured on the prior commit).
+> **named human approval** → promote. **The eval GATE has now run and passed for the flag-on posture;
+> shadow, canary and the named human's approval have NOT happened.** The gate is only meaningful
+> because #204 made it able to execute these paths at all — before that it returned 69/69 green having
+> run neither E2 nor E4. A gate that cannot reach the code is not evidence about it.
+> **Its inertness is now a DEFAULT, not a structural impossibility — this changed, and the change is a
+> reduction in friction that a reviewer must know about.** `widget-backend/src/server.ts` now reads
+> `CATALOG_RETRIEVAL` and constructs the retriever when it is set, so **setting an env var is sufficient
+> to enable this; no code change is required any more.** Why that was done rather than avoided: §5's own
+> pipeline requires **shadow (0%) and canary (1–5%)**, which route a fraction of *real traffic* through
+> the candidate — impossible while no code path could build a flag-on brain. Withholding the wire did not
+> add a gate, it made these gates unreachable. The compensating control is that the posture can never be
+> silent: `server.ts` warns at boot naming every Wave 4 flag that is on and restating that §5 requires a
+> recorded gate, shadow, canary and a named human's approval (`wave4-composition.test.ts`). With the flag
+> off — every environment today — the prompt, every `Decision` and every reply are byte-identical to
+> before the change (pinned by `packages/widget-brain/test/retrieval-flag-off.test.ts` against a golden
+> captured on the prior commit, and from the HTTP surface by `wave4-composition.test.ts`).
 > Two things a reviewer must weigh **at flip time**, neither settled here: retrieval **quality** (no
 > recall/latency number in this repo is real — the fakes say nothing about semantic retrieval), and the
 > fact that a narrowed catalog is a **partial** one, mitigated in-prompt by a rule forbidding "we don't
@@ -122,11 +131,15 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > exists). That adds a rule to the system prompt and asks the model to produce
 > something it does not produce today, so it **changes what the agent says** and is a run-time
 > behaviour/prompt change governed by §5 exactly like any other promotion: eval gate → shadow → canary →
-> **named human approval** → promote. **None of that has happened.**
-> Its inertness is structural, not just a default: the flag defaults OFF, **no `PRODUCT_CITATIONS` env
-> read exists anywhere in the repo**, and `widget-backend/src/server.ts` is **unchanged** (its
-> `createBrain` call passes seven positional arguments and never reaches this one), so flipping a flag
-> alone cannot turn it on. With it off, the prompt, every `Decision` and every reply are byte-identical to
+> **named human approval** → promote. **The eval GATE has now run and passed for the flag-on posture;
+> shadow, canary and the named human's approval have NOT happened.** The gate is only meaningful
+> because #204 made it able to execute these paths at all — before that it returned 69/69 green having
+> run neither E2 nor E4. A gate that cannot reach the code is not evidence about it.
+> **Its inertness is now a DEFAULT, not a structural impossibility (this changed — see the
+> `CATALOG_RETRIEVAL` note above for the full reasoning and the compensating boot-time notice).**
+> `widget-backend/src/server.ts` now reads `PRODUCT_CITATIONS` and its `createBrain` call passes all
+> sixteen positional arguments, so **setting an env var is sufficient to enable this.** With it off —
+> every environment today — the prompt, every `Decision` and every reply are byte-identical to
 > before E1 *and* E2 — `packages/widget-brain/test/citations-flag-off.test.ts` re-runs E1's 37-probe
 > golden, which was captured on the commit before E1's implementation existed, through a recording model
 > port (so the system prompt itself is inside the assertion).
@@ -148,12 +161,17 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > `TelemetryEvent.recommendedProductIds` onto the per-turn telemetry row. The widget renders the cards as
 > an aside below the reply. That puts **new content on a shopper's screen**, so it is a run-time
 > behaviour change governed by §5 exactly like any other promotion: eval gate → shadow → canary →
-> **named human approval** → promote. **None of that has happened.**
-> Its inertness is structural: the flag defaults OFF, **no `PRODUCT_CARDS` env read exists anywhere in the
-> repo**, and although `server.ts` **is** changed here (E2 deferred this and E3 cannot), the change is two
-> spreads of functions that return `{}` unless the `Decision` already carries cited products — which this
-> composition root cannot produce, because its `createBrain` call still passes seven positional arguments
-> and never reaches either flag. Byte-identical when off is proven **twice**: at the brain, by re-running
+> **named human approval** → promote. **The eval GATE has now run and passed for the flag-on posture;
+> shadow, canary and the named human's approval have NOT happened.** The gate is only meaningful
+> because #204 made it able to execute these paths at all — before that it returned 69/69 green having
+> run neither E2 nor E4. A gate that cannot reach the code is not evidence about it.
+> **Its inertness is now a DEFAULT, not a structural impossibility (see the `CATALOG_RETRIEVAL` note above
+> for the reasoning and the compensating boot-time notice).** `server.ts` now reads `PRODUCT_CARDS`, and
+> the two spreads that forward cards are no longer inert by construction because the composition root can
+> now produce a Decision carrying cited products. **Setting an env var is sufficient to enable this** —
+> with one caveat worth stating because it is a real dependency and not a safeguard: cards attach to the
+> ids **E2** cited, so `PRODUCT_CARDS` without `PRODUCT_CITATIONS` serves nothing, and `server.ts` warns
+> at boot when it is set alone. Byte-identical when off is proven **twice**: at the brain, by re-running
 > E1's 37-probe golden (`widget-brain/test/cards-cart-flag-off.test.ts`), and **on the wire**, by
 > `widget-backend/test/chat-wire-flag-off.test.ts` against a golden of the verbatim `/chat` response bytes
 > and telemetry rows captured on the commit before this implementation existed.
@@ -177,12 +195,18 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > `packages/widget-brain` can render what is actually in the shopper's cart into its system prompt as a
 > fenced DATA block, instead of knowing only the coarse `"empty" | "has_items" | "high_value"` enum. That
 > changes **what the agent sees and therefore what it says**, so it is governed by §5 exactly like any
-> other promotion: eval gate → shadow → canary → **named human approval** → promote. **None of that has
-> happened.**
-> Its inertness is structural at **two** layers, and deliberately so: the brain flag defaults OFF, the
-> `deriveServingSignals` gate (`ctx.cartLineItemsEnabled`) defaults OFF **and `server.ts` does not pass
-> it**, so a client-posted `signals.cartItems` is not even parsed in production. **No `CART_LINE_ITEMS`
-> env read exists anywhere in the repo.** Byte-identical when off is proven in the strong form: E1's
+> other promotion: eval gate → shadow → canary → **named human approval** → promote. **The eval GATE has
+> now run and passed for the flag-on posture; shadow, canary and the named human's approval have NOT
+> happened.** See the `CATALOG_RETRIEVAL` note for why that gate is only meaningful as of #204.
+> **Its inertness is now a DEFAULT at two layers rather than a structural impossibility (see the
+> `CATALOG_RETRIEVAL` note above for the reasoning and the compensating boot-time notice).** `server.ts`
+> now reads `CART_LINE_ITEMS` and passes it to **both** gates — the brain's own flag and
+> `deriveServingSignals`'s `ctx.cartLineItemsEnabled` — deliberately from the same single env read, since a
+> value parsed but not consumed (or consumed but never supplied) would be a half-enabled feature that no
+> test posture describes. **Setting that one env var is sufficient to enable both layers**, which is why
+> `wave4-composition.test.ts` asserts the cart block reaching the real system prompt rather than trusting
+> either gate alone. Both still default OFF, so a client-posted `signals.cartItems` is not parsed in any
+> environment today. Byte-identical when off is proven in the strong form: E1's
 > golden is re-run with `signals.cartItems` **supplied on every probe**, which shows the signal is
 > ignored rather than merely absent.
 > Three things a reviewer must weigh **at flip time**, none settled here:

@@ -818,11 +818,13 @@ export function createBrain(
   // prompt, the reply, or any pitch/outbound decision; it only attaches display fields to ids that E2
   // already produced.
   productCardsEnabled = false,
-  // E4 — the CART_LINE_ITEMS posture flag (same shape and same governance as every flag above; no env
-  // read anywhere in the repo, and `deriveServingSignals`'s own gate is separate and also defaulted off,
-  // so a shopper's `cartItems` is not even parsed in production). Default OFF ⇒ `signals.cartItems` is
-  // never consumed and the prompt is byte-identical (pinned by cards-cart-flag-off.test.ts, which
-  // supplies the signal on EVERY probe and still reproduces the pre-E1 golden).
+  // E4 — the CART_LINE_ITEMS posture flag (same shape and same governance as every flag above). The
+  // composition root now reads `CART_LINE_ITEMS` and threads it BOTH here and into
+  // `deriveServingSignals` — two separate gates one env var must open together, because a value parsed
+  // but not consumed (or consumed but never supplied) is a half-enabled feature. Default OFF ⇒
+  // `signals.cartItems` is never consumed and the prompt is byte-identical (pinned by
+  // cards-cart-flag-off.test.ts, which supplies the signal on EVERY probe and still reproduces the
+  // pre-E1 golden; and by wave4-composition.test.ts from the HTTP surface).
   //
   // Even when ON it can only ADD a fenced DATA block to the system prompt on the clean sales path. It is
   // never threaded into `selectPitch`, never derives a cart VALUE, and never reaches price, outbound or
