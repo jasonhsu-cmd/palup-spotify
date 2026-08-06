@@ -19,12 +19,17 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 // READ THIS FIRST — WHAT THIS IS AND IS NOT WIRED TO.
 //
-// This module is COMPOSED BY NOBODY TODAY. `server.ts` does not construct it, there is no
-// `CATALOG_RETRIEVAL` env read anywhere in the repo, and `createBrain`'s retrieval flag defaults off. It
-// follows the DISPOSITION_STYLE precedent exactly (docs/HITL-POLICY.md §5's note): enabling a change to
-// what the shopper agent sees and says is a run-time agent behaviour change, so it needs an eval gate,
-// shadow, canary and a NAMED HUMAN'S approval — not an env var a deploy could flip by accident.
-// Leaving the composition step out is deliberate: a flag alone cannot turn this on.
+// This module IS composed now, by `server.ts`, but ONLY when `CATALOG_RETRIEVAL=true`; with the flag unset
+// (every environment today) nothing here is constructed and no manifest is ever read.
+//
+// An earlier version of this header said "COMPOSED BY NOBODY TODAY … leaving the composition step out is
+// deliberate: a flag alone cannot turn this on." That was true and it was the wrong trade. Enabling a
+// change to what the shopper agent sees and says IS a run-time behaviour change needing an eval gate,
+// shadow, canary and a NAMED HUMAN'S approval (docs/HITL-POLICY.md §5) — but shadow and canary route a
+// FRACTION OF REAL TRAFFIC through the candidate, which is impossible when no code path can build a
+// flag-on brain. Withholding the wire did not add a gate; it made the gates unreachable. The safety comes
+// from the eval gate plus a human promotion, exactly as it does for SUBSCRIPTION_SELFSERVE and
+// SHOPPER_AUTH, which are equally governed and equally env-read in that same composition root.
 //
 // WHAT IT DOES. Given a shopper's turn, it embeds that turn as a QUERY through the `model` port, scores
 // it against the tenant's own catalog corpus through the `vector` port, and returns PRODUCT IDS. It never

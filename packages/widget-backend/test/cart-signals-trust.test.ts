@@ -28,7 +28,7 @@ const on = { ...ctx, cartLineItemsEnabled: true };
 const items = (raw: unknown): Signals => ({ cartItems: raw } as unknown as Signals);
 
 describe("E4 — cartItems is inert until the flag composes it", () => {
-  it("with the flag off (the default, and what server.ts passes) the field is not even read", () => {
+  it("with the flag off (the default, and what server.ts passes when CART_LINE_ITEMS is unset) the field is not even read", () => {
     const out = deriveServingSignals(items([{ productId: "serum-vc", quantity: 2 }]), ctx);
     expect(Object.prototype.hasOwnProperty.call(out, "cartItems")).toBe(false);
   });
