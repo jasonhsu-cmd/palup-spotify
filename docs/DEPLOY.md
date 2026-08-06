@@ -577,18 +577,62 @@ gcloud run jobs deploy palup-retention-sweep \
 # 2. Run it once by hand and READ THE OUTPUT before scheduling anything
 gcloud run jobs execute palup-retention-sweep --region us-central1 --project palup-jason --wait
 
-# 3. Schedule daily once step 2 looks right
+# 3. Enable Cloud Scheduler. It is NOT enabled by default, and the API needs a few minutes to settle
+#    (see the propagation note below) — do this before creating the schedule, not alongside it.
+gcloud services enable cloudscheduler.googleapis.com --project palup-jason
+
+# 4. A DEDICATED invoker identity whose only power is starting this one job. Deliberately NOT the default
+#    compute SA: that one holds project `roles/editor`, and wiring an Editor identity into a scheduler
+#    that fires a DESTRUCTIVE job is the wrong default. (Editor does include `run.jobs.run`, so the lazy
+#    option works — which is exactly why it needs saying no to.)
+gcloud iam service-accounts create palup-sweep-invoker \
+  --display-name="Cloud Scheduler invoker for the retention sweep job" --project palup-jason
+gcloud run jobs add-iam-policy-binding palup-retention-sweep \
+  --region us-central1 --project palup-jason \
+  --member="serviceAccount:palup-sweep-invoker@palup-jason.iam.gserviceaccount.com" \
+  --role="roles/run.invoker"
+
+# 5. Schedule daily, once step 2 looks right. 03:17 UTC — off-peak, and an odd minute so it does not
+#    join the top-of-hour thundering herd. --time-zone=UTC explicitly, so DST never shifts it.
 gcloud scheduler jobs create http palup-retention-sweep-daily \
-  --location us-central1 --schedule "17 3 * * *" --time-zone UTC \
-  --uri "https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/palup-jason/jobs/palup-retention-sweep:run" \
-  --http-method POST --oauth-service-account-email "$RUN_INVOKER_SA"
+  --location=us-central1 --project palup-jason \
+  --schedule="17 3 * * *" --time-zone=UTC \
+  --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/palup-jason/jobs/palup-retention-sweep:run" \
+  --http-method=POST \
+  --oauth-service-account-email="palup-sweep-invoker@palup-jason.iam.gserviceaccount.com" \
+  --max-retry-attempts=3 --min-backoff=60s --max-backoff=600s
+
+# 6. Prove it fires, rather than waiting until tomorrow to find out.
+gcloud scheduler jobs run palup-retention-sweep-daily --location us-central1 --project palup-jason
+gcloud run jobs executions list --job palup-retention-sweep --region us-central1 --project palup-jason
 ```
 
-> **Not verified in this session:** the exact `gcloud run jobs deploy` flag list. This session denies
-> `gcloud * deploy *` (settings.json — the guard that stops an agent deploying anything), which also blocks
-> reading that subcommand's `--help`. The flags above match SDK 532.0.0's documented surface and the
-> secret/instance names ARE verified against the live service, but treat step 1 as "run it once and read
-> the error" rather than known-good. Steps 2–3 use no denied verb and are ordinary.
+**Verified working 2026-08-06** — that exact URI, that invoker SA, and `--max-retry-attempts=3` produced
+scheduler-triggered executions that completed with `succeededCount=1` and the expected
+`[sweep] store=postgres vector=postgres tenants=1` / `visited=0 deleted=0 …` output.
+
+> **PROPAGATION: `gcloud scheduler jobs run` exits 0 while doing nothing, for the first few minutes after
+> enabling the API.** Observed: the first force-run returned exit 0, wrote no output, left
+> `lastAttemptTime` at `(never)`, and created no execution — and then fired *late*, so a retry a few
+> minutes later produced **two** executions rather than one. Do not conclude the wiring is broken from one
+> immediate check; look at `lastAttemptTime` and `status` on the scheduler job (`status: {}` means success)
+> and give it a few minutes. A double execution is harmless here: the second sweep finds nothing expired,
+> which `retention.ts` handles with no vector call and no audit at all.
+
+**Why `--max-retry-attempts` is safe.** A retried `:run` starts a *new* execution rather than resuming one.
+That is fine because the sweep is effectively idempotent — records the first run deleted are simply no
+longer expired-and-present, and a subject with nothing expired produces no delete and no audit row.
+
+> **Step 1 is now confirmed too (2026-08-06):** it was run and the resulting job was inspected —
+> `command=[pnpm] args=[sweep]`, `cloudsql=palup-jason:us-central1:palup-staging`, `DATABASE_URL` and
+> `AUDIT_HMAC_SECRET` both mounted from their secrets, `maxRetries=3`, `timeoutSeconds=600`. It was
+> originally written unverified because this session denies `gcloud * deploy *` (settings.json — the guard
+> that stops an agent deploying anything), which also blocks reading that subcommand's `--help`.
+>
+> **`AUDIT_HMAC_SECRET` on the job is not optional once B5 is live.** Serving writes KEYED `subjectRef`s;
+> a job without the key writes UNKEYED sha256 refs for the same subjects. Two pseudonyms for one person,
+> in an INSERT-only `prev_hash`-chained table where a wrong ref cannot be corrected afterwards. Add it in
+> the same `--set-secrets` list, never as a follow-up after the job has done real work.
 
 **Verify the run, don't assume it** — per-tenant the job prints
 `visited=… deleted=… retired=… failed=… remaining=…`, and:
