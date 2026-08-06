@@ -238,11 +238,40 @@ change and the deploy does not create them:
    It is a JSON entry in a secret that is already mounted, so there is nothing to add to the workflow.
 2. **`MEMORY_ENCRYPTION_KEY__merchant-cred`** per installing tenant, in the same `palup-secrets` payload.
    Also nothing to add to the workflow. Missing ⇒ the install callback returns **502** and stores nothing.
-3. **An `AUDIT_HMAC_SECRET` secret**, only if you want a keyed subject ref in GDPR-erasure audit rows.
-   Without it those rows record the literal `unreferenced (no AUDIT_HMAC_SECRET configured)` — a
-   documented degradation, not a crash, which is why the workflow does **not** hard-code a mount for it: a
-   `--set-secrets` reference to a secret that does not exist makes `gcloud run deploy` itself fail and
-   would break **every** merge until someone created it.
+3. **An `AUDIT_HMAC_SECRET` secret**, needed for a keyed subject ref in memory + GDPR-erasure audit rows
+   (`MEMORY-GO-LIVE-CHECKLIST.md` B5). Without it those rows record the literal
+   `unreferenced (no AUDIT_HMAC_SECRET configured)` — a documented degradation, not a crash, which is why
+   the workflow does **not** hard-code a mount for it: a `--set-secrets` reference to a secret that does
+   not exist makes `gcloud run deploy` itself fail and would break **every** merge until someone created it.
+
+   **It takes THREE steps, not two, and skipping the third breaks every deploy.** Learned the hard way on
+   2026-08-06: the secret was created and `AUDIT_HMAC_SECRET_NAME` was set, which makes the mount
+   unconditional — and the very next deploy failed at *Creating Revision* with
+   `Permission denied on secret … audit-hmac-secret … must be granted roles/secretmanager.secretAccessor`.
+   Cloud Run's rollout safety contained it (the bad revision never became ready, traffic stayed on the
+   previous one, staging kept serving), but **no further deploy can succeed until the grant exists**,
+   because the mount is now always attempted.
+
+   ```bash
+   # 1. create the secret
+   openssl rand -base64 48 | gcloud secrets create audit-hmac-secret \
+     --data-file=- --replication-policy=automatic --project "$GCP_PROJECT"
+
+   # 2. GRANT THE RUNTIME SERVICE ACCOUNT ACCESS — the step that is easy to miss.
+   #    Every other mounted secret (palup-secrets, palup-staging-database-url, widget-token-secret) already
+   #    has this exact per-secret binding; there is no project-level secretAccessor to inherit from.
+   gcloud secrets add-iam-policy-binding audit-hmac-secret \
+     --member="serviceAccount:$(gcloud projects describe "$GCP_PROJECT" --format='value(projectNumber)')-compute@developer.gserviceaccount.com" \
+     --role=roles/secretmanager.secretAccessor --project "$GCP_PROJECT"
+
+   # 3. only now point the workflow at it
+   gh variable set AUDIT_HMAC_SECRET_NAME --body audit-hmac-secret
+   ```
+
+   Verify with `gcloud secrets get-iam-policy audit-hmac-secret` — it must list
+   `roles/secretmanager.secretAccessor` for the `-compute@developer.gserviceaccount.com` service account,
+   matching the other three secrets. **Changing this key later changes every `subjectRef`**, so old and new
+   audit rows stop correlating for the same subject: provision it before the first real memory write.
 4. **The `pl_merchant` grants** (`GRANT SELECT, INSERT, UPDATE … TO palup_app`, deliberately no `DELETE`) —
    see *Cloud SQL* below. `migrate()` runs the DDL at boot only when the install or webhook routes are
    enabled, i.e. only once (1) exists.
