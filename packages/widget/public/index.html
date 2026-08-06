@@ -593,7 +593,19 @@
     memoryActive = consentMode ? { ordinary: consentMode === "opt_out", special: false } : null;
     syncManagePanelToggles();
     const c = document.querySelector('[data-testid="manage-memory-confirmation"]');
-    if (c){ c.hidden = false; c.textContent = "Done — I've cleared what I remembered and started fresh."; }
+    if (c){
+      c.hidden = false;
+      // ADR-0019 F-10 — once the carry-over is live (task 10), a shopper's guest facts may have been copied
+      // into their ACCOUNT namespace. A SIGNED-OUT forget (guest token only, no x-shopper-token) can only
+      // erase the guest copy; the account copy survives and needs a SIGNED-IN forget to clear it — so an
+      // unconditional total-erasure claim would be false for a signed-out shopper post-carry-over. Gated on
+      // CARRY_OVER_PROMPT_ENABLED so it stays INERT and this copy is byte-identical to today until task 10
+      // ships the carry-over. A SIGNED-IN forget erases BOTH namespaces server-side (server.ts N1 —
+      // `verifiedShopperId && guestTokenAnonId`), so the total claim stays true there and keeps today's copy.
+      c.textContent = (CARRY_OVER_PROMPT_ENABLED && !shopperToken)
+        ? "Done — I've cleared what I remembered on this device. If you carried preferences over to your account, sign in to clear those too."
+        : "Done — I've cleared what I remembered and started fresh.";
+    }
   }
 
   // The single entry point: called after every REAL (shopper-initiated) /chat reply. Learns the server's
