@@ -650,19 +650,39 @@ export async function buildServer(opts?: {
    * `deriveServingSignals` guards against), and the cross-shop check that the token's own tenant equals
    * THIS request's tenant (a token minted for some other verified tenant must not be replayable here).
    */
+  // ADR-0019 task 6 (closes C13) — THE ONE shopper-principal resolution. Before this, `/chat` derived the
+  // verified shopper inline while `/consent`/`/forget` used `verifiedShopperIdFor`; C13 recorded that as two
+  // implementations of one security decision and a drift risk. Both now go through THIS: every gate in one
+  // place — the feature flag, a verified MERCHANT principal (a shopper token is only meaningful inside a
+  // verified tenant session), `kind === "shopper"` AND the explicit `verified` flag (an id-set-but-unverified
+  // principal must never authorize), and the F1 cross-shop check that the token's embedded tenant equals THIS
+  // request's tenant (a token minted for another verified tenant must not be replayable here). Returns the
+  // verified shopper `Principal`, or `{kind:"anonymous"}` — never a half-trusted state. `/chat` needs the
+  // full Principal (for signals.shopperId/shopperVerified and the identity audit); the two routes that only
+  // need the id call the `verifiedShopperIdFor` wrapper below.
+  const resolveVerifiedShopper = async (
+    merchantPrincipal: Principal,
+    tenantId: string,
+    headerToken: unknown,
+    bodyToken: unknown,
+  ): Promise<Principal> => {
+    if (!SHOPPER_AUTH_ENABLED || merchantPrincipal.kind !== "merchant") return { kind: "anonymous" };
+    const token =
+      typeof headerToken === "string" ? headerToken : typeof bodyToken === "string" ? bodyToken : undefined;
+    const resolved = await shopperIdentity.authenticate(token);
+    if (resolved.kind !== "shopper" || !resolved.verified) return { kind: "anonymous" };
+    if (shopperIdTenant(resolved.shopperId) !== tenantId) return { kind: "anonymous" };
+    return resolved;
+  };
+  /** The id-only projection of `resolveVerifiedShopper`, for `/consent` and `/forget`. */
   const verifiedShopperIdFor = async (
     merchantPrincipal: Principal,
     tenantId: string,
     headerToken: unknown,
     bodyToken: unknown,
   ): Promise<string | undefined> => {
-    if (!SHOPPER_AUTH_ENABLED || merchantPrincipal.kind !== "merchant") return undefined;
-    const token =
-      typeof headerToken === "string" ? headerToken : typeof bodyToken === "string" ? bodyToken : undefined;
-    const resolved = await shopperIdentity.authenticate(token);
-    if (resolved.kind !== "shopper" || !resolved.verified) return undefined;
-    if (shopperIdTenant(resolved.shopperId) !== tenantId) return undefined;
-    return resolved.shopperId;
+    const p = await resolveVerifiedShopper(merchantPrincipal, tenantId, headerToken, bodyToken);
+    return p.kind === "shopper" ? p.shopperId : undefined;
   };
   // AUDIT_HMAC_SECRET (T8 identity-resolution audit ref, F7 — never a bare hash) is now declared much
   // earlier, alongside SHOPPER_TOKEN_SECRET, so `createMemoryService` below can use it too.
@@ -1551,20 +1571,13 @@ export async function buildServer(opts?: {
     // (`shopify:<tenant>:…`) equals THIS request's verified widget tenant — the mint-time cross-shop
     // check (shopify-shopper-identity.ts step 5) is not enough on its own, because it only proves the
     // token was minted for SOME verified tenant, not that it's being presented on THAT tenant's session.
-    let shopperPrincipal: Principal = { kind: "anonymous" };
-    if (SHOPPER_AUTH_ENABLED && principal.kind === "merchant") {
-      const shopperTokenHeader = req.headers["x-shopper-token"];
-      const shopperToken =
-        typeof shopperTokenHeader === "string"
-          ? shopperTokenHeader
-          : typeof body.shopperToken === "string"
-            ? body.shopperToken
-            : undefined;
-      const resolvedShopper = await shopperIdentity.authenticate(shopperToken);
-      if (resolvedShopper.kind === "shopper" && shopperIdTenant(resolvedShopper.shopperId) === tenantId) {
-        shopperPrincipal = resolvedShopper;
-      }
-    }
+    // ADR-0019 task 6 (C13): the SAME resolver /consent and /forget use — no second inline implementation.
+    const shopperPrincipal: Principal = await resolveVerifiedShopper(
+      principal,
+      tenantId,
+      req.headers["x-shopper-token"],
+      body.shopperToken,
+    );
 
     // T6 — rate limit (denial-of-wallet): per-session / per-IP / per-tenant, atomic windowed counters on
     // the shared store. IP key is bounded/validated (an oversized X-Forwarded-For can't force a store
