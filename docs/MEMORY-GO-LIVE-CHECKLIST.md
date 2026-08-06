@@ -49,20 +49,22 @@ _**REOPENED 2026-08-06 — do not read the paragraph above as settled.** The own
 [`ADR-0019`](adr/0019-server-issued-guest-identity.md) proposes a **server-generated** guest id carried in a
 signed token, so the subject comes from a verified claim. It was **accepted by the named owner 2026-08-06 and
 then re-reviewed across three passes** — BLOCK (6 findings) → BLOCK (B1) → **PASS on B1 (2026-08-06)**. The
-security gate is now CLEARED; **owner re-acceptance and legal (R2-2 Art-9) remain and implementation may not
-begin without them.** The *direction* survived from the start; the *specification* took three passes. What forced the reopening: the B12(b)
+security gate is CLEARED and the owner re-accepted the corrected design 2026-08-06; **LEGAL (R2-2 Art-9,
+counsel Q19) is the one gate left, and implementation may not begin without it.** The *direction* survived
+from the start; the *specification* took three passes. What forced the reopening: the B12(b)
 carry-over was built and reverted the same day because reading a client-named namespace on a verified turn
 fails the **F1** attack test by construction. The 2026-08-04 rationale rejected a server-issued credential on
 **theft resistance** — correctly, as far as that goes, since the credential shares storage with the id — but
 the property that matters is **claim verification**, i.e. whether the server can establish the id belongs to
 its caller at all. ADR-0019 would **narrow C8 and C10**, mostly close **C1**, and unblock
-**B12(b)**; **C14 stays deferred**. ADR-0019 is **security-cleared but UNBUILT and gated on two human
-sign-offs, so nothing below is closed** — and
+**B12(b)**; **C14 stays deferred**. ADR-0019 is **security-cleared + owner-accepted but UNBUILT and gated on
+LEGAL only, so nothing below is closed** — and
 its review found that two of its claimed closures were overstated: **C8 and C10 are NARROWED, not closed**
 (a caller cannot *name* another subject but can still *present* one it holds), and **C9 is not moot** because
 the carry-over is itself an unaudited cross-subject read. A signer accepting C1/C8/C9/C10 today should know a
-superseding decision exists and is owner-approved in
-direction._
+superseding decision exists, is **security-cleared and owner-accepted (Revision 2, 2026-08-06)**, and is
+gated only on legal (R2-2, counsel Q19) — nothing is closed until it is built, but the owner has committed
+to replacing this posture, not merely approved its direction._
 
 ---
 
@@ -114,7 +116,7 @@ writing — silence is not acceptance.
 > wording was corrected by the security review.
 >
 > **The rows below still describe TODAY'S behaviour and are what a signer is accepting right now** —
-> ADR-0019 is **security-cleared but unbuilt and gated on owner re-acceptance + legal**, and no decision
+> ADR-0019 is **security-cleared + owner-accepted but unbuilt and gated on legal only**, and no decision
 > closes a row anyway: each of
 > C1/C8/C9/C10 changes only when the code does. It corrects one thing recorded in C1
 > itself: C1 rejected "binding the id to a server-issued credential" by judging it on **theft resistance**,
