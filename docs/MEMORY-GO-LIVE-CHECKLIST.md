@@ -46,9 +46,9 @@ because C1 does.** Restricting memory to signed-in shoppers would have dissolved
 and not taken, because it costs the guest-memory feature entirely._
 
 _**REOPENED 2026-08-06 — do not read the paragraph above as settled.** The owner approved revisiting C1, and
-**ADR-0019** (`docs/adr/0019-server-issued-guest-identity.md`, PR #214 — not yet merged, so the path is a
-forward reference) proposes making the guest id **server-generated** and carried in a signed token, so the
-subject comes from a verified claim. What forced the reopening: the B12(b)
+[`ADR-0019`](adr/0019-server-issued-guest-identity.md) (merged as PR #214, Status **Proposed** — merging
+records the proposal, it does not accept it) makes the case for a **server-generated** guest id carried in a
+signed token, so the subject comes from a verified claim. What forced the reopening: the B12(b)
 carry-over was built and reverted the same day because reading a client-named namespace on a verified turn
 fails the **F1** attack test by construction. The 2026-08-04 rationale rejected a server-issued credential on
 **theft resistance** — correctly, as far as that goes, since the credential shares storage with the id — but
