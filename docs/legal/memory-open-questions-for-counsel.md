@@ -439,6 +439,19 @@ collected — so this should be decided before, not after, the copy is finalized
 > answer this — it is a lawful-basis question, and it **modifies the special-category basis counsel ratified
 > on 2026-08-04** (ADR-0015's amendment), so it needs a fresh look rather than being treated as settled.
 
+> ### Counsel decision request — the one thing we need signed (self-contained; the rest of this section is the backup)
+> **Ask:** may special-category (Art‑9 / health) memory notes be **copied from a signed‑out "guest" subject
+> into the same person's signed‑in "account" subject**, on the basis that **both** subjects independently
+> recorded an explicit health‑memory consent (`memorySpecial = "in"`) — *provided* the future account
+> transfer was disclosed to the shopper **at the moment they gave the guest‑side health consent**?
+> **We need one of:** (a) **Yes, sufficient** — optionally with conditions on the disclosure wording;
+> (b) **No — re‑consent required under the account** (guest‑era health consent does not transfer; carried
+> notes stay dropped until the account separately opts in); or (c) **Yes, but the sign‑in prompt must itself
+> name health data** (which reopens a privacy disclosure — see part 2). The build is **inert and shipping
+> nothing** until this is answered; the answer determines what the code may do and what the consent copy must
+> say. Full framing, the three sub‑questions, the owner's proposed direction, and the residual risks you must
+> factor are below.
+
 **Background counsel needs, in plain terms.** A shopper can use the widget two ways on one device: signed
 **out** (a "guest", keyed by a browser-held id) and signed **in** (an "account"). Cross-visit memory can hold
 ordinary preference notes and — behind a *separate* explicit health consent (Consent 2) — **special-category
@@ -454,7 +467,9 @@ subject recorded `memorySpecial === "in"` **AND** the destination (account) subj
 notes follow the ordinary consent rule and are out of scope of *this* question. Implementable exactly as
 stated — the consent store can read both subjects' records on one request
 (`packages/state-postgres/src/runtime-consent-store.ts:137`); the current code gates on the destination
-only (`packages/widget-memory/src/merge.ts:59-61,117`), which is the defect R2-2 corrects.
+only (the account-only `consent2` parameter, `packages/widget-memory/src/merge.ts:61`, applied at the drop
+filter `merge.ts:145`: `if (meta?.class === "special" && ctx.consent2 !== "in") continue;`), which is the
+defect R2-2 corrects by requiring the SOURCE guest's `memorySpecial === "in"` as well.
 
 **The decision — three parts, please answer each:**
 
@@ -479,6 +494,30 @@ what the R2-1 prompt must say. If (1) is "re-consent required under the account"
 guest-era health notes until the account separately opts in — a materially different feature. If (2) is
 "must name health data", the prompt copy changes and a privacy trade-off is reopened. Both are cheaper to
 decide now than to unwind from shipped code and a published notice.
+
+**Residual risks that bear on your answer (each is a distinct question elsewhere in this doc; surfaced here
+because the Art‑9 carry‑over's soundness depends on them).**
+
+1. **The special‑category classifier is a keyword map, not semantic (see Q8).** The both‑sides Consent‑2 rule
+   only protects a note that is *correctly classified* `special`. `classifyFact`
+   (`packages/widget-memory/src/classifier.ts`) is a lower‑cased substring match over a fixed keyword list
+   (`allerg`, `peanut`, `pregnan`, …); a health disclosure it does not match is classified **ordinary** and
+   would carry over under the ordinary rule with **no Consent‑2 gate at all**. So the Art‑9 guarantee is
+   bounded by the classifier's recall — a false negative routes health data through the ordinary path.
+2. **The guest consent is a bearer‑capability, not an authenticated identity (see Q4/C1).** "The source
+   guest recorded Consent 2" means *whoever held that browser id* did — on a shared/family device that need
+   not be the person who later signs in. R2‑1's authorisation prompt and the both‑sides rule are the
+   mitigations; the source‑side consent's provenance is not identity‑proven.
+3. **Erasure after carry‑over is asymmetric (see F‑10).** Once copied, the note exists in two namespaces; a
+   **signed‑out** forget clears only the guest copy — the account copy requires a signed‑in forget. The
+   widget's erasure message is being corrected to say so honestly (shipped inert, `CARRY_OVER_PROMPT_ENABLED`
+   off). Relevant to any right‑to‑delete representation about carried health data.
+4. **Retention is unchanged by the carry‑over (see Q2/Q3).** Carried notes keep the sliding
+   30‑days‑from‑last‑activity window with no absolute cap, and special‑category TTL equals ordinary (30d);
+   the copy neither resets nor shortens it.
+5. **Mitigating fact — encryption at rest is implemented (see Q16).** Special‑category facts are encrypted at
+   rest, so the carried copy is encrypted in the account namespace as well; this is not an open risk, stated
+   so the record is complete.
 
 **Companions:** ADR-0019 R2-1/R2-2; ADR-0015's special-category amendment (the ratified basis this touches);
 `memory-privacy-notice-draft.md` (the shopper-facing copy that would carry the answer to part 2);
