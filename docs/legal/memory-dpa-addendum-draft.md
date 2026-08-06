@@ -25,12 +25,22 @@ the processing that **would** occur after a human-only flip of that constant. Li
 Scope: cross-visit shopper memory only. Other processing (chat serving, the traffic/shadow-grading log,
 telemetry, Shopify order lookups, marketing comms) is out of scope here and belongs in the base DPA.
 
-**Storage is non-durable today, and that qualifies §8 and §9.** The only `VectorPort` adapter in the repo
-is an in-memory reference implementation (§5), so as the code stands there is no at-rest fact store: facts
-would live in the serving process, be lost on restart, and not be shared between instances. Retention,
-erasure and data-subject-request statements below describe what the code does **to whatever store it is
-given** — they are not representations about durable data. A durable adapter is in development on a
-separate, unmerged branch and is **not** part of the code described here.
+> **CORRECTION — 2026-08-06: storage IS durable, and §8/§9 are therefore NO LONGER qualified by this.**
+> `PostgresVectorStore` (`packages/state-postgres/src/postgres-vector-store.ts`) is merged on `main`,
+> selected whenever `DATABASE_URL` is set, and live in staging (`GET /health` reports
+> `"vector":"postgres"`); the go-live checklist records it as **B1 — MET**. Counsel should read §8
+> (retention) and §9 (erasure) as representations about **durable, at-rest data**, which makes them
+> stronger obligations than the superseded paragraph allowed for — there is now a real at-rest fact store to
+> encrypt, retain, and erase. Erasure against that adapter has been proven by execution against a live
+> Postgres 16 server, including that deletion is physical rather than a filtered read
+> (`packages/widget-backend/test/b6-erasure-real-postgres.test.ts`; checklist **B6**).
+>
+> ~~**Storage is non-durable today, and that qualifies §8 and §9.** The only `VectorPort` adapter in the
+> repo is an in-memory reference implementation (§5), so as the code stands there is no at-rest fact store:
+> facts would live in the serving process, be lost on restart, and not be shared between instances.
+> Retention, erasure and data-subject-request statements below describe what the code does **to whatever
+> store it is given** — they are not representations about durable data. A durable adapter is in development
+> on a separate, unmerged branch and is **not** part of the code described here.~~
 
 ## 1. Roles
 
@@ -74,8 +84,13 @@ Explicitly **not** collected by design: demographics, psychographics, and inferr
    consent per tier, and append them to the model prompt as fenced data that may only add caution
    (`service.ts:141-189`; `packages/widget-brain/src/brain.ts:1126-1156`, read-time gate `brain.ts:458-460`).
 6. **Retention maintenance** — TTL-on-read drop plus throttled sliding renewal (`service.ts:154,158-168`);
-   a reclamation sweep function exists but is unscheduled (`packages/widget-memory/src/retention.ts:69-100`).
-   The renewal half is **unreachable on the current wiring** — see §8.
+   a reclamation sweep (`packages/widget-memory/src/retention.ts:69-100`) which, **corrected 2026-08-06, is
+   now scheduled** — a Cloud Run Job runs it **daily at 03:17 UTC** in staging via Cloud Scheduler, verified
+   by a forced run against the live database (`docs/DEPLOY.md`, "Retention sweep"; checklist **B4**). Two
+   limits to record: the schedule is a property of a **deployment**, not of this code, so it must be
+   confirmed per environment; and **no sweep has yet deleted anything** (every run reported `visited=0`
+   because memory is off and nothing exists to expire), so the delete-and-audit path is evidenced by tests
+   rather than by production execution. The renewal half is **unreachable on the current wiring** — see §8.
 7. **Erasure** — whole-subject erasure on shopper request (`packages/widget-memory/src/erasure.ts:63-69`,
    route `server.ts:660-710`).
 8. **Audit** — every one of the above is logged (`audit.ts:11-21`).
@@ -87,14 +102,18 @@ All external capability access is through the **ports** in `packages/platform-po
 
 | Capability | Port | Adapter in this repo today |
 |---|---|---|
-| Fact storage | `VectorPort` (`packages/platform-ports/src/vector-port.ts:43-53`) | **In-memory reference adapter only** (`vector-port.ts:117-159`), selected at `server.ts:198`. **No durable/cloud adapter exists.** |
+| Fact storage | `VectorPort` (`packages/platform-ports/src/vector-port.ts:43-53`) | **Corrected 2026-08-06: a durable adapter DOES exist and is live.** `PostgresVectorStore` (`packages/state-postgres/src/postgres-vector-store.ts`) is selected whenever `DATABASE_URL` is set (`vector-factory.ts`), and staging runs it. The in-memory reference adapter (`vector-port.ts:117-159`) remains the local/dev fallback only. **Cloud SQL (Postgres) is therefore a sub-processor for fact storage** — the superseded row said no durable/cloud adapter existed, which understated the exhibit. |
 | Model inference (distillation + serving) | `ModelPort` | Vertex AI (Gemini) when `GOOGLE_CLOUD_PROJECT` is configured, else a local mock (`packages/widget-backend/src/model.ts:12-17`); wrapped in card/SSN redaction (`server.ts:214`) |
 | Consent records, audit log, rate limits | `RuntimeStatePort` | Postgres (Cloud SQL via `DATABASE_URL`) or in-memory (`packages/state-postgres/src/postgres-runtime-store.ts`) |
 
 Consequences counsel should note:
-- Because the only `VectorPort` adapter is in-memory, memory facts today live **in the serving process**,
-  are lost on restart, and `POST /forget` can only erase from the instance that receives the call. A durable
-  adapter is a tracked prerequisite, not shipped.
+- **Corrected 2026-08-06 — this bullet said the opposite and was wrong.** Memory facts land in **Cloud SQL
+  Postgres** whenever `DATABASE_URL` is set, which is every real deployment; they survive restart, are shared
+  across instances, and `POST /forget` is a real cross-instance deletion, proven physical against a live
+  Postgres 16 server (`packages/widget-backend/test/b6-erasure-real-postgres.test.ts`). The superseded
+  version said facts live in the serving process, are lost on restart, `/forget` reaches one instance, and a
+  durable adapter was "a tracked prerequisite, not shipped". **The sub-processor exhibit must therefore list
+  the database host** — that is the obligation the old bullet was hiding.
 - The model provider processes the **raw turn text** during distillation, not just the distilled fact. The
   sub-processor exhibit and any zero-/limited-retention commitments must cover that call
   (`provisions-brief.md` §4, "Model-provider commitment" and "Model-specific retention").
@@ -178,23 +197,37 @@ so nothing here can be mistaken for an operative safeguard.
 
 ## 7. Security measures **NOT implemented today** (open items — must not be represented as in place)
 
-Each item below is a gap in the code as of commit `fea7c0d`. Where an item says engineering intends to
-close it, that is a statement of intent recorded in this document only: **there is no numbered go-live
-tracker in this repository that counsel could inspect**, so this list is the reference.
+Each item below was a gap in the code as of commit `fea7c0d`.
 
-1. **Encryption at rest for special-category facts.** ADR-0015 Invariant 9 calls for it; there is **no
-   encryption anywhere in `packages/widget-memory`** (searched the package for `encrypt`/`crypto` — the only
-   `node:crypto` uses are `randomUUID`, `randomBytes` and the audit `sha256`: `service.ts:1`,
-   `identity.ts:1`, `audit.ts:1`). Application-layer AES-256-GCM exists elsewhere in the codebase
-   (`packages/widget-backend/src/customer-grant-store.ts:28-48`, for OAuth grants) and is **not** applied to
-   memory facts. Nothing in these drafts, in the widget copy, or in the merchant's own notice may state or
-   imply that memory facts — of either class — are encrypted at rest. Intended before enablement; see
-   **Q16**.
-2. **Durable, portable fact storage.** Only the in-memory `VectorPort` adapter exists (`vector-port.ts:117`),
-   so there is no at-rest storage layer to encrypt, back up, or reason about yet — and no basis for
-   representing retention, deletion, or backup handling as applying to durable data. A durable adapter is in
-   development on a separate branch that is **not merged**; it is not part of the code this addendum
-   describes. See **Q11**.
+> **CORRECTION — 2026-08-06. Items 1 and 2 are NO LONGER GAPS, and the header claim was wrong.**
+> This section understates the security measures actually in place, which in an Art. 28/32 context is the
+> worst direction for an error, so counsel must not rely on the two struck items below.
+>
+> The header also said "**there is no numbered go-live tracker in this repository that counsel could
+> inspect**". There is: **`docs/MEMORY-GO-LIVE-CHECKLIST.md`**, an itemised gate list (A1–A7 legal, B1–B12
+> technical, C1–C14 residuals) with a status and evidence per row. It is the reference counsel should
+> inspect, not this list.
+
+1. ~~**Encryption at rest for special-category facts.** ADR-0015 Invariant 9 calls for it; there is **no
+   encryption anywhere in `packages/widget-memory`**…~~ **CORRECTED: implemented, and fail-closed.**
+   `packages/widget-memory/src/service.ts` encrypts a special-category fact's `text`, its
+   `disposition[].value` and `sourceQuote` with **AES-256-GCM** through a `CryptoPort`
+   (`packages/platform-ports/src/crypto-port.ts`) *before* the storage adapter sees them, so a
+   DBA/disk-snapshot/log-shipping path sees ciphertext. It is **fail-closed**: with no
+   `MEMORY_ENCRYPTION_KEY` configured for the tenant, the special-category write is **refused** rather than
+   stored in the clear, and a `write.refused` audit records it. Checklist **B2 — MET (PR #150)**, which also
+   closed two holes found in review (`disposition.value` persisted in the clear, and an Art-9 `sourceQuote`
+   riding an ordinary fact escaping the health gate). The key is provisioned per tenant in the
+   `PALUP_SECRETS` map and is live for staging's tenant (checklist **B8**). **Ordinary facts are NOT
+   encrypted** — that half of the old item stands, so "of either class" was wrong in one direction only.
+   See **Q16**.
+2. ~~**Durable, portable fact storage.** Only the in-memory `VectorPort` adapter exists…~~ **CORRECTED:
+   `PostgresVectorStore` is merged and live** (checklist **B1 — MET**), selected whenever `DATABASE_URL` is
+   set. There **is** an at-rest storage layer to encrypt, back up and reason about, and retention/deletion
+   statements **do** apply to durable data — see the §0 and §5 corrections. Backup handling is a genuinely
+   separate question this addendum still does not describe (Cloud SQL automated backups are a deployment
+   setting, not code), so treat *backups* as unaddressed while treating *storage durability* as resolved.
+   See **Q11**.
 3. **Whole-tenant erasure.** `eraseTenant` throws `NotImplemented` (`erasure.ts:138-144`) — there is no
    "delete every subject under this merchant" operation, which is what a controller offboarding/termination
    clause would need.
@@ -252,8 +285,12 @@ tracker in this repository that counsel could inspect**, so this list is the ref
   emitted. The gap is a few lines of wiring, so counsel should be told which model to commit to
   contractually; this addendum describes the sliding model because that is what the ADR amendment and the
   memory package specify, but that is an assumption, not a verified deployment fact.
-- Enforcement is on read today; deletion depends on the unscheduled sweep (§7 item 6).
-- **There is no durable at-rest store, so none of the above yet describes durable data** (§0, §7 item 2).
+- Enforcement is on read; deletion is by the sweep, which — **corrected 2026-08-06** — is now **scheduled
+  daily** in staging rather than unscheduled (§7 item 6). Caveat retained: the schedule is a property of a
+  deployment, not of this code, and no sweep has yet deleted anything.
+- **Corrected 2026-08-06: there IS a durable at-rest store, so the above DOES describe durable data**
+  (§0, §5). The superseded bullet asserted the reverse and, with it, that no retention or erasure statement
+  here was a representation about durable data — which understated every obligation in §8 and §9.
 - Consent records and audit entries: unbounded (§7 item 10).
 - On termination/offboarding: no whole-tenant erasure exists (§7 item 3), so a "delete or return on
   termination" clause has no implementation behind it yet.

@@ -28,15 +28,28 @@ default (`docs/adr/0015-cross-visit-memory-eu-consent-gated.md:9-16`; mirrored i
 **we have not verified who signed it, what they reviewed, or that it constitutes legal advice**, and it is
 not a sign-off on this notice.
 
-**Storage is not durable today.** The only `VectorPort` adapter that exists in this repo is an in-memory
-reference implementation (`packages/platform-ports/src/vector-port.ts:117-159`), wired at
-`packages/widget-backend/src/server.ts:198`; we searched all of `packages/` and found no other adapter. So
-if the feature were enabled as it stands, notes would live only inside the serving process: they would be
-lost on restart or redeploy, they would not be shared between instances, and a "forget me" call would
-reach only the instance that happened to receive it. **Every retention and erasure statement below
-describes what the code does to the store it is given — not a promise about durable data, because there is
-no durable store yet.** A durable adapter is in development on a separate, unmerged branch; it is not part
-of the code this notice describes. See **Q11**.
+> **CORRECTION — 2026-08-06. Storage IS durable now; the paragraph below was true when written and is no
+> longer.** `PostgresVectorStore` (`packages/state-postgres/src/postgres-vector-store.ts`) is merged on
+> `main` and is selected automatically whenever `DATABASE_URL` is set
+> (`packages/state-postgres/src/vector-factory.ts`); the go-live checklist records this as **B1 — MET**.
+> Staging runs it today (`GET /health` reports `"vector":"postgres"`).
+>
+> **This correction makes the notice's obligations STRONGER, not weaker**, so counsel should re-read §6
+> (retention) and §7 (erasure) without the qualifier that follows: notes would survive restart and be
+> shared across instances, and a "forget me" is a real, cross-instance deletion rather than a
+> single-process one. Erasure against the real adapter has since been proven by execution against a live
+> Postgres 16 server, including that deletion is physical rather than a filtered read
+> (`packages/widget-backend/test/b6-erasure-real-postgres.test.ts`; checklist **B6**).
+>
+> ~~**Storage is not durable today.** The only `VectorPort` adapter that exists in this repo is an
+> in-memory reference implementation (`packages/platform-ports/src/vector-port.ts:117-159`), wired at
+> `packages/widget-backend/src/server.ts:198`; we searched all of `packages/` and found no other adapter.
+> So if the feature were enabled as it stands, notes would live only inside the serving process: they would
+> be lost on restart or redeploy, they would not be shared between instances, and a "forget me" call would
+> reach only the instance that happened to receive it. **Every retention and erasure statement below
+> describes what the code does to the store it is given — not a promise about durable data, because there
+> is no durable store yet.** A durable adapter is in development on a separate, unmerged branch; it is not
+> part of the code this notice describes. See **Q11**.~~
 
 Everything below is therefore written as *"what would happen once enabled"*. Line numbers are as of commit
 `fea7c0d`.
@@ -150,12 +163,18 @@ or was never explicitly "in", the note is not surfaced at all.
 > answers has `consent1 = "unknown"`, which *permits the write* (`consent.ts:51`) but *blocks every read*
 > (`brain.ts:459`) and every retention renewal (`service.ts:164`). See open question **Q5**.
 
-> ⚠️ Counsel — a second asymmetry, in the UI. The manage panel's checkboxes render as **checked only when
-> the stored value is literally `"in"`** (`packages/widget/public/index.html:291-296,298-303`). Under the
-> US opt-out default a shopper who has never answered sits at `"unknown"` — so the panel displays
-> "Preferences: off" **while ordinary notes are in fact permitted and being written** (`consent.ts:51`).
-> Displayed state and actual processing disagree in exactly the default US configuration. This bears
-> directly on whether the consent artifact is valid; see **Q18**.
+> ⚠️ Counsel — **corrected 2026-08-06: the UI asymmetry described here was FIXED and this callout is
+> withdrawn.** The superseded version said the manage panel's checkboxes render checked only when the stored
+> value is literally `"in"`, so under the US opt-out default a never-answered shopper saw "Preferences: off"
+> while ordinary notes were being written — displayed state and actual processing disagreeing in exactly the
+> default configuration. Both `/chat` and `/consent` now return **`memoryActive`**, the effective write
+> capability for the subject actually served, and the widget renders that, so the two cannot disagree
+> (checklist **B11 — MET, PR #152**; asserted against the real upsert count in
+> `manage-panel-honesty.test.ts`).
+>
+> **What survives is the regime, not the mismatch:** under the US opt-out default a shopper who has never
+> answered *is* written about — the panel now discloses that instead of contradicting it. Whether that regime
+> makes the consent artifact valid is **Q5**, still open. See **Q18** for the resolved history.
 
 ## 4. Health information gets its own, separate consent
 
@@ -212,9 +231,17 @@ see open question **Q8**.
   is **no absolute ceiling** anywhere in the code. Any shopper-facing copy must say "30 days after your
   last visit", never "kept for 30 days". See open question **Q2**.
 - An expired note is never served and never renewed, even before anything deletes it (`service.ts:154`).
-- A sweep function that actually deletes expired records exists (`retention.ts:69-100`) — see open question
-  **Q11**: it is **not scheduled by any code in this repo today**, so between expiry and deletion an
-  expired note is unreadable but still present.
+- A sweep function that actually deletes expired records exists (`retention.ts:69-100`). **Corrected
+  2026-08-06:** it is now **scheduled in the staging environment** — a Cloud Run Job runs `pnpm sweep`
+  **daily at 03:17 UTC** via Cloud Scheduler, verified by a forced run that completed successfully against
+  the live database (`docs/DEPLOY.md`, "Retention sweep"; checklist **B4**). The earlier statement that it
+  was "not scheduled by any code in this repo" remains **literally** true and is why it read as it did —
+  the schedule is deployment infrastructure, not repository code — but the consequence counsel needs has
+  changed: an expired note is now unreadable **and** reclaimed within about a day, rather than unreadable
+  but retained indefinitely. Two limits to state plainly: the schedule is **per environment**, so it is a
+  property of a deployment rather than of this code, and **no sweep has yet deleted anything** (every run
+  so far reported `visited=0`, because memory is off and no note exists to expire), so the delete-and-audit
+  path is proven by unit and integration tests rather than by production execution.
 
 > ⚠️ Counsel — **the sliding renewal cannot currently fire on the wired path.** Renewal requires
 > `consent1`/`consent2 === "in"` on the recall context (`service.ts:164`), but the only production caller
@@ -229,8 +256,11 @@ see open question **Q8**.
 > assumption — stated as an assumption, not a decision — is that the sliding model is the intended one, so
 > it is the one described above. See **Q2**.
 
-> ⚠️ Counsel: none of this describes durable data. See §0 — the only fact-storage adapter in the repo is
-> in-memory, so today "kept for 30 days" is bounded above by the lifetime of the serving process.
+> ⚠️ Counsel — **corrected 2026-08-06: this DOES describe durable data.** The superseded version of this
+> callout said the only fact-storage adapter was in-memory, so "kept for 30 days" was bounded above by the
+> lifetime of the serving process. `PostgresVectorStore` is merged and live in staging (see the §0
+> correction), so 30 days is a real retention period against a durable store, and the sliding window is the
+> only thing that extends it.
 
 ## 7. Your controls
 
@@ -250,12 +280,20 @@ see open question **Q8**.
 2. **There is no "show me / export what you remember" path.** No route in `packages/widget-backend/src`
    reads a subject's notes back to the shopper. Erasure is implemented; access/portability is not. See
    **Q7**.
-3. **"Forget everything about me" is not a durable deletion guarantee today.** The call does what the code
-   says — it deletes the whole subject namespace from the store it is pointed at and audits the action —
-   but that store is the in-memory adapter (§0), so the erasure applies only to the serving instance that
-   receives the request and to data that itself only lives in process memory. Until a durable adapter is
-   merged, the notice must not promise deletion "from our systems". `/forget` also does **not** clear the
-   shopper's consent record (`server.ts:708` erases the vector namespace only). See **Q9** and **Q11**.
+3. **"Forget everything about me" — corrected 2026-08-06: this IS a durable deletion now.** The superseded
+   version of this item said the erasure reached only the serving instance that received the request,
+   because the only store was the in-memory adapter, and concluded that the notice "must not promise
+   deletion from our systems". Both premises are obsolete: `PostgresVectorStore` is merged and live (see the
+   §0 correction), so the call deletes from the shared database, and deletion has been proven **physical**
+   against a real Postgres 16 server — asserted by querying the underlying table directly, so a soft-delete
+   or filtered read could not pass, and mutation-verified by breaking the delete and watching the proof fail
+   (`packages/widget-backend/test/b6-erasure-real-postgres.test.ts`; checklist **B6**). The notice may now
+   describe deletion from our systems for **fact notes**. Two carve-outs survive unchanged and still matter:
+   `/forget` does **not** clear the shopper's consent record (`server.ts` erases the vector namespace only —
+   see **C11**, where retaining it is the intended behaviour because opting out is a separate,
+   forward-looking control), and whole-**tenant** erasure still throws `NotImplemented`
+   (`packages/widget-memory/src/erasure.ts`), which bears on the Shopify `shop/redact` obligation rather
+   than on a shopper request. See **Q9** and **Q11**.
 4. **"Forget everything about me" does not delete the conversation itself, and structurally cannot.**
    `eraseSubject` deletes the subject's fact namespace only. The per-tenant **traffic log** keeps the
    shopper's message and the agent's reply (`logTraffic`, `packages/widget-backend/src/canary.ts` —
@@ -315,10 +353,17 @@ Counsel must reconcile the append-only audit log against erasure requests — se
   cross-visit memory.
 - Regional scope is currently a **deploy-level** setting (`MERCHANT_REGION`, default `"us"`,
   `server.ts:293-296`), not per-shopper geolocation. See **Q10**.
-- It does **not** describe encryption at rest for health notes. ADR-0015 Invariant 9 calls for it and
-  **it is not implemented** — there is no encryption anywhere in `packages/widget-memory` (searched the
-  package; the only `node:crypto` uses are `randomUUID`, `randomBytes` and the audit `sha256`). No
-  shopper-facing copy may say health notes are kept encrypted. Note that ADR-0015's own draft Consent-2
+- **Corrected 2026-08-06 — encryption at rest for health notes IS implemented, and the prohibition below is
+  withdrawn.** The superseded text said it was "not implemented — there is no encryption anywhere in
+  `packages/widget-memory`" and therefore that **no shopper-facing copy may say health notes are kept
+  encrypted**. That instruction would now suppress a true and reassuring statement.
+  `packages/widget-memory/src/service.ts` applies **AES-256-GCM** via a `CryptoPort` to a health note's text,
+  disposition value and source quote before storage, **fail-closed** (no tenant key ⇒ the write is refused,
+  not stored in the clear, with a `write.refused` audit). Checklist **B2 — MET (PR #150)**, key provisioned
+  per **B8**. Two limits for whoever writes the shopper-facing copy: this covers **health notes only** —
+  ordinary notes are **not** encrypted, so copy must not generalise — and it is application-layer encryption
+  before the store, not a statement about the database's own at-rest encryption or its backups. Note that
+  ADR-0015's own draft Consent-2
   prompt copy contains the phrase "I'll keep it encrypted"
   (`docs/adr/0015-cross-visit-memory-eu-consent-gated.md:105-108`); the prompt copy actually shipped in the
   widget does **not** make that claim (`index.html:277`), and it must not be reintroduced until the control

@@ -146,9 +146,19 @@ Shopify signs webhook HMACs with the same app client secret — **no new env var
 - `POST /shopify/webhooks/shop/redact`
 - `POST /shopify/webhooks/app/uninstalled` ← the topic that makes revocation real (see D1 above)
 
-`AUDIT_HMAC_SECRET` is **optional** and defaults to `SHOPPER_TOKEN_SECRET`. It is the keyed-HMAC key for
-audit `subjectRef`s, so a low-entropy numeric customer id is never recorded as a bare hash. Provision it
-separately only if you want key separation from the shopper-token secret.
+`AUDIT_HMAC_SECRET` is the keyed-HMAC key for audit `subjectRef`s, so a low-entropy numeric customer id is
+never recorded as a bare hash. It is **optional to BOOT** and falls back to `SHOPPER_TOKEN_SECRET` — but
+**corrected 2026-08-06: it is NOT optional for memory go-live.** Checklist **B5** requires it, because with
+neither variable set the effective key is `undefined`, and then `subjectRef` degrades to an unsalted digest
+that `widget-memory/src/audit.ts` states is unsafe for a low-entropy `acct:` subject, `server.ts` skips the
+identity audit entirely, and the Shopify webhook path records the literal
+`"unreferenced (no AUDIT_HMAC_SECRET configured)"`.
+
+**It is provisioned and live on staging as of 2026-08-06** (secret `audit-hmac-secret`, mounted via the
+`AUDIT_HMAC_SECRET_NAME` repo variable, verified present on the serving revision). Provision it **before the
+first real write**, not after: changing the key changes every `subjectRef`, so audit rows for the same
+subject stop correlating across the change. Full three-step procedure — including the IAM grant that is easy
+to miss and breaks every deploy — is under *One-time setup* below.
 
 **Two KV collections** these add to `rs_kv` (no migration — the runtime store's own table):
 `shopify_webhook_seen` (delivery dedup, TTL'd) and `shopify_data_requests` (the `customers/data_request`
