@@ -1,23 +1,38 @@
-# ADR-0019: Server-issued guest identity (signed guest token) — BLOCKED by security review; owner re-acceptance required
+# ADR-0019: Server-issued guest identity (signed guest token) — security-cleared (Revision 2); pending owner re-acceptance + legal
 
-> ## ⛔ `security-reviewer` returned **BLOCK** — 2026-08-06
+> ## `security-reviewer` gate: CLEARED on the third pass. Two HUMAN gates and nothing built.
 >
-> **Implementation may not begin.** Six design-level blockers, eight conditions. The full review is
-> summarised in *Security review outcome* below. **Two of the blockers invalidate statements the owner relied
-> on when accepting**, so the 2026-08-06 acceptance does not carry over to the corrected design and
-> **re-acceptance is required**. This is recorded at the top rather than in a footnote because a reader who
-> stops after the Status line must not come away thinking this design is cleared to build.
+> **CURRENT STATE (read this first).** Revision 2 (at the bottom of this file) has passed
+> `security-reviewer`: first draft BLOCKED (six findings) → corrected → re-BLOCKED on one finding (B1) →
+> B1 remediated → **third review PASS on B1, 2026-08-06.** The build-time security gate CLAUDE.md §4.4
+> requires is now satisfied for the design.
 >
-> Sequence, so the record is unambiguous: the design was written, the owner accepted it, `security-reviewer`
-> was then run at the owner's request and blocked it. The block is the current state.
+> **This does NOT make the ADR buildable-in-full.** Two gates remain, both HUMAN and neither yet given —
+> no human has accepted anything since this cleared:
+> - **Owner re-acceptance.** The 2026-08-06 owner acceptance was on pre-BLOCK text the review then
+>   invalidated; it does not carry to Revision 2.
+> - **Legal** on R2-2's both-sides Art-9 rule — outside the reviewer's competence, explicitly unmet.
+>
+> **Tasks 1–9 of Revision 2's list are design-approved; task 10 (the carry-over) is security-cleared but
+> gated on the two human sign-offs above.** Every task's eventual CODE gets its own review (§4.4), and the
+> build-time conditions the reviews named still bind. Nothing is built; `MEMORY_ADR_ACCEPTED` is `false`.
+>
+> The historical record of all three reviews follows — kept so the trail draft → block → correction →
+> re-block → correction → PASS stays legible, and because the design took three passes to clear a disclosure
+> the author kept re-introducing. Sequence: design → owner accepted → reviewed → BLOCK → Revision 2 →
+> re-reviewed → BLOCK on B1 → B1 remediated → **third review → PASS on B1.**
 
-- **Status: BLOCKED (security review, 2026-08-06).** Previously *Accepted by the named owner, 2026-08-06* —
-  that acceptance stands as a matter of record but **is not a licence to build**, because F-1 and F-8 below
+- **Status: SECURITY-CLEARED (Revision 2, third review PASS 2026-08-06); PENDING owner re-acceptance +
+  legal.** The security block is lifted for the design; the two human gates in the banner remain. The
+  original *Accepted by the named owner, 2026-08-06* — that acceptance stands as a matter of record but
+  **is not a licence to build**, because F-1 and F-8 below
   show it was given on the strength of two claims in this document that are wrong in the direction that
   matters. The **direction** — replace the client-minted `anonId` with a **server-generated** id delivered in
   a **PalUp-signed guest token**, and derive the guest subject from the *verified claim* — survives review.
   The **specification does not**.
-- This record **enables and builds nothing**, and now blocks the task list below rather than authorising it.
+- This record **enables and builds nothing.** With the security gate cleared, tasks 1–9 are design-approved;
+  task 10 is security-cleared but held by the two human gates above. No task authorises itself, and each
+  task's code gets its own §4.4 review.
 - **CORRECTION (F-4) — the shared-secret justification in the earlier draft was factually wrong.** It said
   this "reuses `WIDGET_TOKEN_SECRET` via the `typ`-claim separation that `shopper-token-identity.ts` already
   justifies over per-token-type secrets". **No such precedent exists.** Shopper tokens use a *separate*
@@ -354,9 +369,12 @@ checked against a primary source.
 with the review's annotations, so the trail from first draft → BLOCK → correction stays legible. Where they
 disagree with this section, **this section wins**.
 
-**Status of Revision 2: awaiting re-review.** It addresses all six blockers and the eight conditions. It has
-**not** been through `security-reviewer`, and the owner's 2026-08-06 acceptance does **not** extend to it —
-both are listed in *Sign-offs still required*.
+**Status of Revision 2: RE-REVIEWED 2026-08-06 → BLOCK on one finding (B1), now remediated in the R2-1 text
+above, pending a THIRD review.** The token-identity foundation (R2-3..R2-8) passed: ten of twelve verifiable
+findings fixed, F1 preserved. The block was a *new* self-inflicted disclosure in the R2-1 prompt — see
+*Revision 2 — security review outcome* immediately below. The B1 remediation is applied above but **the
+block is not cleared by the author's own fix**: it needs re-review, plus the still-unmet owner re-acceptance
+and legal sign-off. See *Sign-offs still required*.
 
 ## The honest starting point
 
@@ -376,18 +394,39 @@ conflated, and is explicit that only one of them is fixable:
 ## R2-1 (fixes F-1) — the carry-over is shopper-authorised, never automatic
 
 Two credentials co-existing on one request **is not authorisation**. The carry-over fires only after the
-shopper answers a question they can answer from their own knowledge:
+shopper answers a question they can answer from their own knowledge. **THE prompt string — the only one this
+ADR specifies — is:**
 
-> "Have you chatted with me on this device before, without signing in? I have some notes from then — want me
-> to keep them on your account?"
+> "Were you using this device before without signing in? If so, I can carry that session's preferences over
+> to your account."
+
+~~"Have you chatted with me on this device before, without signing in? I have some notes from then — want me
+to keep them on your account?"~~ **STRUCK (B1, third-review finding): "I have some notes from then" asserts
+A's notes EXIST — the same pre-authorisation disclosure the bullet below claims to have removed. The earlier
+fix struck the count/health clause in the bullet but left this blockquote live, so the leak survived in the
+one place an implementer would copy. This was the disclosure blind spot a fourth time; the whole point of
+the corrected string is that it presupposes nothing about the other session's data.**
 
 Deliberately designed:
 
-- **No fact text, and no list, is shown in the prompt.** Only that notes exist, how many, and whether any
-  are health-related. **This is where I must not repeat the F-1 mistake:** it is true that C1 already lets a
-  token-holder cause fact text to surface *through recall*, but recall surfaces what is contextually
-  relevant, whereas an enumerated list is a deliberate dump of everything. **Those are not equivalent**, so
-  the prompt discloses neither.
+- **RENDERED FROM CLIENT STATE ALONE — no server read of the other session's namespace.** The trigger is
+  the presence of a guest token in *this browser's* own `localStorage` (`packages/widget/public/index.html`,
+  `MEM_KEY`/`memState`), which proves only that "a signed-out session existed on this device", never that it
+  holds facts, how many, or their class. **Build condition (do not defeat the fix):** the widget must NOT
+  add a server precheck of the other namespace to decide whether to show the prompt — that would reintroduce
+  exactly the read B1 removed and violate invariants 4/5. The corrected string says "preferences", not "N
+  notes", precisely so it commits to nothing the client cannot know.
+- **The prompt discloses NOTHING about the other session's data — corrected per Revision 2's review (B1).**
+  ~~Only that notes exist, how many, and whether any are health-related.~~ **STRUCK: that was the F-1 mistake
+  a third time.** The bullet suppressed the fact *list* on the principle "recall surfaces what is
+  contextually relevant, an enumerated list is a deliberate dump" — and then disclosed the **count and a
+  health-related flag**, which that same principle forbids. **Corrected rule:** the prompt asserts nothing
+  about whether prior notes exist, how many, or their class. Default-NO. The both-sides consent gate (R2-2)
+  still governs what actually carries over on an affirmative answer.
+- **Accepted residual, stated not implicit:** the prompt is B-observable evidence that *someone* used the
+  widget signed-out on this device. That leaks no fact, count, or class, and it is within C1's already-accepted
+  device-access residual — the widget already persists a transcript and consent state in this browser's
+  storage. Recorded here so a signer is not surprised by it.
 - **The question is about the shopper's own history, not about the facts.** An honest B who has never used
   the widget signed-out answers "no" without ever seeing A's data.
 - **Default is NO.** Silence, dismissal, a closed widget, or any unparseable answer means no carry-over. The
@@ -546,8 +585,113 @@ a deployment setting this ADR does not describe.
 
 ## Sign-offs still required
 
-- [ ] **`security-reviewer`** on Revision 2 — it has not been reviewed. Attack invariants 3, 5, 6 and 9
-      first: MINT/RENEW separation and the authorisation gate are what this revision rests on.
-- [ ] **Owner re-acceptance** — the 2026-08-06 acceptance was given on the pre-BLOCK text.
-- [ ] **Legal** — R2-2's both-sides Art-9 rule.
+- [x] **`security-reviewer`** on Revision 2 — **CLEARED 2026-08-06.** Three passes: BLOCK (6) → BLOCK (B1) →
+      **PASS on B1** after the prompt string itself was corrected (see *Revision 2 — third review* below).
+      The build-time §4.4 gate for the DESIGN is satisfied. Each task's eventual CODE still gets its own
+      review, and the named build-time conditions bind.
+- [ ] **Owner re-acceptance** — the 2026-08-06 acceptance was on pre-BLOCK text the reviews invalidated; the
+      design changed three times since. **Not given** — this security clearance is not owner acceptance.
+- [ ] **Legal** — R2-2's both-sides Art-9 rule. Confirmed by the reviewer as out of their competence and
+      still unmet.
 - [ ] **Named human merger** for the implementation PRs (governance-touching).
+
+---
+
+## Revision 2 — security review outcome — BLOCK (2026-08-06)
+
+Second `security-reviewer` pass, on Revision 2. **Verdict: BLOCK (scoped).** The token-identity foundation
+— R2-3 MINT/RENEW split, R2-4 separate secret, R2-5 `tid`, R2-6 endpoint, R2-7 revocation, R2-8 conditions —
+is design-sound and closed **ten of the twelve** code-level findings. **F1 is preserved.** The block is on
+the load-bearing carry-over (R2-1 / task 10), which the task list already sequences last: tasks 1–9 are
+design-approved and may proceed; **task 10 may not begin** until B1 is resolved and re-reviewed and legal +
+owner re-acceptance land.
+
+### B1 (HIGH, DESIGN) — the R2-1 prompt disclosed A's note count and health-status flag to B, pre-authorisation
+
+The prompt was specified to show "how many [notes], and whether any are health-related". On a shared
+browser that renders A's count and Art-9 status to B *before* B authorises anything and regardless of B's
+answer — the leak is in showing the prompt, not in the answer, so default-NO does not help. Internally
+inconsistent: R2-1 suppressed the fact *list* on the principle that recall never proactively dumps, then
+disclosed the count + health flag, which that same principle forbids. **This is my error, the third variant
+of the loss-vs-disclosure mistake in this ADR.** **Remediated above:** the prompt now asserts nothing about
+A's data and asks only about the shopper's own session history. The remediation needs its own review — the
+author's fix does not clear a security block.
+
+### Original F-1 … F-14 under Revision 2 — reviewer's disposition
+
+FIXED: **F-3** (MINT/RENEW split coherent; the `/chat` 401 refreshes only the *widget* token via
+`index.html:839→252-256`, so the guest credential is untouched — no orphan), **F-4** (separate
+`GUEST_TOKEN_SECRET`; separate shopper/widget secrets confirmed `server.ts:374,581,601`), **F-5** (`tid`,
+cross-checked like `server.ts:640`), **F-6** (POST + `no-store`), **F-7** (lazy mint), **F-8** (wording now
+matches code), **F-9** (dispositioned before carry-over), **F-11** (revocation is not a third link table —
+server-minted key, restrictive-only), **F-12** (C13 sequenced before task 10), **F-13** (Invariant 4
+unconditional). FIXED-design-LEGAL-open: **F-2** (both-sides rule implementable; `lookupConsent` reads any
+subject). PARTIALLY FIXED: **F-1** (durable-copy harm fixed by the authorisation gate; B1 was the residual
+leak, now remediated), **F-10** (acknowledged but under-weighted — fix the erasure-honesty message or erase
+both before carry-over ships). F-14: property holds; **Invariant 11 wording is imprecise** — the fail-open
+per-IP rate limiter does a bounded windowed counter write, so "writes nothing to any store" should read "no
+per-subject store write".
+
+### Implementation conditions the review named (bind during build, not blockers)
+
+- **Revocation and erasure MUST key off the token-derived `aid`, never `body.anonId`.** Today `/consent`
+  (`server.ts:1207-1208`) and `/forget` (`server.ts:1375-1376`) derive the guest subject from client-supplied
+  `body.anonId`; task 4's "drop `signals.anonId`" must convert these, or revoking on a *named* `aid` becomes
+  a C10 denial primitive.
+- **Task 4 must also convert the `mergeAccountConsent` sub-path** (`server.ts:1636-1642`) — a second
+  per-turn cross-subject consumer of `signals.anonId`, restrictive-direction so low severity, but a named
+  landmine that would silently reopen invariant 4/5 for the consent store.
+- **Re-check the revocation record at carry-over execution time** (TOCTOU), and handle a `/forget` racing a
+  carry-over (the account copy the shopper authorised survives — acceptable).
+- **F-3(b) wording:** "RENEW refuses an expired token" does NOT bound an *active* thief who refreshes before
+  each expiry; the only real control on a stolen token is R2-7 revocation, which depends on the victim
+  performing forget-me. Consistent with the explicitly-not-closed deliberate-theft case — clarify, don't
+  re-argue.
+- **F-7:** the endpoint checks memory posture server-side, never a client claim.
+
+### Reviewer's stated limits
+
+No build/test run (design review, code unwritten). Browser storage-partitioning/CHIPS not checked against a
+primary source. The two withdrawn branches not read; their failure modes taken from this ADR. **Legal's
+Art-9 both-sides question (R2-2) is out of the reviewer's competence and remains an unmet named gate.**
+
+### Path to unblock
+
+(1) The B1 remediation above → **re-review**; (2) **legal** on R2-2; (3) **owner re-acceptance**. Tasks 1–9
+may proceed in parallel; task 10 is gated on all three.
+
+---
+
+## Revision 2 — third review — PASS on B1 (2026-08-06)
+
+Third `security-reviewer` pass, scoped to the B1 remediation plus a regression check. **Verdict: PASS on
+B1.** The last security objection to task 10 is cleared.
+
+**What the second review's BLOCK actually caught, and why the first fix missed it:** the second-review B1
+remediation struck the count/health-flag clause in the *bullet* but left the quoted prompt *blockquote*
+live — and that blockquote ("…I have some notes from then…") still asserted A's notes exist. Fixing the
+reasoning while leaving the copied-from string intact was the disclosure blind spot a **fourth** time, in
+the one place an implementer copies from. The third-pass fix replaced the string itself.
+
+Confirmed by the reviewer against the file:
+- **Exactly one live prompt string in R2-1**, and it asserts nothing about A's data: *"Were you using this
+  device before without signing in? If so, I can carry that session's preferences over to your account."*
+  A question about **B's own** history, conditional offer, "preferences" (the widget's existing
+  ordinary-memory word, `index.html:414`) — no existence-of-facts, count, or Art-9 assertion. The old string
+  is struck; the second inline string was removed too.
+- **Client-side render trigger sound:** the prompt renders from guest-token presence in this browser's own
+  `localStorage` (`index.html:335,346-351,560`) with zero server read of the other namespace, and the build
+  condition forbidding a server precheck is present and correct.
+- **No regression:** default still NO, recorded-authorisation (inv 9) intact, both-sides consent (R2-2 /
+  inv 10) untouched, invariants 4/5 unaffected — the edit is confined to R2-1's bullets (`git diff HEAD`
+  `@@ -383,25 +383,39 @@`).
+
+**What this PASS does NOT do:** it clears the security gate for the *design* only. Task 10 remains gated on
+**legal** (R2-2 Art-9) and **owner re-acceptance**, both human and both unmet; and the eventual task-8/task-10
+**code** gets its own review, with the build-time conditions (token-derived `aid` not `body.anonId`; convert
+the `mergeAccountConsent` sub-path at `server.ts:1636-1642`; TOCTOU re-check; no-server-precheck at render)
+binding then. Reviewer ran no build/test — design review, no task-10 code exists.
+
+**Process note.** This design cleared security only after three passes, each catching a variant of the same
+disclosure error the author kept re-introducing. The clearance is the review's, not the author's — recorded
+that way deliberately.
