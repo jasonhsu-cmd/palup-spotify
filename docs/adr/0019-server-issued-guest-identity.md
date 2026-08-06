@@ -345,3 +345,209 @@ checked against a primary source.
       widened blast radius plus rotation-equals-data-loss. It cannot rest on the misread precedent.
 - [ ] **Named human merger** for the resulting PRs (governance-touching: HITL boundary set + the C-row
       residual list), CLAUDE.md §4 step 7.
+
+---
+
+# Revision 2 — the corrected specification (2026-08-06)
+
+**This section supersedes *Decision*, *Invariants* and *What this closes* above.** Those are kept verbatim,
+with the review's annotations, so the trail from first draft → BLOCK → correction stays legible. Where they
+disagree with this section, **this section wins**.
+
+**Status of Revision 2: awaiting re-review.** It addresses all six blockers and the eight conditions. It has
+**not** been through `security-reviewer`, and the owner's 2026-08-06 acceptance does **not** extend to it —
+both are listed in *Sign-offs still required*.
+
+## The honest starting point
+
+One finding changed how the rest of this design has to be written. **F-1 was not a detail; it was the design
+answering the wrong question.** The first draft asked "can an attacker *name* someone else's namespace?" and
+solved that. The threat C1 calls dominant is not naming — it is a **shared browser**, where the credential is
+legitimately present and no attacker exists at all. So Revision 2 separates two cases that the first draft
+conflated, and is explicit that only one of them is fixable:
+
+- **The accidental case** — a family/kiosk device where person B signs in and would silently absorb person
+  A's facts. Nobody is attacking. **This is the common case and Revision 2 fixes it.**
+- **The deliberate case** — someone who has stolen a guest token and wants the victim's facts. **Revision 2
+  does not fix this, and no mechanism in this design can.** It is exactly C1's accepted device-access
+  residual. Saying so plainly is the point; the first draft implied copy-not-move handled it, which is what
+  F-1 caught.
+
+## R2-1 (fixes F-1) — the carry-over is shopper-authorised, never automatic
+
+Two credentials co-existing on one request **is not authorisation**. The carry-over fires only after the
+shopper answers a question they can answer from their own knowledge:
+
+> "Have you chatted with me on this device before, without signing in? I have some notes from then — want me
+> to keep them on your account?"
+
+Deliberately designed:
+
+- **No fact text, and no list, is shown in the prompt.** Only that notes exist, how many, and whether any
+  are health-related. **This is where I must not repeat the F-1 mistake:** it is true that C1 already lets a
+  token-holder cause fact text to surface *through recall*, but recall surfaces what is contextually
+  relevant, whereas an enumerated list is a deliberate dump of everything. **Those are not equivalent**, so
+  the prompt discloses neither.
+- **The question is about the shopper's own history, not about the facts.** An honest B who has never used
+  the widget signed-out answers "no" without ever seeing A's data.
+- **Default is NO.** Silence, dismissal, a closed widget, or any unparseable answer means no carry-over. The
+  facts stay in the guest namespace and expire on the ordinary TTL.
+- **The answer is recorded** as a first-class consent-style artifact (actor, subject pair, timestamp,
+  outcome), so an operator can reconstruct who authorised what.
+
+## R2-2 (fixes F-2) — special-category needs consent on BOTH sides
+
+`merge.ts` currently reads `consent2` as the **destination account's** (`merge.ts:59-61,117`), which let B's
+own consent authorise migrating A's Art-9 data. Corrected rule:
+
+> A special-category fact carries over **only if the SOURCE subject recorded `memorySpecial === "in"` AND the
+> DESTINATION account records `memorySpecial === "in"`.** Either side unknown or out ⇒ the fact is dropped,
+> never promoted.
+
+Implementable as-is: `lookupConsent(store, {tenantId, anonId})`
+(`state-postgres/src/runtime-consent-store.ts:137`) takes any subject, so both records are readable on the
+same turn. `MergeCtx.consent2` becomes two fields so the asymmetry cannot be reintroduced by a caller passing
+the wrong one. **Legal sign-off is still required** — R2-1 prevents the cross-person case rather than
+consenting to it, but counsel must confirm that a both-sides rule is the right basis for Art-9 carry-over at
+all.
+
+## R2-3 (fixes F-3) — MINT and RENEW are two different operations
+
+The contradiction was treating one operation as both. Split them, and the invariants stop fighting:
+
+| | MINT | RENEW |
+|---|---|---|
+| Input | nothing from the client | the **existing token** — never a raw id |
+| Verifies | — | signature, `typ`, `tid`, **and expiry** |
+| Output | a **fresh** `generateGuestId` | the **same** `aid`, new `exp` |
+| Refuses | never | an expired, forged, wrong-`typ` or wrong-tenant token |
+
+**RENEW must refuse an expired token.** Without that the TTL is decorative and a stolen guest token is
+renewable forever. **The widget calls RENEW, not MINT, on a `/chat` 401** — the first draft's fatal detail,
+since `index.html:839` re-fetches on 401 and MINT would have silently orphaned the shopper's memory.
+
+The struck claim "a token that expires corresponds to facts that have also expired" is **withdrawn, not
+re-argued**: slide and fact re-stamping fire on different events, and storage eviction is independent of
+both. Consequence, stated rather than hidden: a shopper who loses their token **loses access to those facts**,
+which then expire unread on the TTL. They are not erasable by that shopper in the meantime — the same
+unnameable-namespace exposure `HITL-POLICY.md:258-261` already records.
+
+## R2-4 (fixes F-4) — a separate `GUEST_TOKEN_SECRET`
+
+No shared key. The imaginary precedent is struck above. A separate secret because sharing
+`WIDGET_TOKEN_SECRET` would mean (i) one compromise yields merchant impersonation **and** forgeable guest
+tokens for any `aid` — squatting restored, the exact failure this design claims to make impossible; and
+(ii) rotating it, today a one-hour blip, would become **permanent loss of every guest's memory**, since the
+`aid` is recoverable only from the token.
+
+The cost is real and is accepted knowingly: one more Secret Manager entry, and one more chance to repeat
+B5's missing-IAM-grant deploy failure. `DEPLOY.md` now documents that as a **three-step** procedure
+(create → **grant `roles/secretmanager.secretAccessor` to the runtime SA** → set the repo variable), which is
+precisely why this cost is now cheap to pay correctly.
+
+## R2-5 (fixes F-5) — the token is tenant-bound
+
+Claims become **`{typ:"guest", tid, aid, exp}`**. Verification rejects a token whose `tid` differs from the
+verified merchant principal, mirroring the shopper token's own cross-shop check (`server.ts:640`). Without
+`tid` one subject id would key `A::aid` and `B::aid`, breaking the per-tenant property ADR-0015 Inv 8 asserts
+and allowing cross-merchant re-identification through the unhashed id in `subject-index.ts:18`.
+
+## R2-6 (fixes F-6, F-7) — a POST on its own route, minted lazily
+
+- **`POST /widget/guest`**, not the cacheable `GET /widget/token`. A per-visitor secret must never share a
+  response with a per-tenant one that is identical for every visitor and therefore safely cacheable today.
+  `Cache-Control: no-store` on the response regardless. This also decouples the credential from the 401
+  re-fetch path (R2-3).
+- **Minted lazily, not at boot.** Only when the tenant's memory posture is live, preserving today's
+  behaviour where nothing mints until `/chat` reports `memoryEnabled` (`index.html:328-345,560`). Otherwise
+  every visitor of every merchant would be issued a durable identifier, pre-consent, for a feature that is
+  off everywhere — including in the EU, where ADR-0015 is consent-gated.
+- **MINT performs no store write** (F-14): pure HMAC, no audit row, no subject-index row, no consent row.
+  The per-IP limiter is fail-open (`rate-limit.ts:46-64`), so a write here would make it an unauthenticated
+  write amplifier. The first write under a new subject is already audited, which is the right place.
+
+## R2-7 (fixes F-11) — guest credentials are revocable
+
+An `aid → revokedAt` record, consulted at verify. Written on forget-me, so rotating away from a credential
+actually invalidates it instead of leaving a working copy in a thief's hands.
+
+Why this is not a third link table: it is keyed on a **server-minted** id, so it cannot be squatted (you
+cannot choose your `aid`, and you must hold the signed token to use it); and it moves in the **restrictive
+direction only**, so it can never become the permissive capability proven on `feat/c15-revocable-link`
+@ `d654c66`. It is written on an authenticated path, so it does not violate F-14's no-write-at-mint rule.
+
+## R2-8 (fixes F-9, F-10, F-12, F-13) — the conditions
+
+- **F-9:** `audit.ts:51`'s `merge` reversal path still says the guest namespace is DELETED. Copy-not-move
+  made that false. Fix it **before** any carry-over ships, or the first one writes a false reversal path into
+  an append-only log.
+- **F-10:** after a carry-over the facts exist twice, so a signed-out `/forget` clears one copy while the
+  widget says "I've cleared what I remembered" (`index.html:550`). Either erase both when both credentials
+  are present, or narrow the copy. **Added to *what this does NOT close* below.**
+- **F-12:** **C13 must close before the carry-over ships**, not as a follow-up. Its two shopper-principal
+  derivations (`server.ts:1605-1606` vs `verifiedShopperIdFor`, `server.ts:629-642`) now gate a
+  cross-subject copy, so a drift between them stops being a narrow inconsistency.
+- **F-13:** Invariant 4 is unconditional — **no flag**, the client-minted path is removed outright, because a
+  re-enable switch would be a squatting re-entry. Safe only inside the open window. The client stores the
+  **token only**, never the raw `aid` alongside it; and after signature verification the `aid` still passes
+  `validateAnonId` before it keys a namespace.
+
+## Revised invariants
+
+1. A guest token minted for `aid` A never yields a principal for `aid` B.
+2. A widget or shopper token presented as a guest token yields `anonymous`, and the mirror holds. Separate
+   secrets make this structural rather than claim-dependent (R2-4).
+3. **MINT** never returns a token for a client-supplied id; every call produces a fresh `generateGuestId`.
+4. With no guest token the guest subject is **absent** — no namespace read, no write, and **no fallback** to
+   `signals.anonId`.
+5. **F1 preserved:** a verified shopper cannot cause a namespace they do not hold a credential for to be read.
+6. **RENEW** preserves `aid`, issues a new `exp`, and **refuses an expired token**.
+7. A guest token is valid only at the tenant in its `tid` (R2-5).
+8. A revoked `aid` verifies as `anonymous` (R2-7).
+9. The carry-over requires a **recorded shopper authorisation** for that (`aid`, account) pair; absent it,
+   nothing is read or copied (R2-1).
+10. Special-category facts carry over only on **both** subjects' `memorySpecial === "in"` (R2-2).
+11. MINT writes nothing to any store (F-14).
+
+## Revised — what this closes
+
+| row | after Revision 2 |
+|---|---|
+| **C1** | **Narrowed**, not closed. An `anonId` alone is useless; a *token* is required. Residual: device access — unchanged and still accepted |
+| **C8** | **Narrowed.** A caller cannot *name* another subject; one whose token they hold, they can still present |
+| **C9** | **Still open.** The carry-over is itself a cross-subject read. It must audit **both** subject refs and record the read even when nothing moves — neither is true of `merge.ts` today |
+| **C10** | **Narrowed** on the same basis as C8 |
+| **C2** | **Strengthened** — the guest side becomes verified too |
+| **B12(b)** | **Unblocked**, gated on R2-1's authorisation |
+
+## Revised — what this does NOT close
+
+Device access · the **deliberate** stolen-token case · **C9** (see above) · **C7** · widget XSS reading the
+token from `localStorage` (a partitioned `HttpOnly` cookie would fix it; deliberately out of scope because
+its older-browser fallback becomes the weak path) · **F-10's double-copy erasure gap** · a shopper who loses
+their token loses access to those facts until they expire (R2-3) · **backups** — Cloud SQL backup handling is
+a deployment setting this ADR does not describe.
+
+## Revised task list
+
+1. `platform-ports`: `mintGuestToken` / `renewGuestToken` / `createGuestTokenIdentity` with `tid`, plus
+   contract tests for invariants 1, 2, 3, 6, 7.
+2. Provision `GUEST_TOKEN_SECRET` — three-step, per `DEPLOY.md`.
+3. `POST /widget/guest` (no-store, lazy, no store write) + the RENEW path; widget calls RENEW on 401.
+4. One shared guest-subject derivation helper; route `/chat`, `/consent`, `/forget` through it; drop
+   `signals.anonId` outright (invariants 4, 5).
+5. Revocation record + forget-me writes it (invariant 8).
+6. **Close C13.**
+7. Fix `audit.ts:51`'s false reversal path; make the merge audit both subject refs and record zero-move reads.
+8. Widget: store the token only; the R2-1 authorisation prompt.
+9. Migrate the 18 server-level test files + `e2e/tests/widget.spec.ts`.
+10. **Only then** the carry-over, with both-sides consent (invariants 9, 10) and F1's attack test green
+    throughout.
+
+## Sign-offs still required
+
+- [ ] **`security-reviewer`** on Revision 2 — it has not been reviewed. Attack invariants 3, 5, 6 and 9
+      first: MINT/RENEW separation and the authorisation gate are what this revision rests on.
+- [ ] **Owner re-acceptance** — the 2026-08-06 acceptance was given on the pre-BLOCK text.
+- [ ] **Legal** — R2-2's both-sides Art-9 rule.
+- [ ] **Named human merger** for the implementation PRs (governance-touching).
