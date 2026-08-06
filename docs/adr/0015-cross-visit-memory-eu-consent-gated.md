@@ -19,13 +19,14 @@
   region). This amendment resolves the *retention* opens only; the overall **Status stays Proposed** until
   the full `Accepted` + `MEMORY_ADR_ACCEPTED` go-live flip (named-owner + `security-reviewer` + legal,
   human-only). Implemented INERT in `packages/widget-memory` (`retention.ts`/`service.ts`/`consent.ts`).
-- **Amendment PROPOSED (2026-08-06 — owner approved reopening C1):**
+- **Amendment ACCEPTED (2026-08-06 — named owner; `security-reviewer` outstanding, gating implementation):**
   [`ADR-0019`](0019-server-issued-guest-identity.md) replaces the **client-minted** `anonId` with a
   **server-generated** id in a PalUp-signed `typ:"guest"` token, so the guest subject is derived from a
   *verified claim* rather than client input. It reverses this residual set's **C1** acceptance
   (2026-08-04) and would close **C8**, **C10**, moot **C9**, and unblock **B12(b)** — whose naive caller
   was built and reverted on 2026-08-06 for failing the F1 attack test by construction. **Nothing is closed
-  until ADR-0019 is Accepted and built**; the rows in `MEMORY-GO-LIVE-CHECKLIST.md` still record today's
+  until ADR-0019 is BUILT — it is now Accepted (2026-08-06) but unbuilt, and an accepted decision closes no
+  row**; the rows in `MEMORY-GO-LIVE-CHECKLIST.md` still record today's
   behaviour, and **C14 stays deferred**. Must land BEFORE `MEMORY_ADR_ACCEPTED` is flipped: no fact has ever
   been written, so the switch is free now and unfixable-without-trusting-the-client afterwards.
 - **Decisions recorded (owner, this revision):** (a) **scope = B** — special-category (health/allergy)
