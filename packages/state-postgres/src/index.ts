@@ -74,3 +74,10 @@ export {
   type RecordConsentInput,
   type LookupConsentInput,
 } from "./runtime-consent-store.js";
+export {
+  revokeGuest,
+  isGuestRevoked,
+  type GuestRevocationRecord,
+  type RevokeGuestInput,
+  type IsGuestRevokedInput,
+} from "./runtime-revocation-store.js";
