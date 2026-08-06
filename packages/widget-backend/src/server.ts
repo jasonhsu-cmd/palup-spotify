@@ -303,6 +303,24 @@ export async function buildServer(opts?: {
   // corpus unchanged.
   const merchantRegistry: MerchantRegistryPort | undefined =
     opts?.merchantRegistry ?? (runtimeResult.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : undefined);
+  // DDL BELONGS WITH CONSTRUCTION, NOT WITH A FEATURE FLAG. This used to live inside
+  // `if (SHOPIFY_INSTALL_ENABLED)` and `if (SHOPIFY_WEBHOOKS_ENABLED)` — C1's and C2's gates — while the
+  // registry above is constructed from `DATABASE_URL` alone and D1 made EVERY token mint read it. A
+  // deployment with a database but no Shopify app credentials therefore served a table nobody had
+  // created, and D1's (correct) fail-closed rule turned that into a 401 on every request. That is exactly
+  // what took staging down: /health reported `merchants: registry+env` while POST /widget/token returned
+  // 401 and the log said "registry lookup FAILED ... refusing to resolve". Two individually-correct halves,
+  // jointly fatal.
+  //
+  // Mirrors `createRuntimeStore` / `createVectorStore`, which have always migrated at construction — and
+  // whose tables consequently exist, which is also the evidence that the database role has CREATE and that
+  // no grant was ever missing.
+  //
+  // Capability-checked rather than `instanceof`: several suites inject minimal registry doubles, and
+  // "migrate whatever can be migrated" is the honest rule — a double without `migrate` is simply left
+  // alone. Idempotent (`CREATE TABLE IF NOT EXISTS`), so running it on every boot is free.
+  const migratable = merchantRegistry as { migrate?: () => Promise<void> } | undefined;
+  if (typeof migratable?.migrate === "function") await migratable.migrate();
   // D2 — `MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE`, hoisted here (they used to be parsed ~220 lines
   // below, next to `CONSENT_MODE`) because the resolver now needs them at construction. Both are pure env
   // reads with no I/O, so hoisting them changes nothing about boot ordering.
@@ -686,7 +704,6 @@ export async function buildServer(opts?: {
     // Idempotent DDL, exactly like the runtime/vector stores' own `migrate()` — one more table in the
     // existing database, never a new cloud resource. Only for the real Postgres adapter; an injected
     // registry (test seam) has no migration.
-    if (merchantRegistry instanceof PostgresMerchantRegistry) await merchantRegistry.migrate();
     registerShopifyInstallRoutes(app, {
       store,
       registry: merchantRegistry!,
@@ -730,7 +747,6 @@ export async function buildServer(opts?: {
   const SHOPIFY_WEBHOOKS_ENABLED = Boolean(shopifyAppSecretPresent && merchantRegistry);
   if (SHOPIFY_WEBHOOKS_ENABLED) {
     // Idempotent DDL, and only when C1 has not already run it (an injected registry has no migration).
-    if (!SHOPIFY_INSTALL_ENABLED && merchantRegistry instanceof PostgresMerchantRegistry) await merchantRegistry.migrate();
     registerShopifyWebhookRoutes(app, {
       store,
       registry: merchantRegistry!,
