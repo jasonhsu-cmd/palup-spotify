@@ -238,6 +238,7 @@ appended only when set, so an unset one never produces an empty env pair:
 | `SHOPIFY_APP_CLIENT_ID`, `SHOPIFY_INSTALL_REDIRECT_URI`, `SHOPIFY_INSTALL_REGION` | **all three or none.** A partial set **fails the deploy** with a `::error::` rather than leaving `/shopify/*` silently 404. An invalid `SHOPIFY_INSTALL_REGION` also fails the deploy |
 | `SHOPIFY_INSTALL_SCOPES`, `SHOPIFY_DELEGATE_SCOPES` | optional overrides of the code defaults |
 | `AUDIT_HMAC_SECRET_NAME` | the **name of an existing Secret Manager secret**, which is then mounted as `AUDIT_HMAC_SECRET` |
+| `GUEST_TOKEN_SECRET_NAME` | the **name of an existing Secret Manager secret**, mounted as `GUEST_TOKEN_SECRET` (ADR-0019 R2-4). Unset ⇒ not mounted ⇒ guest tokens cannot be minted — three-step procedure below, right after `AUDIT_HMAC_SECRET`'s |
 
 **What an operator must create before any of this does anything.** These are *not* provisioned by this
 change and the deploy does not create them:
@@ -282,7 +283,46 @@ change and the deploy does not create them:
    `roles/secretmanager.secretAccessor` for the `-compute@developer.gserviceaccount.com` service account,
    matching the other three secrets. **Changing this key later changes every `subjectRef`**, so old and new
    audit rows stop correlating for the same subject: provision it before the first real memory write.
-4. **The `pl_merchant` grants** (`GRANT SELECT, INSERT, UPDATE … TO palup_app`, deliberately no `DELETE`) —
+4. **A `GUEST_TOKEN_SECRET` secret** (ADR-0019 Revision 2, task 2 — `docs/adr/0019-server-issued-guest-identity.md`
+   R2-4), the HMAC key for the server-issued guest identity token. It is deliberately a **SEPARATE** secret
+   from `WIDGET_TOKEN_SECRET` and `SHOPPER_TOKEN_SECRET`: sharing a key would mean one compromise both
+   impersonates a merchant principal *and* forges a guest token for any `aid` — squatting restored, the
+   exact failure ADR-0019 exists to make structurally impossible. For the identical reason as
+   `AUDIT_HMAC_SECRET` above, the workflow does **not** hard-code a mount for it: a `--set-secrets`
+   reference to a secret that does not exist makes `gcloud run deploy` itself fail and would break
+   **every** merge until someone created it. It mounts only once an operator names an existing secret in
+   the `GUEST_TOKEN_SECRET_NAME` repo variable.
+
+   **It takes the SAME three steps as `AUDIT_HMAC_SECRET`, and skipping the third breaks every deploy the
+   same way** — the runtime service account needs `roles/secretmanager.secretAccessor` on the secret;
+   `roles/editor` (what it already has) does **not** include `secretmanager.versions.access`, so without
+   this grant the very next deploy fails at *Creating Revision*, exactly as B5 did on 2026-08-06.
+
+   ```bash
+   # 1. create the secret
+   openssl rand -base64 48 | gcloud secrets create guest-token-secret \
+     --data-file=- --replication-policy=automatic --project "$GCP_PROJECT"
+
+   # 2. GRANT THE RUNTIME SERVICE ACCOUNT ACCESS — the step that is easy to miss.
+   gcloud secrets add-iam-policy-binding guest-token-secret \
+     --member="serviceAccount:$(gcloud projects describe "$GCP_PROJECT" --format='value(projectNumber)')-compute@developer.gserviceaccount.com" \
+     --role=roles/secretmanager.secretAccessor --project "$GCP_PROJECT"
+
+   # 3. only now point the workflow at it
+   gh variable set GUEST_TOKEN_SECRET_NAME --body guest-token-secret
+   ```
+
+   Verify with `gcloud secrets get-iam-policy guest-token-secret` — it must list
+   `roles/secretmanager.secretAccessor` for the `-compute@developer.gserviceaccount.com` service account.
+
+   **Until all three steps are done, `GUEST_TOKEN_SECRET` is not mounted and guest tokens simply cannot be
+   minted — ADR-0019's guest-identity feature stays inert.** That is the **correct state today**: this is
+   only ADR-0019 task 2 (the conditional-mount wiring + this procedure). `mintGuestToken` /
+   `createGuestTokenIdentity` exist in `packages/platform-ports` (task 1, merged), but no server route
+   calls them yet — `POST /widget/guest` (task 3) is not built — so provisioning this secret does not, by
+   itself, mint anything. `MEMORY_ADR_ACCEPTED` is also still `false`
+   (`packages/widget-memory/src/flag.ts`).
+5. **The `pl_merchant` grants** (`GRANT SELECT, INSERT, UPDATE … TO palup_app`, deliberately no `DELETE`) —
    see *Cloud SQL* below. `migrate()` runs the DDL at boot only when the install or webhook routes are
    enabled, i.e. only once (1) exists.
 

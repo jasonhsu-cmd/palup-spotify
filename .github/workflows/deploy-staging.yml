@@ -89,6 +89,14 @@ jobs:
         #     SHOPPER_TOKEN_SECRET; `subjectRef` degrades to a literal "unreferenced (no AUDIT_HMAC_SECRET
         #     configured)" rather than throwing), so it is mounted only once an operator names an existing
         #     secret in the AUDIT_HMAC_SECRET_NAME repo variable.
+        #   • a hard-coded `--set-secrets GUEST_TOKEN_SECRET=…:latest` (ADR-0019 Revision 2, R2-4). This is
+        #     a SEPARATE secret from WIDGET_TOKEN_SECRET/SHOPPER_TOKEN_SECRET on purpose — sharing a key
+        #     would mean one compromise forges both a merchant principal and any guest `aid`. Same
+        #     fail-safe as AUDIT_HMAC_SECRET immediately above: a reference to a secret that does not exist
+        #     makes `gcloud run deploy` itself fail, so this mounts only once an operator names an existing
+        #     secret in the GUEST_TOKEN_SECRET_NAME repo variable. Absent ⇒ not mounted ⇒ guest tokens
+        #     simply cannot be minted — correct while the feature is unbuilt/off (ADR-0019 task 10 is still
+        #     gated on legal + owner re-acceptance; MEMORY_ADR_ACCEPTED is false).
         env:
           GCP_PROJECT: ${{ vars.GCP_PROJECT }}
           GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
@@ -108,6 +116,9 @@ jobs:
           SHOPIFY_DELEGATE_SCOPES: ${{ vars.SHOPIFY_DELEGATE_SCOPES }}
           # The NAME of an existing Secret Manager secret, not the secret. Empty ⇒ not mounted.
           AUDIT_HMAC_SECRET_NAME: ${{ vars.AUDIT_HMAC_SECRET_NAME }}
+          # ADR-0019 R2-4 — same pattern: the NAME of an existing Secret Manager secret, not the secret
+          # itself. Empty ⇒ not mounted ⇒ guest tokens cannot be minted.
+          GUEST_TOKEN_SECRET_NAME: ${{ vars.GUEST_TOKEN_SECRET_NAME }}
         run: |
           set -euo pipefail
 
@@ -139,6 +150,19 @@ jobs:
             echo "AUDIT_HMAC_SECRET not mounted — GDPR-erasure audit rows will record" \
                  "'unreferenced (no AUDIT_HMAC_SECRET configured)' instead of a keyed subject ref." \
                  "Create the secret, then set the AUDIT_HMAC_SECRET_NAME repo variable to its name."
+          fi
+
+          # ADR-0019 R2-4 — a SEPARATE secret from WIDGET_TOKEN_SECRET/SHOPPER_TOKEN_SECRET, so a
+          # compromise of one token type cannot forge guest tokens. Same fail-safe as AUDIT_HMAC_SECRET
+          # above: naming a Secret Manager secret that does not exist makes `gcloud run deploy` itself
+          # fail, so this mounts only once an operator names an existing secret here.
+          if [ -n "${GUEST_TOKEN_SECRET_NAME:-}" ]; then
+            SECRETS="${SECRETS},GUEST_TOKEN_SECRET=${GUEST_TOKEN_SECRET_NAME}:latest"
+            echo "mounting GUEST_TOKEN_SECRET from secret '${GUEST_TOKEN_SECRET_NAME}'"
+          else
+            echo "GUEST_TOKEN_SECRET not mounted — guest tokens cannot be minted (ADR-0019); the" \
+                 "guest-identity feature stays inert. Create the secret, then set the" \
+                 "GUEST_TOKEN_SECRET_NAME repo variable to its name."
           fi
 
           # ^@^ delimiter: pairs split on '@', so the JSON values below keep their quotes and colons.
