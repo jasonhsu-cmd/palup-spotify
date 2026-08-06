@@ -535,7 +535,7 @@ than silently succeeding over nothing.
 
 ```bash
 # 1. Create the job. `--command pnpm --args sweep` overrides the image's CMD ["pnpm","backend"];
-#    pnpm is on PATH in the runtime image (Dockerfile: corepack enable, PNPM_HOME=/pnpm).
+#    the `pnpm` launcher is on PATH in the runtime image (Dockerfile: corepack enable, PNPM_HOME=/pnpm).
 gcloud run jobs deploy palup-retention-sweep \
   --source . --region us-central1 --project palup-jason \
   --command pnpm --args sweep \
