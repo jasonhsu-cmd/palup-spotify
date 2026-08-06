@@ -232,9 +232,11 @@ that consent was given.
 ## Q10 — Region is a deploy-level setting, not per-shopper
 
 **What the code does.** `MERCHANT_REGION` is read once at boot from the environment and defaults to `"us"`
-(`server.ts:293-296`); it drives both the consent regime (`consent.ts:50-51`, via `signals.region`) and the
-widget's consent-card mode (`CONSENT_MODE`, `server.ts:304`). The code comment states plainly that region
-"should become geo-derived from the request". So an EU-resident shopper browsing a US-configured merchant is
+(`server.ts:337-338`); it drives both the consent regime (`consent-rules.ts:44`, via `signals.region`) and the
+widget's consent-card mode. That mode is **no longer a boot constant**: the former `CONSENT_MODE` env-derived
+constant was removed (D2) and the mode is now computed **per response** as `consentModeFor(<merchant region>)`
+(`merchant-resolver.ts`; wiring at `server.ts:708-718`). The code comment states plainly that region "should
+become geo-derived from the request". So an EU-resident shopper browsing a US-configured merchant is
 processed under the US opt-out regime.
 
 **The decision.** Is deploy-level regional configuration acceptable at launch (e.g. because the initial market
