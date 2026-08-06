@@ -43,10 +43,15 @@ describe("deriveServingSignals — client signals are untrusted", () => {
     expect(out.anonId).toBeUndefined(); // fails validateAnonId's charset/length bound — dropped, never thrown
   });
 
-  it("ADR-0015 T12: a well-formed client-sent anonId IS accepted via validateAnonId", () => {
+  it("ADR-0019 task 4 (invariant 4): a client-sent anonId is IGNORED — the subject is ctx.memorySubject ONLY", () => {
     const validId = generateGuestId();
-    const out = deriveServingSignals({ anonId: validId } as Signals, ctx);
-    expect(out.anonId).toBe(validId);
+    // Client sends a well-formed anonId but there is no server-derived subject → it is NOT accepted.
+    // (Superseded ADR-0015 T12, which accepted the client value via validateAnonId — that fallback was the
+    // F1 hole the tasks-4/9 review caught; the guest subject now comes only from a verified x-guest-token,
+    // surfaced here as `ctx.memorySubject`.)
+    expect(deriveServingSignals({ anonId: validId } as Signals, ctx).anonId).toBeUndefined();
+    // When the server HAS derived a subject, that — and only that — is used, regardless of the client value.
+    expect(deriveServingSignals({ anonId: validId } as Signals, { ...ctx, memorySubject: "acct:demo:1" }).anonId).toBe("acct:demo:1");
   });
 
   it("sources kill state from the server context, not the client", () => {

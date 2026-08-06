@@ -1675,9 +1675,10 @@ export async function buildServer(opts?: {
       // overhead; skipping it keeps the inert /chat path byte-identical to pre-PR-11a (consentRecord stays
       // undefined ⇒ deriveServingSignals's own `ctx.consent?.… ?? "unknown"` default, i.e. the old hardcode).
       //
-      // SUBJECT-SCOPED AUTH: the memory subject is `acct:<shopperId>` for a server-VERIFIED shopper and
-      // the validated client `anonId` only for an anonymous guest (memorySubjectId, widget-memory/
-      // identity.ts). Derived ONCE here and reused for the consent lookup, remember(), and the retention
+      // SUBJECT-SCOPED AUTH (ADR-0019 task 4): the memory subject is `acct:<shopperId>` for a
+      // server-VERIFIED shopper, else the anonId of a VERIFIED `x-guest-token` (`guestAnonIdFrom`), and
+      // nothing otherwise — a client `signals.anonId`/`body.anonId` is NEVER a subject (invariant 4).
+      // Derived ONCE here and reused for the consent lookup, remember(), and the retention
       // sweep below, so all three can never disagree about whose memory this turn touches. Uses
       // `shopperPrincipal` (resolved above from the x-shopper-token, gated on `verified`) rather than
       // anything client-asserted.

@@ -58,6 +58,7 @@ describe("B7 — sliding retention actually fires through /chat (it never could 
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
     process.env.MERCHANT_REGION = "us";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET; // needed so the server can verify the x-guest-token
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
     const app = await buildServer({ store, vectorPort: vector, modelPort: quietModel, memoryEnabled: true });
@@ -66,7 +67,9 @@ describe("B7 — sliding retention actually fires through /chat (it never could 
     const res = await app.inject({
       method: "POST",
       url: "/chat",
-      payload: { sessionId: "s-renew-us", message: "what do you recommend for dry skin?", signals: { anonId: ANON_ID }, widgetToken: DEMO_WIDGET_TOKEN },
+      // Task 4: the returning shopper's subject comes from the verified guest token, not signals.anonId.
+      headers: guestTokenHeader(GUEST_SECRET, "demo", ANON_ID),
+      payload: { sessionId: "s-renew-us", message: "what do you recommend for dry skin?", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
     });
     expect(res.statusCode).toBe(200);
 

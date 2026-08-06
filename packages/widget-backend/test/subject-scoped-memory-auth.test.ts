@@ -193,6 +193,49 @@ describe("subject-scoped auth — a verified shopper keys off acct:<shopperId>, 
     await app.close();
   });
 
+  it("THE ATTACK (recall), NO TOKEN AT ALL: a caller with no shopper AND no guest token cannot recall by naming a victim's anonId (invariant 4 — the signals.ts fallback the tasks-4/9 review caught)", async () => {
+    // The reviewer's uncovered case: memory ON, no x-shopper-token, no x-guest-token, just a client
+    // signals.anonId = victim. Before the fix, `deriveServingSignals` fell back to the client anonId
+    // (signals.ts) so recall keyed off it. Now memorySubject is undefined ⇒ signals.anonId undefined ⇒
+    // no recall, no read of the victim namespace.
+    armAuth();
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const victimNs = subjectNamespace("demo", VICTIM_ANON_ID);
+    await vector.upsert(victimNs, [
+      {
+        id: "victim-secret",
+        text: "shopper is allergic to tree nuts",
+        metadata: { text: "shopper is allergic to tree nuts", class: "ordinary", expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+      },
+    ]);
+    const queried: string[] = [];
+    const origQuery = vector.query.bind(vector);
+    vi.spyOn(vector, "query").mockImplementation(async (ns: string, q: never) => {
+      queried.push(ns);
+      return origQuery(ns, q);
+    });
+    const modelCalls: ModelRequest[] = [];
+    const modelPort: ModelPort = { async complete(req: ModelRequest) { modelCalls.push(req); return { text: "ok", model: "spy" }; } };
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      // NO x-shopper-token, NO x-guest-token — only the merchant widget token and a client-named anonId.
+      payload: {
+        sessionId: "attack-recall-notoken",
+        message: "what do you remember about me?",
+        signals: { cart: "empty", anonId: VICTIM_ANON_ID },
+        widgetToken: DEMO_WIDGET_TOKEN,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(queried, "the victim namespace was read from a bare client anonId — invariant 4 fallback").not.toContain(victimNs);
+    const everythingSent = modelCalls.flatMap((c) => c.messages.map((m) => m.content)).join(" ");
+    expect(everythingSent).not.toContain("tree nuts");
+    await app.close();
+  });
+
   // REVISED (ADR-0019 task 4/9) — this test's premise changed: a guest no longer gets ANY subject from a
   // bare client-supplied anonId. The guest subject now comes EXCLUSIVELY from a VERIFIED `x-guest-token`
   // (invariant 4). Intent preserved: a guest presenting a valid token for THEIR OWN anonId can still
