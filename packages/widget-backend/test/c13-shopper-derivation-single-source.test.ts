@@ -7,9 +7,13 @@ import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // ADR-0019 task 6 — C13 is CLOSED: `/chat` and `/consent`/`/forget` now derive the verified shopper through
 // ONE resolver (`resolveVerifiedShopper`), so the security gates (flag, merchant principal, verified,
-// cross-shop tenant check) cannot drift between routes. This test would FAIL if someone re-inlined one
-// derivation and it diverged — it presents the SAME shopper tokens to /chat and /consent and asserts both
-// make the SAME trust decision.
+// cross-shop tenant check) cannot drift between routes.
+//
+// SCOPE OF THIS FILE (stated precisely, per the task-6 security review): it exercises the shared resolver
+// through the `verifiedShopperIdFor` projection that `/consent` (and `/forget`) use, asserting the
+// own-tenant-honored vs foreign-tenant-rejected decision. `/chat`'s use of the SAME resolver — the other
+// half of C13 — is exercised with an `x-shopper-token` in `consent-restrictive-merge.test.ts` (POST /chat).
+// Together they cover both callers of the single source; this file is the `/consent`-side pin.
 
 const WIDGET_SECRET = "wsecret";
 const SHOPPER_SECRET = "shopper-secret";
