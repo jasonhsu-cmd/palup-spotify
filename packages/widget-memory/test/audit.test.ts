@@ -119,3 +119,70 @@ describe("subjectRef — keyed HMAC when hmacKey is supplied", () => {
     expect(refOf(withKey)).toBe(subjectRef("acme", "acct:shopify:acme:12345", "secret"));
   });
 });
+
+// F-8/C9 (ADR-0019 Revision 2, task 7) — the merge audit must carry BOTH the source (guest) and
+// destination (account) subject refs, never a raw id, so an operator can reconstruct WHICH ACCOUNT
+// received a guest's facts. `destAnonId` is the minimal extension: optional, additive, every existing
+// caller (retention.ts/service.ts/erasure.ts) is unaffected because none of them pass it.
+describe("buildMemoryAudit — destAnonId (F-8: the merge audit records BOTH subjects)", () => {
+  it("with a destAnonId, the audit input carries a SECOND hashed ref (destSubjectRef), distinct from the source subjectRef", () => {
+    const input = buildMemoryAudit({
+      action: "merge",
+      tenantId: "acme",
+      anonId: "guest-source-id",
+      destAnonId: "acct:acct-dest-id",
+      count: 3,
+      hmacKey: "test-key",
+    });
+    const inputField = input.input as { subjectRef?: string; destSubjectRef?: string };
+    expect(typeof inputField.subjectRef).toBe("string");
+    expect(typeof inputField.destSubjectRef).toBe("string");
+    expect(inputField.destSubjectRef).not.toBe(inputField.subjectRef);
+    expect(inputField.destSubjectRef).toBe(subjectRef("acme", "acct:acct-dest-id", "test-key"));
+  });
+
+  it("never leaks the raw source id or the raw destination id into the serialized audit", () => {
+    const input = buildMemoryAudit({
+      action: "merge",
+      tenantId: "acme",
+      anonId: "guest-super-secret-id",
+      destAnonId: "acct:account-super-secret-id",
+      count: 1,
+      hmacKey: "test-key",
+    });
+    const serialized = JSON.stringify(input);
+    expect(serialized).not.toContain("guest-super-secret-id");
+    expect(serialized).not.toContain("account-super-secret-id");
+  });
+
+  it("without a destAnonId, behaves exactly as before — no destSubjectRef key at all (backward-compatible for every other action)", () => {
+    const input = buildMemoryAudit({ action: "recall", tenantId: "acme", anonId: "guest-1" });
+    const inputField = input.input as { destSubjectRef?: string };
+    expect(inputField.destSubjectRef).toBeUndefined();
+  });
+});
+
+// F-9 (ADR-0019 Revision 2, task 7) — copy-not-move (shipped separately) left the guest namespace
+// INTACT, but the merge reversal path still claimed it was DELETED. An append-only audit log must never
+// carry a false reversal path.
+describe("REVERSAL_PATHS['merge'] (F-9 — copy-not-move made the old wording false)", () => {
+  it("no longer claims the guest namespace is deleted on merge", () => {
+    const input = buildMemoryAudit({ action: "merge", tenantId: "acme", anonId: "guest-1", count: 1 });
+    expect(input.reversalPath).toBeDefined();
+    expect(input.reversalPath!.toLowerCase()).not.toContain("deleted");
+  });
+
+  it("describes reality: the guest namespace is unchanged/intact and expires on the ordinary TTL", () => {
+    const input = buildMemoryAudit({ action: "merge", tenantId: "acme", anonId: "guest-1", count: 1 });
+    const path = input.reversalPath!.toLowerCase();
+    expect(path).toMatch(/intact|unchanged|survives|left alone/);
+    expect(path).toContain("ttl");
+  });
+
+  it("describes the actual reversal for the account copy: erasable via the account subject's own erasure path", () => {
+    const input = buildMemoryAudit({ action: "merge", tenantId: "acme", anonId: "guest-1", count: 1 });
+    const path = input.reversalPath!.toLowerCase();
+    expect(path).toContain("account");
+    expect(path).toMatch(/erasure|erasable|withdraw/);
+  });
+});

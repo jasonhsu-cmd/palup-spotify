@@ -27,10 +27,15 @@ import { subjectNamespace, accountSubjectId } from "../src/identity.js";
 // rather than by a delete this code could get wrong or an attacker could trigger.
 //
 // IDEMPOTENCE IS NOW BY CONTENT, NOT BY DELETION. The old function was self-limiting because it erased
-// its own source. Copying is not, so this migrates only ids the account does NOT already hold, and
-// writes NO audit when nothing moved. That matters concretely: the production caller runs on every
-// verified turn that presents a guest `anonId`, so an unconditional audit would put a `merge` row in the
-// immutable log on every single chat message.
+// its own source. Copying is not, so this migrates only ids the account does NOT already hold.
+//
+// CORRECTED (F-8/C9, ADR-0019 Revision 2 task 7): an earlier version of this file said a no-op call
+// "writes NO audit when nothing moved". That was itself the C9 defect — the carry-over is a
+// CROSS-SUBJECT READ of the guest namespace regardless of whether anything ends up migrating, and an
+// unaudited cross-subject read is unacceptable. Every call now writes exactly one `merge` audit row,
+// carrying BOTH the source (guest) and destination (account) subject refs; the `count` field is what
+// distinguishes a real migration (count > 0) from a read that moved nothing (count 0). See merge.ts and
+// audit.test.ts's `destAnonId` tests.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 const TENANT = "acme";
@@ -93,7 +98,12 @@ describe("B12 — idempotence is by CONTENT now, because the source is no longer
     expect(await idsIn(vector, acctNs())).toEqual(["f1", "f2"]);
   });
 
-  it("a no-op merge writes NO audit row — the caller runs per turn, so an unconditional audit would spam the immutable log", async () => {
+  // CORRECTED (F-8/C9, ADR-0019 Revision 2 task 7): the earlier version of this test asserted a no-op
+  // merge wrote NO audit row, on the reasoning that an unconditional audit would spam the immutable log.
+  // That is exactly the defect C9 names: a no-op merge is still a CROSS-SUBJECT READ of the guest
+  // namespace by/for an account, and an unaudited cross-subject read is unacceptable regardless of
+  // whether anything moved. Every call now audits — count reflects what actually moved (0 for a no-op).
+  it("every merge call audits, including no-op calls that move nothing — a cross-subject read is never silent (F-8/C9)", async () => {
     const { vector, merge, mergeRows } = fixture();
     await seed(vector, guestNs(), [{ id: "f1", text: "a" }]);
     await merge();
@@ -101,7 +111,9 @@ describe("B12 — idempotence is by CONTENT now, because the source is no longer
 
     await merge();
     await merge();
-    expect(await mergeRows(), "every turn added a merge row even though nothing moved").toHaveLength(1);
+    expect(await mergeRows(), "a no-op merge is still a cross-subject read and must still be audited").toHaveLength(3);
+    const rows = await mergeRows();
+    expect(rows.map((r) => (r as { decision?: { count?: number } }).decision?.count)).toEqual([1, 0, 0]);
   });
 
   it("a guest fact added AFTER the first sign-in still follows on the next merge — 'all facts', not 'the first batch'", async () => {
@@ -123,11 +135,16 @@ describe("B12 — idempotence is by CONTENT now, because the source is no longer
     expect(await idsIn(vector, acctNs())).toEqual(["f1", "own"]);
   });
 
-  it("an empty guest namespace is a cheap no-op: nothing written, nothing audited", async () => {
+  // CORRECTED (F-8/C9): an empty guest namespace still gets READ (that read is the cross-subject
+  // exposure C9 is about), so it is cheap in the sense of "nothing written to the vector store" but it
+  // is NOT unaudited — the read itself is recorded, with count 0 and both subject refs.
+  it("an empty guest namespace writes nothing to the vector store, but the read IS still audited (count 0)", async () => {
     const { vector, merge, mergeRows } = fixture();
     expect((await merge()).merged).toBe(0);
     expect(await idsIn(vector, acctNs())).toEqual([]);
-    expect(await mergeRows()).toHaveLength(0);
+    const rows = await mergeRows();
+    expect(rows, "the empty-namespace read is an unaudited cross-subject read (C9)").toHaveLength(1);
+    expect((rows[0] as { decision?: { count?: number } }).decision?.count).toBe(0);
   });
 });
 

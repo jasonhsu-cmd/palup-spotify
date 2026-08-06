@@ -48,7 +48,8 @@ const REVERSAL_PATHS: Record<MemoryAction, string> = {
   recall: "n/a — read-only, no state change",
   "erase.subject": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
   "erase.tenant": "n/a — erasure is itself the reversal path (right-to-erasure is irreversible by design)",
-  merge: "irreversible: the pre-merge anon-id namespace is DELETED on merge; the migrated facts live under the account namespace, from which the account's own erasure/withdrawal applies",
+  merge:
+    "the guest namespace is left INTACT (copy-not-move) — it is unchanged by the merge and expires on its own ordinary TTL sweep; the copy that landed in the account namespace is reversible via the account subject's own erasure path (erase.subject) or by withdrawing Consent 2",
   ttl_sweep: "n/a — expiry is policy-driven; a fresh consent grant starts a new TTL",
   "ttl_renew":
     "shopper may withdraw (manage-memory / forget-me) — a withdrawn fact is never renewed again and ages out on its current expiry; erasure purges it immediately",
@@ -74,19 +75,33 @@ export function subjectRef(tenantId: string, anonId: string, hmacKey?: string): 
  * the sensitivity class + a count (NEVER the fact text itself). `hmacKey` is threaded through to
  * `subjectRef` (see its own doc comment) — supply it whenever one is configured, required for an
  * `acct:` subject ref to be more than an unsalted, brute-forceable hash.
+ *
+ * `destAnonId` (F-8, ADR-0019 Revision 2 task 7): a SECOND subject, used only by `action:"merge"` today.
+ * The carry-over copies a guest's facts INTO an account, so a single `subjectRef` for the source (guest)
+ * left an operator unable to tell WHICH ACCOUNT received them (C9's complaint). When supplied, the
+ * input also carries `destSubjectRef` — hashed through the SAME keyed `subjectRef` helper, never a raw
+ * id. Optional and additive: every other action/caller (retention.ts/service.ts/erasure.ts) omits it and
+ * is unaffected — no `destSubjectRef` key appears on their audit input at all.
  */
 export function buildMemoryAudit(args: {
   action: MemoryAction;
   tenantId: string;
   anonId: string;
+  destAnonId?: string;
   factClass?: FactClass;
   count?: number;
   hmacKey?: string;
 }): AuditInput {
+  const input: { subjectRef: string; destSubjectRef?: string } = {
+    subjectRef: subjectRef(args.tenantId, args.anonId, args.hmacKey),
+  };
+  if (args.destAnonId !== undefined) {
+    input.destSubjectRef = subjectRef(args.tenantId, args.destAnonId, args.hmacKey);
+  }
   return {
     actor: ACTOR,
     action: args.action,
-    input: { subjectRef: subjectRef(args.tenantId, args.anonId, args.hmacKey) },
+    input,
     decision: { class: args.factClass, count: args.count ?? 0 },
     reversalPath: REVERSAL_PATHS[args.action],
   };
