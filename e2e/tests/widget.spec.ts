@@ -1190,18 +1190,53 @@ test.describe("E3 — product cards (mocked /chat seam)", () => {
     expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
   });
 
-  test("the card block is a list, and never claims a capability the widget does not have", async ({ page }) => {
-    // There is no `url` on `Product` (platform-ports/src/grounding-port.ts) and the widget has no cart or
-    // checkout, so a card must not be a link and must not offer to add anything to a basket.
+  test("the card block is a list, and offers only a low-key cart LINK — never an aggressive CTA or a button", async ({ page }) => {
+    // C1 reversed the original #185 "no link ever" posture: a cart deep link now genuinely exists (built
+    // server-side from the tenant's shop domain + the card's variant), so a card MAY carry a quiet "View
+    // in cart" link. What stays forbidden: a <button> (a control the widget can't back), and aggressive
+    // "Buy now / add to cart / checkout" CTA copy. The link opens the store's pre-filled cart; it never
+    // adds or purchases on the shopper's behalf.
     await chatWith(page, {
-      recommendedProductCards: [{ productId: "serum-vc", title: "Vitamin-C Brightening Serum", price: "$34", availableForSale: true }],
+      recommendedProductCards: [
+        { productId: "serum-vc", title: "Vitamin-C Brightening Serum", price: "$34", availableForSale: true, cartUrl: "https://palup-skincare-jason.myshopify.com/cart/4567:1" },
+      ],
     });
     await send(page);
     const block = page.getByTestId("product-cards");
     await expect(block).toHaveAttribute("role", "list");
-    expect(await block.locator("a").count()).toBe(0);
+    // The ONLY link is the cart link, it points at the exact permalink the server sent, opens safely in a
+    // new tab, and reads as a quiet link — not a "Buy now" control.
+    const cart = block.getByTestId("product-card-cart");
+    await expect(cart).toHaveText("View in cart");
+    await expect(cart).toHaveAttribute("href", "https://palup-skincare-jason.myshopify.com/cart/4567:1");
+    await expect(cart).toHaveAttribute("target", "_blank");
+    await expect(cart).toHaveAttribute("rel", "noopener noreferrer");
     expect(await block.locator("button").count()).toBe(0);
     await expect(block).not.toContainText(/add to (cart|bag)|buy now|checkout/i);
+  });
+
+  test("a card with NO cartUrl renders no cart link (the affordance appears only when the server sends the URL)", async ({ page }) => {
+    await chatWith(page, {
+      recommendedProductCards: [{ productId: "serum-vc", title: "Vitamin-C Brightening Serum", price: "$34", availableForSale: true }],
+    });
+    await send(page);
+    expect(await page.getByTestId("product-cards").getByTestId("product-card-cart").count()).toBe(0);
+    expect(await page.getByTestId("product-cards").locator("a").count()).toBe(0);
+  });
+
+  test("a spoofed/cross-origin cartUrl is REFUSED by the client — never becomes an href", async ({ page }) => {
+    // Defence in depth: even though the server fail-safes the URL, a compromised response must not be able
+    // to smuggle a javascript:/cross-origin link onto the shopper's screen. The widget re-validates shape.
+    await chatWith(page, {
+      recommendedProductCards: [
+        { productId: "a", title: "Bad JS URL", price: "$1", cartUrl: "javascript:alert(1)" },
+        { productId: "b", title: "Cross-origin", price: "$2", cartUrl: "https://evil.example.com/cart/1:1" },
+        { productId: "c", title: "Not a cart path", price: "$3", cartUrl: "https://shop.myshopify.com/checkout" },
+      ],
+    });
+    await send(page);
+    expect(await page.getByTestId("product-cards").getByTestId("product-card-cart").count()).toBe(0);
+    expect(await page.getByTestId("product-cards").locator("a").count()).toBe(0);
   });
 });
 
