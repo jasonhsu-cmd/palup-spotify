@@ -1,5 +1,19 @@
-import type { Decision } from "@palup/widget-brain";
+import type { Decision, RecommendedProductCard } from "@palup/widget-brain";
 import type { TelemetryEvent } from "@palup/platform-ports";
+import { cartPermalink } from "./cart-permalink.js";
+
+/**
+ * C1 — the wire form of a product card: the neutral brain card PLUS an optional platform cart deep link.
+ *
+ * `cartUrl` lives HERE, on the wire card, and NEVER on `RecommendedProductCard` (widget-brain), because it
+ * is a Shopify-specific URL and the brain is vendor-neutral (grounding-port carries no link either). The
+ * neutral opaque `variantId` crosses the port; this widget-backend layer — which alone knows the tenant's
+ * shop domain — turns it into the URL. A LINK ONLY: it pre-fills a cart, it never adds-to-cart or purchases
+ * on the shopper's behalf (reversible → auto per the C1 governance tag; never auto-purchase).
+ */
+export interface WireProductCard extends RecommendedProductCard {
+  cartUrl?: string;
+}
 
 // E3 — THE FORWARDING LAYER between `Decision` and the two places a cited product leaves this process:
 // the /chat response body, and the per-turn telemetry row.
@@ -38,15 +52,33 @@ import type { TelemetryEvent } from "@palup/platform-ports";
 // render an empty card block, and in telemetry it would look like a MEASURED zero rather than an
 // unmeasured turn.
 
-/** What `POST /chat` adds to its response body for a turn that cited products. `{}` when it did not. */
+/**
+ * What `POST /chat` adds to its response body for a turn that cited products. `{}` when it did not.
+ *
+ * C1 — `cartBase` is the tenant's shop domain (from the merchant resolver). When it is present AND a card
+ * carries a `variantId`, the card gains a `cartUrl` cart permalink; otherwise the card is passed through
+ * unchanged. `cartPermalink` is fail-safe (undefined on a bad host / non-numeric variant / bad qty), so a
+ * malformed or cross-origin URL is never emitted. `cartBase` absent (no domain, or grounding disabled for
+ * the tenant) ⇒ no card ever gains a link — the pre-C1 behaviour exactly.
+ *
+ * Flag-off invariant preserved: cards are absent on every turn today (PRODUCT_CARDS defaults false), so
+ * this returns `{}` and the serialized body stays byte-identical — chat-wire-flag-off.test.ts still holds.
+ */
 export function recommendationWireFields(
   d: Pick<Decision, "recommendedProducts" | "recommendedProductCards">,
-): Pick<Decision, "recommendedProducts" | "recommendedProductCards"> {
+  cartBase?: string,
+): { recommendedProducts?: string[]; recommendedProductCards?: WireProductCard[] } {
+  const cards = d.recommendedProductCards;
+  const wireCards: WireProductCard[] | undefined =
+    cards && cards.length > 0
+      ? cards.map((c) => {
+          const cartUrl = cartBase && c.variantId ? cartPermalink(cartBase, c.variantId) : undefined;
+          return cartUrl ? { ...c, cartUrl } : c;
+        })
+      : undefined;
   return {
     ...(d.recommendedProducts && d.recommendedProducts.length > 0 ? { recommendedProducts: d.recommendedProducts } : {}),
-    ...(d.recommendedProductCards && d.recommendedProductCards.length > 0
-      ? { recommendedProductCards: d.recommendedProductCards }
-      : {}),
+    ...(wireCards ? { recommendedProductCards: wireCards } : {}),
   };
 }
 

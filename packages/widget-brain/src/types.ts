@@ -198,10 +198,15 @@ export interface CatalogRetrieverPort {
  * never from a second `getContext` call, and never from the client. So a card cannot show a price the
  * model was not told, cannot outlive the turn that produced it, and cannot disagree with the reply.
  *
- * DELIBERATELY NO URL, and no "add to cart". `Product` (platform-ports/src/grounding-port.ts) carries no
- * link, and this system has no cart or checkout capability at all — a card that offered either would be
- * a shopper-facing claim about something that does not exist (the class of defect #185 removed and
- * `widget-backend/test/shopper-promise-guard.ts` now guards).
+ * NO URL ON THIS NEUTRAL CARD, on purpose — but the capability is no longer absent. `Product`
+ * (platform-ports/src/grounding-port.ts) carries a vendor-neutral opaque `variantId`, and the
+ * widget-backend WIRE layer (recommendation-telemetry.ts `WireProductCard`) turns it into a real Shopify
+ * `cart` permalink using the tenant's shop domain. The URL is built THERE — the layer that knows the
+ * platform — and never here, so the brain stays vendor-neutral. That is why C1 REVERSED the original #185
+ * "no link ever" posture: a cart link WAS a false promise when no cart deep-link existed; now it is a true,
+ * reversible affordance (a link the shopper chooses to follow — never an auto-add or purchase). What is
+ * still forbidden is aggressive "Buy now / add to cart" CTA copy and any claim of a capability that does
+ * NOT exist — `widget-backend/test/shopper-promise-guard.ts` guards that class.
  */
 export interface RecommendedProductCard {
   /** The merchant's own product id — the same value that appears in `Decision.recommendedProducts`. */
@@ -210,9 +215,9 @@ export interface RecommendedProductCard {
   title: string;
   /** The merchant's DISPLAY price string, e.g. "$34" — copied, never parsed, computed or converted. */
   price: string;
-  /** C1 — the opaque variant id for a one-tap cart deep link, copied from `Product.variantId`. The WIDGET
-   *  builds the platform cart URL from it client-side (no URL crosses to this neutral card). Absent when
-   *  the source reports no variant. */
+  /** C1 — the opaque variant id for a one-tap cart deep link, copied from `Product.variantId`. The
+   *  widget-backend WIRE layer builds the platform cart URL from it (it knows the tenant's shop domain);
+   *  no URL is ever placed on this neutral card. Absent when the source reports no variant. */
   variantId?: string;
   /**
    * THREE-STATE, mirroring `Product.availableForSale` and the CATALOG rule the model reads:

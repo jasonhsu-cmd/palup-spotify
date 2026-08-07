@@ -83,6 +83,44 @@ describe("E3 — /chat wire forwarding", () => {
   });
 });
 
+describe("C1 — cart permalink is attached at the WIRE layer, never the neutral card", () => {
+  const shop = "palup-skincare-jason.myshopify.com";
+  const card = { productId: "serum-vc", title: "Vitamin-C Brightening Serum", price: "$34", variantId: "4567", availableForSale: true };
+
+  it("attaches a cartUrl when the shop domain AND a variantId are both present", () => {
+    const out = recommendationWireFields({ ...base, recommendedProductCards: [card] }, shop);
+    expect(out.recommendedProductCards).toEqual([{ ...card, cartUrl: `https://${shop}/cart/4567:1` }]);
+  });
+
+  it("attaches NO cartUrl when there is no shop domain (non-grounded tenant) — the pre-C1 card, unchanged", () => {
+    const out = recommendationWireFields({ ...base, recommendedProductCards: [card] });
+    expect(out.recommendedProductCards).toEqual([card]);
+    expect(JSON.stringify(out)).not.toContain("cartUrl");
+  });
+
+  it("attaches NO cartUrl to a card without a variantId, even with a shop domain", () => {
+    const noVariant = { productId: "x", title: "No Variant", price: "$9" };
+    const out = recommendationWireFields({ ...base, recommendedProductCards: [noVariant] }, shop);
+    expect(out.recommendedProductCards).toEqual([noVariant]);
+  });
+
+  it("emits NO cartUrl for a non-Shopify host — cartPermalink fail-safes to undefined (no cross-origin URL)", () => {
+    const out = recommendationWireFields({ ...base, recommendedProductCards: [card] }, "evil.example.com");
+    expect(out.recommendedProductCards).toEqual([card]);
+  });
+
+  it("mixes: only the carded-with-variant entry gains a link; others pass through", () => {
+    const noVariant = { productId: "x", title: "No Variant", price: "$9" };
+    const out = recommendationWireFields({ ...base, recommendedProductCards: [card, noVariant] }, shop);
+    expect(out.recommendedProductCards).toEqual([{ ...card, cartUrl: `https://${shop}/cart/4567:1` }, noVariant]);
+  });
+
+  it("flag-off byte-identity holds even when a shop domain is supplied — no cards ⇒ no key", () => {
+    const response = { reply: "hi", flags: [] as string[], ...recommendationWireFields(base, shop) };
+    expect(JSON.stringify(response)).toBe(JSON.stringify({ reply: "hi", flags: [] }));
+  });
+});
+
 describe("E3 — the constraint is written next to the thing it governs, not only in the PR", () => {
   const read = (p: string): string => readFileSync(`${REPO}/${p}`, "utf8");
 

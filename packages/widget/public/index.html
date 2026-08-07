@@ -149,6 +149,9 @@
   .rec-t{ font-size:13px; color:var(--fg); font-weight:600; flex:1 1 auto; min-width:0; overflow-wrap:anywhere }
   .rec-p{ font-size:13px; color:var(--fg); flex:0 0 auto }
   .rec-a{ flex-basis:100%; font-size:11.5px; color:var(--muted) }
+  /* C1 — the low-key cart link: its own row, small, a quiet brand-coloured text link (theme-safe via
+     --brand-text), never a filled "Buy now" button. */
+  .rec-cart{ flex-basis:100%; font-size:11.5px; color:var(--brand-text); text-decoration:underline; text-underline-offset:2px }
 
   /* ---- prefers-reduced-motion — MUST STAY LAST IN THIS STYLESHEET -------------------------------
      A media query contributes no specificity, so this block only wins by being declared after the
@@ -809,14 +812,30 @@
       if (c.availableForSale === true || c.availableForSale === false){
         const a = document.createElement("span");
         a.className = "rec-a"; a.setAttribute("data-testid","product-card-availability");
-        // WORDED AS A STATUS, NOT A CALL TO ACTION, and the E2E test that asserts no add-to-cart/buy-now
-        // copy is what forced it: the CATALOG line the model reads says "available to buy now", but on a
-        // bordered card next to a price "Buy now" is such a strong CTA convention that it reads as a
-        // control — and there is no control, because this widget has no cart or checkout. These two words
-        // carry the same fact with no implied affordance, and neither states or implies a stock COUNT
-        // (§8a invariant 11 forbids manufactured scarcity, and no count exists in the data anyway).
+        // WORDED AS A STATUS, NOT A CALL TO ACTION: the CATALOG line the model reads says "available to
+        // buy now", but on a bordered card next to a price "Buy now" is such a strong CTA convention that
+        // it reads as an aggressive control. The card DOES now offer a cart affordance (the low-key "View
+        // in cart" link below, C1), but availability stays a plain status and the aggressive "Buy now"
+        // framing is still avoided — the E2E test still forbids add-to-cart / buy-now / checkout copy.
+        // Neither word states or implies a stock COUNT (§8a invariant 11 forbids manufactured scarcity, and
+        // no count exists in the data anyway).
         a.textContent = c.availableForSale ? "Available" : "Currently unavailable";
         li.appendChild(a);
+      }
+      // C1 — a LOW-KEY cart link, only when the server sent a cartUrl (built server-side from the tenant's
+      // shop domain + the card's variant; the widget never builds it, since it doesn't know the store's
+      // domain). Rendered as a quiet text link, NOT a "Buy now" button: it opens the store's pre-filled
+      // cart in a new tab, and the shopper still chooses to act — a link, never an auto-add or purchase.
+      // DEFENCE IN DEPTH: even though the server already fail-safes the URL, the client re-validates the
+      // exact `https://<shop>.myshopify.com/cart/<digits>:<digits>` shape before it ever becomes an href,
+      // so a spoofed/compromised response cannot smuggle a `javascript:`/cross-origin link onto the screen.
+      if (typeof c.cartUrl === "string" && /^https:\/\/[a-z0-9][a-z0-9-]*\.myshopify\.com\/cart\/[0-9]{1,20}:[0-9]{1,2}$/i.test(c.cartUrl)){
+        const link = document.createElement("a");
+        link.className = "rec-cart"; link.setAttribute("data-testid","product-card-cart");
+        link.href = c.cartUrl;
+        link.target = "_blank"; link.rel = "noopener noreferrer";
+        link.textContent = "View in cart";
+        li.appendChild(link);
       }
       list.appendChild(li); rendered++;
     }

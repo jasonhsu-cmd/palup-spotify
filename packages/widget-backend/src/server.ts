@@ -2144,6 +2144,11 @@ export async function buildServer(opts?: {
         void store.trimStream(serving, "telemetry", TELEMETRY_KEEP_LAST).catch(() => {}); // F-4: bound growth
 
       }
+      // C1 — the tenant's shop domain, resolved ONLY when this turn actually carries cards, so the extra
+      // lookup never runs on the (current, flag-off) card-less path. `shopDomainFor` returns undefined
+      // unless grounding is enabled for the tenant, so a non-grounded tenant's cards get no cart link. The
+      // wire layer turns it + each card's opaque variantId into a fail-safe cart permalink.
+      const cartBase = d.recommendedProductCards?.length ? await merchants.shopDomainFor(tenantId) : undefined;
       // Only the shopper-safe fields leave the server (no system prompt, no raw signals echo).
       // PR-11b: memoryEnabled/consentMode are the widget's SOLE source of truth for whether to ever mint
       // a durable anonId or show any consent UI — read-only, never client-settable.
@@ -2174,7 +2179,7 @@ export async function buildServer(opts?: {
         // see a paraphrase, so it UNDER-REPORTS, and a client rendering these as "everything the
         // assistant suggested" will under-display. They are NOT a billing basis — see
         // recommendation-telemetry.ts.
-        ...recommendationWireFields(d),
+        ...recommendationWireFields(d, cartBase),
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
