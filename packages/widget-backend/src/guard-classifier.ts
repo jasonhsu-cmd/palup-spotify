@@ -1,6 +1,11 @@
 import type { ModelPort } from "@palup/platform-ports";
 import type { SafetyClass } from "@palup/widget-brain";
 
+// Metering agent type for this classifier's per-turn model call — DISTINCT from the shopper turn's
+// RUNTIME_AGENT_TYPE and the catalog retriever's, so a cost review (ADR-0013) can tell guardrail
+// classification spend apart from generation and embedding.
+export const GUARD_CLASSIFIER_AGENT_TYPE = "guard-classifier";
+
 // T1 phase 2 — the SERVER-side combined guardrail classifier. One model-port call per turn (the chosen
 // "one combined call" + "model detect+classify every turn" posture) turns a shopper message in ANY
 // language into the server-derived signals phase-1's brain already consumes: a safety class and an

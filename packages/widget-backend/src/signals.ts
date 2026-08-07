@@ -1,4 +1,4 @@
-import type { Signals, CartLineItemRef, Consent } from "@palup/widget-brain";
+import type { Signals, CartLineItemRef, Consent, SafetyClass } from "@palup/widget-brain";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -131,6 +131,14 @@ export interface ServingSignalContext {
    * request that carries line items — a run-time behaviour change governed by docs/HITL-POLICY.md §5.
    */
   cartLineItemsEnabled?: boolean;
+  /**
+   * T1 — the server-side guard classifier's result for THIS turn (computed by classifyGuardSignals in
+   * server.ts BEFORE this function runs, only when SERVER_GUARD_SIGNALS is on; absent otherwise). Passed
+   * through here so the SERVER is the sole origin of `Signals.serverSafetyClass`/`serverInjection` — the
+   * client's own values are never read (this function rebuilds), exactly like tenantId/kill/consent.
+   */
+  serverSafetyClass?: SafetyClass;
+  serverInjection?: boolean;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -219,5 +227,10 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // CALLER's record, not the victim's. Dropping the fallback closes it: no credential ⇒ no
     // `signals.anonId` ⇒ no recall, no write.
     anonId: ctx.memorySubject,
+    // T1 — server-derived guard signals, SPREAD so the key is ABSENT (not present-and-undefined) whenever
+    // the classifier didn't run / said "none" — keeping the SERVER_GUARD_SIGNALS-off path byte-identical
+    // and a client-supplied value dropped (rebuild-not-spread; pinned by signals-safety-trust.test.ts).
+    ...(ctx.serverSafetyClass !== undefined ? { serverSafetyClass: ctx.serverSafetyClass } : {}),
+    ...(ctx.serverInjection !== undefined ? { serverInjection: ctx.serverInjection } : {}),
   };
 }

@@ -12,6 +12,7 @@ import {
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY, normalizeHistory } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
+import { classifyGuardSignals, GUARD_CLASSIFIER_AGENT_TYPE } from "./guard-classifier.js";
 import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort } from "@palup/platform-ports";
 import {
   createWidgetTokenIdentity,
@@ -507,6 +508,12 @@ export async function buildServer(opts?: {
   const PRODUCT_CITATIONS = process.env.PRODUCT_CITATIONS === "true";
   const PRODUCT_CARDS = process.env.PRODUCT_CARDS === "true";
   const CART_LINE_ITEMS = process.env.CART_LINE_ITEMS === "true";
+  // T1 phase 2 — SERVER_GUARD_SIGNALS: run the server-side language-agnostic guard classifier per turn and
+  // thread its result into signals (the brain merges it most-conservative-wins with its keyword floor).
+  // Same governed posture-flag discipline as the Wave 4 flags: env-read here, default OFF, and turning it
+  // on in a real environment is a human promotion (HITL-POLICY §5) — it changes what the shopper agent
+  // detects. OFF ⇒ the classifier never runs (zero spend) and the guardrail ladder is byte-identical.
+  const SERVER_GUARD_SIGNALS = process.env.SERVER_GUARD_SIGNALS === "true";
   // E3 attaches display fields to the ids E2 cited, so cards WITHOUT citations is inert rather than
   // broken (recommendation-telemetry.ts returns `{}` for a Decision with no cited products). Warn like
   // SUBSCRIPTION_SELFSERVE's own unmet-prerequisite check above — the degrade is safe, never a bypass.
@@ -525,6 +532,12 @@ export async function buildServer(opts?: {
         model: createMeteringModelPort(activeModelPort, telemetry, { agentType: CATALOG_RETRIEVAL_AGENT_TYPE }),
       })
     : undefined;
+  // T1 phase 2 — the guard classifier's model port, metered under its OWN agentType so its per-turn
+  // classification spend is distinguishable from generation/embedding (ADR-0013). Constructed ONLY when
+  // SERVER_GUARD_SIGNALS is on, so a deployment that never enables it spends nothing.
+  const guardClassifierModel = SERVER_GUARD_SIGNALS
+    ? createMeteringModelPort(activeModelPort, telemetry, { agentType: GUARD_CLASSIFIER_AGENT_TYPE })
+    : undefined;
   // THE COST OF WIRING THESE, MADE VISIBLE. Before this change, enabling Wave 4 required editing code;
   // now an env var suffices. That is a real reduction in friction and it is the honest trade for making
   // shadow/canary possible at all (HITL-POLICY §5). The compensating control is that an enabled flag can
@@ -532,7 +545,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ CATALOG_RETRIEVAL, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS })
+  const wave4On = Object.entries({ CATALOG_RETRIEVAL, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -566,6 +579,9 @@ export async function buildServer(opts?: {
         // Positions 11–16 — Wave 4. `catalogRetriever` is `undefined` unless CATALOG_RETRIEVAL is set, so
         // the retrieval rung has nothing to call and falls back to the full catalog exactly as before.
         catalogRetriever, CATALOG_RETRIEVAL, CATALOG_RETRIEVAL_K, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS,
+        // Position 17 — T1 SERVER_GUARD_SIGNALS. The brain consults signals.serverSafetyClass/serverInjection
+        // (populated per-turn below when this is on) alongside its keyword floor, most-conservative-wins.
+        SERVER_GUARD_SIGNALS,
       );
       brains.set(key, b);
     }
@@ -1867,10 +1883,23 @@ export async function buildServer(opts?: {
         classifyFact(message).class === "special"
           ? "special"
           : undefined;
+      // T1 phase 2 — server-side guard classification for THIS turn, run BEFORE deriveServingSignals so the
+      // result is server-authored and unspoofable. Runs only when SERVER_GUARD_SIGNALS is on (⇒
+      // guardClassifierModel defined), never while halted, and never on an empty/proactive turn (no message
+      // to classify). classifyGuardSignals never throws — a failure returns a degraded result (no signal ⇒
+      // the brain falls back to its keyword floor).
+      const guardSignals =
+        guardClassifierModel && !kill && message.trim() !== ""
+          ? await classifyGuardSignals(guardClassifierModel, message, tenantId)
+          : undefined;
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
         kill: Boolean(kill),
         atCap: Boolean(costCap),
+        // T1 — server-authored guard signals (undefined ⇒ deriveServingSignals omits the keys, so the
+        // flag-off path stays byte-identical). `safetyClass` is undefined when the classifier said "none".
+        serverSafetyClass: guardSignals?.safetyClass,
+        serverInjection: guardSignals?.injection,
         // E4 — THE SECOND GATE. `cartLineItemsEnabled` appears twice by design: here it decides whether a
         // client's `cartItems` is PARSED AT ALL (parsing untrusted input is its own attack surface), and in
         // `createBrain` above it decides whether the parsed value is CONSUMED. One env var must open both,
