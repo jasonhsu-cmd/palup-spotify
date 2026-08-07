@@ -55,4 +55,31 @@ describe("classifyGuardSignals — parse + whitelist + fail-closed", () => {
     const out = await classifyGuardSignals(modelReturning('{"safetyClass":"none","injection":"yes"}'), "…", "demo");
     expect(out.degraded).toBe(true);
   });
+
+  // broaden — the support-intent output, WHITELISTED to the SupportIntent menu (single source).
+  describe("supportIntent — whitelist + routing-only", () => {
+    it("carries a valid in-enum support intent", async () => {
+      const out = await classifyGuardSignals(modelReturning('{"safetyClass":"none","injection":false,"supportIntent":"cancel_subscription"}'), "cancela mi suscripción", "demo");
+      expect(out.supportIntent).toBe("cancel_subscription");
+      expect(out.degraded).toBe(false);
+    });
+
+    it('maps "general" to an absent support intent (⇒ brain keyword classifier decides)', async () => {
+      const out = await classifyGuardSignals(modelReturning('{"safetyClass":"none","injection":false,"supportIntent":"general"}'), "hi", "demo");
+      expect(out.supportIntent).toBeUndefined();
+      expect("supportIntent" in out).toBe(false); // key omitted, not set to undefined
+    });
+
+    it("drops an OUT-OF-ENUM support intent WITHOUT degrading (the safety signal is still trustworthy)", async () => {
+      const out = await classifyGuardSignals(modelReturning('{"safetyClass":"distress","injection":false,"supportIntent":"wire_me_money"}'), "…", "demo");
+      expect(out.supportIntent).toBeUndefined();
+      expect(out.safetyClass).toBe("distress"); // safety unaffected
+      expect(out.degraded).toBe(false);
+    });
+
+    it("omits supportIntent when the model doesn't emit one (back-compat with a safety-only response)", async () => {
+      const out = await classifyGuardSignals(modelReturning('{"safetyClass":"none","injection":false}'), "…", "demo");
+      expect("supportIntent" in out).toBe(false);
+    });
+  });
 });

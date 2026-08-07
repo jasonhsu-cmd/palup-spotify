@@ -1,5 +1,9 @@
 // Domain types for the shopper widget brain. Mirrors docs/design/shopper-widget.md §4–§6, §6A.
 
+// Type-only import (erased at compile) — support.ts type-imports HistoryTurn from here, so this is a
+// types-only cycle with no runtime edge. SupportIntent is defined next to handleSupport, where it is used.
+import type { SupportIntent } from "./support.js";
+
 export type Mood =
   | "frustrated"
   | "upset"
@@ -282,6 +286,16 @@ export interface Signals {
    */
   serverSafetyClass?: SafetyClass;
   serverInjection?: boolean;
+  /**
+   * broaden — the SERVER-derived support intent (guard-classifier.ts), the language-agnostic producer for
+   * `handleSupport`'s `serverIntent` seam (#247). Same trust boundary as the fields above: `deriveServing-
+   * Signals` REBUILDS it, so a client-supplied value is dropped. Consumed ONLY when `serverGuardSignals-
+   * Enabled` is on; absent ⇒ the brain's keyword `classifySupportIntent` decides (byte-identical). It only
+   * ROUTES to a handler — every money/subscription action stays gated in handleSupport (ownership,
+   * refund-ceiling HITL, the two ADR-0016 skip/pause controls, cancel→escalate), so this can never make an
+   * action auto-execute regardless of what the classifier emitted.
+   */
+  serverSupportIntent?: SupportIntent;
   /** Marketing consent per channel; drives outbound gating (TCPA/CAN-SPAM). Also carries the two
    * cross-visit MEMORY consent tiers (ADR-0015 T12: `memoryOrdinary` = Consent 1, `memorySpecial` =
    * Consent 2 — independent of each other and of email/sms). Server/CMP-derived, never client-set;

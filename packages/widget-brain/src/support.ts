@@ -6,11 +6,20 @@ import type { HistoryTurn } from "./types.js";
 // address changes are blocked after shipment; disputes and stuck conversations escalate; nothing about
 // status/policy is fabricated. Replies are deterministic + grounded so they can't drift.
 
-export type SupportIntent =
-  | "order_status" | "return" | "refund" | "exchange" | "cancel_order"
-  | "cancel_subscription" | "skip_subscription" | "lost_package" | "wrong_item"
-  | "damaged" | "policy_q" | "how_to" | "ingredients" | "address_change"
-  | "billing" | "escalate_stuck" | "general";
+// The closed SupportIntent menu as a runtime array so a SERVER-side classifier (guard-classifier.ts, the
+// #247 producer) can whitelist against the SAME single source the type is derived from — no hand-kept
+// duplicate to drift (the SAFETY_CLASSES/SAFETY_GROUPS lesson). An intent is a ROUTING label only; every
+// money/subscription ACTION stays gated in handleSupport (ownership check, refund-ceiling HITL, the two
+// ADR-0016 skip/pause controls, cancel→escalate), so which producer chose the intent never authorizes an
+// action on its own.
+export const SUPPORT_INTENTS = [
+  "order_status", "return", "refund", "exchange", "cancel_order",
+  "cancel_subscription", "skip_subscription", "lost_package", "wrong_item",
+  "damaged", "policy_q", "how_to", "ingredients", "address_change",
+  "billing", "escalate_stuck", "general",
+] as const;
+
+export type SupportIntent = (typeof SUPPORT_INTENTS)[number];
 
 export interface SupportResult { reply: string; escalate: boolean; flags: string[] }
 
