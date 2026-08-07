@@ -153,8 +153,15 @@ export async function handleSupport(
   mood?: string,
   selfServe?: SubscriptionSelfServeOptions,
   context?: SupportContext,
+  // T1 phase 3 — OPTIONAL server-derived support intent (from the language-agnostic guard classifier).
+  // When present it OVERRIDES the internal English `classifySupportIntent`, so a non-English
+  // return/refund/order-status/cancel request routes to the correct deterministic handler (ownership
+  // check, refund-ceiling HITL, fixture-data guard) instead of defaulting to "general". Absent ⇒
+  // byte-identical to today (the English keyword classifier decides). Typed to the closed `SupportIntent`
+  // union, so a caller can only pass a valid intent; the producing classifier whitelists at its boundary.
+  serverIntent?: SupportIntent,
 ): Promise<SupportResult> {
-  const intent = classifySupportIntent(message, Boolean(selfServe?.enabled));
+  const intent = serverIntent ?? classifySupportIntent(message, Boolean(selfServe?.enabled));
   const flags = ["mode_support", "no_pitch", `support:${intent}`];
 
   // FIXTURE-DATA GUARD — a claim about THIS shopper's account may never come from demo data.
