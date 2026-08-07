@@ -2,6 +2,7 @@ export {
   createBrain,
   DEFAULT_CATALOG_RETRIEVAL_K,
   DEFAULT_POLICY,
+  MONEY_GATED_PITCHES,
   normalizeHistory,
   HISTORY_MAX_TURNS,
   HISTORY_MAX_CHARS,

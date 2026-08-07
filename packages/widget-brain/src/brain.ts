@@ -348,6 +348,16 @@ const PITCH_PLAYBOOK: Record<PitchKind, string> = {
   none: "",
 };
 
+// NN#1 money boundary, made STRUCTURAL. These three pitch kinds move plan/price/promotion
+// (docs/HITL-POLICY.md Q1), so a run-time agent may NEVER emit them autonomously — they are
+// reachable ONLY through a human-approved enablement path (Approval Center; SUBSCRIPTION_SELFSERVE
+// ADR-0016; grounded merchant promos surfaced by the grounding layer, not manufactured here).
+// `selectPitch` — the autonomous reactive selector — has no branch that returns any of them, and
+// `select-pitch-money-boundary.test.ts` pins that exhaustively so a future branch cannot cross the
+// money boundary unnoticed (§3 — the OpenClaw failure mode PalUp exists to prevent). This is a
+// guard on the AUTONOMOUS path only; it does not remove the governed enablement path.
+export const MONEY_GATED_PITCHES = ["upsell", "subscription", "promo"] as const satisfies readonly PitchKind[];
+
 // ── Persona-style directives (PR-3, flag DISPOSITION_STYLE) ──────────────────────────────────────
 // Shopper-disposition program: consume signals.personaStyle — either SUPPLIED by the caller (PR-3,
 // always wins) or auto-detected by classifyPersonaStyle below (PR-5, flag DISPOSITION_CLASSIFIER) —
