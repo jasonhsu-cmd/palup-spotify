@@ -29,6 +29,8 @@ export interface StorefrontProductNode {
   priceRange?: { minVariantPrice?: { amount?: string; currencyCode?: string } };
   /** `Product.availableForSale: Boolean!` — see the GroundingPort field for why not `quantityAvailable`. */
   availableForSale?: boolean;
+  /** C1 — the first variant's node, for the one-tap cart permalink id. `variants(first: 1) { nodes { id } }`. */
+  variants?: { nodes?: { id?: string }[] };
 }
 
 /**
@@ -71,6 +73,20 @@ function formatPrice(p?: { amount?: string; currencyCode?: string }): string {
  * from the response), so a mis-scoped fetch can't smuggle another tenant's id past the cache's
  * tenant-match assertion. Bounds merchant text. Tested against synthetic fixtures.
  */
+// C1 — the numeric Shopify variant id for a one-tap cart permalink, from the first variant's GID
+// (gid://shopify/ProductVariant/4567 -> "4567"), else undefined. Shopify-specific extraction stays in THIS
+// adapter; only the opaque neutral `Product.variantId` crosses the port (the widget builds the cart URL).
+// NOT LIVE-VERIFIED: `variants(first:1){nodes{id}}` was added to the query after the 2026-07-31 live check
+// (like the pagination fields), so it is mock-tested here — confirm against the live Storefront API
+// (drift-check / model:smoke) before relying on it.
+function firstVariantNumericId(node: StorefrontProductNode): string | undefined {
+  const gid = node.variants?.nodes?.[0]?.id;
+  if (typeof gid !== "string") return undefined;
+  const m = gid.match(/\/ProductVariant\/(\d{1,20})$/);
+  if (m) return m[1];
+  return /^\d{1,20}$/.test(gid) ? gid : undefined;
+}
+
 export function mapStorefrontToContext(tenantId: string, data: StorefrontData): GroundingContext {
   const products: Product[] = (data.products?.nodes ?? []).map((n) => ({
     id: n.id,
@@ -82,6 +98,8 @@ export function mapStorefrontToContext(tenantId: string, data: StorefrontData): 
     // UNDEFINED rather than collapsing to false, because "unknown" and "not purchasable" are different
     // claims to make to a shopper and the prompt handles them differently.
     availableForSale: typeof n.availableForSale === "boolean" ? n.availableForSale : undefined,
+    // C1 — the opaque cart/checkout variant id (undefined when the source reports no variant).
+    variantId: firstVariantNumericId(n),
   }));
   const policy: StorePolicy = {
     returns: bound(data.shop?.refundPolicy?.body, MAX_DESC),
@@ -184,7 +202,7 @@ export interface StorefrontEgressLog {
   maxPages?: number;
 }
 
-const PRODUCT_PAGE_FIELDS = `nodes { id title description tags availableForSale priceRange { minVariantPrice { amount currencyCode } } }
+const PRODUCT_PAGE_FIELDS = `nodes { id title description tags availableForSale priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } } }
     pageInfo { hasNextPage endCursor }`;
 
 /** Page 1: shop/policy + the first product page. `$after` is nullable — null means "start of the list". */

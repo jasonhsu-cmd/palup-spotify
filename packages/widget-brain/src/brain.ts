@@ -672,6 +672,8 @@ function buildProductCards(citedIds: readonly string[], rendered: readonly Produ
       title: sanitizeGroundingText(p.title, CATALOG_TITLE_MAX),
       price: sanitizeGroundingText(p.price, CATALOG_PRICE_MAX),
       ...(typeof p.availableForSale === "boolean" ? { availableForSale: p.availableForSale } : {}),
+      // C1 — carry the opaque cart variant id (neutral) so the widget can build a one-tap cart link.
+      ...(p.variantId ? { variantId: p.variantId } : {}),
     });
   }
   return cards;

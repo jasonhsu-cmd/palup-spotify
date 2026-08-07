@@ -9,6 +9,13 @@ export interface Product {
   description: string;
   /** Display price string, e.g. "$28". The agent never invents or alters this. */
   price: string;
+  /**
+   * C1 (ADR-0020) — the opaque per-product id used to build a one-tap cart/checkout deep link (a Shopify
+   * variant id today). VENDOR-NEUTRAL: an opaque string the widget interpolates client-side; the
+   * platform-specific cart-URL format is built in the WIDGET, never in the neutral layers (portability —
+   * no Shopify URL crosses this port). OPTIONAL: absent when the source reports no purchasable variant.
+   */
+  variantId?: string;
   tags?: string[];
   /**
    * The product's ingredient list (INCI / label order), if the merchant publishes one. OPTIONAL:
