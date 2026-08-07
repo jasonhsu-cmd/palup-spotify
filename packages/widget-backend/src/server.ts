@@ -28,9 +28,10 @@ import {
   createStoreTelemetry,
   createMeteringModelPort,
   createRedactingModelPort,
+  createInMemoryProductFactsStore,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -514,6 +515,11 @@ export async function buildServer(opts?: {
   // on in a real environment is a human promotion (HITL-POLICY §5) — it changes what the shopper agent
   // detects. OFF ⇒ the classifier never runs (zero spend) and the guardrail ladder is byte-identical.
   const SERVER_GUARD_SIGNALS = process.env.SERVER_GUARD_SIGNALS === "true";
+  // A1b — PRODUCT_FACTS_HYDRATION: overlay the Tier-2 store's fresh price/availability onto the retrieved
+  // subset before it renders. Same governed posture-flag discipline: env-read here, default OFF, turning it
+  // on is a human promotion (HITL-POLICY §5) — it changes which PRICE the agent quotes (money/NN#1). OFF ⇒
+  // the store is never constructed, getMany never runs, and the CATALOG block is byte-identical.
+  const PRODUCT_FACTS_HYDRATION = process.env.PRODUCT_FACTS_HYDRATION === "true";
   // E3 attaches display fields to the ids E2 cited, so cards WITHOUT citations is inert rather than
   // broken (recommendation-telemetry.ts returns `{}` for a Decision with no cited products). Warn like
   // SUBSCRIPTION_SELFSERVE's own unmet-prerequisite check above — the degrade is safe, never a bypass.
@@ -538,6 +544,17 @@ export async function buildServer(opts?: {
   const guardClassifierModel = SERVER_GUARD_SIGNALS
     ? createMeteringModelPort(activeModelPort, telemetry, { agentType: GUARD_CLASSIFIER_AGENT_TYPE })
     : undefined;
+  // A1b — the Tier-2 product-facts store, constructed ONLY when PRODUCT_FACTS_HYDRATION is on (a deployment
+  // that never enables hydration builds nothing). Durable Postgres when a pool exists (same pool the runtime
+  // store opened), else the in-memory reference adapter — mirroring the merchant-registry selection above.
+  // Migrated at startup like the other Postgres state stores. No producer populates it yet (that is A3), so
+  // even flag-on it hydrates from an empty store until ingestion lands — inert by construction today.
+  const productFactsPort = PRODUCT_FACTS_HYDRATION
+    ? runtimeResult.sql
+      ? new PostgresProductFactsStore(runtimeResult.sql)
+      : createInMemoryProductFactsStore()
+    : undefined;
+  if (productFactsPort instanceof PostgresProductFactsStore) await productFactsPort.migrate();
   // THE COST OF WIRING THESE, MADE VISIBLE. Before this change, enabling Wave 4 required editing code;
   // now an env var suffices. That is a real reduction in friction and it is the honest trade for making
   // shadow/canary possible at all (HITL-POLICY §5). The compensating control is that an enabled flag can
@@ -545,7 +562,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ CATALOG_RETRIEVAL, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS })
+  const wave4On = Object.entries({ CATALOG_RETRIEVAL, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -582,6 +599,10 @@ export async function buildServer(opts?: {
         // Position 17 — T1 SERVER_GUARD_SIGNALS. The brain consults signals.serverSafetyClass/serverInjection
         // (populated per-turn below when this is on) alongside its keyword floor, most-conservative-wins.
         SERVER_GUARD_SIGNALS,
+        // Positions 18–19 — A1b. `productFactsPort` is `undefined` unless PRODUCT_FACTS_HYDRATION is set, so
+        // the hydrate step has nothing to call and the retrieved subset renders with its live-catalog price
+        // exactly as today. Only ever consulted for the retrieved subset, never the whole catalog.
+        productFactsPort, PRODUCT_FACTS_HYDRATION,
       );
       brains.set(key, b);
     }
