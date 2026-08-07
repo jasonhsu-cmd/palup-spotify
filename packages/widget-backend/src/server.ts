@@ -13,7 +13,7 @@ import {
 import { DEFAULT_POLICY, normalizeHistory, OFFER_CHECK_AGENT_TYPE } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
 import { classifyGuardSignals, GUARD_CLASSIFIER_AGENT_TYPE } from "./guard-classifier.js";
-import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort } from "@palup/platform-ports";
+import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort } from "@palup/platform-ports";
 import {
   createWidgetTokenIdentity,
   mintWidgetToken,
@@ -29,6 +29,7 @@ import {
   createMeteringModelPort,
   createRedactingModelPort,
   createInMemoryProductFactsStore,
+  createInMemoryQueue,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
 import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
@@ -66,6 +67,8 @@ import {
   type MerchantCredentialSink,
 } from "./routes/shopify-install.js";
 import { registerShopifyWebhookRoutes } from "./routes/shopify-webhooks.js";
+import { subscribeCatalogReconcile } from "./catalog-webhook-queue.js";
+import { runCatalogIndex, shopifyCatalogSource } from "./jobs/catalog-index.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
 // multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
@@ -924,6 +927,39 @@ export async function buildServer(opts?: {
   // half-working endpoint that 500s is therefore worse than an absent one: it burns the retries either
   // way, but a 404 is unambiguous to whoever is debugging the app's configuration.
   const SHOPIFY_WEBHOOKS_ENABLED = Boolean(shopifyAppSecretPresent && merchantRegistry);
+  // A3 (ADR-0020 D4) — catalog/inventory webhook INGESTION, behind CATALOG_WEBHOOKS (default OFF, and only
+  // meaningful when the compliance-webhook plumbing is already enabled). ON ⇒ the catalog webhook routes
+  // register and enqueue a reconcile per delivery; a worker re-fetches that tenant's current catalog via
+  // runCatalogIndex (never trusting the payload) and refreshes the Tier-2 facts. OFF ⇒ the catalog routes
+  // 404 and no queue/worker is built — byte-identical to before. The scheduled poll job (PRODUCT_FACTS_POLL)
+  // remains the missed-event backstop, so webhooks are an optimisation, never the only freshness path.
+  const CATALOG_WEBHOOKS = SHOPIFY_WEBHOOKS_ENABLED && process.env.CATALOG_WEBHOOKS === "true";
+  let catalogQueue: QueuePort | undefined;
+  if (CATALOG_WEBHOOKS) {
+    catalogQueue = createInMemoryQueue({});
+    // The reconcile worker. runCatalogIndex is the SAME reconcile-by-re-fetch path the poll job runs, given
+    // its own metered model + a durable facts store (Postgres when a pool exists). A malformed tenantId is
+    // skipped; a failing reconcile is retried then dead-lettered by the QueuePort, and the poll job still
+    // catches what a dead-lettered delivery missed.
+    const factsStore = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
+    if (factsStore instanceof PostgresProductFactsStore) await factsStore.migrate();
+    const reconcileDeps = {
+      store,
+      vector: vectorPort,
+      model: createMeteringModelPort(activeModelPort, telemetry, { agentType: "catalog-index" }),
+      catalog: shopifyCatalogSource(secrets),
+      productFacts: factsStore,
+    };
+    subscribeCatalogReconcile(catalogQueue, async (tenantId) => {
+      await runCatalogIndex(reconcileDeps, [tenantId], {});
+    });
+    console.warn(
+      "[config] CATALOG_WEBHOOKS is ON — catalog/inventory webhooks enqueue a re-index per delivery. NOTE: the " +
+        "in-memory QueuePort delivers SYNCHRONOUSLY, so a delivery blocks on a full re-index; production must " +
+        "supply an async adapter (Cloud Tasks/Pub/Sub, ADR-0006 D4). Enabling ingestion does not itself serve " +
+        "the facts — the serving side (PRODUCT_FACTS_HYDRATION) is a separate money/NN#1 promotion (HITL §5).",
+    );
+  }
   if (SHOPIFY_WEBHOOKS_ENABLED) {
     // Idempotent DDL, and only when C1 has not already run it (an injected registry has no migration).
     registerShopifyWebhookRoutes(app, {
@@ -945,6 +981,8 @@ export async function buildServer(opts?: {
       // mechanism, not a second one that could drift.
       checkRateLimit: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
       now: () => Date.now(),
+      // A3 — present ONLY when CATALOG_WEBHOOKS is on, so the catalog routes register only then (else 404).
+      queue: catalogQueue,
     });
   }
 

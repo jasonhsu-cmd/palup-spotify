@@ -57,7 +57,7 @@ const GUEST_ANON = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const ACCOUNT_SUBJECT = accountSubjectId(`shopify:${TENANT}:${CUSTOMER_ID}`);
 const OTHER_ACCOUNT_SUBJECT = accountSubjectId(`shopify:${TENANT}:${OTHER_CUSTOMER_ID}`);
 
-const ENV_KEYS = ["PALUP_SECRETS", "WIDGET_EMBED_KEYS", "SHOPIFY_STORES", "SHOPIFY_APP_CLIENT_ID", "GUEST_TOKEN_SECRET"];
+const ENV_KEYS = ["PALUP_SECRETS", "WIDGET_EMBED_KEYS", "SHOPIFY_STORES", "SHOPIFY_APP_CLIENT_ID", "GUEST_TOKEN_SECRET", "CATALOG_WEBHOOKS"];
 // ADR-0019 task 4/9 — incidental fallout, not this file's concern: `/consent`'s guest subject now comes
 // ONLY from a VERIFIED `x-guest-token` (invariant 4), so the JSON-parsing-encapsulation test below needs
 // one purely to get a 200 back; it is not testing anything about memory/consent semantics.
@@ -192,10 +192,13 @@ describe("C2 gating — the webhook routes are inert unless the app secret AND a
     }
   });
 
-  it("all four routes exist when fully configured", async () => {
+  it("all four compliance/uninstall routes exist when fully configured", async () => {
     const h = await harness();
     await seedMerchant(h.registry);
-    for (const path of Object.values(WEBHOOK_ROUTES)) {
+    // The always-on routes (the catalog/inventory routes are a separate opt-in behind CATALOG_WEBHOOKS,
+    // covered by the A3 describe below — including their 404 when that flag is off).
+    const alwaysOn = [WEBHOOK_ROUTES.customersDataRequest, WEBHOOK_ROUTES.customersRedact, WEBHOOK_ROUTES.shopRedact, WEBHOOK_ROUTES.appUninstalled];
+    for (const path of alwaysOn) {
       const res = await h.post(path, { raw: shopRedactBody(), topic: "shop/redact" });
       expect(res.statusCode, `${path} must not 404 when configured`).not.toBe(404);
     }
@@ -460,6 +463,78 @@ describe("C2 — app/uninstalled makes the merchant INERT, end to end", () => {
     } finally {
       await disarmKill(h.store, scope);
     }
+  });
+});
+
+// ── A3 (ADR-0020 D4) — catalog/inventory ingestion webhooks ────────────────────────────────────────
+// Same raw-body-HMAC-or-nothing property as the compliance routes, plus: the route only EXISTS when
+// CATALOG_WEBHOOKS is on, it ENQUEUES (never trusts the payload), and a kill halts ingestion. The
+// reconcile no-ops here (no SHOPIFY_STORES ⇒ the catalog source is "not-configured"), so these exercise
+// the ROUTE, not a live re-index.
+const productBody = (over: Record<string, unknown> = {}): string => JSON.stringify({ id: 788032119674292922, title: "Serum", handle: "serum", ...over });
+const inventoryBody = (over: Record<string, unknown> = {}): string => JSON.stringify({ inventory_item_id: 999, location_id: 1, available: 5, ...over });
+
+describe("A3 — catalog/inventory webhooks (behind CATALOG_WEBHOOKS)", () => {
+  it("a validly-signed products/update enqueues a reconcile and 200s", async () => {
+    const h = await harness({ CATALOG_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const res = await h.post(WEBHOOK_ROUTES.productsUpdate, { raw: productBody(), topic: "products/update" });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("applied");
+    expectNothingLeaked(res.body, "catalog webhook response");
+  });
+
+  it("a validly-signed inventory_levels/update 200s (same enqueue path)", async () => {
+    const h = await harness({ CATALOG_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const res = await h.post(WEBHOOK_ROUTES.inventoryLevelsUpdate, { raw: inventoryBody(), topic: "inventory_levels/update" });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("applied");
+  });
+
+  it("the catalog routes DO NOT EXIST when CATALOG_WEBHOOKS is off (404, not 500) — inert by default", async () => {
+    const h = await harness(); // flag off
+    await seedMerchant(h.registry);
+    const res = await h.post(WEBHOOK_ROUTES.productsUpdate, { raw: productBody(), topic: "products/update" });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("a bad HMAC is 401, never enqueued", async () => {
+    const h = await harness({ CATALOG_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const res = await h.post(WEBHOOK_ROUTES.productsUpdate, { raw: productBody(), topic: "products/update", hmac: "not-the-real-hmac" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("a compliance body replayed at a catalog path is refused on shape (no cross-topic escalation)", async () => {
+    const h = await harness({ CATALOG_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    // customerRedactBody carries shop_domain + customer — both FORBIDDEN by the products/update shape.
+    const res = await h.post(WEBHOOK_ROUTES.productsUpdate, { raw: customerRedactBody(), topic: "products/update" });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("a kill HALTS ingestion — the delivery is acknowledged as halted_deferred, not enqueued", async () => {
+    const h = await harness({ CATALOG_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const scope = `tenant:${TENANT}`;
+    await armKill(h.store, scope, "test");
+    try {
+      const res = await h.post(WEBHOOK_ROUTES.productsUpdate, { raw: productBody(), topic: "products/update" });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain("halted_deferred");
+    } finally {
+      await disarmKill(h.store, scope);
+    }
+  });
+
+  it("a redelivery of the same webhook id is deduped (already_handled), never double-enqueued", async () => {
+    const h = await harness({ CATALOG_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const first = await h.post(WEBHOOK_ROUTES.productsUpdate, { raw: productBody(), topic: "products/update", webhookId: "wh-dup-1" });
+    const second = await h.post(WEBHOOK_ROUTES.productsUpdate, { raw: productBody(), topic: "products/update", webhookId: "wh-dup-1" });
+    expect(first.body).toContain("applied");
+    expect(second.body).toContain("already_handled");
   });
 });
 
