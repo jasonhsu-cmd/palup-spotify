@@ -78,3 +78,24 @@ these decisions. Everything stays behind ports, so a second commerce platform re
 rewrite (NN#3). Poll-first (D2) delivers the freshness win with zero new webhook/queue infra; webhooks are a
 drop-in producer against the same Tier-2 store once the queue port lands. The two re-confirm-later facts in
 the Status block must be re-checked if this ADR is read after the next Shopify version rotation.
+
+## Refinement decisions (2026-08-08, owner: jason.hsu)
+Follow-on decisions taken while sequencing the A/B/C build; they refine (and in one case reverse) the above.
+
+- **A2 test-infra:** the pgvector-HNSW adapter is verified against a **real Postgres+pgvector in CI**
+  (Dockerized/testcontainer in the merge-gate), not pglite (which lacks the `vector` extension). This is a
+  CI-infra prerequisite for A2; the ANN adapter's contract runs against real pgvector, so HNSW recall/DDL
+  is genuinely exercised, not mocked.
+- **Progress record #185 REVERSAL — C1 cart link:** decision #185 made the widget's product cards
+  deliberately NOT links/CTAs because the system had "no cart or checkout capability" (guarded by
+  `widget-backend/test/shopper-promise-guard.ts`). C1 makes a Shopify cart permalink a **real** capability,
+  so the premise no longer holds. DECIDED: wire a **low-key "view in cart" link** (a real, working `/cart/`
+  deep link) — understated, NOT an aggressive "Buy now" CTA, preserving #185's anti-false-promise *spirit*
+  while enabling one-tap conversion. The shopper-promise guard is updated to reflect the now-real
+  capability (the guard's own rule: "wire the capability or reword the text" — here we wire it).
+- **Non-English corpora:** the es/zh-Hant guard-detection cases + crisis-string translations are **drafted
+  by the build agent as candidates, then vetted by a native reviewer before they GATE** (a machine draft is
+  never trusted as the eval oracle). This unblocks building the broad classifier + phase-4 against candidate
+  fixtures now; non-English *promotion* still waits on the native vet.
+- **Governed PR flow:** the remaining money/safety/serving-path increments (broaden, 3b, A1b, B-T3) are
+  built to **review-passed PRs that queue for a named-human merge** — never auto-merged (§3).
