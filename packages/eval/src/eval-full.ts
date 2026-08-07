@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createBrain, createSession, DEFAULT_POLICY, StaticGroundingAdapter, MockCommerceAdapter, demoCommerceGroundTruth } from "@palup/widget-brain";
+import { createBrain, createSession, DEFAULT_POLICY, StaticGroundingAdapter, MockCommerceAdapter, demoCommerceGroundTruth, MockModelAdapter } from "@palup/widget-brain";
 import type { HistoryTurn } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import {
@@ -19,6 +19,7 @@ import {
 } from "@palup/judge";
 import { createCaseMeter, caseReportFields, aggregate, formatRunMetrics } from "./metrics.js";
 import { scoreSuites, formatSuiteReport, liveSuiteCases, liveMeasurements } from "./suites.js";
+import { gradeFloor } from "./floor.js";
 
 interface FullCase {
   id: string;
@@ -153,8 +154,18 @@ async function main() {
     console.log(`  ${layer.padEnd(14)} ${s.pass}/${s.total} (${Math.round((s.pass / s.total) * 100)}%)${floor}`);
   }
   const passed = results.filter((r) => r.pass).length;
-  const floorFails = results.filter((r) => FLOOR_LAYERS.has(r.layer) && !r.pass);
-  console.log(`\nOVERALL: ${passed}/${results.length} (${Math.round((passed / results.length) * 100)}%) | floor fails: ${floorFails.length} [${floorFails.map((r) => r.id).join(", ")}]`);
+  // JUDGE-derived safety/injection floor (as the stochastic judge graded the full-corpus rows). Kept as a
+  // gate disjunct below so nothing that blocked before stops blocking — but NO LONGER the sole floor: a
+  // stochastic judge must never be the only arbiter of a safety gate (H-1). It flapped on fixed guardrail
+  // strings (e.g. KILL-1's live-chat-fallback wording), false-failing clean candidates.
+  const judgeFloorFails = results.filter((r) => FLOOR_LAYERS.has(r.layer) && !r.pass);
+  // H-1: the AUTHORITATIVE floor is CODE-graded. gradeFloor runs core.json's floor:true cases through the
+  // brain's guardrails — which return BEFORE any model call (floor.ts / brain.ts kill+safety rungs) — and
+  // checks must/mustNot (grade.ts). Identical mechanism to `pnpm eval`/run.ts, so both gate paths read ONE
+  // floor. Judge-family-independent, so it gates UNCONDITIONALLY. Mock model proves it never calls out.
+  const floorBrain = createBrain(new MockModelAdapter(), grounding, DEFAULT_POLICY, commerce, "shopper-demo");
+  const floorFails = (await gradeFloor(floorBrain)).filter((r) => !r.pass);
+  console.log(`\nOVERALL: ${passed}/${results.length} (${Math.round((passed / results.length) * 100)}%) | DETERMINISTIC floor fails: ${floorFails.length} [${floorFails.map((r) => r.id).join(", ")}] | judge safety/injection fails (advisory): ${judgeFloorFails.length} [${judgeFloorFails.map((r) => r.id).join(", ")}]`);
 
   // ERRORED cases are NOT quality failures — a thrown complete() (empty completion, timeout, safety block)
   // is recorded with fails like ["error: …"]. Lumping them into the pass-rate makes a broken RUN look like
@@ -196,7 +207,7 @@ async function main() {
   //     suite's verdict and the exit code below read the one mechanism (no parallel gate to drift).
   const suiteReport = scoreSuites(liveSuiteCases(results, FLOOR_LAYERS), { measurements: liveMeasurements(metrics) });
   console.log(
-    `\n${formatSuiteReport(suiteReport, { enforced: false })}\n  (what DOES gate this run: the safety/injection floor — ${floorFails.length} fail(s).)`,
+    `\n${formatSuiteReport(suiteReport, { enforced: false })}\n  (what DOES gate this run: the DETERMINISTIC floor — ${floorFails.length} fail(s); plus the judge safety/injection floor under a cross-family judge — ${judgeFloorFails.length} fail(s).)`,
   );
 
   const dir = join(here, "..", "..", "..", "reports");
@@ -216,6 +227,7 @@ async function main() {
         // see which verdicts were enforced (none here) rather than having to infer it.
         suites: { enforced: false, enforcedBy: "safety/injection floor (unchanged)", ...suiteReport },
         floorFails: floorFails.map((r) => r.id),
+        judgeFloorFails: judgeFloorFails.map((r) => r.id),
         results: lean,
       },
       null,
@@ -229,8 +241,15 @@ async function main() {
     console.log("detail: reports/full-eval-detail.json");
   }
 
-  if (guard.crossFamily && floorFails.length) {
-    console.error(`FULL EVAL GATE FAIL — ${floorFails.length} safety/injection floor case(s) failed.`);
+  // GATE (HITL-POLICY §5 — ADDITIVE, never weaker than before):
+  //  • the DETERMINISTIC floor ALWAYS gates — code-graded, judge-independent (the H-1 fix); AND
+  //  • the judge-derived floor STILL gates under a cross-family (independent) judge, exactly as before,
+  //    so every case that blocked previously still blocks.
+  if (floorFails.length || (guard.crossFamily && judgeFloorFails.length)) {
+    if (floorFails.length)
+      console.error(`FULL EVAL GATE FAIL — ${floorFails.length} DETERMINISTIC floor case(s) failed: ${floorFails.map((r) => r.id).join(", ")}`);
+    if (guard.crossFamily && judgeFloorFails.length)
+      console.error(`FULL EVAL GATE FAIL — ${judgeFloorFails.length} judge-graded safety/injection case(s) failed: ${judgeFloorFails.map((r) => r.id).join(", ")}`);
     process.exit(1);
   }
 }
