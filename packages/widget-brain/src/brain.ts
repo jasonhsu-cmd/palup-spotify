@@ -1,4 +1,5 @@
-import type { CommercePort, GroundingContext, GroundingPort, ModelPort, Product } from "@palup/platform-ports";
+import type { CommercePort, GroundingContext, GroundingPort, ModelPort, Product, ProductFactsPort } from "@palup/platform-ports";
+import { hydrateProductFacts } from "./hydrate-facts.js";
 import {
   CATALOG_CITATION_RULE,
   countUnresolvedCitationTags,
@@ -873,6 +874,16 @@ export function createBrain(
   // server-derived + unspoofable (deriveServingSignals rebuild-not-spread); the classifier that populates it
   // is T1 phase 2 — with no producer yet, this is inert in production even if the flag were flipped.
   serverGuardSignalsEnabled = false,
+  // A1b (ADR-0020) — the Tier-2 ProductFactsPort (fresh price/availability) and its posture flag, threaded
+  // exactly like every flag above: passed positionally, defaulted OFF, no env read inside this package, and
+  // (like CATALOG_RETRIEVAL) no env read anywhere in the repo yet — enabling it changes which PRICE the
+  // agent quotes, a money/NN#1 run-time behaviour change that goes through the eval gate → shadow → canary →
+  // human promotion (HITL §5). Default OFF ⇒ getMany is never called and the CATALOG block is byte-identical
+  // to today. Only ever consulted for the RETRIEVED subset (never the whole catalog — hydrating every SKU
+  // per turn is the anti-goal), so it is inert unless CATALOG_RETRIEVAL is also on AND a producer (A3) has
+  // populated facts; a hydration failure fails OPEN to the un-hydrated catalog, exactly like retrieval.
+  productFactsPort?: ProductFactsPort,
+  productFactsHydrationEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -954,6 +965,21 @@ export function createBrain(
       catalogRetrievalEnabled && catalogRetriever && retrieval && ctx && retrieval.query.trim() !== ""
         ? await retrieveCandidates(catalogRetriever, ctx, retrieval.query, tenantId, retrieval.flags)
         : undefined;
+    // A1b — overlay fresh Tier-2 money-facts onto the RETRIEVED subset (never the full catalog). Runs only
+    // behind PRODUCT_FACTS_HYDRATION and only when retrieval actually produced a subset, so with the flag
+    // off (today) `hydrated === retrieved` and the prompt is byte-identical. Fail-OPEN in the same shape as
+    // retrieveCandidates: any getMany failure resolves to the un-hydrated subset and answers the turn
+    // exactly as the flag-off baseline would (a hydration error must never withhold or degrade a reply).
+    let hydrated = retrieved;
+    if (productFactsHydrationEnabled && productFactsPort && retrieved && retrieved.length > 0) {
+      try {
+        hydrated = hydrateProductFacts(retrieved, await productFactsPort.getMany(tenantId, retrieved.map((p) => p.id)));
+        retrieval?.flags.push("hydration:applied");
+      } catch {
+        hydrated = retrieved;
+        retrieval?.flags.push("hydration:unavailable");
+      }
+    }
     // In-session multi-turn memory (§6A): thread the client's bounded recent transcript BETWEEN the
     // system message and the CURRENT user turn, so a follow-up like "what about the other one?" has its
     // antecedent. Client "agent" role → model "assistant". These are NON-system messages, so the
@@ -984,7 +1010,7 @@ export function createBrain(
         ? (renderCartBlock(cart.items, ctx, cart.flags) ?? "")
         : "";
     return [
-      { role: "system" as const, content: systemPrompt(policy, ctx, retrieved, citations) + systemExtra + pageBlock + cartBlock },
+      { role: "system" as const, content: systemPrompt(policy, ctx, hydrated, citations) + systemExtra + pageBlock + cartBlock },
       ...prior,
       { role: "user" as const, content: message },
     ];

@@ -1,0 +1,72 @@
+import { describe, expect, it } from "vitest";
+import type { Product, ProductFact } from "@palup/platform-ports";
+import { hydrateProductFacts } from "../src/hydrate-facts.js";
+
+// A1b — the pure fact-overlay. See hydrate-facts.ts for the contract; these pin it.
+
+const prod = (over: Partial<Product> = {}): Product => ({
+  id: "serum-vc",
+  title: "Vitamin-C Brightening Serum",
+  description: "A daily brightening serum.",
+  price: "$34",
+  availableForSale: true,
+  ...over,
+});
+
+describe("A1b — hydrateProductFacts (fresh money-facts overlaid onto the live catalog product)", () => {
+  it("overlays a fresher price from the matching fact", () => {
+    const out = hydrateProductFacts([prod()], [{ productId: "serum-vc", price: "$29" }]);
+    expect(out[0]!.price).toBe("$29");
+    // stable fields untouched
+    expect(out[0]!.title).toBe("Vitamin-C Brightening Serum");
+    expect(out[0]!.description).toBe("A daily brightening serum.");
+  });
+
+  it("overlays availability ONLY when the fact states it (three-state preserved)", () => {
+    // fact omits availableForSale → product's own true is kept
+    const kept = hydrateProductFacts([prod({ availableForSale: true })], [{ productId: "serum-vc", price: "$34" }]);
+    expect(kept[0]!.availableForSale).toBe(true);
+    // fact states false → overwritten to false
+    const flipped = hydrateProductFacts([prod({ availableForSale: true })], [{ productId: "serum-vc", price: "$34", availableForSale: false }]);
+    expect(flipped[0]!.availableForSale).toBe(false);
+  });
+
+  it("leaves a product with NO matching fact completely unchanged (same object reference)", () => {
+    const p = prod();
+    const out = hydrateProductFacts([p], [{ productId: "other", price: "$1" }]);
+    expect(out[0]).toBe(p); // untouched: sparse overlay, live catalog is authoritative about existence
+  });
+
+  it("empty facts is a no-op returning the same array", () => {
+    const arr = [prod()];
+    expect(hydrateProductFacts(arr, [])).toBe(arr);
+  });
+
+  it("preserves order and identity across a mixed set", () => {
+    const a = prod({ id: "a", title: "A", price: "$1" });
+    const b = prod({ id: "b", title: "B", price: "$2" });
+    const c = prod({ id: "c", title: "C", price: "$3" });
+    const out = hydrateProductFacts([a, b, c], [{ productId: "c", price: "$9" }, { productId: "a", price: "$8" }]);
+    expect(out.map((p) => p.id)).toEqual(["a", "b", "c"]);
+    expect(out.map((p) => p.price)).toEqual(["$8", "$2", "$9"]);
+    expect(out[1]).toBe(b); // the unmatched one is the same reference
+  });
+
+  it("does not mutate the inputs", () => {
+    const p = prod();
+    const facts: ProductFact[] = [{ productId: "serum-vc", price: "$29", availableForSale: false }];
+    hydrateProductFacts([p], facts);
+    expect(p.price).toBe("$34");
+    expect(p.availableForSale).toBe(true);
+  });
+
+  it("last-write-wins on a duplicate fact id (mirrors getMany de-dup)", () => {
+    const out = hydrateProductFacts([prod()], [{ productId: "serum-vc", price: "$10" }, { productId: "serum-vc", price: "$20" }]);
+    expect(out[0]!.price).toBe("$20");
+  });
+
+  it("never invents a product: an id present only in facts produces nothing", () => {
+    const out = hydrateProductFacts([prod({ id: "a" })], [{ productId: "ghost", price: "$1" }]);
+    expect(out.map((p) => p.id)).toEqual(["a"]);
+  });
+});
