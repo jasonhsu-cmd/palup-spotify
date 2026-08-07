@@ -23,16 +23,31 @@ export interface GenRequest {
     systemInstruction?: string;
     temperature?: number;
     maxOutputTokens?: number;
+    // Gemini "thinking" control (@google/genai ThinkingConfig). `thinkingLevel` is the enum lever
+    // (MINIMAL | LOW | MEDIUM | HIGH); lower = faster + cheaper, at some reasoning cost. Omitted ⇒ the
+    // model's own default (MEDIUM for gemini-3.5-flash). The exact shape is read from the installed SDK's
+    // ThinkingConfig type, not from memory.
+    thinkingConfig?: { thinkingLevel?: string; thinkingBudget?: number };
   };
 }
 export interface GenResponse {
   text?: string;
   usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  // Surfaced so an EMPTY completion is diagnosable instead of an opaque "empty completion" throw. A
+  // Gemini response can be empty for very different reasons — a safety/recitation block (blockReason /
+  // finishReason SAFETY|RECITATION), truncation (MAX_TOKENS, incl. thinking tokens), or genuinely no
+  // candidate — and the fix differs by cause. This underlies EVERY conversation test, so it must not be
+  // silently opaque.
+  finishReason?: string;
+  blockReason?: string;
 }
 export type GenerateFn = (req: GenRequest) => Promise<GenResponse>;
 
 export interface VertexConfig {
   model: string;
+  /** Optional Gemini thinking level (MINIMAL | LOW | MEDIUM | HIGH). Latency/quality lever; unset ⇒ the
+   * model default. Set from PALUP_THINKING_LEVEL in create.ts. */
+  thinkingLevel?: string;
 }
 
 // ── embeddings (B3) ───────────────────────────────────────────────────────────────────────────────
@@ -274,11 +289,16 @@ export class VertexModelAdapter implements ModelPort {
         systemInstruction,
         temperature: req.temperature ?? 0,
         maxOutputTokens: req.maxTokens,
+        // Only sent when configured (PALUP_THINKING_LEVEL); otherwise the model applies its own default.
+        ...(this.cfg.thinkingLevel ? { thinkingConfig: { thinkingLevel: this.cfg.thinkingLevel } } : {}),
       },
     });
 
     const text = (res.text ?? "").trim();
-    if (!text) throw new Error("vertex: model returned empty completion");
+    if (!text)
+      throw new Error(
+        `vertex: model returned empty completion (finishReason=${res.finishReason ?? "?"}, blockReason=${res.blockReason ?? "none"})`,
+      );
 
     return {
       text,

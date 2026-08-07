@@ -22,6 +22,9 @@ export interface CreateVertexOptions {
   project?: string;
   location?: string;
   model?: string;
+  /** Gemini thinking level (MINIMAL | LOW | MEDIUM | HIGH); defaults to PALUP_THINKING_LEVEL, else unset
+   * (the model's own default). Latency/quality lever — lower is faster + cheaper. */
+  thinkingLevel?: string;
   /** Embedding model id; defaults to PALUP_EMBED_MODEL, then DEFAULT_EMBED_MODEL. */
   embedModel?: string;
   /**
@@ -62,6 +65,16 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
   // live model in this repo — run drift-check.yml (live smoke + cross-family judge) and confirm the id
   // resolves in the project's Vertex region before serving shoppers (see the UNVERIFIED-LIVE header above).
   const model = opts.model ?? process.env.PALUP_MODEL ?? "gemini-3.5-flash";
+  // Gemini "thinking" level — a latency/quality lever (gemini-3.5-flash dev guide). DEFAULT: MINIMAL.
+  // Validated by a live eval:full A/B on 2026-08-07 (gemini-3.5-flash, 190 cases, Claude judge): MINIMAL
+  // scored 75% at p50 1.66s/call vs the model-default MEDIUM's 73% at p50 15.2s — ~9× faster with NO quality
+  // cost (LOW was worse on both axes). For a shopper chat agent the extra reasoning bought latency, not
+  // quality. Overridable per-deployment via PALUP_THINKING_LEVEL (MINIMAL|LOW|MEDIUM|HIGH); an unrecognised
+  // value falls back to MINIMAL. Env-driven so feature code stays model-agnostic.
+  const thinkingLevel = (() => {
+    const raw = (opts.thinkingLevel ?? process.env.PALUP_THINKING_LEVEL ?? "MINIMAL").trim().toUpperCase();
+    return new Set(["MINIMAL", "LOW", "MEDIUM", "HIGH"]).has(raw) ? raw : "MINIMAL";
+  })();
   if (!project) {
     throw new Error(
       "createVertexAdapter: set GOOGLE_CLOUD_PROJECT (and GOOGLE_CLOUD_LOCATION) or pass opts.project",
@@ -87,7 +100,15 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
     // `as any` at the SDK boundary: request/response types are pinned to the installed SDK
     // version and validated at runtime, not asserted here.
     const res: any = await ai.models.generateContent(req);
-    return { text: res?.text, usageMetadata: res?.usageMetadata };
+    // Carry the reason an answer is empty (finishReason / promptFeedback.blockReason). Previously
+    // discarded, which made every empty completion an opaque throw — the adapter reconstructs a
+    // meaningful error from these instead.
+    return {
+      text: res?.text,
+      usageMetadata: res?.usageMetadata,
+      finishReason: res?.candidates?.[0]?.finishReason,
+      blockReason: res?.promptFeedback?.blockReason,
+    };
   };
 
   // The embedding transport, shaped exactly like `generate`: the SDK call and nothing else, so every rule
@@ -129,7 +150,7 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
   // not "this operator would rather not".
   return new VertexModelAdapter(
     generate,
-    { model },
+    { model, ...(thinkingLevel ? { thinkingLevel } : {}) },
     {
       call: embedContent,
       cfg: {
