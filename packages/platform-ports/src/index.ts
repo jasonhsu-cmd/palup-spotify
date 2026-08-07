@@ -83,6 +83,8 @@ export type { VectorPort, VectorRecord, VectorQuery, VectorMatch } from "./vecto
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type { ProductFactsPort, ProductFact } from "./product-facts-port.js";
 export { createInMemoryProductFactsStore, requireProductFactsTenant } from "./product-facts-port.js";
+export type { QueuePort, QueueMessage, QueueHandler, QueueSubscription, DeadLetter } from "./queue-port.js";
+export { createInMemoryQueue } from "./queue-port.js";
 export type {
   CommsPort,
   CommsMessage,
