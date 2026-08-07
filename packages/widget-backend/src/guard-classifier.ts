@@ -13,8 +13,8 @@ export const GUARD_CLASSIFIER_AGENT_TYPE = "guard-classifier";
 // only ever RE-ENTERS the deterministic guardrail branches (worstSafety / boolean-OR, most-conservative-
 // wins), so a wrong/absent classification can only fall back to the English keyword floor, never lower a
 // detection or shape a reply. Mirrors classifyPersonaStyle's fail-safe shape (responseSchema enum +
-// whitelist + try/catch). On ANY failure it returns a DEGRADED result the caller treats conservatively —
-// never a false "safe".
+// whitelist + try/catch). On ANY failure it returns a DEGRADED result (no server signal ⇒ the brain
+// falls back to its keyword floor) — never a false "safe".
 
 // The safety-GROUP classes the classifier may emit. "none" = the explicit safe label; "injection" is NOT
 // here (it is the separate boolean). Kept in sync with widget-brain's SAFETY_GROUPS.
@@ -26,8 +26,11 @@ export interface GuardSignals {
   safetyClass?: SafetyClass;
   /** True only when the classifier positively identified a prompt-injection attempt. */
   injection: boolean;
-  /** True when the classification could not be trusted (error/timeout/unparseable/out-of-enum). The caller
-   * applies the DEGRADED-SAFE posture (suppress pitch + conservative) rather than treating it as "safe". */
+  /** True when the classification could not be trusted (error/timeout/unparseable/out-of-enum). Today this
+   * yields NO server signal (safetyClass undefined, injection false), so the brain falls back to its
+   * English keyword floor — fail-safe (never a false "safe"), but no better than today's baseline for a
+   * non-English turn. A stronger degraded-safe posture (actively SUPPRESS the pitch on degraded) is a
+   * planned follow-up; it is NOT yet wired — no caller reads this field beyond logging/telemetry. */
   degraded: boolean;
 }
 
@@ -58,8 +61,9 @@ function extractJson(text: string): { safetyClass?: unknown; injection?: unknown
 /**
  * Classify one shopper message into server-derived guard signals via a single model-port call. NEVER
  * throws. On any failure (error/timeout/unparseable/out-of-enum) returns
- * `{ safetyClass: undefined, injection: false, degraded: true }` — a DEGRADED marker the caller must
- * treat conservatively, never as a positive "safe".
+ * `{ safetyClass: undefined, injection: false, degraded: true }` — no server signal, so the brain falls
+ * back to its keyword floor (fail-safe, never a false "safe"). `degraded` is a telemetry marker today;
+ * a suppress-pitch-on-degraded posture is a planned follow-up, not yet wired (see the field doc above).
  */
 export async function classifyGuardSignals(model: ModelPort, message: string, tenantId: string): Promise<GuardSignals> {
   let text: string;

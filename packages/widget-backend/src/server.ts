@@ -1889,7 +1889,7 @@ export async function buildServer(opts?: {
       // to classify). classifyGuardSignals never throws — a failure returns a degraded result (no signal ⇒
       // the brain falls back to its keyword floor).
       const guardSignals =
-        guardClassifierModel && !kill && message.trim() !== ""
+        guardClassifierModel && !kill && !costCap && message.trim() !== ""
           ? await classifyGuardSignals(guardClassifierModel, message, tenantId)
           : undefined;
       const signals: Signals = deriveServingSignals(body.signals, {
