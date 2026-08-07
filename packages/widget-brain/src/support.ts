@@ -414,8 +414,21 @@ export async function handleSupport(
       // seen. A mixed "cancel, or at least skip next month" must not be silently downgraded to an
       // auto-skip that drops the cancel from human view (pre-branch, such a message escalated).
       const mentionsCancelOrMoney = /\bcancel\b|\brefund\b|stop (billing|charging|payments?)|\bend (my |the )?(subscription|plan|membership)\b/.test(message.toLowerCase());
+      // broaden safety gate (guard-classifier security review, MEDIUM): the three message-derived controls
+      // below — isAffirmativeSubscriptionIntent (negation/question), mentionsCancelOrMoney (cancel-
+      // firewall), detectSubscriptionAction — are ENGLISH regexes. broaden makes the ROUTER language-
+      // agnostic (a server intent can route a non-English message here), which would decouple the router's
+      // language from these guards' language: a non-English negation/question/mixed-cancel finds no English
+      // keyword, so isAffirmative→true and mentionsCancelOrMoney→false, and it would slip past to an
+      // auto-skip — defeating ADR-0016's "auto-execute only on a genuine present-tense request" for exactly
+      // the inputs broaden adds. So a server-derived intent may ROUTE here but MUST NOT by itself authorize
+      // the auto-skip: the English keyword classifier must INDEPENDENTLY confirm a skip on this message
+      // (which puts the English guards back in the router's language). A non-English skip request still
+      // reaches this handler — it just routes to a human instead of auto-executing. Keyword-path routing
+      // (serverIntent undefined) is unaffected: classifySupportIntent already produced the skip intent.
+      const keywordConfirmsSkip = classifySupportIntent(message, Boolean(selfServe?.enabled)) === "skip_subscription";
       const autoAllowed =
-        Boolean(selfServe?.enabled) && Boolean(selfServe?.shopperVerified) && !mentionsCancelOrMoney && isAffirmativeSubscriptionIntent(message);
+        Boolean(selfServe?.enabled) && Boolean(selfServe?.shopperVerified) && keywordConfirmsSkip && !mentionsCancelOrMoney && isAffirmativeSubscriptionIntent(message);
       if (!autoAllowed) return routeToHuman();
 
       const sub = await commerce.getSubscription(shopperId);
