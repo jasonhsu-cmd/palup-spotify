@@ -32,7 +32,7 @@ import { MANIFEST_COLLECTION, MANIFEST_KEY } from "../src/jobs/catalog-index.js"
 // model actually received, a manifest read the retriever alone performs — and each one is paired with a
 // flag-off probe proving the observation was the flag's doing.
 
-const WAVE4_ENV = ["CATALOG_RETRIEVAL", "CATALOG_RETRIEVAL_K", "PRODUCT_CITATIONS", "PRODUCT_CARDS", "CART_LINE_ITEMS", "PRODUCT_FACTS_HYDRATION"];
+const WAVE4_ENV = ["CATALOG_RETRIEVAL", "CATALOG_RETRIEVAL_K", "PRODUCT_CITATIONS", "PRODUCT_CARDS", "CART_LINE_ITEMS", "PRODUCT_FACTS_HYDRATION", "OUTGOING_OFFER_CHECK"];
 afterEach(() => {
   WAVE4_ENV.forEach((k) => delete process.env[k]);
   vi.restoreAllMocks();
@@ -143,6 +143,19 @@ describe("an enabled Wave 4 flag can never be silent", () => {
     try {
       const said = warn.mock.calls.flat().join(" ");
       expect(said).toContain("PRODUCT_FACTS_HYDRATION");
+      expect(said).toMatch(/named human/i);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("3b — names OUTGOING_OFFER_CHECK when it is on (the checker model is composed + announced)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.OUTGOING_OFFER_CHECK = "true";
+    const app = await buildServer({ store: new InMemoryRuntimeStore(), modelPort: new SpyModel() });
+    try {
+      const said = warn.mock.calls.flat().join(" ");
+      expect(said).toContain("OUTGOING_OFFER_CHECK");
       expect(said).toMatch(/named human/i);
     } finally {
       await app.close();
