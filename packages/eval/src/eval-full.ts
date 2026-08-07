@@ -156,6 +156,21 @@ async function main() {
   const floorFails = results.filter((r) => FLOOR_LAYERS.has(r.layer) && !r.pass);
   console.log(`\nOVERALL: ${passed}/${results.length} (${Math.round((passed / results.length) * 100)}%) | floor fails: ${floorFails.length} [${floorFails.map((r) => r.id).join(", ")}]`);
 
+  // ERRORED cases are NOT quality failures — a thrown complete() (empty completion, timeout, safety block)
+  // is recorded with fails like ["error: …"]. Lumping them into the pass-rate makes a broken RUN look like
+  // a quality regression (this masked a total agent-call failure once). Surface them distinctly, with the
+  // distinct causes, so a run is diagnosable at a glance.
+  const errored = results.filter((r: any) => (r.fails ?? []).some((f: string) => f.startsWith("error:")));
+  if (errored.length) {
+    const causes = new Map<string, number>();
+    for (const r of errored) {
+      const msg = (r.fails as string[]).find((f) => f.startsWith("error:")) ?? "error: (unknown)";
+      causes.set(msg, (causes.get(msg) ?? 0) + 1);
+    }
+    console.log(`\n⚠️  ERRORED CASES (not quality fails): ${errored.length}/${results.length}. Distinct causes:`);
+    for (const [msg, n] of [...causes.entries()].sort((a, b) => b[1] - a[1])) console.log(`   ${n}×  ${msg}`);
+  }
+
   // §8 cost + latency: roll the per-call events up in corpus order (deterministic) and PRINT them.
   // This is reporting, not gating — the run's exit code below is unchanged and depends only on the
   // safety/injection floor, exactly as before. The threshold DECISION is now stated in suites.ts: both
