@@ -10,7 +10,7 @@ import {
   type Signals,
   type Consent,
 } from "@palup/widget-brain";
-import { DEFAULT_POLICY, normalizeHistory } from "@palup/widget-brain";
+import { DEFAULT_POLICY, normalizeHistory, OFFER_CHECK_AGENT_TYPE } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
 import { classifyGuardSignals, GUARD_CLASSIFIER_AGENT_TYPE } from "./guard-classifier.js";
 import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort } from "@palup/platform-ports";
@@ -520,6 +520,12 @@ export async function buildServer(opts?: {
   // on is a human promotion (HITL-POLICY §5) — it changes which PRICE the agent quotes (money/NN#1). OFF ⇒
   // the store is never constructed, getMany never runs, and the CATALOG block is byte-identical.
   const PRODUCT_FACTS_HYDRATION = process.env.PRODUCT_FACTS_HYDRATION === "true";
+  // 3b — OUTGOING_OFFER_CHECK: run the language-agnostic semantic check on the outgoing reply (a backstop to
+  // the deterministic keyword floor) per sales turn. Same governed posture-flag discipline: env-read here,
+  // default OFF, turning it on is a human promotion (HITL §5) — it adds a per-turn model call (cost) and is
+  // a money-guard behaviour change. OFF ⇒ the check never runs (zero spend) and reply-integrity is exactly
+  // the keyword floor, byte-identical.
+  const OUTGOING_OFFER_CHECK = process.env.OUTGOING_OFFER_CHECK === "true";
   // E3 attaches display fields to the ids E2 cited, so cards WITHOUT citations is inert rather than
   // broken (recommendation-telemetry.ts returns `{}` for a Decision with no cited products). Warn like
   // SUBSCRIPTION_SELFSERVE's own unmet-prerequisite check above — the degrade is safe, never a bypass.
@@ -555,6 +561,12 @@ export async function buildServer(opts?: {
       : createInMemoryProductFactsStore()
     : undefined;
   if (productFactsPort instanceof PostgresProductFactsStore) await productFactsPort.migrate();
+  // 3b — the outgoing-offer checker's model port, metered under its OWN agentType so its per-turn check
+  // spend is distinguishable from generation/embedding/guard (ADR-0013). Constructed ONLY when
+  // OUTGOING_OFFER_CHECK is on, so a deployment that never enables it spends nothing.
+  const offerCheckModel = OUTGOING_OFFER_CHECK
+    ? createMeteringModelPort(activeModelPort, telemetry, { agentType: OFFER_CHECK_AGENT_TYPE })
+    : undefined;
   // THE COST OF WIRING THESE, MADE VISIBLE. Before this change, enabling Wave 4 required editing code;
   // now an env var suffices. That is a real reduction in friction and it is the honest trade for making
   // shadow/canary possible at all (HITL-POLICY §5). The compensating control is that an enabled flag can
@@ -562,7 +574,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ CATALOG_RETRIEVAL, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION })
+  const wave4On = Object.entries({ CATALOG_RETRIEVAL, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -603,6 +615,9 @@ export async function buildServer(opts?: {
         // the hydrate step has nothing to call and the retrieved subset renders with its live-catalog price
         // exactly as today. Only ever consulted for the retrieved subset, never the whole catalog.
         productFactsPort, PRODUCT_FACTS_HYDRATION,
+        // Positions 20–21 — 3b. `offerCheckModel` is `undefined` unless OUTGOING_OFFER_CHECK is set, so the
+        // reply-integrity check is exactly the deterministic keyword floor and the decision is byte-identical.
+        offerCheckModel, OUTGOING_OFFER_CHECK,
       );
       brains.set(key, b);
     }
