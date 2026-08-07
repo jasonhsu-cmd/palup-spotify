@@ -12,7 +12,7 @@ green.
 > enforced); then it mints a widget token and calls `/chat`, asserting a **real, non-empty model reply** (not
 > the auth fall-back or the oversize-input rejection). The widget UI is served at `/`. Every merge to `main`
 > auto-redeploys and re-runs this gate. The exact model id is pinned in `.github/workflows/deploy-staging.yml`
-> (`GOOGLE_CLOUD_LOCATION=global`, `PALUP_MODEL=gemini-2.5-flash`). Reply content is asserted **structurally**
+> (`GOOGLE_CLOUD_LOCATION=global`, `PALUP_MODEL=gemini-3.5-flash`). Reply content is asserted **structurally**
 > (non-empty, not a canned string), not verbatim — the model is nondeterministic. This exact flow was also
 > verified live by hand against the deployed service (2026-07-31).
 > **Run-time state is durable + shared:** backed by a Cloud SQL Postgres instance (`palup-staging`,
