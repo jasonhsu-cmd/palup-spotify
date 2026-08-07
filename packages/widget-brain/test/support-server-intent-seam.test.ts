@@ -54,5 +54,33 @@ describe("handleSupport — server-intent seam", () => {
       expect(viaServer.flags).toContain("skip_sub_routed");
       expect(viaKeyword.flags).toContain("skip_sub_routed");
     });
+
+    // The MEDIUM finding from the broaden security review: the ADR-0016 auto-skip guards
+    // (isAffirmativeSubscriptionIntent / cancel-firewall) are English regexes. A server intent can route a
+    // non-English message here, so a server intent alone must NOT satisfy the auto-execute gate — the
+    // English keyword path must independently confirm the skip. These lock that.
+    const selfServe = { enabled: true, shopperVerified: true }; // BOTH ADR-0016 controls present
+
+    it("a server-routed skip on a NON-English message does NOT auto-execute even with both controls — routes to a human", async () => {
+      const r = await handleSupport(new MockCommerceAdapter(), "shopper-demo", "quiero saltar mi próxima entrega", undefined, selfServe, undefined, "skip_subscription");
+      expect(r.flags).not.toContain("sub_skipped"); // the money/autonomy action did NOT fire
+      expect(r.flags).not.toContain("autonomous_action");
+      expect(r.flags).toContain("skip_sub_routed");
+      expect(r.escalate).toBe(true);
+    });
+
+    it("a server-routed skip on a QUESTION about a past skip does NOT auto-execute (ADR-0016: never on a question)", async () => {
+      // A non-English retrospective question the English negation-guard cannot see; the server intent must
+      // not turn it into an action.
+      const r = await handleSupport(new MockCommerceAdapter(), "shopper-demo", "¿por qué saltaste mi entrega?", undefined, selfServe, undefined, "skip_subscription");
+      expect(r.flags).not.toContain("sub_skipped");
+      expect(r.flags).toContain("skip_sub_routed");
+    });
+
+    it("REGRESSION: the English keyword-confirmed affirmative skip still auto-executes with both controls", async () => {
+      const r = await handleSupport(new MockCommerceAdapter(), "shopper-demo", "please skip my next delivery", undefined, selfServe, undefined, "skip_subscription");
+      expect(r.flags).toContain("sub_skipped"); // keyword confirms the skip → the fix does not block English
+      expect(r.escalate).toBe(false);
+    });
   });
 });
