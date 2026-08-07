@@ -19,5 +19,6 @@ export { MockCommerceAdapter, demoCommerceGroundTruth } from "./adapters/mock-co
 export { consentPermits, consentPermitsFactClass } from "./consent-rules.js";
 export type { ConsentRegion, ConsentTriState, ConsentTier } from "./consent-rules.js";
 export { handleSupport, classifySupportIntent, extractOrderId } from "./support.js";
+export { classifyOutgoingOffer, OFFER_CHECK_AGENT_TYPE } from "./offer-check.js";
 export type { SupportIntent, SupportResult } from "./support.js";
 export type * from "./types.js";

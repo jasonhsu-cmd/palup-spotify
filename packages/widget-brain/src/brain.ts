@@ -1,5 +1,6 @@
 import type { CommercePort, GroundingContext, GroundingPort, ModelPort, Product, ProductFactsPort } from "@palup/platform-ports";
 import { hydrateProductFacts } from "./hydrate-facts.js";
+import { classifyOutgoingOffer } from "./offer-check.js";
 import {
   CATALOG_CITATION_RULE,
   countUnresolvedCitationTags,
@@ -884,6 +885,14 @@ export function createBrain(
   // populated facts; a hydration failure fails OPEN to the un-hydrated catalog, exactly like retrieval.
   productFactsPort?: ProductFactsPort,
   productFactsHydrationEnabled = false,
+  // 3b (ADR-0020) — the semantic outgoing-offer checker's model port + its posture flag, threaded exactly
+  // like every flag above: passed positionally, defaulted OFF, no env read inside this package. A per-turn
+  // extra model call (metered under its own agentType by the server) and a money-guard behaviour change, so
+  // enabling it is a human promotion through the eval gate → shadow → canary (HITL §5). Default OFF ⇒ the
+  // reply-integrity check is exactly the deterministic keyword floor and the decision is byte-identical.
+  // Only ever ADDS catches on top of that floor, and fails SAFE to the floor on any model/parse error.
+  offerCheckModel?: ModelPort,
+  outgoingOfferCheckEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -900,6 +909,16 @@ export function createBrain(
    * not attempted at all (flag off, or the catalog already fits) — an audit tag for "nothing happened" is
    * noise, and the absence of both is unambiguous.
    */
+  // 3b — the ONE definition of "this reply promises an ungrounded offer", used at every reply-integrity
+  // call site (keeping "what counts as an invented offer" in a single place, as history-fence.ts requires).
+  // The deterministic keyword floor runs FIRST and is the guaranteed catch; the semantic checker runs only
+  // when the floor did NOT fire AND the flag is on, so it is purely additive and byte-identical when off.
+  const offersUngroundedDiscount = async (text: string, tenantId: string): Promise<boolean> => {
+    if (replyOffersUngroundedDiscount(text)) return true;
+    if (outgoingOfferCheckEnabled && offerCheckModel) return classifyOutgoingOffer(offerCheckModel, text, tenantId);
+    return false;
+  };
+
   const retrieveCandidates = async (
     retriever: CatalogRetrieverPort,
     ctx: GroundingContext,
@@ -1288,7 +1307,7 @@ export function createBrain(
         const stuck = text.includes("just fix it") || text.includes("need help") || text.includes("none of this");
         if (stuck) flags.push("escalate");
         const gen = await model.complete({ messages: await groundedMessages(message, tenantId, "", history, signals.pageContext), temperature: 0, tenantId });
-        if (replyOffersUngroundedDiscount(gen.text)) return discountGuardrail(); // (a) never serve an invented/injected discount
+        if (await offersUngroundedDiscount(gen.text, tenantId)) return discountGuardrail(); // (a) never serve an invented/injected discount (keyword floor + semantic backstop when 3b on)
         const reply = stuck
           ? "I'm sorry this has been frustrating — I've flagged this for a person on our team who can resolve it."
           : `Let me help with that. ${gen.text}`;
@@ -1396,7 +1415,7 @@ export function createBrain(
           temperature: 0,
           tenantId,
         });
-        if (replyOffersUngroundedDiscount(proGen.text)) return discountGuardrail(); // never serve an invented/injected discount
+        if (await offersUngroundedDiscount(proGen.text, tenantId)) return discountGuardrail(); // never serve an invented/injected discount (keyword floor + semantic backstop when 3b on)
         return {
           mode: "sales",
           reply: proGen.text,
@@ -1675,7 +1694,7 @@ export function createBrain(
         temperature: 0,
         tenantId,
       });
-      if (replyOffersUngroundedDiscount(gen.text)) return discountGuardrail(); // (a) never serve an invented/injected discount
+      if (await offersUngroundedDiscount(gen.text, tenantId)) return discountGuardrail(); // (a) never serve an invented/injected discount (keyword floor + semantic backstop when 3b on)
       // E2 — resolve, then strip. Order matters: resolution needs the tags, the shopper must never see
       // one. STRIPPING IS UNCONDITIONAL on this path once the flag is on — not limited to tags that
       // resolved — because the tag-shaped things a shopper must not see include the ones we REFUSED (a
