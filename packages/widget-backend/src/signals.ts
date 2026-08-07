@@ -1,4 +1,4 @@
-import type { Signals, CartLineItemRef, Consent, SafetyClass } from "@palup/widget-brain";
+import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent } from "@palup/widget-brain";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -139,6 +139,10 @@ export interface ServingSignalContext {
    */
   serverSafetyClass?: SafetyClass;
   serverInjection?: boolean;
+  /** broaden — the guard classifier's whitelisted support intent for THIS turn (same source + trust
+   *  boundary as the two above). Passed through so the SERVER is the sole origin of
+   *  `Signals.serverSupportIntent`; the client's own value is never read (this function rebuilds). */
+  serverSupportIntent?: SupportIntent;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -232,5 +236,6 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // and a client-supplied value dropped (rebuild-not-spread; pinned by signals-safety-trust.test.ts).
     ...(ctx.serverSafetyClass !== undefined ? { serverSafetyClass: ctx.serverSafetyClass } : {}),
     ...(ctx.serverInjection !== undefined ? { serverInjection: ctx.serverInjection } : {}),
+    ...(ctx.serverSupportIntent !== undefined ? { serverSupportIntent: ctx.serverSupportIntent } : {}),
   };
 }
