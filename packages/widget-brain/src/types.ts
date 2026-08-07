@@ -215,9 +215,9 @@ export interface RecommendedProductCard {
   title: string;
   /** The merchant's DISPLAY price string, e.g. "$34" — copied, never parsed, computed or converted. */
   price: string;
-  /** C1 — the opaque variant id for a one-tap cart deep link, copied from `Product.variantId`. The WIDGET
-   *  builds the platform cart URL from it client-side (no URL crosses to this neutral card). Absent when
-   *  the source reports no variant. */
+  /** C1 — the opaque variant id for a one-tap cart deep link, copied from `Product.variantId`. The
+   *  widget-backend WIRE layer builds the platform cart URL from it (it knows the tenant's shop domain);
+   *  no URL is ever placed on this neutral card. Absent when the source reports no variant. */
   variantId?: string;
   /**
    * THREE-STATE, mirroring `Product.availableForSale` and the CATALOG rule the model reads:

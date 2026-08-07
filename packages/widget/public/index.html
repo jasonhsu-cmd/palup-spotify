@@ -829,7 +829,7 @@
       // DEFENCE IN DEPTH: even though the server already fail-safes the URL, the client re-validates the
       // exact `https://<shop>.myshopify.com/cart/<digits>:<digits>` shape before it ever becomes an href,
       // so a spoofed/compromised response cannot smuggle a `javascript:`/cross-origin link onto the screen.
-      if (typeof c.cartUrl === "string" && /^https:\/\/[a-z0-9][a-z0-9-]*\.myshopify\.com\/cart\/[0-9]{1,20}:[0-9]{1,3}$/i.test(c.cartUrl)){
+      if (typeof c.cartUrl === "string" && /^https:\/\/[a-z0-9][a-z0-9-]*\.myshopify\.com\/cart\/[0-9]{1,20}:[0-9]{1,2}$/i.test(c.cartUrl)){
         const link = document.createElement("a");
         link.className = "rec-cart"; link.setAttribute("data-testid","product-card-cart");
         link.href = c.cartUrl;
