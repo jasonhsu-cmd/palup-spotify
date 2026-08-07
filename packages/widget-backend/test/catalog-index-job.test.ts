@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import {
   InMemoryRuntimeStore,
   createInMemoryVectorStore,
+  createInMemoryProductFactsStore,
   createEnvSecrets,
   requireEmbedAlignment,
   requireEmbedInputs,
@@ -12,6 +13,8 @@ import {
   type GroundingContext,
   type ModelPort,
   type Product,
+  type ProductFact,
+  type ProductFactsPort,
   type VectorPort,
 } from "@palup/platform-ports";
 import { armKill, setCostCap } from "@palup/state-postgres";
@@ -28,6 +31,7 @@ import {
   catalogRecordId,
   parseCatalogArgv,
   productEmbedText,
+  productFactsFrom,
   resolveIndexStores,
   runCatalogClear,
   runCatalogIndex,
@@ -1041,5 +1045,82 @@ describe("C3 ingest — the job indexes a MULTI-PAGE catalog via the real #180 f
 
   it("the embed batch size is bounded by one Storefront page, so a full catalog is a bounded run", () => {
     expect(MAX_INDEXED_PRODUCTS % STOREFRONT_PAGE_SIZE).toBe(0);
+  });
+});
+
+// ── A3 (ADR-0020) — the POLL-path Tier-2 product-facts producer ─────────────────────────────────────
+// runCatalogIndex, given a ProductFactsPort, refreshes fresh price/availability from the SAME catalog it
+// re-fetches for the vector corpus (D2, poll-first). Absent the dep it is byte-identical to before.
+
+describe("A3 — productFactsFrom maps a catalog to Tier-2 money-facts (the volatile fields only)", () => {
+  const at = new Date("2026-08-08T00:00:00.000Z");
+  it("projects id + price + three-state availability, stamps source + updatedAt, and carries NO semantic fields", () => {
+    const ctx = context("acme-co", [
+      { id: "a", title: "A", description: "desc", price: "$10", availableForSale: true, tags: ["t"] },
+      { id: "b", title: "B", description: "d", price: "$20", availableForSale: false },
+      { id: "c", title: "C", description: "d", price: "$30" }, // availableForSale absent → must stay absent
+    ]);
+    const facts = productFactsFrom(ctx, at);
+    expect(facts).toEqual([
+      { productId: "a", price: "$10", availableForSale: true, source: "poll:catalog-index", updatedAt: at.toISOString() },
+      { productId: "b", price: "$20", availableForSale: false, source: "poll:catalog-index", updatedAt: at.toISOString() },
+      { productId: "c", price: "$30", source: "poll:catalog-index", updatedAt: at.toISOString() },
+    ]);
+    // no title/description/tags leak into the money-facts (mirror image of productEmbedText)
+    expect(JSON.stringify(facts)).not.toContain("desc");
+    expect(JSON.stringify(facts)).not.toContain("title");
+  });
+});
+
+/** A ProductFactsPort that records every upsert, over a real in-memory store; can be made to throw. */
+function spyFacts(opts: { throwOnUpsert?: boolean } = {}): ProductFactsPort & { upserts: { tenantId: string; facts: ProductFact[] }[] } {
+  const inner = createInMemoryProductFactsStore();
+  const upserts: { tenantId: string; facts: ProductFact[] }[] = [];
+  return {
+    upserts,
+    async getMany(tenantId, ids) { return inner.getMany(tenantId, ids); },
+    async upsertMany(tenantId, facts) {
+      upserts.push({ tenantId, facts });
+      if (opts.throwOnUpsert) throw new Error("facts store down");
+      return inner.upsertMany(tenantId, facts);
+    },
+    async deleteTenant(tenantId) { return inner.deleteTenant(tenantId); },
+  };
+}
+
+describe("A3 — runCatalogIndex populates the product-facts store when the dep is present", () => {
+  it("upserts fresh facts for the re-fetched catalog, hydrate-able by id afterwards", async () => {
+    const pid = "gid://shopify/Product/serum";
+    const h = harness([product("serum", { price: "$34", availableForSale: true })]);
+    const facts = spyFacts();
+    const [report] = await runCatalogIndex({ store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: facts }, [h.tenantId], { maxProducts: 5 });
+    expect(report!.outcome).toBe("indexed");
+    expect(facts.upserts).toHaveLength(1);
+    const got = await facts.getMany(h.tenantId, [pid]);
+    expect(got).toEqual([expect.objectContaining({ productId: pid, price: "$34", availableForSale: true, source: "poll:catalog-index" })]);
+  });
+
+  it("is INERT with no dep — the run is unaffected and nothing is written (byte-identical to before)", async () => {
+    const h = harness([product("serum", { price: "$34" })]);
+    const [report] = await runCatalogIndex({ store: h.store, vector: h.vector, model: h.model, catalog: h.catalog }, [h.tenantId], { maxProducts: 5 });
+    expect(report!.outcome).toBe("indexed"); // unchanged behaviour; no facts store touched (none provided)
+  });
+
+  it("refreshes facts even when the catalog is UNCHANGED (no vector re-embed) — price/availability move constantly", async () => {
+    const h = harness([product("serum", { price: "$34" })]);
+    const facts = spyFacts();
+    const deps = { store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: facts };
+    await runCatalogIndex(deps, [h.tenantId], { maxProducts: 5 });
+    const [second] = await runCatalogIndex(deps, [h.tenantId], { maxProducts: 5 });
+    expect(second!.outcome).toBe("unchanged"); // vector corpus not re-embedded…
+    expect(facts.upserts).toHaveLength(2); // …but facts refreshed on BOTH runs
+  });
+
+  it("FAILS SAFE — a facts-store error is swallowed and the vector index still completes", async () => {
+    const h = harness([product("serum", { price: "$34" })]);
+    const facts = spyFacts({ throwOnUpsert: true });
+    const [report] = await runCatalogIndex({ store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: facts }, [h.tenantId], { maxProducts: 5 });
+    expect(report!.outcome).toBe("indexed"); // primary job unaffected by the facts failure
+    expect(await idsIn(h.vector, h.tenantId)).not.toHaveLength(0); // corpus was written
   });
 });
