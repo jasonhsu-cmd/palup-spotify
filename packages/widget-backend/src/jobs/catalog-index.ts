@@ -9,6 +9,8 @@ import {
   type GroundingContext,
   type ModelPort,
   type Product,
+  type ProductFact,
+  type ProductFactsPort,
   type RuntimeStatePort,
   type SecretsPort,
   type VectorPort,
@@ -19,7 +21,9 @@ import {
   createVectorStore,
   matchedCostCap,
   matchedKill,
+  PostgresProductFactsStore,
   RUNTIME_AGENT_TYPE,
+  type Sql,
 } from "@palup/state-postgres";
 import { parseStoreDomains, resolveShopifyStore } from "../merchant-store.js";
 import { createModelPort } from "../model.js";
@@ -226,6 +230,14 @@ export interface CatalogIndexDeps {
   /** Whatever adapter this deployment composed. `embed` is OPTIONAL — see `canEmbed` below. */
   model: ModelPort;
   catalog: CatalogSource;
+  /**
+   * A3 (ADR-0020) — OPTIONAL Tier-2 product-facts store. When present, each successful catalog re-fetch
+   * ALSO upserts the fresh price/availability facts here (the POLL-path producer, D2 — the freshness win
+   * with zero new webhook/queue infra). Absent (the default) ⇒ the job is byte-identical to before: it
+   * only indexes the vector corpus and writes nothing here. Fail-safe: a facts-upsert error is logged and
+   * the vector index (the primary job) still completes.
+   */
+  productFacts?: ProductFactsPort;
   now?: () => Date;
 }
 
@@ -252,6 +264,26 @@ export function productEmbedText(p: Product): string {
     .map((s) => (s ?? "").trim())
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * A3 — project a re-fetched catalog into the Tier-2 money-facts the serving path (A1b) overlays: the
+ * VOLATILE fields only (price display string + three-state availability), NOT the semantic ones the
+ * vector corpus holds. The mirror image of `productEmbedText`: that excludes price/availability because
+ * they change constantly and carry no similarity signal; this carries ONLY them, because they are the
+ * money facts a shopper is quoted and must be kept fresh (freshness SLA, D2). `availableForSale` is copied
+ * through three-state (absent stays absent — never fabricated). `updatedAt` stamps the poll time so the
+ * store can later enforce the D2 staleness ceiling. Pure; the caller supplies `now` (no ambient clock).
+ */
+export function productFactsFrom(ctx: GroundingContext, now: Date): ProductFact[] {
+  const at = now.toISOString();
+  return ctx.products.map((p) => ({
+    productId: p.id,
+    price: p.price,
+    ...(p.availableForSale !== undefined ? { availableForSale: p.availableForSale } : {}),
+    source: "poll:catalog-index",
+    updatedAt: at,
+  }));
 }
 
 /** sha256 of the embedded text — the change detector that makes a re-run free (see `indexOneTenant`). */
@@ -420,6 +452,19 @@ async function indexOneTenant(
         `catalog has ${catalog.products.length} products, above this job's ceiling of ${maxProducts} — refusing ` +
         "to index part of it (a truncated corpus becomes a confident false 'we don't carry that')",
     };
+  }
+
+  // A3 — POLL-path producer (D2). We now hold a complete, current catalog (ceiling-checked), so refresh the
+  // Tier-2 money-facts A1b serves from — on EVERY successful fetch, independent of the vector-corpus diff
+  // below (a price/availability change must refresh here even when the semantic text, and so the embedding,
+  // is unchanged). Inert when no store is wired. FAIL-SAFE: the vector index is the primary job, so a facts
+  // write failure is logged and swallowed rather than failing the tenant's index.
+  if (deps.productFacts) {
+    try {
+      await deps.productFacts.upsertMany(tenantId, productFactsFrom(catalog, now()));
+    } catch (e) {
+      console.error(`[catalog] tenant=${tenantId} product-facts upsert failed (index continues): ${(e as Error).message}`);
+    }
   }
 
   const plan = planProducts(catalog.products);
@@ -902,7 +947,7 @@ export function parseCatalogArgv(argv: string[]): CatalogCommand {
  */
 export async function resolveIndexStores(
   env: NodeJS.ProcessEnv = process.env,
-): Promise<{ store: RuntimeStatePort; vector: VectorPort; kind: string }> {
+): Promise<{ store: RuntimeStatePort; vector: VectorPort; sql: Sql | undefined; kind: string }> {
   if (!env.DATABASE_URL) {
     throw new Error(
       "DATABASE_URL is unset — refusing to run. Without it this process gets its OWN in-memory stores, so " +
@@ -912,7 +957,8 @@ export async function resolveIndexStores(
   }
   const runtime = await createRuntimeStore();
   const vector = await createVectorStore(runtime.sql);
-  return { store: runtime.store, vector: vector.store, kind: `${runtime.kind}/${vector.kind}` };
+  // A3 — `sql` exposed so main() can build the durable Tier-2 product-facts store on the SAME pool.
+  return { store: runtime.store, vector: vector.store, sql: runtime.sql, kind: `${runtime.kind}/${vector.kind}` };
 }
 
 async function main(): Promise<void> {
@@ -926,7 +972,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    const { store, vector, kind } = await resolveIndexStores();
+    const { store, vector, sql, kind } = await resolveIndexStores();
 
     if (cmd.action === "clear") {
       const report = await runCatalogClear({ store, vector }, cmd.tenantId!);
@@ -950,11 +996,26 @@ async function main(): Promise<void> {
     const model = createMeteringModelPort(createModelPort().port, telemetry, { agentType: "catalog-index" });
     const catalog = shopifyCatalogSource(createEnvSecrets());
 
+    // A3 — the POLL-path Tier-2 producer, behind PRODUCT_FACTS_POLL (default OFF, governed like every
+    // posture flag). ON ⇒ each catalog re-fetch also upserts fresh price/availability into the durable
+    // product-facts store the serving path (A1b) overlays from. OFF ⇒ the job writes nothing there and is
+    // byte-identical to before. Postgres-only here (the job already refuses to run without DATABASE_URL).
+    const PRODUCT_FACTS_POLL = process.env.PRODUCT_FACTS_POLL === "true";
+    const productFacts = PRODUCT_FACTS_POLL && sql ? new PostgresProductFactsStore(sql) : undefined;
+    if (productFacts) await productFacts.migrate();
+    if (PRODUCT_FACTS_POLL) {
+      console.warn(
+        "[config] PRODUCT_FACTS_POLL is ON — this job now also writes the Tier-2 product-facts store the " +
+          "serving path reads. Enabling the SERVING side (PRODUCT_FACTS_HYDRATION) to quote those facts is a " +
+          "separate money/NN#1 promotion (HITL-POLICY §5).",
+      );
+    }
+
     console.log(
       `[catalog] store=${kind} tenants=${tenantIds.length} ceiling=${MAX_INDEXED_PRODUCTS}` +
-        `${cmd.reindex ? " REINDEX (replacing each corpus)" : ""}`,
+        `${cmd.reindex ? " REINDEX (replacing each corpus)" : ""}${productFacts ? " +product-facts" : ""}`,
     );
-    const reports = await runCatalogIndex({ store, vector, model, catalog }, tenantIds, {
+    const reports = await runCatalogIndex({ store, vector, model, catalog, ...(productFacts ? { productFacts } : {}) }, tenantIds, {
       ...(cmd.reindex ? { reindex: true } : {}),
     });
 
