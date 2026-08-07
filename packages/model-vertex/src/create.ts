@@ -51,14 +51,17 @@ function positiveIntEnv(raw: string | undefined): number | undefined {
 export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModelAdapter {
   const project = opts.project ?? process.env.GOOGLE_CLOUD_PROJECT;
   // "global" is the default Vertex endpoint; staging pins GOOGLE_CLOUD_LOCATION=global and
-  // PALUP_MODEL=gemini-2.5-flash (.github/workflows/deploy-staging.yml). The live end-to-end call
+  // PALUP_MODEL=gemini-3.5-flash (.github/workflows/deploy-staging.yml). The live end-to-end call
   // against that endpoint is NOT independently verified in this repo (see the UNVERIFIED-LIVE header
   // above); some models/regions differ — override via GOOGLE_CLOUD_LOCATION. The embeddings docs' own
   // Node.js sample also pairs GOOGLE_CLOUD_LOCATION=global with gemini-embedding-001 ([E1]).
   const location = opts.location ?? process.env.GOOGLE_CLOUD_LOCATION ?? "global";
   // Model ids change; keep it env-overridable. Confirm availability for your project/region in
-  // Model Garden. (gemini-2.5-flash was GA as of 2026-07 with a retirement date of 2026-10-16.)
-  const model = opts.model ?? process.env.PALUP_MODEL ?? "gemini-2.5-flash";
+  // Model Garden. Moved off gemini-2.5-flash (GA 2026-07, RETIRES 2026-10-16) to gemini-3.5-flash
+  // (GA per Google's 2026 Gemini-3 release). NOTE: this default has NOT been validated against the
+  // live model in this repo — run drift-check.yml (live smoke + cross-family judge) and confirm the id
+  // resolves in the project's Vertex region before serving shoppers (see the UNVERIFIED-LIVE header above).
+  const model = opts.model ?? process.env.PALUP_MODEL ?? "gemini-3.5-flash";
   if (!project) {
     throw new Error(
       "createVertexAdapter: set GOOGLE_CLOUD_PROJECT (and GOOGLE_CLOUD_LOCATION) or pass opts.project",

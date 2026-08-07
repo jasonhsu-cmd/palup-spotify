@@ -35,7 +35,7 @@ jobs:
         env:
           GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT }}
           GOOGLE_CLOUD_LOCATION: global
-          PALUP_MODEL: gemini-2.5-flash
+          PALUP_MODEL: gemini-3.5-flash
         run: pnpm model:smoke "Recommend a gentle cleanser for sensitive skin in one sentence."
 
       # Cross-family judge: Gemini agent graded by Claude. Needs var JUDGE_ENABLED=true + secret ANTHROPIC_API_KEY.
@@ -44,7 +44,7 @@ jobs:
         env:
           GOOGLE_CLOUD_PROJECT: ${{ vars.GCP_PROJECT }}
           GOOGLE_CLOUD_LOCATION: global
-          PALUP_MODEL: gemini-2.5-flash
+          PALUP_MODEL: gemini-3.5-flash
           JUDGE_FAMILY: anthropic
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: pnpm eval:judge
