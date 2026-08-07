@@ -13,6 +13,7 @@
     "./contract/merchant-registry": "./src/contract/merchant-registry-port.contract.ts",
     "./contract/telemetry": "./src/contract/telemetry-port.contract.ts",
     "./contract/vector": "./src/contract/vector-port.contract.ts",
-    "./contract/product-facts": "./src/contract/product-facts-port.contract.ts"
+    "./contract/product-facts": "./src/contract/product-facts-port.contract.ts",
+    "./contract/queue": "./src/contract/queue-port.contract.ts"
   }
 }
