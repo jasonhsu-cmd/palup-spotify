@@ -18,6 +18,16 @@ import type { Product, ProductFact } from "@palup/platform-ports";
 // GOVERNANCE. Changing which price the agent quotes is a money-fact change (NN#1), so this runs only behind
 // the PRODUCT_FACTS_HYDRATION posture flag and, being a run-time behaviour change, is enabled only through
 // the eval gate → shadow → canary → human promotion (HITL §5) — never by this build. Inert until then.
+//
+// PROMOTION BLOCKER — READ BEFORE ENABLING (security review, A1b #252). This overlay reads only
+// `fact.price`/`fact.availableForSale` and IGNORES `fact.updatedAt`, so a well-formed but semantically
+// STALE fact would be quoted verbatim with no upper bound on age. ADR-0020 D2's fail-honest rule ("past a
+// hard staleness ceiling the agent says 'let me confirm current price/availability' rather than quote a
+// stale number") is DEFERRED and NOT implemented here. Enabling PRODUCT_FACTS_HYDRATION in ANY live stage
+// (shadow/canary/prod) is therefore blocked until D2 fail-honest lands — otherwise a stale fact silently
+// poisons a money/NN#1 fact. The promoter MUST record "D2 staleness ceiling implemented" as an explicit
+// pre-shadow acceptance criterion. Safe to merge now only because the feature is inert (flag OFF; even
+// flag-on the store is empty until the A3 producer lands).
 
 /**
  * Overlay fresh price/availability from `facts` onto `products`, matched by id. Returns a new array (new
