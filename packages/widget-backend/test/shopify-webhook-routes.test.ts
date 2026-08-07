@@ -536,6 +536,18 @@ describe("A3 — catalog/inventory webhooks (behind CATALOG_WEBHOOKS)", () => {
     expect(first.body).toContain("applied");
     expect(second.body).toContain("already_handled");
   });
+
+  it("a validly-signed CATALOG body replayed at /app/uninstalled is REFUSED on shape — cannot make a merchant inert", async () => {
+    // Security-review finding: before the app/uninstalled shape forbade product/inventory fields, a
+    // captured signed catalog delivery matched its forbidden-only shape and could revoke a merchant.
+    const h = await harness(); // catalog flag irrelevant — app/uninstalled is always registered
+    await seedMerchant(h.registry);
+    for (const raw of [productBody(), inventoryBody()]) {
+      const res = await h.post(WEBHOOK_ROUTES.appUninstalled, { raw, topic: "app/uninstalled" });
+      expect(res.statusCode).toBe(400); // wrong_payload_shape
+    }
+    expect(await h.registry.lookupByTenantId(TENANT), "merchant must stay active").not.toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------------------------------

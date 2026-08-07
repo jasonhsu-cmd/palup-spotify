@@ -296,7 +296,16 @@ export const PAYLOAD_SHAPES: Record<string, PayloadShape> = {
   "customers/data_request": { required: ["shop_domain", "customer", "data_request"], forbidden: [] },
   "customers/redact": { required: ["shop_domain", "customer"], forbidden: ["data_request"] },
   "shop/redact": { required: ["shop_domain"], forbidden: ["customer", "data_request", "orders_requested", "orders_to_redact"] },
-  [UNINSTALL_TOPIC]: { required: [], forbidden: ["shop_domain", "customer", "data_request"] },
+  // A shop payload's own domain fields may be null (see APP_UNINSTALLED_SHOP_SOURCE), so this shape stays
+  // FORBIDDEN-only rather than requiring a positive shop field. But it must still exclude the OTHER signed
+  // body classes so one cannot be replayed here: compliance bodies carry shop_domain/customer/data_request,
+  // and — A3 (security review) — product/inventory bodies carry title/handle/variants/inventory_item_id.
+  // A genuine Shop object carries NONE of these, so forbidding them cannot reject a real uninstall, but it
+  // stops a captured, validly-signed catalog delivery from being replayed here to make a merchant inert.
+  [UNINSTALL_TOPIC]: {
+    required: [],
+    forbidden: ["shop_domain", "customer", "data_request", "title", "handle", "variants", "inventory_item_id"],
+  },
   // A3 — catalog/inventory bodies. Discriminators only (the worker re-fetches, never trusting the body);
   // `forbidden` keeps a compliance body (shop_domain/customer/data_request) from ever matching a catalog
   // topic and vice-versa. products/* carry `id`; inventory_levels/update carries `inventory_item_id`.

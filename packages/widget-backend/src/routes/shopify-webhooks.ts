@@ -367,9 +367,12 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
  * and return 200. It NEVER trusts the payload — the message carries only the tenantId, and the worker
  * re-fetches the tenant's CURRENT catalog (out-of-order-safe; the poll job is the backstop). Shop comes
  * from the SIGNED-gated header (CATALOG_TOPICS doc): a wrong header can at worst re-index some other
- * tenant's OWN data, never cross-tenant. A kill halts ingestion too (NN#4) — recorded, not silently
- * dropped. No per-enqueue audit: the enqueue is routine, non-destructive and idempotent, and the RECONCILE
- * it triggers writes its own manifest audit through runCatalogIndex.
+ * tenant's OWN data, never cross-tenant. A kill halts ingestion too (NN#4): the delivery is ACKNOWLEDGED as
+ * `halted_deferred` and NOT enqueued. This path is deliberately NOT audited — unlike a compliance deferral,
+ * a halted re-index loses no obligation (the scheduled poll job is the backstop and reconciles the tenant
+ * once the halt clears), so there is nothing to record. No per-enqueue audit either: the enqueue is routine,
+ * non-destructive and idempotent, and the RECONCILE it triggers writes its own manifest audit through
+ * runCatalogIndex.
  */
 async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic: string): Promise<Ack | { refused: Refusal }> {
   if (!deps.queue) return "unknown_shop"; // defensive; the route is only registered when a queue is wired
