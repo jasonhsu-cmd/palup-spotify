@@ -1936,6 +1936,9 @@ export async function buildServer(opts?: {
         // flag-off path stays byte-identical). `safetyClass` is undefined when the classifier said "none".
         serverSafetyClass: guardSignals?.safetyClass,
         serverInjection: guardSignals?.injection,
+        // broaden — the same classifier's whitelisted support intent (undefined when it said "general" /
+        // was out-of-enum / it failed ⇒ key omitted ⇒ brain's keyword classifier decides, byte-identical).
+        serverSupportIntent: guardSignals?.supportIntent,
         // E4 — THE SECOND GATE. `cartLineItemsEnabled` appears twice by design: here it decides whether a
         // client's `cartItems` is PARSED AT ALL (parsing untrusted input is its own attack surface), and in
         // `createBrain` above it decides whether the parsed value is CONSUMED. One env var must open both,

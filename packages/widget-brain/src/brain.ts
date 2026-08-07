@@ -1299,6 +1299,13 @@ export function createBrain(
             signals.mood,
             { enabled: subscriptionSelfServeEnabled, shopperVerified },
             { history, openIssues: signals.openIssues }, // D1 — conversation context so support isn't stateless
+            // broaden — feed the #247 serverIntent seam its producer: the server classifier's whitelisted,
+            // language-agnostic support intent, ONLY when SERVER_GUARD_SIGNALS is on. Absent (flag off, or
+            // the classifier said "general"/failed) ⇒ handleSupport falls back to its keyword classifier,
+            // byte-identical. It only ROUTES — handleSupport keeps every action gate (ownership,
+            // refund-ceiling HITL, the two ADR-0016 skip/pause controls, cancel→escalate), so a
+            // classifier-chosen intent can never make a money/subscription action auto-execute.
+            serverGuardSignalsEnabled ? signals.serverSupportIntent : undefined,
           );
           return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
         }

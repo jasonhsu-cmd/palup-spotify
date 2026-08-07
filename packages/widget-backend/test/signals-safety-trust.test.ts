@@ -25,4 +25,14 @@ describe("signals trust — the client cannot set the server-derived guardrail s
     expect("serverSafetyClass" in out).toBe(false);
     expect("serverInjection" in out).toBe(false);
   });
+
+  // broaden — serverSupportIntent is the same trust boundary: a client cannot forge the support intent
+  // that feeds handleSupport's #247 seam (it could otherwise try to force a routing it wants).
+  it("drops a client-supplied serverSupportIntent; only the server ctx can set it", () => {
+    const hostile = { serverSupportIntent: "cancel_subscription", mood: "neutral" } as Signals;
+    expect("serverSupportIntent" in deriveServingSignals(hostile, ctx)).toBe(false);
+    // …but the server ctx IS the sole legitimate origin
+    const fromServer = deriveServingSignals(undefined, { ...ctx, serverSupportIntent: "return" });
+    expect(fromServer.serverSupportIntent).toBe("return");
+  });
 });

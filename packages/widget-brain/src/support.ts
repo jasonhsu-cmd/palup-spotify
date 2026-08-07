@@ -6,11 +6,20 @@ import type { HistoryTurn } from "./types.js";
 // address changes are blocked after shipment; disputes and stuck conversations escalate; nothing about
 // status/policy is fabricated. Replies are deterministic + grounded so they can't drift.
 
-export type SupportIntent =
-  | "order_status" | "return" | "refund" | "exchange" | "cancel_order"
-  | "cancel_subscription" | "skip_subscription" | "lost_package" | "wrong_item"
-  | "damaged" | "policy_q" | "how_to" | "ingredients" | "address_change"
-  | "billing" | "escalate_stuck" | "general";
+// The closed SupportIntent menu as a runtime array so a SERVER-side classifier (guard-classifier.ts, the
+// #247 producer) can whitelist against the SAME single source the type is derived from — no hand-kept
+// duplicate to drift (the SAFETY_CLASSES/SAFETY_GROUPS lesson). An intent is a ROUTING label only; every
+// money/subscription ACTION stays gated in handleSupport (ownership check, refund-ceiling HITL, the two
+// ADR-0016 skip/pause controls, cancel→escalate), so which producer chose the intent never authorizes an
+// action on its own.
+export const SUPPORT_INTENTS = [
+  "order_status", "return", "refund", "exchange", "cancel_order",
+  "cancel_subscription", "skip_subscription", "lost_package", "wrong_item",
+  "damaged", "policy_q", "how_to", "ingredients", "address_change",
+  "billing", "escalate_stuck", "general",
+] as const;
+
+export type SupportIntent = (typeof SUPPORT_INTENTS)[number];
 
 export interface SupportResult { reply: string; escalate: boolean; flags: string[] }
 
@@ -405,8 +414,21 @@ export async function handleSupport(
       // seen. A mixed "cancel, or at least skip next month" must not be silently downgraded to an
       // auto-skip that drops the cancel from human view (pre-branch, such a message escalated).
       const mentionsCancelOrMoney = /\bcancel\b|\brefund\b|stop (billing|charging|payments?)|\bend (my |the )?(subscription|plan|membership)\b/.test(message.toLowerCase());
+      // broaden safety gate (guard-classifier security review, MEDIUM): the three message-derived controls
+      // below — isAffirmativeSubscriptionIntent (negation/question), mentionsCancelOrMoney (cancel-
+      // firewall), detectSubscriptionAction — are ENGLISH regexes. broaden makes the ROUTER language-
+      // agnostic (a server intent can route a non-English message here), which would decouple the router's
+      // language from these guards' language: a non-English negation/question/mixed-cancel finds no English
+      // keyword, so isAffirmative→true and mentionsCancelOrMoney→false, and it would slip past to an
+      // auto-skip — defeating ADR-0016's "auto-execute only on a genuine present-tense request" for exactly
+      // the inputs broaden adds. So a server-derived intent may ROUTE here but MUST NOT by itself authorize
+      // the auto-skip: the English keyword classifier must INDEPENDENTLY confirm a skip on this message
+      // (which puts the English guards back in the router's language). A non-English skip request still
+      // reaches this handler — it just routes to a human instead of auto-executing. Keyword-path routing
+      // (serverIntent undefined) is unaffected: classifySupportIntent already produced the skip intent.
+      const keywordConfirmsSkip = classifySupportIntent(message, Boolean(selfServe?.enabled)) === "skip_subscription";
       const autoAllowed =
-        Boolean(selfServe?.enabled) && Boolean(selfServe?.shopperVerified) && !mentionsCancelOrMoney && isAffirmativeSubscriptionIntent(message);
+        Boolean(selfServe?.enabled) && Boolean(selfServe?.shopperVerified) && keywordConfirmsSkip && !mentionsCancelOrMoney && isAffirmativeSubscriptionIntent(message);
       if (!autoAllowed) return routeToHuman();
 
       const sub = await commerce.getSubscription(shopperId);
