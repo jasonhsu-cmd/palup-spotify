@@ -140,3 +140,32 @@ export function classifySafety(text: string): SafetyClass {
   }
   return "none";
 }
+
+// T1 — severity order for merging the English keyword-floor safety class with a SERVER-derived one.
+// The merge must only ever RAISE severity (never turn a real class into "none"), so worstSafety returns
+// whichever input ranks higher. Order (most→least severe): distress > medical > product_safety > legal >
+// regulated_claim > abuse > none. "injection" is NOT a safety-group class — it has its own rung
+// (isInjectionAttempt / the serverInjection signal) and never flows through here; ranked 0 defensively.
+// The exact escalating-vs-non-escalating ordering is reviewable when the classifier that populates the
+// server signal goes live (T1 phase 2); today it is inert (no producer, flag OFF).
+const SAFETY_SEVERITY: Record<SafetyClass, number> = {
+  distress: 6,
+  medical: 5,
+  product_safety: 4,
+  legal: 3,
+  regulated_claim: 2,
+  abuse: 1,
+  none: 0,
+  injection: 0,
+};
+
+/**
+ * Most-conservative-wins merge of the keyword-floor class `a` and an optional server-derived class `b`.
+ * `b === undefined` ⇒ returns `a` unchanged (the byte-identical inert property the flag-off path relies
+ * on). Otherwise returns the higher-severity of the two, so the result is never LESS severe than either
+ * input and never "none" when either is non-"none".
+ */
+export function worstSafety(a: SafetyClass, b: SafetyClass | undefined): SafetyClass {
+  if (b === undefined) return a;
+  return SAFETY_SEVERITY[b] > SAFETY_SEVERITY[a] ? b : a;
+}

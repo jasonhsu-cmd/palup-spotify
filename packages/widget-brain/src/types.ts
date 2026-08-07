@@ -261,6 +261,18 @@ export interface Signals {
   cartItems?: CartLineItemRef[];
   /** True once a safety event has latched this conversation (INV-A). */
   safetyLatched?: boolean;
+  /**
+   * T1 — SERVER-DERIVED semantic guardrail signals for language-agnostic detection. NEVER client-set:
+   * `deriveServingSignals` (widget-backend/src/signals.ts) is the only origin and it REBUILDS its output,
+   * so a client-supplied value is dropped (pinned by signals-safety-trust.test.ts). Consumed ONLY when the
+   * `serverGuardSignalsEnabled` posture flag is on, and merged with the English keyword floor
+   * most-conservative-wins (`worstSafety` / boolean-OR), so they can only ever RAISE the safety/injection
+   * classification — never lower it, never reach a model call. Absent ⇒ keyword-only behaviour is
+   * byte-identical. `serverSafetyClass` carries a safety-GROUP class or "none" — never "injection" (that is
+   * `serverInjection`).
+   */
+  serverSafetyClass?: SafetyClass;
+  serverInjection?: boolean;
   /** Marketing consent per channel; drives outbound gating (TCPA/CAN-SPAM). Also carries the two
    * cross-visit MEMORY consent tiers (ADR-0015 T12: `memoryOrdinary` = Consent 1, `memorySpecial` =
    * Consent 2 — independent of each other and of email/sms). Server/CMP-derived, never client-set;

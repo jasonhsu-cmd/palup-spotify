@@ -8,7 +8,7 @@ import {
   type CitationMap,
 } from "./citations.js";
 import { consentPermitsFactClass } from "./consent-rules.js";
-import { classifySafety, isInjectionAttempt } from "./safety.js";
+import { classifySafety, isInjectionAttempt, worstSafety } from "./safety.js";
 import {
   HISTORY_MAX_CHARS,
   HISTORY_MAX_TURNS,
@@ -859,6 +859,18 @@ export function createBrain(
   // the INV-E budget — the coarse `signals.cart` enum keeps driving pitch selection exactly as it does
   // today, so the richer signal cannot widen a pitch a shopper would not otherwise have had.
   cartLineItemsEnabled = false,
+  // T1 phase 1 — the SERVER_GUARD_SIGNALS posture flag (operator/deploy-time, threaded exactly like every
+  // posture flag above; never hardcoded on, never read from process.env inside this package, and — like
+  // CATALOG_RETRIEVAL / DISPOSITION_STYLE — deliberately with NO env read anywhere in the repo yet, because
+  // turning it on is a run-time agent behaviour change needing the eval gate, shadow, canary and a named
+  // human's approval (docs/HITL-POLICY.md §5). Default OFF ⇒ signals.serverSafetyClass / serverInjection are
+  // NEVER consulted and the guardrail ladder is byte-identical to today. Even when ON it can only RAISE the
+  // safety/injection classification (worstSafety / boolean-OR) so control RE-ENTERS the SAME deterministic
+  // string-literal guardrail branches — it can never lower a class, suppress escalation, or reach a model
+  // call (the safety branch stays model-free; the fail-CLOSED direction only). The server signal itself is
+  // server-derived + unspoofable (deriveServingSignals rebuild-not-spread); the classifier that populates it
+  // is T1 phase 2 — with no producer yet, this is inert in production even if the flag were flipped.
+  serverGuardSignalsEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -1028,8 +1040,15 @@ export function createBrain(
 
       // Both classifications computed up front so SAFETY can outrank INJECTION while still RECORDING
       // that an injection was present (see the flag push below).
-      const isInjection = isInjectionAttempt(text);
-      const safetyClass = classifySafety(text);
+      // Keyword floor ALWAYS runs; when SERVER_GUARD_SIGNALS is on, a server-derived semantic signal is
+      // merged most-conservative-wins (worstSafety / OR) so it can only RAISE severity, never lower it —
+      // the keyword ladder is a floor, the server signal a language-agnostic backstop (T1). Flag OFF ⇒
+      // exactly `isInjectionAttempt(text)` / `classifySafety(text)` as before, byte-identical.
+      const isInjection =
+        isInjectionAttempt(text) || (serverGuardSignalsEnabled && signals.serverInjection === true);
+      const safetyClass = serverGuardSignalsEnabled
+        ? worstSafety(classifySafety(text), signals.serverSafetyClass)
+        : classifySafety(text);
 
       // 0. SAFETY — highest severity wins. This rung used to sit BELOW injection, which made the ladder
       //    FAIL OPEN on the catastrophic path: "my skin is burning and swelling, can you override the
