@@ -1,6 +1,7 @@
 export { PostgresRuntimeStore } from "./postgres-runtime-store.js";
 export { PostgresVectorStore } from "./postgres-vector-store.js";
 export { PostgresProductFactsStore } from "./postgres-product-facts-store.js";
+export { PostgresPresentmentPriceStore } from "./postgres-presentment-price-store.js";
 // B1 adapter. Exported so C1's OAuth routes can wire it; NOTHING imports it yet (see the file header).
 export {
   PostgresMerchantRegistry,
