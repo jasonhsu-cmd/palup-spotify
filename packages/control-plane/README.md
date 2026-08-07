@@ -16,7 +16,7 @@ Gemini agent and grading it with the cross-family judge (Claude/Opus). Requires 
 
 ```bash
 CP_MODE=live \
-  GOOGLE_CLOUD_PROJECT=... GOOGLE_CLOUD_LOCATION=global PALUP_MODEL=gemini-2.5-flash \
+  GOOGLE_CLOUD_PROJECT=... GOOGLE_CLOUD_LOCATION=global PALUP_MODEL=gemini-3.5-flash \
   ANTHROPIC_API_KEY=... \
   pnpm monitor
 ```

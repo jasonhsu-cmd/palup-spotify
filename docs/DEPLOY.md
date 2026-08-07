@@ -583,8 +583,9 @@ secrets/variables incl. `STAGING_ENABLED=true`). The manual equivalent:
   it serves the **real Gemini** model.
 - **`.github/workflows/drift-check.yml`** — **manual** ("Run workflow"), no schedule: a live-model smoke
   + the cross-family judge (guarded by `STAGING_ENABLED` / `JUDGE_ENABLED`). The offline eval is
-  deterministic and already runs in CI on every PR, so it isn't re-run on a timer; trigger this only to
-  check the live model (e.g. after Google updates the `gemini-2.5-flash` alias).
+  deterministic and runs locally in `merge-gate.sh` before every merge (and in CI on push to `main`), so
+  it isn't re-run on a timer; trigger this only to check the live model (e.g. after Google updates the
+  `gemini-3.5-flash` alias).
 
 ## Retention sweep (B4) — the job that makes expiry real
 
