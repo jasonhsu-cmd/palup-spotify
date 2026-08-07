@@ -397,6 +397,24 @@ const PERSONA_ROLE_DIRECTIVE: Record<Exclude<PersonaRole, "b2b">, string> = {
     "\nPERSONA ROLE - gift: The shopper is buying this as a gift, not for themselves - the recipient, not the shopper, will use it. Ask who it's for (or their skin type/size, if that's uncertain) before assuming a fit, and present options as gift-appropriate.",
 };
 
+// Relationship-stage VOICE (moat lever). `signals.relationship` already keys selectPitch (pitch selection);
+// this turns the lifecycle stage into TONE. Keyed by the Relationship enum (types.ts). VOICE ONLY: appended
+// to systemExtra with one flag, NEVER threaded into pitch/selectPitch/outbound/price (FAIR-1, Inv 10) — a
+// VIP gets the exact same pitch surface as anyone else. VIP is worded SERVICE-first, NEVER deal-first, and
+// no entry names a discount/coupon/exclusive/'just for you' offer (FAIR-3 floor: relationship must never
+// move the price surface). `anonymous` has no entry — the default gets no stage directive. Typed as
+// Record<string,string> + a hasOwnProperty guard at the use site (same prototype-safety discipline as the
+// persona directive lookups above).
+const REL_VOICE: Record<string, string> = {
+  new: "\nRELATIONSHIP - new: This is a new shopper. Build trust: be genuinely helpful and low-pressure, and earn the first purchase rather than pushing for it.",
+  repeat: "\nRELATIONSHIP - repeat: This is a returning shopper. Acknowledge them warmly as someone who has shopped here before, and pick up where they left off.",
+  vip: "\nRELATIONSHIP - valued: This is a long-standing, valued customer. Lead with attentive, priority service and genuine expertise — your value to them is exceptional help, not a price break.",
+  subscriber: "\nRELATIONSHIP - subscriber: This shopper is a subscriber. Treat them as an established member: helpful and low-pressure, and never re-sell what they already receive on subscription.",
+  replenishment_due: "\nRELATIONSHIP - restock: This shopper is likely due to restock. A gentle, optional reorder reminder is welcome — never pushy.",
+  lapsed: "\nRELATIONSHIP - lapsed: This shopper has not visited in a while. Give a warm re-welcome and remind them why they liked it here; win them back with helpful service, not a price cut.",
+  one_and_done: "\nRELATIONSHIP - one-and-done: This shopper bought once and did not return. Give them a genuine reason to come back — great service or a helpful tip — rather than a hard sell.",
+};
+
 // Flag emitted alongside each PERSONA_ROLE_DIRECTIVE entry (persona:* precedent, mirroring the PR-0
 // forward-declared PersonaFlag vocabulary's `persona:role_gift` / `persona:role_self`). No b2b entry
 // here (see above) — the pre-existing guardrail flag `persona:b2b` (§3.5, always co-occurring with a
@@ -1372,6 +1390,14 @@ export function createBrain(
         systemExtra +=
           "\nSKEPTIC POLICY: The shopper is skeptical about efficacy. Back every claim with SPECIFIC facts from the CATALOG (named actives/ingredients, what the product is formulated for, how to use it) — never vague hype. Be honest about what it can and can't do and that results vary. Disclose that you are an AI assistant.";
       }
+      // Relationship-stage VOICE (moat lever) — turn the lifecycle stage into TONE. VOICE ONLY: one flag +
+      // one code-owned directive appended to systemExtra; NEVER threaded into selectPitch/pitch/outbound/
+      // price (FAIR-1, Inv 10). hasOwnProperty-guarded (prototype safety, same as the persona lookups).
+      // `anonymous` has no entry, so the default shopper gets no stage directive.
+      if (signals.relationship && Object.prototype.hasOwnProperty.call(REL_VOICE, signals.relationship)) {
+        flags.push(`rel_voice:${signals.relationship}`);
+        systemExtra += REL_VOICE[signals.relationship];
+      }
       // Shopper-disposition program PR-3 (flag DISPOSITION_STYLE) — a SUPPLIED signals.personaStyle adds
       // ONE closed-enum-keyed, code-owned voice directive to systemExtra. Flag OFF (default) ⇒ this
       // block never runs, so behavior is byte-identical to before PR-3. Deliberately does NOT touch
@@ -1472,6 +1498,16 @@ export function createBrain(
         flags.push("browsing");
         systemExtra +=
           "\nBROWSING: The shopper is just looking, not buying now. Give a warm, brief, helpful greeting and offer to help if they'd like — do NOT push a product, recommendation, or pitch.";
+      }
+      // Positive-mood restraint (moat lever) — a satisfied shopper is served, not squeezed. VOICE ONLY:
+      // tempers HOW a pitch is delivered (gentle, optional, service-first); it does NOT suppress or change
+      // WHICH pitch selectPitch chooses (FAIR-1, Inv 10 — pitch/outbound/price untouched, mirroring the
+      // negativeMood brake's voice-only discipline). Targets the pairwise "does not exploit a satisfied
+      // mood" criterion — goodwill is not a cue to sell harder.
+      if (signals.mood === "satisfied") {
+        flags.push("mood_positive");
+        systemExtra +=
+          "\nPOSITIVE-MOOD RESTRAINT: The shopper is happy and satisfied. Lead with a warm, service-first acknowledgement. At most ONE gentle, clearly-optional suggestion — never an aggressive upsell, bundle push, or hard close.";
       }
       let pitch: PitchKind = "none";
       let outbound = false;
