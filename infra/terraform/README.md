@@ -32,3 +32,68 @@ Slack) first. Leave `notification_channel_ids=[]` to create the metric + policy 
 
 This does not enable `PRODUCT_FACTS_POLL`/`PRODUCT_FACTS_HYDRATION`/`CATALOG_WEBHOOKS` — those stay
 env-flag, human-promoted (see the go-live checklist).
+
+## `pubsub.tf` — P4 durable catalog-reconcile queue (go-live precondition P4)
+
+Creates the `catalog-reconcile` topic + DLQ, the `pubsub-catalog-push` service account, an ordered push
+subscription that POSTs to the backend's OIDC-gated route (`routes/pubsub-push.ts`), and the least-privilege
+IAM. **Prerequisite: the backend must already be deployed to Cloud Run** — the push subscription needs the
+service's real URL, and the smoke test below needs a live endpoint. Do P4 *after* the backend is up.
+
+### Discover the var values (read-only gcloud)
+
+```bash
+PROJECT=$(gcloud config get-value project)
+gcloud projects describe "$PROJECT" --format='value(projectNumber)'              # project_number
+gcloud run services list --format='table(metadata.name, status.url)'             # cloud_run_service_name + URL
+gcloud run services describe <SERVICE> --format='value(spec.template.spec.serviceAccountName)'  # backend_service_account
+```
+
+The push endpoint is `<service-url>/internal/pubsub/catalog-reconcile` (the route's `PUBSUB_PUSH_ROUTE`).
+
+### Apply (human, with GCP creds)
+
+```bash
+cd infra/terraform
+terraform init
+terraform apply \
+  -var="project_id=$PROJECT" \
+  -var="project_number=<NUMBER>" \
+  -var="pubsub_push_endpoint=https://<service-url>/internal/pubsub/catalog-reconcile" \
+  -var="backend_service_account=<backend-runtime-sa-email>" \
+  -var="cloud_run_service_name=<SERVICE>"
+```
+
+### Then set the switch-on env on the service (separate from apply — does NOT enable webhooks yet)
+
+```bash
+gcloud run services update <SERVICE> --update-env-vars \
+  PUBSUB_CATALOG_TOPIC=catalog-reconcile,\
+PUBSUB_PUSH_SERVICE_ACCOUNT=pubsub-catalog-push@$PROJECT.iam.gserviceaccount.com,\
+PUBSUB_PUSH_AUDIENCE=https://<service-url>/internal/pubsub/catalog-reconcile
+```
+
+`PUBSUB_PUSH_AUDIENCE` MUST byte-equal the subscription's `oidc_token.audience` (the endpoint URL) or every
+push 401s. Setting these three switches the backend onto the durable path; `CATALOG_WEBHOOKS` stays a
+separate, later human flip.
+
+### Smoke test the OIDC gate BEFORE enabling `CATALOG_WEBHOOKS` (go-live P4)
+
+`pnpm push:smoke` probes the deployed endpoint. The two always-on probes (no token, garbage token ⇒ 401)
+need no creds; the two token probes need OIDC tokens you mint with gcloud (the script prints the exact
+commands). It is side-effect-free — every probe sends a tenant-less envelope, so a valid token yields 204
+(ack + drop) without running a reconcile.
+
+```bash
+URL=https://<service-url>/internal/pubsub/catalog-reconcile
+PUSH_SMOKE_URL=$URL \
+  WRONG_SA_TOKEN=$(gcloud auth print-identity-token --audiences="$URL") \
+  PUSH_SA_TOKEN=$(gcloud auth print-identity-token \
+    --impersonate-service-account=pubsub-catalog-push@$PROJECT.iam.gserviceaccount.com \
+    --audiences="$URL") \
+  pnpm push:smoke
+```
+
+Expect: anonymous 401, garbage 401, **your own SA 401 (Google-signed ≠ authorized)**, push-SA 204. All four
+must pass before `CATALOG_WEBHOOKS` is enabled — the OIDC check is the sole control on this internet-reachable
+route.
