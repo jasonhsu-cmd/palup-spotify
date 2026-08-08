@@ -19,6 +19,7 @@
     "try": "tsx packages/control-plane/src/try.ts",
     "monitor": "tsx packages/control-plane/src/server.ts",
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
+    "push:smoke": "tsx packages/widget-backend/src/pubsub-push-smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
     "sweep": "tsx packages/widget-backend/src/jobs/retention-sweep.ts",
     "kill:arm": "tsx packages/widget-backend/src/jobs/kill-switch.ts arm",
