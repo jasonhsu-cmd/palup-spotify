@@ -70,3 +70,47 @@ describe("A1b — hydrateProductFacts (fresh money-facts overlaid onto the live 
     expect(out.map((p) => p.id)).toEqual(["a"]);
   });
 });
+
+describe("A1b/D2 — the staleness ceiling (fail-honest on a stale money fact)", () => {
+  const now = new Date("2026-08-08T12:00:00.000Z");
+  const ceiling = { now, maxAgeMs: 3_600_000 }; // 1h
+  const ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
+
+  it("marks a STALE fact priceConfirmed:false and does NOT overlay its price/availability", () => {
+    const p = prod({ price: "$34", availableForSale: true });
+    const out = hydrateProductFacts([p], [{ productId: "serum-vc", price: "$29", availableForSale: false, updatedAt: ago(7_200_000) }], ceiling);
+    expect(out[0]!.priceConfirmed).toBe(false);
+    expect(out[0]!.price).toBe("$34"); // the stale $29 is NOT quoted; base price retained but withheld by the flag
+    expect(out[0]!.availableForSale).toBe(true); // stale availability not applied either
+  });
+
+  it("overlays a FRESH fact normally and leaves priceConfirmed unset", () => {
+    const out = hydrateProductFacts([prod({ price: "$34" })], [{ productId: "serum-vc", price: "$29", updatedAt: ago(60_000) }], ceiling);
+    expect(out[0]!.price).toBe("$29");
+    expect(out[0]!.priceConfirmed).toBeUndefined();
+  });
+
+  it("treats a fact with NO updatedAt as UNCONFIRMABLE ⇒ stale (freshness can't be proven)", () => {
+    const out = hydrateProductFacts([prod({ price: "$34" })], [{ productId: "serum-vc", price: "$29" }], ceiling);
+    expect(out[0]!.priceConfirmed).toBe(false);
+    expect(out[0]!.price).toBe("$34");
+  });
+
+  it("treats a malformed updatedAt as stale", () => {
+    const out = hydrateProductFacts([prod({ price: "$34" })], [{ productId: "serum-vc", price: "$29", updatedAt: "not-a-date" }], ceiling);
+    expect(out[0]!.priceConfirmed).toBe(false);
+  });
+
+  it("with NO ceiling supplied, overlays regardless of updatedAt (pre-D2 behaviour, byte-identical)", () => {
+    const out = hydrateProductFacts([prod({ price: "$34" })], [{ productId: "serum-vc", price: "$29", updatedAt: ago(999_999_999) }]);
+    expect(out[0]!.price).toBe("$29");
+    expect(out[0]!.priceConfirmed).toBeUndefined();
+  });
+
+  it("a fact exactly AT the ceiling is still fresh; just past it is stale", () => {
+    const atLimit = hydrateProductFacts([prod({ price: "$34" })], [{ productId: "serum-vc", price: "$29", updatedAt: ago(3_600_000) }], ceiling);
+    expect(atLimit[0]!.price).toBe("$29"); // not > maxAgeMs
+    const justPast = hydrateProductFacts([prod({ price: "$34" })], [{ productId: "serum-vc", price: "$29", updatedAt: ago(3_600_001) }], ceiling);
+    expect(justPast[0]!.priceConfirmed).toBe(false);
+  });
+});

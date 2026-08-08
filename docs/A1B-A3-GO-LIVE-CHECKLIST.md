@@ -32,7 +32,7 @@ _Last updated: 2026-08-08._
 
 | # | Item | Status | Blocks |
 |---|------|--------|--------|
-| P1 | **D2 staleness ceiling.** A1b's overlay must ignore/refuse a fact older than a hard ceiling and make the agent say *"let me confirm current price/availability"* rather than quote a stale number. | **OPEN** (in progress) | `PRODUCT_FACTS_HYDRATION` shadow |
+| P1 | **D2 staleness ceiling.** A1b's overlay must ignore/refuse a fact older than a hard ceiling and make the agent say *"let me confirm current price/availability"* rather than quote a stale number. | **MET** — `hydrateProductFacts` takes a `HydrationStaleness` ceiling; a fact past it (or with no/malformed `updatedAt`) is not quoted → the product renders `priceConfirmed:false`, and BOTH the CATALOG line AND the E3 card withhold the number (the card carries the same "current price needs confirming" sentinel + `priceConfirmed:false`, so the prompt and the card can't diverge — the money/NN#1 leak the P1 security review caught). `PRODUCT_FACTS_MAX_AGE_MS` (default 1h) tunes it. Unit + serving + card-path tests; flag-off byte-identical. | — |
 | P2 | **Audit-log the facts `upsertMany`** (A3 producer) — once served, these are shopper-quoted money facts; §5 wants the write in the immutable audit log. | OPEN | `PRODUCT_FACTS_HYDRATION` canary |
 | P3 | **Producer failure metric + alert** — a silently-failing producer = facts quietly going stale (today only `console.error`). | OPEN | `PRODUCT_FACTS_POLL` canary |
 | P4 | **Async QueuePort adapter** (Cloud Tasks / Pub-Sub) — the in-memory queue reconciles synchronously in-request and exceeds Shopify's webhook timeout. | OPEN | `CATALOG_WEBHOOKS` shadow |

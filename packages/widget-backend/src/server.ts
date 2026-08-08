@@ -523,6 +523,11 @@ export async function buildServer(opts?: {
   // on is a human promotion (HITL-POLICY §5) — it changes which PRICE the agent quotes (money/NN#1). OFF ⇒
   // the store is never constructed, getMany never runs, and the CATALOG block is byte-identical.
   const PRODUCT_FACTS_HYDRATION = process.env.PRODUCT_FACTS_HYDRATION === "true";
+  // A1b/D2 — hard staleness ceiling (ms) for hydrated Tier-2 facts. Default 1h: a fact older than this (or
+  // one with no updatedAt) is NOT quoted — the agent offers to confirm rather than quote a stale number
+  // (money/NN#1 fail-honest). Only takes effect on the flag-gated hydration path. The promotion is expected
+  // to tune this against D2's ≤15-min freshness target (see the go-live checklist).
+  const PRODUCT_FACTS_MAX_AGE_MS = posInt("PRODUCT_FACTS_MAX_AGE_MS", 3_600_000);
   // 3b — OUTGOING_OFFER_CHECK: run the language-agnostic semantic check on the outgoing reply (a backstop to
   // the deterministic keyword floor) per sales turn. Same governed posture-flag discipline: env-read here,
   // default OFF, turning it on is a human promotion (HITL §5) — it adds a per-turn model call (cost) and is
@@ -621,6 +626,9 @@ export async function buildServer(opts?: {
         // Positions 20–21 — 3b. `offerCheckModel` is `undefined` unless OUTGOING_OFFER_CHECK is set, so the
         // reply-integrity check is exactly the deterministic keyword floor and the decision is byte-identical.
         offerCheckModel, OUTGOING_OFFER_CHECK,
+        // Position 22 — A1b/D2 staleness ceiling. Only consulted on the hydration path (flag-gated above);
+        // a fact past this age renders `priceConfirmed:false` and the agent offers to confirm the price.
+        PRODUCT_FACTS_MAX_AGE_MS,
       );
       brains.set(key, b);
     }

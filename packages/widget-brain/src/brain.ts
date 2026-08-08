@@ -133,6 +133,17 @@ const CATALOG_SUBSET_RULE =
 const CATALOG_TITLE_MAX = 140;
 const CATALOG_PRICE_MAX = 40;
 
+// D2 (ADR-0020) — what a product's price field renders as when A1b marked it `priceConfirmed:false` (its
+// Tier-2 fact is past the hard staleness ceiling). NO number is shown, and the rule below tells the agent
+// to offer to confirm rather than quote a stale one — money/NN#1 fail-honest.
+const PRICE_UNCONFIRMED_TEXT = "current price needs confirming";
+const CATALOG_PRICE_UNCONFIRMED_RULE =
+  "For any CATALOG product whose price shows as '" +
+  PRICE_UNCONFIRMED_TEXT +
+  "', its current price could not be confirmed: do NOT quote or guess a price for it — tell the shopper " +
+  "you'll confirm the current price before they buy, and offer to help another way. Never present a number " +
+  "as its price.";
+
 /**
  * @param retrieved When present, the CATALOG block renders ONLY these products (in the order given) and
  *   the subset rule above is added. When absent — the default, and the flag-off path — every branch below
@@ -189,10 +200,14 @@ function systemPrompt(
     // exist for a product with no resolvable tag.
     citations.rendered = rendered;
   }
+  // D2 — when any rendered product's price is unconfirmed (A1b staleness ceiling), tell the model how to
+  // handle it BEFORE it reads the block. Only added when actually present, so the flag-off / all-fresh
+  // prompt is byte-identical.
+  if (rendered.some((p) => p.priceConfirmed === false)) rules.push(CATALOG_PRICE_UNCONFIRMED_RULE);
   const catalog = rendered
     .map(
       (p, i) =>
-        `- ${minted ? `${minted.tags[i]} ` : ""}${sanitizeGroundingText(p.title, CATALOG_TITLE_MAX)} (${sanitizeGroundingText(p.price, CATALOG_PRICE_MAX)}): ${sanitizeGroundingText(p.description)}${p.tags?.length ? ` [${p.tags.map((t) => sanitizeGroundingText(t, 40)).join(", ")}]` : ""}${
+        `- ${minted ? `${minted.tags[i]} ` : ""}${sanitizeGroundingText(p.title, CATALOG_TITLE_MAX)} (${p.priceConfirmed === false ? PRICE_UNCONFIRMED_TEXT : sanitizeGroundingText(p.price, CATALOG_PRICE_MAX)}): ${sanitizeGroundingText(p.description)}${p.tags?.length ? ` [${p.tags.map((t) => sanitizeGroundingText(t, 40)).join(", ")}]` : ""}${
           // Ingredient list (INCI), when the merchant publishes it — bounded (count + per-item) to cap
           // prompt bloat + the injection surface. Grounds honest "does it contain X?" answers and lets
           // the skeptic/evidence path name the ACTUAL actives instead of marketing adjectives (D2).
@@ -669,10 +684,16 @@ function buildProductCards(citedIds: readonly string[], rendered: readonly Produ
   for (const id of citedIds) {
     const p = byId.get(id);
     if (!p) continue;
+    // A1b/D2 — a card is a projection of the CATALOG line, so it must withhold the price on EXACTLY the
+    // products the prompt withheld it on (priceConfirmed:false). Otherwise the reply says "let me confirm
+    // the price" while the card chip shows a number — a money/NN#1 fail-honest divergence. So an
+    // unconfirmed card carries the SAME sentinel the prompt shows (never a number) + the honest flag.
+    const unconfirmed = p.priceConfirmed === false;
     cards.push({
       productId: p.id,
       title: sanitizeGroundingText(p.title, CATALOG_TITLE_MAX),
-      price: sanitizeGroundingText(p.price, CATALOG_PRICE_MAX),
+      price: unconfirmed ? PRICE_UNCONFIRMED_TEXT : sanitizeGroundingText(p.price, CATALOG_PRICE_MAX),
+      ...(unconfirmed ? { priceConfirmed: false } : {}),
       ...(typeof p.availableForSale === "boolean" ? { availableForSale: p.availableForSale } : {}),
       // C1 — carry the opaque cart variant id (neutral) so the widget can build a one-tap cart link.
       ...(p.variantId ? { variantId: p.variantId } : {}),
@@ -893,6 +914,12 @@ export function createBrain(
   // Only ever ADDS catches on top of that floor, and fails SAFE to the floor on any model/parse error.
   offerCheckModel?: ModelPort,
   outgoingOfferCheckEnabled = false,
+  // A1b/D2 (ADR-0020) — the hard staleness ceiling (ms) for hydrated Tier-2 facts. When set (and hydration
+  // is on), a fact older than this — or one with no updatedAt — is NOT quoted: its product renders
+  // `priceConfirmed:false` and the agent offers to confirm rather than quote a stale number (money/NN#1).
+  // Undefined ⇒ no ceiling ⇒ every matched fact is overlaid (the pre-D2 behaviour). Server supplies it
+  // from PRODUCT_FACTS_MAX_AGE_MS; it only ever takes effect on the already-flag-gated hydration path.
+  productFactsMaxAgeMs?: number,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -992,7 +1019,10 @@ export function createBrain(
     let hydrated = retrieved;
     if (productFactsHydrationEnabled && productFactsPort && retrieved && retrieved.length > 0) {
       try {
-        hydrated = hydrateProductFacts(retrieved, await productFactsPort.getMany(tenantId, retrieved.map((p) => p.id)));
+        // D2 — supply the staleness ceiling only when one is configured, so a deployment without it keeps
+        // the pre-D2 overlay behaviour. `now` is read here (the choke point), never an ambient clock.
+        const staleness = productFactsMaxAgeMs !== undefined ? { now: new Date(), maxAgeMs: productFactsMaxAgeMs } : undefined;
+        hydrated = hydrateProductFacts(retrieved, await productFactsPort.getMany(tenantId, retrieved.map((p) => p.id)), staleness);
         retrieval?.flags.push("hydration:applied");
       } catch {
         hydrated = retrieved;
