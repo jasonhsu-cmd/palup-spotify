@@ -19,9 +19,17 @@ the deploy half of P3 (`docs/A1B-A3-GO-LIVE-CHECKLIST.md`). It creates:
 
 ### Apply (human, with GCP creds)
 
+**Note — `monitoring.tf` and `pubsub.tf` are ONE root module** sharing `variables.tf`, so a single
+`terraform apply` covers BOTH P3 and P4, and P4's vars (`project_number`, `pubsub_push_endpoint`,
+`backend_service_account`, `cloud_run_service_name`) have no defaults. To apply **P3 alone** (e.g. before
+the backend is deployed), pass empty strings for those — `pubsub.tf` still plans its resources, so prefer
+this only when you have not yet run pubsub.tf. Once the backend is up, apply both together (P4 section
+below). Always `terraform plan` first.
+
 ```bash
 cd infra/terraform
 terraform init
+terraform plan  -var="project_id=YOUR_PROJECT" ...      # ALWAYS plan first — it catches missing/invalid args
 terraform apply \
   -var="project_id=YOUR_PROJECT" \
   -var='notification_channel_ids=["projects/YOUR_PROJECT/notificationChannels/CHANNEL_ID"]'

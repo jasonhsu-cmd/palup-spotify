@@ -68,9 +68,13 @@ resource "google_pubsub_topic_iam_member" "backend_publish" {
 # audience + the exact push-SA email) is the SOLE control. This grant is kept for correctness/least-change,
 # not as the security boundary; the boundary is the code.
 resource "google_cloud_run_v2_service_iam_member" "push_invoker" {
-  name   = var.cloud_run_service_name
-  role   = "roles/run.invoker"
-  member = "serviceAccount:${google_service_account.pubsub_push.email}"
+  name = var.cloud_run_service_name
+  # `location` is optional (inferable) but the provider sets `region`, not `location`, so a v2 Cloud Run IAM
+  # member can't reliably infer it — set it explicitly to the service's region to avoid an apply-time
+  # "location could not be determined" error.
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.pubsub_push.email}"
 }
 
 # The Pub/Sub service agent may mint OIDC tokens AS the push SA (required for push oidc_token).
