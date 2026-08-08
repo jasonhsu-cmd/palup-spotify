@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   InMemoryRuntimeStore,
   createInMemoryVectorStore,
@@ -1117,10 +1117,39 @@ describe("A3 — runCatalogIndex populates the product-facts store when the dep 
   });
 
   it("FAILS SAFE — a facts-store error is swallowed and the vector index still completes", async () => {
-    const h = harness([product("serum", { price: "$34" })]);
-    const facts = spyFacts({ throwOnUpsert: true });
-    const [report] = await runCatalogIndex({ store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: facts }, [h.tenantId], { maxProducts: 5 });
-    expect(report!.outcome).toBe("indexed"); // primary job unaffected by the facts failure
-    expect(await idsIn(h.vector, h.tenantId)).not.toHaveLength(0); // corpus was written
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const h = harness([product("serum", { price: "$34" })]);
+      const facts = spyFacts({ throwOnUpsert: true });
+      const [report] = await runCatalogIndex({ store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: facts }, [h.tenantId], { maxProducts: 5 });
+      expect(report!.outcome).toBe("indexed"); // primary job unaffected by the facts failure
+      expect(await idsIn(h.vector, h.tenantId)).not.toHaveLength(0); // corpus was written
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("P2 (§5) — a successful facts write is logged to the immutable audit log", async () => {
+    const h = harness([product("serum", { price: "$34" }), product("cream", { price: "$20" })]);
+    await runCatalogIndex({ store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: spyFacts() }, [h.tenantId], { maxProducts: 5 });
+    const rec = (await h.store.readAudit({ tenantId: h.tenantId })).find((a) => a.action === "catalog.product_facts");
+    expect(rec).toBeDefined();
+    expect(rec!.actor).toBe(CATALOG_INDEX_ACTOR);
+    expect(rec!.input).toMatchObject({ tenantId: h.tenantId, count: 2, source: "poll:catalog-index" });
+    expect(rec!.reversalPath).toMatch(/deleteTenant/);
+  });
+
+  it("P3 — a facts-write failure raises the stably-keyed alert marker (for a log-based metric/alert)", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const h = harness([product("serum", { price: "$34" })]);
+      await runCatalogIndex({ store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: spyFacts({ throwOnUpsert: true }) }, [h.tenantId], { maxProducts: 5 });
+      const said = err.mock.calls.flat().join(" ");
+      expect(said).toContain("product_facts_upsert_failed");
+      expect(said).toContain(`tenant=${h.tenantId}`);
+      expect(said).not.toContain("product_facts_audit_failed"); // the upsert failed, so this is the upsert marker
+    } finally {
+      err.mockRestore();
+    }
   });
 });

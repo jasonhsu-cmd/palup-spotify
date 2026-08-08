@@ -457,13 +457,38 @@ async function indexOneTenant(
   // A3 — POLL-path producer (D2). We now hold a complete, current catalog (ceiling-checked), so refresh the
   // Tier-2 money-facts A1b serves from — on EVERY successful fetch, independent of the vector-corpus diff
   // below (a price/availability change must refresh here even when the semantic text, and so the embedding,
-  // is unchanged). Inert when no store is wired. FAIL-SAFE: the vector index is the primary job, so a facts
-  // write failure is logged and swallowed rather than failing the tenant's index.
+  // is unchanged). Inert when no store is wired. The write is AUDITED (P2, §5) and any failure raises a
+  // stably-keyed ALERT marker (P3). FAIL-SAFE: the vector index is the primary job, so a facts write
+  // failure is alerted + swallowed rather than failing the tenant's index (the poll re-run is the backstop).
   if (deps.productFacts) {
+    const facts = productFactsFrom(catalog, now());
+    let upserted = false;
     try {
-      await deps.productFacts.upsertMany(tenantId, productFactsFrom(catalog, now()));
+      await deps.productFacts.upsertMany(tenantId, facts);
+      upserted = true;
+      // P2 (§5) — LOG the money-fact write to the immutable audit log. It is a separate port from the
+      // vector write, so this can't share the manifest's transaction; a rare audit failure AFTER a
+      // successful upsert is therefore itself alerted (P3) rather than leaving an unaudited money write.
+      await deps.store.audit(
+        { tenantId },
+        {
+          actor: CATALOG_INDEX_ACTOR,
+          action: "catalog.product_facts",
+          input: { tenantId, count: facts.length, source: "poll:catalog-index" },
+          decision: "refreshed", // Tier-2 price/availability facts; served only when PRODUCT_FACTS_HYDRATION is promoted
+          reversalPath: `the next \`pnpm catalog:index --tenant ${tenantId}\` run overwrites them; ProductFactsPort.deleteTenant erases them`,
+        },
+      );
     } catch (e) {
-      console.error(`[catalog] tenant=${tenantId} product-facts upsert failed (index continues): ${(e as Error).message}`);
+      // P3 — a STABLY-KEYED alert marker so a log-based metric/alert can fire on a silently-failing
+      // producer (facts quietly going stale is exactly the risk this makes observable). Non-fatal: the
+      // vector index is the primary job and the scheduled poll re-run is the backstop. `upserted`
+      // distinguishes an UNWRITTEN refresh (upsert failed) from an UNAUDITED write (facts landed, §5
+      // record did not). Configure a Cloud Logging log-based metric/alert on "product_facts_*_failed".
+      console.error(
+        `[catalog] ALERT product_facts_${upserted ? "audit" : "upsert"}_failed tenant=${tenantId} ` +
+          `error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`,
+      );
     }
   }
 
