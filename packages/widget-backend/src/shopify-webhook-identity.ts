@@ -145,6 +145,16 @@ export const COMPLIANCE_TOPICS = ["customers/data_request", "customers/redact", 
 export const UNINSTALL_TOPIC = "app/uninstalled" as const;
 
 /**
+ * A3 (ADR-0020 D1/D4) — the catalog/inventory ingestion topics. Like `app/uninstalled`, their payload is
+ * the changed object (a Product / an InventoryLevel), NOT a Shop, so the shop is taken from the SIGNED-
+ * gated HEADER (see APP_UNINSTALLED_SHOP_SOURCE): the ONLY action they take is enqueue-a-reconcile, and
+ * the worker RE-FETCHES that tenant's OWN catalog through that tenant's OWN creds — so a wrong header can
+ * at worst trigger a redundant re-index of some other tenant's own data (what its own poll would do
+ * anyway), never a cross-tenant read or write, and only a Shopify-HMAC-signed body reaches it at all.
+ */
+export const CATALOG_TOPICS = ["products/create", "products/update", "products/delete", "inventory_levels/update"] as const;
+
+/**
  * Why `app/uninstalled` takes its shop from a header while every GDPR topic takes it from the body.
  *
  * The HMAC covers the BODY ONLY. So a body field is authenticated and a header is not. Every compliance
@@ -286,7 +296,23 @@ export const PAYLOAD_SHAPES: Record<string, PayloadShape> = {
   "customers/data_request": { required: ["shop_domain", "customer", "data_request"], forbidden: [] },
   "customers/redact": { required: ["shop_domain", "customer"], forbidden: ["data_request"] },
   "shop/redact": { required: ["shop_domain"], forbidden: ["customer", "data_request", "orders_requested", "orders_to_redact"] },
-  [UNINSTALL_TOPIC]: { required: [], forbidden: ["shop_domain", "customer", "data_request"] },
+  // A shop payload's own domain fields may be null (see APP_UNINSTALLED_SHOP_SOURCE), so this shape stays
+  // FORBIDDEN-only rather than requiring a positive shop field. But it must still exclude the OTHER signed
+  // body classes so one cannot be replayed here: compliance bodies carry shop_domain/customer/data_request,
+  // and — A3 (security review) — product/inventory bodies carry title/handle/variants/inventory_item_id.
+  // A genuine Shop object carries NONE of these, so forbidding them cannot reject a real uninstall, but it
+  // stops a captured, validly-signed catalog delivery from being replayed here to make a merchant inert.
+  [UNINSTALL_TOPIC]: {
+    required: [],
+    forbidden: ["shop_domain", "customer", "data_request", "title", "handle", "variants", "inventory_item_id"],
+  },
+  // A3 — catalog/inventory bodies. Discriminators only (the worker re-fetches, never trusting the body);
+  // `forbidden` keeps a compliance body (shop_domain/customer/data_request) from ever matching a catalog
+  // topic and vice-versa. products/* carry `id`; inventory_levels/update carries `inventory_item_id`.
+  "products/create": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request"] },
+  "products/update": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request"] },
+  "products/delete": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request"] },
+  "inventory_levels/update": { required: ["inventory_item_id"], forbidden: ["shop_domain", "customer", "data_request"] },
 };
 
 /** True when `body` matches exactly the shape this topic's documented payload has. Own-property checks

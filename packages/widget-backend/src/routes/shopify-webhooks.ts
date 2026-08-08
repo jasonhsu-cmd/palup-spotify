@@ -1,11 +1,13 @@
 import { createHmac } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { MerchantRecord, MerchantRegistryPort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
+import type { MerchantRecord, MerchantRegistryPort, QueuePort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
 import { buildShopifyShopperId } from "@palup/platform-ports";
 import { accountSubjectId, eraseSubject, listSubjects, retireSubject } from "@palup/widget-memory";
 import { clientIpKey } from "../rate-limit.js";
+import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage } from "../catalog-webhook-queue.js";
 import {
   APP_UNINSTALLED_SHOP_SOURCE,
+  CATALOG_TOPICS,
   COMPLIANCE_TOPICS,
   UNINSTALL_TOPIC,
   WEBHOOK_HMAC_HEADER,
@@ -109,6 +111,11 @@ export const WEBHOOK_ROUTES = {
   customersRedact: "/shopify/webhooks/customers/redact",
   shopRedact: "/shopify/webhooks/shop/redact",
   appUninstalled: "/shopify/webhooks/app/uninstalled",
+  // A3 — catalog/inventory ingestion (registered only when a queue is wired).
+  productsCreate: "/shopify/webhooks/products/create",
+  productsUpdate: "/shopify/webhooks/products/update",
+  productsDelete: "/shopify/webhooks/products/delete",
+  inventoryLevelsUpdate: "/shopify/webhooks/inventory_levels/update",
 } as const;
 
 /**
@@ -163,6 +170,10 @@ export interface ShopifyWebhookDeps {
   now: () => number;
   /** Per-IP rate limit for these PUBLIC routes — `false` ⇒ refuse. See `limited` below. */
   checkRateLimit?: (ipKey: string) => Promise<boolean>;
+  /** A3 (ADR-0020 D4) — the queue a verified catalog/inventory delivery is enqueued to. Present ONLY when
+   *  CATALOG_WEBHOOKS is on; absent ⇒ the catalog routes are not registered at all, so those topics 404
+   *  exactly as before this feature (inert). Never used by the compliance/uninstall handlers. */
+  queue?: QueuePort;
 }
 
 /** A refusal reason, for the SERVER-SIDE log only. The HTTP response never distinguishes these — a
@@ -348,6 +359,33 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
   );
   await deps.registry.setStatus(tenantId, "uninstalled", { reason });
   await markHandled(deps, tenantId, UNINSTALL_TOPIC, v.webhookId);
+  return "applied";
+}
+
+/**
+ * A3 (ADR-0020 D4) — a catalog/inventory change: verify (done), then ENQUEUE ONE reconcile for this tenant
+ * and return 200. It NEVER trusts the payload — the message carries only the tenantId, and the worker
+ * re-fetches the tenant's CURRENT catalog (out-of-order-safe; the poll job is the backstop). Shop comes
+ * from the SIGNED-gated header (CATALOG_TOPICS doc): a wrong header can at worst re-index some other
+ * tenant's OWN data, never cross-tenant. A kill halts ingestion too (NN#4): the delivery is ACKNOWLEDGED as
+ * `halted_deferred` and NOT enqueued. This path is deliberately NOT audited — unlike a compliance deferral,
+ * a halted re-index loses no obligation (the scheduled poll job is the backstop and reconciles the tenant
+ * once the halt clears), so there is nothing to record. No per-enqueue audit either: the enqueue is routine,
+ * non-destructive and idempotent, and the RECONCILE it triggers writes its own manifest audit through
+ * runCatalogIndex.
+ */
+async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic: string): Promise<Ack | { refused: Refusal }> {
+  if (!deps.queue) return "unknown_shop"; // defensive; the route is only registered when a queue is wired
+  if (!v.shopHeader) return { refused: "no_shop_header" };
+  if (!isValidShopDomain(v.shopHeader)) return { refused: "bad_shop" };
+  const shopDomain = v.shopHeader.toLowerCase();
+  const existing = await resolveTenant(deps, shopDomain);
+  if (!existing) return "unknown_shop";
+  const tenantId = existing.tenantId;
+  if (await deps.killCheck(tenantId)) return "halted_deferred";
+  if (await alreadyHandled(deps, tenantId, topic, v.webhookId)) return "already_handled";
+  await deps.queue.publish(CATALOG_RECONCILE_TOPIC, catalogReconcileMessage(tenantId, topic, v.webhookId, deps.now()));
+  await markHandled(deps, tenantId, topic, v.webhookId);
   return "applied";
 }
 
@@ -773,5 +811,15 @@ export function registerShopifyWebhookRoutes(app: FastifyInstance, deps: Shopify
     route(WEBHOOK_ROUTES.shopRedact, COMPLIANCE_TOPICS[2], handleShopRedact);
     route(WEBHOOK_ROUTES.customersRedact, COMPLIANCE_TOPICS[1], handleCustomerRedact);
     route(WEBHOOK_ROUTES.customersDataRequest, COMPLIANCE_TOPICS[0], handleDataRequest);
+
+    // A3 — catalog/inventory ingestion, registered ONLY when a queue is wired (CATALOG_WEBHOOKS on). With
+    // no queue these paths 404, exactly as before this feature. Each topic shares one enqueue handler; the
+    // topic is captured per-route so the message records which one fired.
+    if (deps.queue) {
+      route(WEBHOOK_ROUTES.productsCreate, CATALOG_TOPICS[0], (d, v) => handleCatalogChange(d, v, CATALOG_TOPICS[0]));
+      route(WEBHOOK_ROUTES.productsUpdate, CATALOG_TOPICS[1], (d, v) => handleCatalogChange(d, v, CATALOG_TOPICS[1]));
+      route(WEBHOOK_ROUTES.productsDelete, CATALOG_TOPICS[2], (d, v) => handleCatalogChange(d, v, CATALOG_TOPICS[2]));
+      route(WEBHOOK_ROUTES.inventoryLevelsUpdate, CATALOG_TOPICS[3], (d, v) => handleCatalogChange(d, v, CATALOG_TOPICS[3]));
+    }
   });
 }
