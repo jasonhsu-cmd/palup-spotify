@@ -10,6 +10,14 @@ export interface Product {
   /** Display price string, e.g. "$28". The agent never invents or alters this. */
   price: string;
   /**
+   * A1b/D2 (ADR-0020) — SERVING freshness marker, NOT catalog data. Grounding adapters leave it unset
+   * (absent === confirmed). The A1b hydrate step sets it `false` when the Tier-2 fact backing this price is
+   * past the hard staleness ceiling — meaning the price can no longer be trusted as current. When `false`,
+   * the CATALOG block renders NO number for this product and a rule tells the agent to offer to confirm the
+   * current price rather than quote a stale one (money/NN#1 fail-honest). Absent/`true` ⇒ quote as normal.
+   */
+  priceConfirmed?: boolean;
+  /**
    * C1 (ADR-0020) — the opaque per-product id used to build a one-tap cart/checkout deep link (a Shopify
    * variant id today). VENDOR-NEUTRAL: an opaque string the widget interpolates client-side; the
    * platform-specific cart-URL format is built in the WIDGET, never in the neutral layers (portability —

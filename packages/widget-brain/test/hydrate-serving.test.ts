@@ -52,6 +52,7 @@ function brainWithHydration(
   retriever: CatalogRetrieverPort,
   facts: ProductFactsPort | undefined,
   hydrationEnabled: boolean,
+  maxAgeMs?: number, // A1b/D2 staleness ceiling (position 22)
 ) {
   return createBrain(
     model, grounding, undefined, new MockCommerceAdapter(), undefined, undefined,
@@ -59,6 +60,8 @@ function brainWithHydration(
     retriever, /* catalogRetrieval */ true, DEFAULT_CATALOG_RETRIEVAL_K,
     false, false, false, false,
     facts, hydrationEnabled,
+    undefined, false,
+    maxAgeMs,
   );
 }
 
@@ -104,5 +107,26 @@ describe("A1b — flag OFF is inert", () => {
     await brainWithHydration(model, groundingOf(bigCatalog()), fakeRetriever(["p1", "p2"]), facts, false).decide(SALES, ASK);
     expect(facts.calls).toEqual([]);            // never called
     expect(lastSystemPrompt(model)).not.toContain("$99");
+  });
+});
+
+describe("A1b/D2 — staleness ceiling in serving (fail-honest on a stale fact)", () => {
+  it("a STALE fact is NOT quoted — the CATALOG shows 'needs confirming' + the confirm-price rule, not the number", async () => {
+    const model = new RecordingModelPort();
+    const stale = fakeFacts([{ productId: "p1", price: "$99", updatedAt: new Date(0).toISOString() }]); // 1970 ⇒ stale
+    await brainWithHydration(model, groundingOf(bigCatalog()), fakeRetriever(["p1", "p2"]), stale, true, 3_600_000).decide(SALES, ASK);
+    const prompt = lastSystemPrompt(model);
+    expect(prompt).toContain("current price needs confirming"); // the withheld-price marker
+    expect(prompt).toMatch(/do NOT quote or guess a price/i);   // the fail-honest rule was added
+    expect(prompt).not.toContain("$99");                        // the stale number never reaches the model
+  });
+
+  it("a FRESH fact under the same ceiling IS quoted (the ceiling only withholds stale ones)", async () => {
+    const model = new RecordingModelPort();
+    const fresh = fakeFacts([{ productId: "p1", price: "$29", updatedAt: new Date().toISOString() }]);
+    await brainWithHydration(model, groundingOf(bigCatalog()), fakeRetriever(["p1", "p2"]), fresh, true, 3_600_000).decide(SALES, ASK);
+    const prompt = lastSystemPrompt(model);
+    expect(prompt).toContain("$29");
+    expect(prompt).not.toContain("current price needs confirming");
   });
 });
