@@ -68,6 +68,8 @@ import {
 } from "./routes/shopify-install.js";
 import { registerShopifyWebhookRoutes } from "./routes/shopify-webhooks.js";
 import { subscribeCatalogReconcile } from "./catalog-webhook-queue.js";
+import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
+import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
 import { runCatalogIndex, shopifyCatalogSource } from "./jobs/catalog-index.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
@@ -944,11 +946,8 @@ export async function buildServer(opts?: {
   const CATALOG_WEBHOOKS = SHOPIFY_WEBHOOKS_ENABLED && process.env.CATALOG_WEBHOOKS === "true";
   let catalogQueue: QueuePort | undefined;
   if (CATALOG_WEBHOOKS) {
-    catalogQueue = createInMemoryQueue({});
-    // The reconcile worker. runCatalogIndex is the SAME reconcile-by-re-fetch path the poll job runs, given
-    // its own metered model + a durable facts store (Postgres when a pool exists). A malformed tenantId is
-    // skipped; a failing reconcile is retried then dead-lettered by the QueuePort, and the poll job still
-    // catches what a dead-lettered delivery missed.
+    // The reconcile — the SAME reconcile-by-re-fetch path the poll job runs, given its own metered model +
+    // a durable facts store (Postgres when a pool exists). Shared by both the durable and in-memory paths.
     const factsStore = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
     if (factsStore instanceof PostgresProductFactsStore) await factsStore.migrate();
     const reconcileDeps = {
@@ -958,15 +957,51 @@ export async function buildServer(opts?: {
       catalog: shopifyCatalogSource(secrets),
       productFacts: factsStore,
     };
-    subscribeCatalogReconcile(catalogQueue, async (tenantId) => {
+    const reconcile = async (tenantId: string) => {
       await runCatalogIndex(reconcileDeps, [tenantId], {});
-    });
-    console.warn(
-      "[config] CATALOG_WEBHOOKS is ON — catalog/inventory webhooks enqueue a re-index per delivery. NOTE: the " +
-        "in-memory QueuePort delivers SYNCHRONOUSLY, so a delivery blocks on a full re-index; production must " +
-        "supply an async adapter (Cloud Tasks/Pub/Sub, ADR-0006 D4). Enabling ingestion does not itself serve " +
-        "the facts — the serving side (PRODUCT_FACTS_HYDRATION) is a separate money/NN#1 promotion (HITL §5).",
-    );
+    };
+
+    // P4 (ADR-0006 D4) — the DURABLE async path: publish to Pub/Sub, consume via the OIDC-verified push
+    // route. Chosen ONLY when all three Pub/Sub settings are present; otherwise fall back to the in-memory
+    // reference queue (dev/staging only — synchronous delivery blocks the webhook request).
+    const PUBSUB_TOPIC = process.env.PUBSUB_CATALOG_TOPIC?.trim();
+    const PUBSUB_PUSH_SERVICE_ACCOUNT = process.env.PUBSUB_PUSH_SERVICE_ACCOUNT?.trim();
+    const PUBSUB_PUSH_AUDIENCE = process.env.PUBSUB_PUSH_AUDIENCE?.trim();
+    if (PUBSUB_TOPIC && PUBSUB_PUSH_SERVICE_ACCOUNT && PUBSUB_PUSH_AUDIENCE) {
+      // Dynamic import so the GCP SDKs load ONLY on the durable path (never on the default, flag-off build).
+      const { PubSub } = await import("@google-cloud/pubsub");
+      const { OAuth2Client } = await import("google-auth-library");
+      catalogQueue = createPubSubQueue({
+        client: new PubSub() as unknown as PubSubClientLike,
+        topicName: () => PUBSUB_TOPIC,
+      });
+      const oauth = new OAuth2Client();
+      const verify: OidcVerifier = async (token) => {
+        // verifyIdToken checks the Google signature + the audience; a bad token throws (⇒ route sees null).
+        const ticket = await oauth.verifyIdToken({ idToken: token, audience: PUBSUB_PUSH_AUDIENCE });
+        const p = ticket.getPayload();
+        return p?.email ? { email: p.email } : null;
+      };
+      registerPubSubPushRoute(app, {
+        verify,
+        expectedServiceAccount: PUBSUB_PUSH_SERVICE_ACCOUNT,
+        reconcile,
+        checkRateLimit: (ip) => underLimit(store, { tenantId: "__mint__" }, `ip:${ip}`, RL_IP, RL_WINDOW),
+      });
+      console.warn(
+        "[config] CATALOG_WEBHOOKS + Pub/Sub push — DURABLE async ingestion (publish→Pub/Sub→OIDC push route). " +
+          "UNVERIFIED-LIVE: the live path is staging-verified, not gate-verified (go-live P4). Enabling ingestion " +
+          "does not itself serve the facts — PRODUCT_FACTS_HYDRATION is a separate money/NN#1 promotion (HITL §5).",
+      );
+    } else {
+      catalogQueue = createInMemoryQueue({});
+      subscribeCatalogReconcile(catalogQueue, reconcile);
+      console.warn(
+        "[config] CATALOG_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): delivery is SYNCHRONOUS, so a " +
+          "webhook blocks on a full re-index. Set PUBSUB_CATALOG_TOPIC + PUBSUB_PUSH_SERVICE_ACCOUNT + " +
+          "PUBSUB_PUSH_AUDIENCE for the durable async path before any real deployment.",
+      );
+    }
   }
   if (SHOPIFY_WEBHOOKS_ENABLED) {
     // Idempotent DDL, and only when C1 has not already run it (an injected registry has no migration).

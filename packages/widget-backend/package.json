@@ -4,11 +4,13 @@
   "type": "module",
   "main": "src/server.ts",
   "dependencies": {
-    "@palup/platform-ports": "workspace:*",
-    "@palup/widget-brain": "workspace:*",
+    "@google-cloud/pubsub": "^6.0.0",
     "@palup/model-vertex": "workspace:*",
+    "@palup/platform-ports": "workspace:*",
+    "@palup/state-postgres": "workspace:*",
+    "@palup/widget-brain": "workspace:*",
     "@palup/widget-memory": "workspace:*",
     "fastify": "^5.0.0",
-    "@palup/state-postgres": "workspace:*"
+    "google-auth-library": "^11.0.0"
   }
 }
