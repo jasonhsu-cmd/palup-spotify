@@ -1,0 +1,58 @@
+{
+  "_meta": {
+    "purpose": "go-live checklist §B — the money-facts eval layer for A1b (fresh-price serving). Each case seeds the Tier-2 fact store, runs the shopper's price question through the hydration path, and grades the reply DETERMINISTICALLY (exact price presence/absence + fail-honest), not with a stochastic judge. Run with GCP creds via `pnpm eval:money-facts`; the harness plumbing is gate-tested with a scripted model (money-facts-harness.test.ts).",
+    "properties": ["price-fidelity", "staleness fail-honest (D2)", "availability fidelity", "missing-fact → base price", "cross-tenant isolation"],
+    "note": "The 1h staleness ceiling matches PRODUCT_FACTS_MAX_AGE_MS. ageMinutes > 60 ⇒ stale."
+  },
+  "cases": [
+    {
+      "id": "MF-fresh-1", "kind": "fresh", "tenantId": "acme",
+      "products": [{ "id": "serum", "title": "Vitamin-C Brightening Serum", "price": "$34", "description": "A daily brightening serum." }],
+      "facts": [{ "productId": "serum", "price": "$29", "ageMinutes": 5 }],
+      "message": "what's the price of the Vitamin-C Brightening Serum?",
+      "expect": { "quotes": "$29", "notQuotes": ["$34"] }
+    },
+    {
+      "id": "MF-fresh-2", "kind": "fresh", "tenantId": "acme",
+      "products": [{ "id": "cream", "title": "Night Repair Cream", "price": "$48", "description": "A rich overnight moisturiser." }],
+      "facts": [{ "productId": "cream", "price": "$52", "ageMinutes": 12, "availableForSale": true }],
+      "message": "what does the Night Repair Cream cost?",
+      "expect": { "quotes": "$52", "notQuotes": ["$48"] }
+    },
+    {
+      "id": "MF-stale-1", "kind": "stale", "tenantId": "acme",
+      "products": [{ "id": "serum", "title": "Vitamin-C Brightening Serum", "price": "$34", "description": "A daily brightening serum." }],
+      "facts": [{ "productId": "serum", "price": "$29", "ageMinutes": 180 }],
+      "message": "what's the current price of the Vitamin-C Brightening Serum?",
+      "expect": { "withholdsPrice": true, "confirms": true, "notQuotes": ["$29", "$34"] }
+    },
+    {
+      "id": "MF-stale-2", "kind": "stale", "tenantId": "acme",
+      "products": [{ "id": "cream", "title": "Night Repair Cream", "price": "$48", "description": "A rich overnight moisturiser." }],
+      "facts": [{ "productId": "cream", "price": "$52", "ageMinutes": 4320 }],
+      "message": "and the price of the Night Repair Cream?",
+      "expect": { "withholdsPrice": true, "confirms": true }
+    },
+    {
+      "id": "MF-missing-1", "kind": "missing", "tenantId": "acme",
+      "products": [{ "id": "toner", "title": "Balancing Toner", "price": "$22", "description": "A gentle balancing toner." }],
+      "facts": [],
+      "message": "how much is the Balancing Toner?",
+      "expect": { "quotes": "$22" }
+    },
+    {
+      "id": "MF-avail-1", "kind": "fresh", "tenantId": "acme",
+      "products": [{ "id": "serum", "title": "Vitamin-C Brightening Serum", "price": "$34", "description": "A daily brightening serum.", "availableForSale": true }],
+      "facts": [{ "productId": "serum", "price": "$29", "ageMinutes": 3, "availableForSale": false }],
+      "message": "is the Vitamin-C Brightening Serum in stock, and how much?",
+      "expect": { "quotes": "$29", "notQuotes": ["$34"] }
+    },
+    {
+      "id": "MF-xtenant-1", "kind": "cross_tenant", "tenantId": "acme",
+      "products": [{ "id": "serum", "title": "Vitamin-C Brightening Serum", "price": "$34", "description": "A daily brightening serum." }],
+      "facts": [{ "productId": "serum", "price": "$9", "ageMinutes": 5, "tenantId": "rival-store" }],
+      "message": "what's the price of the Vitamin-C Brightening Serum?",
+      "expect": { "quotes": "$34", "notQuotes": ["$9"] }
+    }
+  ]
+}

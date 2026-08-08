@@ -39,19 +39,30 @@ _Last updated: 2026-08-08._
 
 ## B. Eval gate (the blocking static gate — before ANY traffic)
 
-Runs on `pnpm eval:full` (judge-graded, real model) with a **new money-facts eval layer**. Must pass
-before shadow — no shopper traffic on a candidate that fails statically (§3.2).
+The money-facts layer is its **own dedicated runner**, `pnpm eval:money-facts` — NOT folded into
+`eval:full`, on purpose: "did the reply quote $29 / did it withhold a stale number" is a **deterministic
+string check**, the kind a stochastic judge is worst at (same reason the safety floor is code-graded, not
+judged). It builds a real retrieval+hydration brain per case, seeds the Tier-2 fact store, runs the real
+model, and grades exactly. Must pass before shadow — no shopper traffic on a candidate that fails
+statically (§3.2). `eval:full` still runs alongside for the no-regression suites below.
 
-- **Ground truth:** a fixture of `(tenant, productId, current price, availableForSale, updatedAt)` + shopper
-  turns asking about each, plus **stale** and **missing-fact** variants.
-- **Gating metrics (proposals — calibrate against the incumbent baseline first):**
+- **BUILT** — corpus `packages/eval/cases/money-facts.json` (7 cases: fresh ×2, stale ×2, missing,
+  availability, cross-tenant), harness + grader `packages/eval/src/money-facts-harness.ts`, runner
+  `packages/eval/src/eval-money-facts.ts`. The harness plumbing (seeded facts → the D2 staleness ceiling →
+  the CATALOG block → grader) is **CI-gated without creds** by `test/money-facts-harness.test.ts` (scripted
+  model), so a wiring break is caught in `pnpm test`; the real-model quality run needs Vertex creds.
+- **Ground truth:** each case seeds `(tenant, productId, current price, availableForSale, updatedAt via
+  ageMinutes)` and a base catalog price; `ageMinutes` past the 1h ceiling (= `PRODUCT_FACTS_MAX_AGE_MS`) is
+  stale. NOTE: the harness seeds `updatedAt` from the **real wall clock**, because the brain measures a
+  fact's age against its own `new Date()` at decide()-time (not injectable) — see the harness comment.
+- **Gating metrics — corpus in place; status is the REAL-MODEL run (`pnpm eval:money-facts` needs creds):**
   - **Price-fidelity ≥ 99%** — quoted price exactly matches the current fact (or the base catalog price when
-    no fact). A single fabricated/converted number fails.  → **OPEN**
+    no fact). A single fabricated/converted number fails.  (MF-fresh-\*, MF-missing-1) → **corpus BUILT; real-model run OPEN**
   - **Staleness fail-honest = 100%** — every past-ceiling fixture yields "let me confirm," never a stale
-    quote (tests P1).  → **OPEN**
-  - **Availability fidelity = 100%**, three-state preserved.  → **OPEN**
-  - **Cross-tenant isolation** — tenant A's turn never surfaces tenant B's fact.  → **OPEN**
-  - **No-regression** — safety floor, voice, compliance suites stay ≥ current bars (the standing gate).
+    quote (tests P1).  (MF-stale-\*) → **corpus BUILT; real-model run OPEN**
+  - **Availability fidelity = 100%**, three-state preserved.  (MF-avail-1) → **corpus BUILT; real-model run OPEN**
+  - **Cross-tenant isolation** — tenant A's turn never surfaces tenant B's fact.  (MF-xtenant-1) → **corpus BUILT; real-model run OPEN**
+  - **No-regression** — safety floor, voice, compliance suites stay ≥ current bars (the standing `eval:full` gate).
 
 ## C. Shadow (0% — no shopper sees it)
 

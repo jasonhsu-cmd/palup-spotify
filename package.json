@@ -13,6 +13,7 @@
     "eval:judge": "tsx packages/eval/src/judge-run.ts",
     "eval:full": "tsx packages/eval/src/eval-full.ts",
     "eval:regression": "tsx packages/eval/src/regression-check.ts",
+    "eval:money-facts": "tsx packages/eval/src/eval-money-facts.ts",
     "evo:demo": "tsx packages/evolution/src/demo.ts",
     "evolve": "tsx packages/control-plane/src/evolve.ts",
     "try": "tsx packages/control-plane/src/try.ts",
