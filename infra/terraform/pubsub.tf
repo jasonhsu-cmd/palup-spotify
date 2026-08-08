@@ -62,7 +62,11 @@ resource "google_pubsub_topic_iam_member" "backend_publish" {
   member = "serviceAccount:${var.backend_service_account}"
 }
 
-# The push SA may invoke the Cloud Run service (so Pub/Sub's OIDC-authenticated POST is allowed in).
+# The push SA may invoke the Cloud Run service. NOTE: the backend deploys `--allow-unauthenticated` (it
+# must — /chat is public), so this run.invoker grant provides NO enforcement for the push endpoint: it is
+# internet-reachable by anyone, and the route's OWN OIDC check (routes/pubsub-push.ts — signature +
+# audience + the exact push-SA email) is the SOLE control. This grant is kept for correctness/least-change,
+# not as the security boundary; the boundary is the code.
 resource "google_cloud_run_v2_service_iam_member" "push_invoker" {
   name   = var.cloud_run_service_name
   role   = "roles/run.invoker"

@@ -8,6 +8,12 @@ import type { FastifyInstance } from "fastify";
 // the same "verify-before-you-trust-the-body" discipline as the Shopify webhook routes, with OIDC in place
 // of HMAC.
 //
+// THIS OIDC CHECK IS THE SOLE CONTROL. The service runs `--allow-unauthenticated` (it must — /chat is
+// public), so Cloud Run IAM does NOT gate this route: anyone on the internet can POST here. The verify →
+// expected-SA gate below is the only thing between a stranger's request and a tenant re-index, so it is
+// fail-closed at every step (bad/absent token, wrong SA, verifier throw ⇒ 401, no body read). The
+// production verifier also requires email_verified (server.ts) as defence in depth.
+//
 // **UNVERIFIED-LIVE.** The OIDC-verify + envelope-parse + fail-closed logic is unit-tested with an injected
 // verifier; a real Pub/Sub push is verified in STAGING before CATALOG_WEBHOOKS is enabled (go-live P4).
 

@@ -977,10 +977,14 @@ export async function buildServer(opts?: {
       });
       const oauth = new OAuth2Client();
       const verify: OidcVerifier = async (token) => {
-        // verifyIdToken checks the Google signature + the audience; a bad token throws (⇒ route sees null).
+        // verifyIdToken checks the Google SIGNATURE, the AUDIENCE, the ISSUER (accounts.google.com) and
+        // expiry; a bad token throws (⇒ route sees null). We additionally require email_verified — defence
+        // in depth on the sole control of an internet-reachable endpoint (the service runs
+        // --allow-unauthenticated for /chat, so Cloud Run IAM does NOT gate this route; the route's own
+        // OIDC check is it). The route then enforces email === the expected push SA.
         const ticket = await oauth.verifyIdToken({ idToken: token, audience: PUBSUB_PUSH_AUDIENCE });
         const p = ticket.getPayload();
-        return p?.email ? { email: p.email } : null;
+        return p?.email && p.email_verified === true ? { email: p.email } : null;
       };
       registerPubSubPushRoute(app, {
         verify,
