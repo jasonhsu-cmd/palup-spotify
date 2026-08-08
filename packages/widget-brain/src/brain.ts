@@ -684,10 +684,16 @@ function buildProductCards(citedIds: readonly string[], rendered: readonly Produ
   for (const id of citedIds) {
     const p = byId.get(id);
     if (!p) continue;
+    // A1b/D2 — a card is a projection of the CATALOG line, so it must withhold the price on EXACTLY the
+    // products the prompt withheld it on (priceConfirmed:false). Otherwise the reply says "let me confirm
+    // the price" while the card chip shows a number — a money/NN#1 fail-honest divergence. So an
+    // unconfirmed card carries the SAME sentinel the prompt shows (never a number) + the honest flag.
+    const unconfirmed = p.priceConfirmed === false;
     cards.push({
       productId: p.id,
       title: sanitizeGroundingText(p.title, CATALOG_TITLE_MAX),
-      price: sanitizeGroundingText(p.price, CATALOG_PRICE_MAX),
+      price: unconfirmed ? PRICE_UNCONFIRMED_TEXT : sanitizeGroundingText(p.price, CATALOG_PRICE_MAX),
+      ...(unconfirmed ? { priceConfirmed: false } : {}),
       ...(typeof p.availableForSale === "boolean" ? { availableForSale: p.availableForSale } : {}),
       // C1 — carry the opaque cart variant id (neutral) so the widget can build a one-tap cart link.
       ...(p.variantId ? { variantId: p.variantId } : {}),

@@ -217,8 +217,14 @@ export interface RecommendedProductCard {
   productId: string;
   /** The merchant's title, sanitized and capped exactly as the CATALOG line renders it. */
   title: string;
-  /** The merchant's DISPLAY price string, e.g. "$34" — copied, never parsed, computed or converted. */
+  /** The merchant's DISPLAY price string, e.g. "$34" — copied, never parsed, computed or converted. When
+   *  `priceConfirmed` is false (A1b/D2 staleness), this is NOT a number but the same "needs confirming"
+   *  sentinel the CATALOG line shows — so the card never asserts a price the reply is declining to quote. */
   price: string;
+  /** A1b/D2 — false when the price could not be confirmed (its Tier-2 fact was past the staleness
+   *  ceiling), matching the prompt's withheld state. Absent ⇒ confirmed. The widget should render an
+   *  unconfirmed card without a numeric price chip (money/NN#1 fail-honest, consistent with the reply). */
+  priceConfirmed?: boolean;
   /** C1 — the opaque variant id for a one-tap cart deep link, copied from `Product.variantId`. The
    *  widget-backend WIRE layer builds the platform cart URL from it (it knows the tenant's shop domain);
    *  no URL is ever placed on this neutral card. Absent when the source reports no variant. */

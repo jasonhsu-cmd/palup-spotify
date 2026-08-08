@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { GroundingContext, GroundingPort, ModelPort, ModelRequest, ModelResponse, Product } from "@palup/platform-ports";
-import { MockCommerceAdapter, createBrain } from "../src/index.js";
+import type { GroundingContext, GroundingPort, ModelPort, ModelRequest, ModelResponse, Product, ProductFactsPort } from "@palup/platform-ports";
+import { MockCommerceAdapter, createBrain, DEFAULT_CATALOG_RETRIEVAL_K } from "../src/index.js";
 import type { CatalogRetrieverPort, RetrievedProduct, Signals } from "../src/types.js";
 
 // E3 — PRODUCT CARDS, behind the PRODUCT_CARDS posture flag (default OFF).
@@ -276,5 +276,40 @@ describe("E3 — PRODUCT_CARDS is independent of PRODUCT_CITATIONS in both direc
     const model = new ScriptedModelPort(() => "I can look into that.");
     const d = await brainWith(model, groundingOf({ ...catalogOf(0) }), { citations: true, cards: true }).decide(SALES, ASK);
     expect(d.recommendedProductCards).toBeUndefined();
+  });
+});
+
+// ── A1b/D2 — a withheld (stale) price must be withheld on the CARD too, not just the prompt ─────────
+// Security review of P1 (#261) caught that buildProductCards emitted p.price unconditionally, so a
+// stale product's card shipped a number while the reply said "let me confirm" — a money/NN#1 divergence.
+describe("A1b/D2 — an unconfirmed (stale) price is withheld on the card, matching the prompt", () => {
+  /** getMany returns one STALE fact (1970 updatedAt) for the retrieved product. */
+  function staleFacts(productId: string): ProductFactsPort {
+    return {
+      async getMany(_t, ids) {
+        return ids.includes(productId) ? [{ productId, price: "$99", updatedAt: new Date(0).toISOString() }] : [];
+      },
+      async upsertMany() {},
+      async deleteTenant() {},
+    };
+  }
+
+  it("the card carries the confirm sentinel + priceConfirmed:false, never the base or stale number", async () => {
+    const pid = "gid://shopify/Product/1";
+    const model = new ScriptedModelPort(citeNth(1)); // cite the single retrieved product
+    const d = await createBrain(
+      model, groundingOf(catalogOf(15)), undefined, new MockCommerceAdapter(), undefined, undefined,
+      false, false, false, false,
+      fakeRetriever([pid]), /* catalogRetrieval */ true, DEFAULT_CATALOG_RETRIEVAL_K,
+      /* citations */ true, /* cards */ true, false, false,
+      staleFacts(pid), /* hydration */ true,
+      undefined, false,
+      /* maxAgeMs */ 3_600_000,
+    ).decide(SALES, ASK);
+    const card = d.recommendedProductCards?.[0];
+    expect(card?.productId).toBe(pid);
+    expect(card?.priceConfirmed).toBe(false);
+    expect(card?.price).toBe("current price needs confirming"); // the sentinel, not a number
+    expect(card?.price).not.toMatch(/\$\d/); // never the stale ($99) or base ($1) number
   });
 });
