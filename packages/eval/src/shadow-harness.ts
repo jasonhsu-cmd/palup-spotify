@@ -67,23 +67,30 @@ export function safetyRegression(champion: Decision, candidate: Decision): strin
 }
 
 /** Run one case through both brains and diff. Multi-turn cases are replayed as a session; the FINAL turn's
- *  decision is compared (the reply the shopper is left with). */
-async function shadowOne(c: ShadowCase, champion: Brain, candidate: Brain): Promise<{ champ: Decision; cand: Decision }> {
-  const run = async (brain: Brain): Promise<Decision> => {
+ *  decision is compared (the reply the shopper is left with). The candidate may run with AUGMENTED signals
+ *  (e.g. server-derived guard signals a producer computed for this turn) — the champion always uses the
+ *  case's own signals, so the diff isolates the flag + its server-authored inputs. */
+async function shadowOne(
+  c: ShadowCase,
+  champion: Brain,
+  candidate: Brain,
+  candidateSignals: Record<string, unknown>,
+): Promise<{ champ: Decision; cand: Decision }> {
+  const run = async (brain: Brain, signals: Record<string, unknown>): Promise<Decision> => {
     if (c.turns?.length) {
       const s = await createSession(brain);
       const history: HistoryTurn[] = [];
       let last: Decision | undefined;
       for (const t of c.turns) {
-        last = await s.send(t, (c.signals ?? {}) as never, history);
+        last = await s.send(t, signals as never, history);
         history.push({ role: "user", content: t }, { role: "agent", content: last.reply });
       }
       return last!;
     }
-    return brain.decide((c.signals ?? {}) as never, c.message ?? "");
+    return brain.decide(signals as never, c.message ?? "");
   };
   // Champion and candidate are independent brains over independent sessions — no shared state.
-  const [champ, cand] = await Promise.all([run(champion), run(candidate)]);
+  const [champ, cand] = await Promise.all([run(champion, c.signals ?? {}), run(candidate, candidateSignals)]);
   return { champ, cand };
 }
 
@@ -100,7 +107,14 @@ export async function runShadow(
   buildChampion: BrainFactory,
   buildCandidate: BrainFactory,
   model: ModelPort,
-  opts: { concurrency?: number } = {},
+  opts: {
+    concurrency?: number;
+    /** Optional per-case signals the CANDIDATE runs with (merged over the case's own signals). Use this to
+     *  inject a server-authored input the flag consumes — e.g. run the guard-classifier producer for this
+     *  turn and pass its serverSafetyClass / serverInjection / serverSupportIntent. The champion is
+     *  unaffected, so the diff still isolates the flag. Async (it may call the model). */
+    augmentCandidateSignals?: (c: ShadowCase, model: ModelPort) => Promise<Record<string, unknown> | undefined>;
+  } = {},
 ): Promise<ShadowSummary> {
   const rows: ShadowRow[] = new Array(cases.length);
   let next = 0;
@@ -110,7 +124,9 @@ export async function runShadow(
       if (i >= cases.length) return;
       const c = cases[i]!;
       try {
-        const { champ, cand } = await shadowOne(c, buildChampion(model), buildCandidate(model));
+        const extra = opts.augmentCandidateSignals ? await opts.augmentCandidateSignals(c, model) : undefined;
+        const candidateSignals = { ...(c.signals ?? {}), ...(extra ?? {}) };
+        const { champ, cand } = await shadowOne(c, buildChampion(model), buildCandidate(model), candidateSignals);
         rows[i] = {
           id: c.id,
           layer: c.layer,

@@ -18,6 +18,7 @@
     "eval:guard-classifier": "tsx packages/widget-backend/src/eval-guard-classifier.ts",
     "eval:retrieval": "tsx packages/widget-backend/src/eval-retrieval.ts",
     "shadow:offer-check": "tsx packages/eval/src/shadow-offer-check.ts",
+    "shadow:guard-signals": "tsx packages/eval/src/shadow-guard-signals.ts",
     "evo:demo": "tsx packages/evolution/src/demo.ts",
     "evolve": "tsx packages/control-plane/src/evolve.ts",
     "try": "tsx packages/control-plane/src/try.ts",

@@ -68,6 +68,9 @@ importers:
       '@palup/platform-ports':
         specifier: workspace:*
         version: link:../platform-ports
+      '@palup/widget-backend':
+        specifier: workspace:*
+        version: link:../widget-backend
       '@palup/widget-brain':
         specifier: workspace:*
         version: link:../widget-brain
