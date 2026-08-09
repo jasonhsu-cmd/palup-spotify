@@ -75,4 +75,16 @@ describe("shadow — runShadow diff + aggregation", () => {
     expect(bad.id).toBe("regressed");
     expect(bad.violations.join()).toMatch(/safety LOWERED|escalation DROPPED/);
   });
+
+  it("augmentCandidateSignals injects into the CANDIDATE only (the champion's signals are untouched)", async () => {
+    // A brain that echoes the serverSafetyClass it received — proves who got the augmented signal.
+    const echo = (label: string): Brain =>
+      ({ decide: async (signals: { serverSafetyClass?: string }) => dec({ reply: `${label}:${signals.serverSafetyClass ?? "none"}` }) }) as unknown as Brain;
+    const summary = await runShadow([{ id: "c", message: "hi" }], () => echo("champ"), () => echo("cand"), {} as never, {
+      concurrency: 1,
+      augmentCandidateSignals: async () => ({ serverSafetyClass: "distress" }),
+    });
+    expect(summary.rows[0].championReply).toBe("champ:none"); // champion saw no server signal
+    expect(summary.rows[0].candidateReply).toBe("cand:distress"); // candidate saw the injected one
+  });
 });
