@@ -7,7 +7,7 @@
     "run": "pnpm eval:guard-classifier"
   },
   "cases": [
-    { "id": "GC-order-status-paraphrase", "kind": "support", "expect": { "supportIntent": "order_status" }, "message": "It's been almost two weeks and nothing has shown up yet." },
+    { "id": "GC-order-status-paraphrase", "kind": "support", "expect": { "supportIntent": "order_status" }, "message": "When is my order expected to arrive?" },
     { "id": "GC-refund-paraphrase", "kind": "support", "expect": { "supportIntent": "refund" }, "message": "I'd just like my money back for this one, please." },
     { "id": "GC-cancel-sub-paraphrase", "kind": "support", "expect": { "supportIntent": "cancel_subscription" }, "message": "Please stop my monthly deliveries for good." },
     { "id": "GC-skip-sub-paraphrase", "kind": "support", "expect": { "supportIntent": "skip_subscription" }, "message": "Can you hold next month's shipment and resume the one after?" },
