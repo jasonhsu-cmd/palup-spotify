@@ -61,23 +61,30 @@ subset it hydrates) AND a producer that has populated `ProductFactsPort` (else `
 
 ## Ordered action list
 
+**Shadow-replay harness — BUILT (#275) + all four instances wired.** `runShadow` (champion vs candidate
+over the graded corpus) + `safetyRegression` (the zero-tolerance exit bar: no lowered safetyClass, no
+dropped escalation, no added floor-detected ungrounded offer). Per-instance small real runs all → **0
+violations**. CAVEAT: the agent model is non-deterministic, so reply-TEXT diffs are noisy — the GATE is the
+structured-field violation check; a thorough shadow also wants failure-ELICITING cases + N-pass runs, and a
+FULL-corpus pass per flag before promotion.
+
 **Track A**
-- [ ] A1. Shadow-replay `OUTGOING_OFFER_CHECK` + `SERVER_GUARD_SIGNALS` against the graded corpus. **SCOUT
-      (2026-08-09): no replay harness exists yet.** `eval:regression` only compares `eval:full`'s gap-map to
-      a baseline, and `eval:full` builds the brain WITHOUT the wave-4 flags (positions 1–5 only). A1 needs a
-      NEW harness that runs the graded corpus with each flag ON vs OFF and diffs the decisions (fabricated
-      offers / lowered safety must be zero). Buildable next.
+- [x] A1. Shadow instances — **DONE:** `pnpm shadow:offer-check` (#275), `pnpm shadow:guard-signals` (#276,
+      runs the real guard classifier per turn + injects its server signals). Small runs → 0 violations.
+      Remaining: a FULL-corpus pass per flag + offer/guard-eliciting cases before promotion.
 - [ ] A2. Kill-switch dry-run at the canary scope.
 - [ ] A3. Canary on 1–3 design-partner tenants; monitor; human approve; widen.
 
 **Track B**
 - [x] B1. **`CATALOG_RETRIEVAL` eval corpus — DONE (#273).** Real index + retrieve paths, recall@k /
       no-wrong-product; **10/10 on real Vertex embeddings**. `pnpm eval:retrieval`.
-- [ ] B2. Promote `CATALOG_RETRIEVAL` (eval ✅ → shadow → canary → approve). Shadow needs the A1 replay
-      harness too (same flag-on-vs-off diff, over retrieval-affected turns).
+- [ ] B2. Promote `CATALOG_RETRIEVAL` (eval ✅ → shadow → canary → approve). **Shadow instance DONE (#277):
+      `pnpm shadow:retrieval`** (full catalog vs top-5; 0 violations). Remaining: full-corpus pass + canary.
 - [ ] B3. Enable `CATALOG_WEBHOOKS` producer in staging shadow (P4 consume route is ready); confirm facts
       populate + the P3 alert stays quiet; do the push-SA 204 delivery check (grant tokenCreator or observe a
       real push).
+      **Shadow instance DONE (#277): `pnpm shadow:hydration`** (both retrieval on; hydration off vs on over a
+      seeded fresh fact store; 0 violations). Remaining: full-corpus pass + canary.
 - [ ] B4. Promote `PRODUCT_FACTS_HYDRATION` (eval ✅ → shadow → canary → approve) — the money/NN#1 gate; tune
       `PRODUCT_FACTS_MAX_AGE_MS` against D2's ≤15-min freshness target.
 
