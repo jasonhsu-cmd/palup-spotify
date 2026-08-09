@@ -16,6 +16,7 @@
     "eval:money-facts": "tsx packages/eval/src/eval-money-facts.ts",
     "eval:offer-check": "tsx packages/eval/src/eval-offer-check.ts",
     "eval:guard-classifier": "tsx packages/widget-backend/src/eval-guard-classifier.ts",
+    "eval:retrieval": "tsx packages/widget-backend/src/eval-retrieval.ts",
     "evo:demo": "tsx packages/evolution/src/demo.ts",
     "evolve": "tsx packages/control-plane/src/evolve.ts",
     "try": "tsx packages/control-plane/src/try.ts",

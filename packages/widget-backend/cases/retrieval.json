@@ -1,0 +1,34 @@
+{
+  "_meta": {
+    "purpose": "CATALOG_RETRIEVAL (E1) eval corpus — the retrieval-QUALITY gate that catalog-retrieval.test.ts defers ('nothing about retrieval QUALITY, recall, or latency. That is the eval gate's job, on real embeddings'). Indexes this catalog through the REAL path (runCatalogIndex → embed purpose:document → vector store) and runs each shopper query through the REAL retriever (createCatalogRetriever → embed purpose:query → vector top-k), then grades recall@k on real Vertex embeddings.",
+    "properties": ["recall@k (the relevant product is in the retriever's top-k)", "no-wrong-product (a focused query does NOT surface a clearly-irrelevant product in top-k)"],
+    "grading": "expectTop ⇒ the top-ranked id must equal it; relevantInTopK ⇒ at least one of these ids must be in the top-k; notInTopK ⇒ none of these ids may appear in the top-k. k defaults to 3 over this 10-product catalog.",
+    "note": "Silent-truncation (postgres-vector-store MAX_SCAN_ROWS, a separate finding) is NOT covered here — that is a store-level property, not a relevance one.",
+    "run": "pnpm eval:retrieval",
+    "k": 3
+  },
+  "products": [
+    { "id": "serum", "title": "Vitamin-C Brightening Serum", "price": "$34", "description": "A daily antioxidant serum that brightens dull skin and fades dark spots and uneven tone.", "tags": ["brightening", "vitamin-c", "dark-spots", "antioxidant"] },
+    { "id": "cream", "title": "Night Repair Cream", "price": "$48", "description": "A rich overnight moisturizer that repairs and deeply hydrates the skin barrier while you sleep.", "tags": ["moisturizer", "overnight", "repair", "hydrating"] },
+    { "id": "toner", "title": "Balancing Toner", "price": "$22", "description": "A gentle alcohol-free toner that balances the skin and preps it to absorb serums.", "tags": ["toner", "balancing", "gentle", "prep"] },
+    { "id": "cleanser", "title": "Gentle Foaming Cleanser", "price": "$24", "description": "A daily foaming face wash that removes makeup and dirt without stripping or drying the skin.", "tags": ["cleanser", "face-wash", "makeup-removal", "gentle"] },
+    { "id": "sunscreen", "title": "Daily Mineral Sunscreen SPF 50", "price": "$28", "description": "A lightweight mineral sunscreen with zinc for broad-spectrum daily UV protection.", "tags": ["sunscreen", "spf", "uv-protection", "mineral"] },
+    { "id": "mask", "title": "Hydrating Overnight Mask", "price": "$38", "description": "A deep-hydration sleeping mask that plumps and revives dry, tired skin overnight.", "tags": ["mask", "hydration", "sleeping-mask", "plumping"] },
+    { "id": "eye", "title": "Caffeine Eye Cream", "price": "$32", "description": "An under-eye cream with caffeine to reduce puffiness and the look of dark circles.", "tags": ["eye-cream", "dark-circles", "puffiness", "under-eye"] },
+    { "id": "oil", "title": "Rosehip Facial Oil", "price": "$40", "description": "A nourishing rosehip oil for very dry skin that softens the look of fine lines.", "tags": ["facial-oil", "nourishing", "dry-skin", "fine-lines"] },
+    { "id": "exfoliant", "title": "AHA Exfoliating Solution", "price": "$30", "description": "A weekly AHA exfoliant that smooths rough texture and helps unclog pores.", "tags": ["exfoliant", "aha", "texture", "pores"] },
+    { "id": "lipbalm", "title": "Repairing Lip Balm", "price": "$12", "description": "A soothing balm that repairs dry, chapped lips.", "tags": ["lip-balm", "lips", "repair", "soothing"] }
+  ],
+  "cases": [
+    { "id": "R-brighten", "query": "something to fade dark spots and brighten my dull skin", "expectTop": "serum", "relevantInTopK": ["serum"] },
+    { "id": "R-eyes", "query": "what helps with puffy eyes and dark circles", "expectTop": "eye", "relevantInTopK": ["eye"], "notInTopK": ["lipbalm", "cleanser"] },
+    { "id": "R-spf", "query": "I need daily sun protection for my face", "expectTop": "sunscreen", "relevantInTopK": ["sunscreen"], "notInTopK": ["lipbalm", "eye"] },
+    { "id": "R-cleanse", "query": "a gentle face wash to take off my makeup", "expectTop": "cleanser", "relevantInTopK": ["cleanser"] },
+    { "id": "R-toner", "query": "a toner to balance my skin before serum", "expectTop": "toner", "relevantInTopK": ["toner"] },
+    { "id": "R-exfoliate", "query": "something to smooth rough texture and unclog pores", "expectTop": "exfoliant", "relevantInTopK": ["exfoliant"] },
+    { "id": "R-lips", "query": "my lips are chapped and dry", "expectTop": "lipbalm", "relevantInTopK": ["lipbalm"] },
+    { "id": "R-overnight", "query": "a rich moisturizer to use overnight", "relevantInTopK": ["cream", "mask"] },
+    { "id": "R-dry", "query": "my skin is really dry and flaky, something nourishing", "relevantInTopK": ["oil", "cream"] },
+    { "id": "R-hydrate-sleep", "query": "deep hydration while I sleep", "relevantInTopK": ["mask", "cream"] }
+  ]
+}
