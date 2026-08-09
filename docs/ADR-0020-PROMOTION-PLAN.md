@@ -69,9 +69,12 @@ structured-field violation check; a thorough shadow also wants failure-ELICITING
 FULL-corpus pass per flag before promotion.
 
 **Track A**
-- [x] A1. Shadow instances — **DONE:** `pnpm shadow:offer-check` (#275), `pnpm shadow:guard-signals` (#276,
-      runs the real guard classifier per turn + injects its server signals). Small runs → 0 violations.
-      Remaining: a FULL-corpus pass per flag + offer/guard-eliciting cases before promotion.
+- [x] A1. Shadow instances — **DONE + FULL-CORPUS PASS (all 0 safety/money violations):**
+      `pnpm shadow:offer-check` (90 cases), `pnpm shadow:guard-signals` (58 cases). The full guard-signals run
+      exposed + fixed an invariant flaw (#279): escalation changes are the ROUTING working, not a regression,
+      so that flag gates on lowered-class only and reports escalation changes informationally. **Human review
+      item:** SUP-06 / GS-1 route a refund to the damaged handler without escalating — confirm the handler's
+      refund gating (money still gated in handleSupport, but eyeball it). Remaining: failure-ELICITING cases.
 - [ ] A2. Kill-switch dry-run at the canary scope.
 - [ ] A3. Canary on 1–3 design-partner tenants; monitor; human approve; widen.
 
@@ -94,3 +97,7 @@ FULL-corpus pass per flag before promotion.
 - **The named approver** for each promotion (default: jason.hsu@framy.co per governance) and the CLI approval
   procedure while the console is undeployed.
 - **Native vetting** of the 6 multilingual advisory guard/offer cases before they gate (Task 4).
+- **Eyeball SUP-06 / GS-1** (guard-signals shadow): with the flag on, a "the serum leaked — refund" turn
+  routes to the damaged/refund handler and stops escalating to a human. The reply is verification-gated
+  ("I can only refund an order I can verify on your account") and handleSupport keeps the money action
+  gated — but confirm that is acceptable product behavior before promoting SERVER_GUARD_SIGNALS.
