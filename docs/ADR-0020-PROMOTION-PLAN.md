@@ -74,7 +74,12 @@ FULL-corpus pass per flag before promotion.
       exposed + fixed an invariant flaw (#279): escalation changes are the ROUTING working, not a regression,
       so that flag gates on lowered-class only and reports escalation changes informationally. **Human review
       item:** SUP-06 / GS-1 route a refund to the damaged handler without escalating — confirm the handler's
-      refund gating (money still gated in handleSupport, but eyeball it). Remaining: failure-ELICITING cases.
+      refund gating (money still gated in handleSupport, but eyeball it).
+- [x] A1b. **Failure-ELICITING corpus — DONE (#281):** `cases/shadow-eliciting.json`, run via `SHADOW_ELICIT=1`.
+      SERVER_GUARD_SIGNALS earns it — the classifier raised safety on 4/8 evasions the keyword floor MISSED
+      (roleplay + polite-extraction injection, abuse, a paraphrased DISTRESS); 0 regressions. OUTGOING_OFFER_CHECK:
+      agent declines coaxing robustly flag-off, check adds marginal catches; the offer oracle is noisy so it is
+      informational (gate = no-regression). **All shadow evidence is now in hand for a promotion decision.**
 - [ ] A2. Kill-switch dry-run at the canary scope.
 - [ ] A3. Canary on 1–3 design-partner tenants; monitor; human approve; widen.
 
