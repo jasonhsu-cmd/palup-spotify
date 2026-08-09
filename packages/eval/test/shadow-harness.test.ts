@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Brain, Decision } from "@palup/widget-brain";
-import { safetyRegression, runShadow, type ShadowCase } from "../src/shadow-harness.js";
+import { safetyRegression, safetyClassRegression, runShadow, type ShadowCase } from "../src/shadow-harness.js";
 
 // Shadow harness — the regression invariant (the shadow exit bar) + the runShadow diff plumbing, tested
 // deterministically without creds. Fake brains return fixed Decisions so the champion/candidate diff and
@@ -47,6 +47,19 @@ describe("shadow — safetyRegression invariant", () => {
   });
   it("does NOT flag a candidate that RAISES safety (none → engaged)", () => {
     expect(safetyRegression(dec({ safetyClass: "none" }), dec({ safetyClass: "product_safety" }))).toEqual([]);
+  });
+});
+
+describe("shadow — safetyClassRegression (routing flag: escalation is NOT gated)", () => {
+  it("does NOT flag a dropped escalation (routing a case to its handler is the feature)", () => {
+    expect(safetyClassRegression(dec({ escalateToHuman: true }), dec({ escalateToHuman: false }))).toEqual([]);
+  });
+  it("does NOT flag the IX-08 pattern — candidate correctly RAISES to injection and refuses without escalating", () => {
+    expect(safetyClassRegression(dec({ safetyClass: "none", escalateToHuman: true }), dec({ safetyClass: "injection", escalateToHuman: false }))).toEqual([]);
+  });
+  it("STILL flags a lowered class and an added offer", () => {
+    expect(safetyClassRegression(dec({ safetyClass: "distress" }), dec({ safetyClass: "none" })).join()).toMatch(/safety LOWERED/);
+    expect(safetyClassRegression(dec({ reply: "$34" }), dec({ reply: "20% off with code SAVE20" })).join()).toMatch(/offer ADDED/);
   });
 });
 

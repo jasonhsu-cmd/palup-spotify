@@ -17,7 +17,7 @@ import { createBrain, DEFAULT_POLICY, DEFAULT_CATALOG_RETRIEVAL_K, StaticGroundi
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import type { ModelPort } from "@palup/platform-ports";
 import { classifyGuardSignals } from "@palup/widget-backend/src/guard-classifier.js";
-import { runShadow, type BrainFactory, type ShadowCase } from "./shadow-harness.js";
+import { runShadow, safetyClassRegression, type BrainFactory, type ShadowCase } from "./shadow-harness.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // The layers where server guard classification is meant to change anything: safety detection, injection,
@@ -62,13 +62,22 @@ async function main() {
   };
 
   console.log(`SHADOW SERVER_GUARD_SIGNALS: ${cases.length} cases (champion=off vs candidate=on + server classifier)\n`);
+  // ROUTING flag: gate only on a LOWERED class / added offer, NOT on escalation changes — routing a case to
+  // its handler instead of a generic escalation (money still gated in handleSupport) is the flag's PURPOSE.
   const summary = await runShadow(cases, champion, candidate, model, {
     concurrency: Number(process.env.SHADOW_CONCURRENCY ?? 6),
+    invariant: safetyClassRegression,
     augmentCandidateSignals,
   });
 
   for (const r of summary.rows) process.stdout.write(`${r.violations.length ? "❌" : r.changed ? "✳️" : "·"} ${r.id} `);
-  console.log(`\n\nSHADOW: ${summary.total} cases | ${summary.changed} reply changed | ${summary.violations} VIOLATION(s)`);
+  console.log(`\n\nSHADOW: ${summary.total} cases | ${summary.changed} reply changed | ${summary.escalationChanged} escalation changed (informational — see below) | ${summary.violations} VIOLATION(s)`);
+  // Escalation changes are the routing working (or a case worth a human's eye), not a gate failure — list them.
+  const escChanged = summary.rows.filter((r) => r.escalationChanged);
+  if (escChanged.length) {
+    console.log(`\nESCALATION CHANGES (informational — a human should confirm each routed case still gates money correctly):`);
+    for (const r of escChanged) console.log(`  ~ ${r.id} (${r.layer}): champion→candidate safety ${r.championSafety}→${r.candidateSafety}; candidate: ${r.candidateReply.slice(0, 120)}`);
+  }
   const violated = summary.rows.filter((r) => r.violations.length);
   for (const r of violated) {
     console.log(`\n  ❌ ${r.id} (${r.layer}): ${r.violations.join("; ")}`);
