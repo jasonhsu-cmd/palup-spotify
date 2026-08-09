@@ -29,9 +29,18 @@ async function main() {
     console.error("Set GOOGLE_CLOUD_PROJECT + ADC — shadow replay runs the agent + the guard classifier on the real model.");
     process.exit(2);
   }
-  let cases = JSON.parse(readFileSync(join(here, "..", "cases", "full-corpus.json"), "utf8")) as ShadowCase[];
-  const layerFilter = process.env.SHADOW_LAYER?.split(",").map((s) => s.trim());
-  cases = cases.filter((c) => (layerFilter ? layerFilter.includes(c.layer ?? "") : DEFAULT_LAYERS.has(c.layer ?? "")));
+  // SHADOW_ELICIT loads the failure-eliciting corpus (paraphrased/social-engineered evasions the English
+  // keyword floor misses) instead of the benign graded one.
+  const elicit = process.env.SHADOW_ELICIT === "1";
+  let cases: ShadowCase[];
+  if (elicit) {
+    cases = (JSON.parse(readFileSync(join(here, "..", "cases", "shadow-eliciting.json"), "utf8")).cases as ShadowCase[]).filter((c) => c.target === "guard");
+  } else {
+    cases = (JSON.parse(readFileSync(join(here, "..", "cases", "full-corpus.json"), "utf8")) as ShadowCase[]).filter((c) => {
+      const layerFilter = process.env.SHADOW_LAYER?.split(",").map((s) => s.trim());
+      return layerFilter ? layerFilter.includes(c.layer ?? "") : DEFAULT_LAYERS.has(c.layer ?? "");
+    });
+  }
   if (process.env.SHADOW_LIMIT) cases = cases.slice(0, Number(process.env.SHADOW_LIMIT));
 
   const grounding = new StaticGroundingAdapter();
@@ -87,6 +96,26 @@ async function main() {
   if (violated.length) {
     console.error(`\nSHADOW FAIL — ${violated.length} case(s) regressed safety. SERVER_GUARD_SIGNALS must only RAISE safety, never lower it.`);
     process.exit(1);
+  }
+
+  // ELICITING: the feature's VALUE — where did the server classifier RAISE safety on an evasion the English
+  // keyword floor (champion) missed? (Detection CORRECTNESS is the guard-classifier eval's gate; here we
+  // just surface that the flag catches paraphrased/social-engineered turns the floor lets through.)
+  if (elicit) {
+    console.log("\nELICITING — evasions the keyword floor missed that the server classifier caught:");
+    let raised = 0;
+    for (const r of summary.rows) {
+      if (r.championSafety === "none" && r.candidateSafety !== "none") {
+        raised++;
+        console.log(`  ✓ ${r.id}: champion=none → candidate=${r.candidateSafety} (evasion caught)`);
+      } else if (r.candidateSafety !== "none") {
+        console.log(`  = ${r.id}: both engaged safety (${r.championSafety}→${r.candidateSafety})`);
+      } else {
+        console.log(`  · ${r.id}: neither engaged safety — ${r.candidateReply.slice(0, 90)}`);
+      }
+    }
+    console.log(`\nELICIT: the server classifier raised safety on ${raised}/${summary.total} evasion(s) the keyword floor missed (the flag's value). 0 regressions.`);
+    return;
   }
   console.log("SHADOW OK — the candidate never lowered safety or dropped an escalation (server signals only raised).");
 }
