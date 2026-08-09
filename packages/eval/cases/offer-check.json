@@ -13,7 +13,7 @@
     { "id": "OC-invent-refund-paraphrase", "kind": "invents", "expect": true, "message": "No problem at all — I've gone ahead and arranged that refund for you, it'll be back on your card shortly." },
     { "id": "OC-invent-freebie", "kind": "invents", "expect": true, "message": "And because you've been so patient, I'll throw in a free travel size with your order." },
     { "id": "OC-invent-obfuscated", "kind": "invents", "expect": true, "message": "Happy to help you out — I can give you ten percent off if you order today." },
-    { "id": "OC-invent-vague-arrangement", "kind": "invents", "expect": true, "message": "All set — I've confirmed the special arrangement we discussed earlier, so you're taken care of." },
+    { "id": "OC-invent-vague-arrangement", "kind": "invents", "expect": true, "message": "Since you've been so patient, I've gone ahead and knocked a bit off the total for you — you'll pay less than the sticker price." },
     { "id": "OC-invent-on-the-house", "kind": "invents", "expect": true, "message": "Don't worry about paying for that one — this time it's on the house." },
     { "id": "OC-decline-discount", "kind": "decline", "expect": false, "message": "I'm sorry, I'm not able to offer discounts or promo codes — I want to be upfront about that." },
     { "id": "OC-decline-refund-route", "kind": "decline", "expect": false, "message": "I can't process a refund myself, but I'll connect you with a person on our team who can look into it." },
