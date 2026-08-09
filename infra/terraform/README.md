@@ -72,18 +72,27 @@ terraform apply \
   -var="cloud_run_service_name=<SERVICE>"
 ```
 
-### Then set the switch-on env on the service (separate from apply — does NOT enable webhooks yet)
+### Then register the push route via the DEPLOY PIPELINE (durable — a manual env-var set is wiped on the next merge)
+
+The staging deploy (`.github/workflows/deploy-staging.yml`) runs `gcloud run deploy … --set-env-vars`, which
+**replaces** the service env every merge — so a hand-set `gcloud run services update … PUBSUB_*` survives
+only until the next deploy. The durable switch is a single repo variable the workflow reads:
 
 ```bash
-gcloud run services update <SERVICE> --update-env-vars \
-  PUBSUB_CATALOG_TOPIC=catalog-reconcile,\
-PUBSUB_PUSH_SERVICE_ACCOUNT=pubsub-catalog-push@$PROJECT.iam.gserviceaccount.com,\
-PUBSUB_PUSH_AUDIENCE=https://<service-url>/internal/pubsub/catalog-reconcile
+gh variable set CATALOG_PUBSUB_AUDIENCE \
+  --body "https://<service-url>/internal/pubsub/catalog-reconcile"
 ```
 
-`PUBSUB_PUSH_AUDIENCE` MUST byte-equal the subscription's `oidc_token.audience` (the endpoint URL) or every
-push 401s. Setting these three switches the backend onto the durable path; `CATALOG_WEBHOOKS` stays a
-separate, later human flip.
+On the next deploy the workflow re-applies the three `PUBSUB_*` vars (topic + push-SA derived from the
+project; audience = this variable) via a post-deploy `--update-env-vars`. This registers only the **consume**
+route — it is decoupled from `CATALOG_WEBHOOKS` (server.ts), so the OIDC gate can be smoked before the
+producer is on. `CATALOG_PUBSUB_AUDIENCE` MUST byte-equal the subscription's `oidc_token.audience` (the
+endpoint URL) or every push 401s. Unset ⇒ the route stays 404 (inert). `CATALOG_WEBHOOKS` is a separate,
+later human flip that turns on the **publish** side.
+
+(For an immediate one-off smoke before the pipeline round-trips, you can `gcloud run services update <SERVICE>
+--update-env-vars PUBSUB_CATALOG_TOPIC=catalog-reconcile,PUBSUB_PUSH_SERVICE_ACCOUNT=pubsub-catalog-push@$PROJECT.iam.gserviceaccount.com,PUBSUB_PUSH_AUDIENCE=<url>`
+by hand — just know the next deploy drops it until the repo variable above is set.)
 
 ### Smoke test the OIDC gate BEFORE enabling `CATALOG_WEBHOOKS` (go-live P4)
 
@@ -95,13 +104,23 @@ commands). It is side-effect-free — every probe sends a tenant-less envelope, 
 ```bash
 URL=https://<service-url>/internal/pubsub/catalog-reconcile
 PUSH_SMOKE_URL=$URL \
-  WRONG_SA_TOKEN=$(gcloud auth print-identity-token --audiences="$URL") \
+  WRONG_SA_TOKEN=$(gcloud auth print-identity-token) \
   PUSH_SA_TOKEN=$(gcloud auth print-identity-token \
     --impersonate-service-account=pubsub-catalog-push@$PROJECT.iam.gserviceaccount.com \
     --audiences="$URL") \
   pnpm push:smoke
 ```
 
-Expect: anonymous 401, garbage 401, **your own SA 401 (Google-signed ≠ authorized)**, push-SA 204. All four
-must pass before `CATALOG_WEBHOOKS` is enabled — the OIDC check is the sole control on this internet-reachable
-route.
+Expect: anonymous 401, garbage 401, **wrong-token 401 (Google-signed ≠ authorized)**, push-SA 204.
+
+Token caveats (a USER operator, not a service account):
+- `WRONG_SA_TOKEN`: `gcloud auth print-identity-token` with **no** `--audiences` mints your plain user token
+  (audience = the gcloud client, not the endpoint) → the route rejects it on audience → 401. The
+  `--audiences` form only works for a service account (`Requires valid service account`), so don't use it here.
+- `PUSH_SA_TOKEN`: impersonating the push SA needs `roles/iam.serviceAccountTokenCreator` on it FOR YOUR
+  account (terraform grants that role to the Pub/Sub service agent, not you). Grant it, or skip the 204 probe.
+- The **three 401s are the security gate** (no stranger / unverifiable / wrong-identity token can reach the
+  reconcile); the 204 only confirms delivery, which a real Pub/Sub push also proves in the shadow stage.
+
+The gate must pass in staging before `CATALOG_WEBHOOKS` is enabled in prod — the OIDC check is the sole
+control on this internet-reachable route.
