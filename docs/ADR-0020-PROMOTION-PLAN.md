@@ -73,8 +73,12 @@ FULL-corpus pass per flag before promotion.
       `pnpm shadow:offer-check` (90 cases), `pnpm shadow:guard-signals` (58 cases). The full guard-signals run
       exposed + fixed an invariant flaw (#279): escalation changes are the ROUTING working, not a regression,
       so that flag gates on lowered-class only and reports escalation changes informationally. **Human review
-      item:** SUP-06 / GS-1 route a refund to the damaged handler without escalating — confirm the handler's
-      refund gating (money still gated in handleSupport, but eyeball it).
+      item — ANALYZED (recommend promote-safe; owner confirms per §3):** SUP-06 ("serum leaked — refund")
+      routes to `case "damaged"` (support.ts:333-349) instead of `case "refund"`. The damaged handler moves
+      NO money — it offers replacement-or-refund and asks the shopper to choose, verifies order ownership,
+      escalates above the refund ceiling (:336), and the actual refund stays gated in `case "refund"` (:327/331,
+      "I can't move the money myself" + above-ceiling refund_hitl). So the dropped escalation is a routing/UX
+      change, not a money-safety regression. No HITL bypass.
 - [x] A1b. **Failure-ELICITING corpus — DONE (#281):** `cases/shadow-eliciting.json`, run via `SHADOW_ELICIT=1`.
       SERVER_GUARD_SIGNALS earns it — the classifier raised safety on 4/8 evasions the keyword floor MISSED
       (roleplay + polite-extraction injection, abuse, a paraphrased DISTRESS); 0 regressions. OUTGOING_OFFER_CHECK:
