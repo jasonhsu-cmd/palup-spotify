@@ -1,0 +1,7 @@
+# Local Terraform working dir + downloaded providers (the google provider plugin alone is >100MB).
+.terraform/
+# State — may contain sensitive values; never commit. Use a remote backend for shared state.
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log

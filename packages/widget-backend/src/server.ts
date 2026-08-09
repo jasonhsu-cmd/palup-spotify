@@ -944,10 +944,21 @@ export async function buildServer(opts?: {
   // 404 and no queue/worker is built — byte-identical to before. The scheduled poll job (PRODUCT_FACTS_POLL)
   // remains the missed-event backstop, so webhooks are an optimisation, never the only freshness path.
   const CATALOG_WEBHOOKS = SHOPIFY_WEBHOOKS_ENABLED && process.env.CATALOG_WEBHOOKS === "true";
+  // P4 — Pub/Sub push settings. The CONSUME side (the OIDC push route) is gated on these THREE ALONE, NOT on
+  // CATALOG_WEBHOOKS: the route's OIDC verify is the sole control on an internet-reachable,
+  // --allow-unauthenticated endpoint, and decoupling it lets an operator smoke-verify that gate in staging
+  // (and, in the window before `shopify app deploy` subscribes topics, prod) BEFORE the webhook producer is
+  // turned on (go-live P4). CATALOG_WEBHOOKS gates only the PUBLISH side (the webhook routes that enqueue).
+  const PUBSUB_TOPIC = process.env.PUBSUB_CATALOG_TOPIC?.trim();
+  const PUBSUB_PUSH_SERVICE_ACCOUNT = process.env.PUBSUB_PUSH_SERVICE_ACCOUNT?.trim();
+  const PUBSUB_PUSH_AUDIENCE = process.env.PUBSUB_PUSH_AUDIENCE?.trim();
+  const pubsubPushConfigured = Boolean(PUBSUB_TOPIC && PUBSUB_PUSH_SERVICE_ACCOUNT && PUBSUB_PUSH_AUDIENCE);
   let catalogQueue: QueuePort | undefined;
-  if (CATALOG_WEBHOOKS) {
-    // The reconcile — the SAME reconcile-by-re-fetch path the poll job runs, given its own metered model +
-    // a durable facts store (Postgres when a pool exists). Shared by both the durable and in-memory paths.
+
+  // The reconcile-by-re-fetch worker (the SAME path the poll job runs, with its own metered model + a durable
+  // facts store when a pool exists) is shared by the consume (push route) and the in-memory publish path, so
+  // build it when EITHER is active.
+  if (CATALOG_WEBHOOKS || pubsubPushConfigured) {
     const factsStore = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
     if (factsStore instanceof PostgresProductFactsStore) await factsStore.migrate();
     const reconcileDeps = {
@@ -961,20 +972,13 @@ export async function buildServer(opts?: {
       await runCatalogIndex(reconcileDeps, [tenantId], {});
     };
 
-    // P4 (ADR-0006 D4) — the DURABLE async path: publish to Pub/Sub, consume via the OIDC-verified push
-    // route. Chosen ONLY when all three Pub/Sub settings are present; otherwise fall back to the in-memory
-    // reference queue (dev/staging only — synchronous delivery blocks the webhook request).
-    const PUBSUB_TOPIC = process.env.PUBSUB_CATALOG_TOPIC?.trim();
-    const PUBSUB_PUSH_SERVICE_ACCOUNT = process.env.PUBSUB_PUSH_SERVICE_ACCOUNT?.trim();
-    const PUBSUB_PUSH_AUDIENCE = process.env.PUBSUB_PUSH_AUDIENCE?.trim();
-    if (PUBSUB_TOPIC && PUBSUB_PUSH_SERVICE_ACCOUNT && PUBSUB_PUSH_AUDIENCE) {
-      // Dynamic import so the GCP SDKs load ONLY on the durable path (never on the default, flag-off build).
-      const { PubSub } = await import("@google-cloud/pubsub");
+    // CONSUME side — the durable OIDC-verified push route. Registered whenever Pub/Sub push is configured,
+    // INDEPENDENT of CATALOG_WEBHOOKS (the P4 decoupling). With CATALOG_WEBHOOKS off nothing publishes, so the
+    // route is inert except for a deliberately-authorized push (e.g. the go-live smoke) — but it is still
+    // fully OIDC-gated and fail-closed at every step, so registering it early carries no extra exposure.
+    if (pubsubPushConfigured) {
+      // Dynamic import so the GCP SDK loads ONLY when Pub/Sub push is configured (never on the flag-off build).
       const { OAuth2Client } = await import("google-auth-library");
-      catalogQueue = createPubSubQueue({
-        client: new PubSub() as unknown as PubSubClientLike,
-        topicName: () => PUBSUB_TOPIC,
-      });
       const oauth = new OAuth2Client();
       const verify: OidcVerifier = async (token) => {
         // verifyIdToken checks the Google SIGNATURE, the AUDIENCE, the ISSUER (accounts.google.com) and
@@ -982,29 +986,43 @@ export async function buildServer(opts?: {
         // in depth on the sole control of an internet-reachable endpoint (the service runs
         // --allow-unauthenticated for /chat, so Cloud Run IAM does NOT gate this route; the route's own
         // OIDC check is it). The route then enforces email === the expected push SA.
-        const ticket = await oauth.verifyIdToken({ idToken: token, audience: PUBSUB_PUSH_AUDIENCE });
+        const ticket = await oauth.verifyIdToken({ idToken: token, audience: PUBSUB_PUSH_AUDIENCE! });
         const p = ticket.getPayload();
         return p?.email && p.email_verified === true ? { email: p.email } : null;
       };
       registerPubSubPushRoute(app, {
         verify,
-        expectedServiceAccount: PUBSUB_PUSH_SERVICE_ACCOUNT,
+        expectedServiceAccount: PUBSUB_PUSH_SERVICE_ACCOUNT!,
         reconcile,
         checkRateLimit: (ip) => underLimit(store, { tenantId: "__mint__" }, `ip:${ip}`, RL_IP, RL_WINDOW),
       });
       console.warn(
-        "[config] CATALOG_WEBHOOKS + Pub/Sub push — DURABLE async ingestion (publish→Pub/Sub→OIDC push route). " +
-          "UNVERIFIED-LIVE: the live path is staging-verified, not gate-verified (go-live P4). Enabling ingestion " +
-          "does not itself serve the facts — PRODUCT_FACTS_HYDRATION is a separate money/NN#1 promotion (HITL §5).",
+        "[config] Pub/Sub OIDC push route registered (consume side) — its OIDC verify (signature + audience + " +
+          "expected SA + email_verified) is the SOLE control on this internet-reachable route. Registration is " +
+          "INDEPENDENT of CATALOG_WEBHOOKS so the gate can be smoke-verified before the producer is enabled (P4). " +
+          "Enabling ingestion does not itself serve the facts — PRODUCT_FACTS_HYDRATION is a separate money/NN#1 " +
+          "promotion (HITL §5).",
       );
-    } else {
-      catalogQueue = createInMemoryQueue({});
-      subscribeCatalogReconcile(catalogQueue, reconcile);
-      console.warn(
-        "[config] CATALOG_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): delivery is SYNCHRONOUS, so a " +
-          "webhook blocks on a full re-index. Set PUBSUB_CATALOG_TOPIC + PUBSUB_PUSH_SERVICE_ACCOUNT + " +
-          "PUBSUB_PUSH_AUDIENCE for the durable async path before any real deployment.",
-      );
+    }
+
+    // PUBLISH side — only when the webhook producer is on. It enqueues a reconcile per delivery: the durable
+    // path publishes to Pub/Sub (consumed by the route above), the fallback runs the in-memory queue inline.
+    if (CATALOG_WEBHOOKS) {
+      if (pubsubPushConfigured) {
+        const { PubSub } = await import("@google-cloud/pubsub");
+        catalogQueue = createPubSubQueue({
+          client: new PubSub() as unknown as PubSubClientLike,
+          topicName: () => PUBSUB_TOPIC!,
+        });
+      } else {
+        catalogQueue = createInMemoryQueue({});
+        subscribeCatalogReconcile(catalogQueue, reconcile);
+        console.warn(
+          "[config] CATALOG_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): delivery is SYNCHRONOUS, so a " +
+            "webhook blocks on a full re-index. Set PUBSUB_CATALOG_TOPIC + PUBSUB_PUSH_SERVICE_ACCOUNT + " +
+            "PUBSUB_PUSH_AUDIENCE for the durable async path before any real deployment.",
+        );
+      }
     }
   }
   if (SHOPIFY_WEBHOOKS_ENABLED) {
