@@ -62,14 +62,19 @@ subset it hydrates) AND a producer that has populated `ProductFactsPort` (else `
 ## Ordered action list
 
 **Track A**
-- [ ] A1. Shadow-replay `OUTGOING_OFFER_CHECK` + `SERVER_GUARD_SIGNALS` against the graded corpus (build the
-      replay harness if one does not already exist under `packages/eval`).
+- [ ] A1. Shadow-replay `OUTGOING_OFFER_CHECK` + `SERVER_GUARD_SIGNALS` against the graded corpus. **SCOUT
+      (2026-08-09): no replay harness exists yet.** `eval:regression` only compares `eval:full`'s gap-map to
+      a baseline, and `eval:full` builds the brain WITHOUT the wave-4 flags (positions 1–5 only). A1 needs a
+      NEW harness that runs the graded corpus with each flag ON vs OFF and diffs the decisions (fabricated
+      offers / lowered safety must be zero). Buildable next.
 - [ ] A2. Kill-switch dry-run at the canary scope.
 - [ ] A3. Canary on 1–3 design-partner tenants; monitor; human approve; widen.
 
 **Track B**
-- [ ] B1. **Build the `CATALOG_RETRIEVAL` eval corpus** (recall@k / no-wrong-product / no-silent-truncation).
-- [ ] B2. Promote `CATALOG_RETRIEVAL` (eval → shadow → canary → approve).
+- [x] B1. **`CATALOG_RETRIEVAL` eval corpus — DONE (#273).** Real index + retrieve paths, recall@k /
+      no-wrong-product; **10/10 on real Vertex embeddings**. `pnpm eval:retrieval`.
+- [ ] B2. Promote `CATALOG_RETRIEVAL` (eval ✅ → shadow → canary → approve). Shadow needs the A1 replay
+      harness too (same flag-on-vs-off diff, over retrieval-affected turns).
 - [ ] B3. Enable `CATALOG_WEBHOOKS` producer in staging shadow (P4 consume route is ready); confirm facts
       populate + the P3 alert stays quiet; do the push-SA 204 delivery check (grant tokenCreator or observe a
       real push).
