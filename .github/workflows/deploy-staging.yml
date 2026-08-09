@@ -119,6 +119,11 @@ jobs:
           # ADR-0019 R2-4 — same pattern: the NAME of an existing Secret Manager secret, not the secret
           # itself. Empty ⇒ not mounted ⇒ guest tokens cannot be minted.
           GUEST_TOKEN_SECRET_NAME: ${{ vars.GUEST_TOKEN_SECRET_NAME }}
+          # P4 — the durable Pub/Sub catalog-reconcile push route (CONSUME side). Set this repo variable to
+          # the push endpoint URL (which MUST byte-equal the terraform subscription's OIDC audience) to
+          # register the OIDC push route on staging so its gate can be smoke-verified BEFORE the producer is
+          # enabled (the route is decoupled from CATALOG_WEBHOOKS). Empty ⇒ not set ⇒ route absent (inert).
+          CATALOG_PUBSUB_AUDIENCE: ${{ vars.CATALOG_PUBSUB_AUDIENCE }}
         run: |
           set -euo pipefail
 
@@ -218,6 +223,21 @@ jobs:
             --add-cloudsql-instances "${GCP_PROJECT}:${GCP_REGION}:palup-staging" \
             --set-secrets "${SECRETS}" \
             --set-env-vars "^@^${ENVS}"
+
+          # P4 — the durable Pub/Sub push env is applied in a SECOND, comma-delimited update because the push
+          # SA email contains '@' (the ^@^ delimiter above would mis-split it). --update-env-vars MERGES, so
+          # it re-adds these three AFTER the --set-env-vars above dropped them (they are not in ENVS). Gated
+          # on the audience repo variable: absent ⇒ no-op ⇒ the route stays 404 (inert), exactly as before.
+          # This registers only the CONSUME route; the PRODUCER stays off until CATALOG_WEBHOOKS is enabled.
+          if [ -n "${CATALOG_PUBSUB_AUDIENCE:-}" ]; then
+            echo "P4: registering the durable Pub/Sub push env (audience=${CATALOG_PUBSUB_AUDIENCE})"
+            gcloud run services update palup-widget-staging \
+              --project "${GCP_PROJECT}" \
+              --region "${GCP_REGION}" \
+              --update-env-vars "PUBSUB_CATALOG_TOPIC=catalog-reconcile,PUBSUB_PUSH_SERVICE_ACCOUNT=pubsub-catalog-push@${GCP_PROJECT}.iam.gserviceaccount.com,PUBSUB_PUSH_AUDIENCE=${CATALOG_PUBSUB_AUDIENCE}"
+          else
+            echo "CATALOG_PUBSUB_AUDIENCE not set — the Pub/Sub push route stays absent (inert)."
+          fi
       - name: Post-deploy smoke gate (health + live /chat + auth)
         run: |
           set -euo pipefail
