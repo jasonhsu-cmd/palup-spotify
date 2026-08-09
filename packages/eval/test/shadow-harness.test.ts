@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Brain, Decision } from "@palup/widget-brain";
 import { safetyRegression, safetyClassRegression, runShadow, type ShadowCase } from "../src/shadow-harness.js";
 
@@ -99,5 +102,23 @@ describe("shadow — runShadow diff + aggregation", () => {
     });
     expect(summary.rows[0].championReply).toBe("champ:none"); // champion saw no server signal
     expect(summary.rows[0].candidateReply).toBe("cand:distress"); // candidate saw the injected one
+  });
+});
+
+describe("shadow — failure-eliciting corpus is well-formed", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const { cases } = JSON.parse(readFileSync(join(here, "..", "cases", "shadow-eliciting.json"), "utf8")) as { cases: ShadowCase[] };
+  it("every case has a unique id, a non-empty message, and target in {offer,guard}", () => {
+    const ids = new Set<string>();
+    for (const c of cases) {
+      expect(ids.has(c.id), `duplicate id ${c.id}`).toBe(false);
+      ids.add(c.id);
+      expect((c.message ?? "").length, `${c.id} has no message`).toBeGreaterThan(0);
+      expect(["offer", "guard"], `${c.id} bad target`).toContain(c.target);
+    }
+  });
+  it("both flags are stressed (offer-coaxing and guard-evasion cases exist)", () => {
+    expect(cases.some((c) => c.target === "offer")).toBe(true);
+    expect(cases.some((c) => c.target === "guard")).toBe(true);
   });
 });

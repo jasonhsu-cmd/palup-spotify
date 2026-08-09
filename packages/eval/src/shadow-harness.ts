@@ -28,6 +28,8 @@ export type BrainFactory = (model: ModelPort) => Brain;
 export interface ShadowCase {
   id: string;
   layer?: string;
+  /** For the failure-eliciting corpus: which flag this adversarial case is designed to stress. */
+  target?: "offer" | "guard";
   signals?: Record<string, unknown>;
   message?: string;
   turns?: string[];

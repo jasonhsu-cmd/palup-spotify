@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   createBrain,
+  classifyOutgoingOffer,
   DEFAULT_POLICY,
   DEFAULT_CATALOG_RETRIEVAL_K,
   StaticGroundingAdapter,
@@ -30,9 +31,17 @@ async function main() {
     console.error("Set GOOGLE_CLOUD_PROJECT + ADC — shadow replay runs the agent on the real model.");
     process.exit(2);
   }
-  let cases = JSON.parse(readFileSync(join(here, "..", "cases", "full-corpus.json"), "utf8")) as ShadowCase[];
-  const layerFilter = process.env.SHADOW_LAYER?.split(",").map((s) => s.trim());
-  cases = cases.filter((c) => (layerFilter ? layerFilter.includes(c.layer ?? "") : DEFAULT_LAYERS.has(c.layer ?? "")));
+  // SHADOW_ELICIT loads the failure-eliciting corpus (offer-coaxing turns) instead of the benign graded one.
+  const elicit = process.env.SHADOW_ELICIT === "1";
+  let cases: ShadowCase[];
+  if (elicit) {
+    cases = (JSON.parse(readFileSync(join(here, "..", "cases", "shadow-eliciting.json"), "utf8")).cases as ShadowCase[]).filter((c) => c.target === "offer");
+  } else {
+    cases = (JSON.parse(readFileSync(join(here, "..", "cases", "full-corpus.json"), "utf8")) as ShadowCase[]).filter((c) => {
+      const layerFilter = process.env.SHADOW_LAYER?.split(",").map((s) => s.trim());
+      return layerFilter ? layerFilter.includes(c.layer ?? "") : DEFAULT_LAYERS.has(c.layer ?? "");
+    });
+  }
   if (process.env.SHADOW_LIMIT) cases = cases.slice(0, Number(process.env.SHADOW_LIMIT));
 
   // Grounding + commerce are shared by both variants — the SAME source of truth, so the only difference
@@ -70,6 +79,33 @@ async function main() {
   if (violated.length) {
     console.error(`\nSHADOW FAIL — ${violated.length} case(s) regressed safety/money. OUTGOING_OFFER_CHECK must not exit shadow.`);
     process.exit(1);
+  }
+
+  // ELICITING: the GATE stays the deterministic no-regression check above (0 violations). Deterministically
+  // proving the candidate "did not invent a semantic offer" is exactly the hard problem the offer-check
+  // solves STOCHASTICALLY, so re-running classifyOutgoingOffer as an oracle would be circular AND noisy — a
+  // candidate reply the candidate's OWN check already passed can be re-flagged by a second sample (observed:
+  // a verification-gated "happy to help with a refund — which order?" mis-flagged as an invented offer, the
+  // same false-positive class the offer-check.json eval calibrates). So the oracle read below is
+  // INFORMATIONAL only, for human review — never a gate. The reply CHANGES are the flag's marginal value:
+  // the turns where the check intervened on top of the already-strong grounding.
+  if (elicit) {
+    console.log("\nELICITING (informational — the stochastic checker as an oracle; NOT a gate, see the note in code):");
+    let champFlag = 0;
+    let candFlag = 0;
+    for (const r of summary.rows) {
+      const [ch, ca] = await Promise.all([
+        classifyOutgoingOffer(model, r.championReply, "eval"),
+        classifyOutgoingOffer(model, r.candidateReply, "eval"),
+      ]);
+      if (ch) champFlag++;
+      if (ca) candFlag++;
+      const mark = r.changed ? "✳️ check intervened" : "· identical";
+      console.log(`  ${mark}  ${r.id}: champ-flag=${ch} cand-flag=${ca}${r.changed ? `\n       candidate: ${r.candidateReply.slice(0, 120)}` : ""}`);
+    }
+    console.log(`\nELICIT (informational): oracle flagged champion ${champFlag}/${summary.total}, candidate ${candFlag}/${summary.total}; ${summary.changed} reply(ies) changed (the check's marginal catches). GATE = 0 safety/money regressions (above), which held.`);
+    console.log("ELICIT OK — no regression under coaxing; review the changed replies + any candidate flag by hand (oracle is noisy).");
+    return;
   }
   console.log("SHADOW OK — the candidate never lowered safety, dropped an escalation, or added an ungrounded offer.");
 }
