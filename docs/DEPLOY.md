@@ -107,10 +107,16 @@ green.
 > is exactly what the install landing page tells them ("not live on your storefront yet").
 >
 > **What D1 did NOT cut over** (so nobody assumes it did):
-> - **The Storefront token is still `SecretsPort`.** Serving reads `shopify_storefront_token` from
->   `PALUP_SECRETS` — *not* the encrypted delegate credential an install stores. **A merchant who installs
->   themselves therefore gets the built-in FIXTURE catalog, not their own products,** until an operator
->   provisions that secret for their tenant. There is exactly one source of truth for the token today.
+> - ~~**The Storefront token is still `SecretsPort`.**~~ **NARROWED BY D2 — see *Storefront-token
+>   read-back (D2) go-live* below.** Serving reads `shopify_storefront_token` from `PALUP_SECRETS` — *not*
+>   the encrypted delegate credential an install stores — **only while `MERCHANT_CRED_READBACK_ENABLED` is
+>   OFF, which is the default (and how this branch ships).** ON, serving reads the custodied delegate
+>   credential via `MerchantCredentialStore.read` first, and `shopify_storefront_token` becomes a
+>   `missing`-only fallback (never installed) — an `unreadable` credential REFUSES rather than falling back
+>   to it. With the flag OFF, **a merchant who installs themselves therefore still gets the built-in
+>   FIXTURE catalog, not their own products,** until an operator provisions that secret for their tenant (or
+>   completes the D2 go-live below). There is exactly one source of truth for the token while the flag is
+>   off; two, ranked, while it is on.
 > - ~~**`MERCHANT_REGION` / `MERCHANT_GROUNDING_MODE` are still process-wide env.**~~ **CLOSED BY D2 — see
 >   *Per-merchant region* below.** A merchant is now *served* with the region on their own `pl_merchant`
 >   row, i.e. the value `SHOPIFY_INSTALL_REGION` recorded. D1's `[config] SHOPIFY_INSTALL_REGION=… but
@@ -232,14 +238,18 @@ merchant who installs still needs one of the two paths above populated by hand u
 occurrences to the real app host (or a build/templating step must be added later) **before** that deploy is
 meaningful for real traffic.
 
-**A merchant who installs today still gets the fixture catalog, not their own products.** The OAuth install
-(`shopify-install.ts`) records a `pl_merchant` row and a shop domain, which is enough for the embed to
-resolve a tenant — but serving still reads the Storefront access token from `SecretsPort`
+**A merchant who installs today still gets the fixture catalog, not their own products — while
+`MERCHANT_CRED_READBACK_ENABLED` is OFF, which is the default and how this branch ships.** The OAuth
+install (`shopify-install.ts`) records a `pl_merchant` row and a shop domain, which is enough for the embed
+to resolve a tenant. With the flag OFF, serving reads the Storefront access token from `SecretsPort`
 (`shopify_storefront_token`, hand-provisioned per tenant), never the delegate credential the install
-captures (`merchant-store.ts:16,54-61`). Until an operator provisions that secret for a tenant,
+captures (`merchant-store.ts:16,54-61`), and until an operator provisions that secret for a tenant,
 `resolveShopifyStore` returns `undefined` and that merchant's shoppers ground on the built-in fixture
-catalog — the embed extension does not close this gap. See *Shopify app install* above ("Onboarding a
-merchant who installed the app themselves") and `docs/PATH-TO-PRODUCTION.md` Phase 1 #2/#3.
+catalog — the embed extension alone does not close this gap. With the flag ON, serving reads the install's
+own custodied delegate credential first (see *Storefront-token read-back (D2) go-live* below) and only
+falls back to `shopify_storefront_token` for a tenant with no custodied credential at all. See *Shopify app
+install* above ("Onboarding a merchant who installed the app themselves") and
+`docs/PATH-TO-PRODUCTION.md` Phase 1 #2/#3.
 
 **Extension schema — consistent with `shopify.app.toml`, not live-validated.** The schema shape
 (`type = "theme"`, one app-embed block, `target: "body"`, one `position` select setting in
@@ -289,6 +299,100 @@ differently. D1's boot warning that they must match was removed for exactly this
 unauthenticated, rate-limited, and the servability refusal) now report `consentMode: "opt_in"` — the
 stricter regime — instead of the process default. The shipped widget throws on any non-2xx before reading
 the body, so it never sees these; the change is about not asserting a jurisdiction we did not resolve.
+
+## Storefront-token read-back (D2) go-live
+
+**This ships DARK: `MERCHANT_CRED_READBACK_ENABLED` defaults to OFF, and it is OFF on this branch.** The
+OAuth install → delegate-mint → Storefront-read chain this section describes has **never been run against
+a real Shopify store from this repo** — the verification harness in step (c) below is exactly the step that
+would prove it, and nobody has run it. Nothing here means a merchant is being served live today; it is the
+runbook for the operator who later does step (a)–(e) below, one merchant at a time.
+
+**What changes when the flag is ON.** Off, credential resolution is unchanged from D1: `resolveShopifyStore`
+reads `shopify_storefront_token` from `SecretsPort` only (`packages/widget-backend/src/merchant-store.ts`).
+On, `resolveStorefrontCredential` (same file) becomes a three-way resolver:
+
+| `MerchantCredentialStore.read` result | outcome |
+|---|---|
+| `found` (a custodied delegate credential decrypts) | used live |
+| `missing` (never installed, or deleted) | falls back to `shopify_storefront_token` in `SecretsPort` — the pre-D2 behavior, unchanged |
+| `unreadable` (a row exists but is malformed or fails to decrypt) | **REFUSES** — never fixtures, never the `SecretsPort` fallback |
+
+`/chat`'s own pre-flight (`packages/widget-backend/src/server.ts:1964-1980`) runs the same check before the
+model turn, so an `unreadable` credential is refused there too, not only inside grounding.
+
+**The crypto secret.** The delegate credential is encrypted under its own `CryptoPort` key scope,
+`MERCHANT_CRED_KEY_SCOPE = "merchant-cred"` (`packages/state-postgres/src/merchant-credential-store.ts:76`).
+For the default secret base name, `keyScopeSecretName("MEMORY_ENCRYPTION_KEY", "merchant-cred")`
+(`packages/platform-ports/src/crypto-port.ts:147`, separator `"__"` at line 106) resolves to
+**`MEMORY_ENCRYPTION_KEY__merchant-cred`**, provisioned per tenant in the same `PALUP_SECRETS` map as
+described under *Shopify app install + compliance webhooks* above — that secret is required at **install**
+time too (a missing key there makes the OAuth callback refuse with 502 and store nothing, before D2 even
+applies). At **read** time, a missing or wrong key for this scope is exactly the `unreadable` case above:
+the shopper sees the graceful 503 below, **never fixtures**, and never a silent "unconfigured" treatment —
+an unreadable credential must never be mistaken for an absent one (see *Rotating `MEMORY_ENCRYPTION_KEY`*
+above for why the two failure modes are reported differently on purpose).
+
+**The flag.** `MERCHANT_CRED_READBACK_ENABLED` (`packages/widget-backend/src/server.ts:307`) — env, exact
+string `"true"`, default OFF. ON logs a boot warning
+(`[boot] MERCHANT_CRED_READBACK_ENABLED=true — serving reads custodied delegate tokens (D2 read-back).`)
+and constructs a read-capable `MerchantCredentialStore` handle reused by both grounding and the `/chat`
+pre-flight; OFF constructs nothing, so an off/unconfigured deployment never attempts a credential read at
+all — identical behavior and cost to before D2. It is a single **global** switch, not per-tenant — see
+*Deferred* below.
+
+**Ordered go-live for ONE merchant** (operator-run; requires a real Shopify dev store; none of this has
+been executed yet):
+
+1. `shopify app deploy` (Partners account) plus the install env vars — `SHOPIFY_APP_CLIENT_ID`,
+   `SHOPIFY_INSTALL_REDIRECT_URI`, `SHOPIFY_INSTALL_REGION`, and `shopify_app_client_secret` in
+   `PALUP_SECRETS` under `__shopify_app__` (see *Shopify app install + compliance webhooks* above).
+2. The merchant installs on their (dev) store via `GET /shopify/install` → `GET /shopify/callback`. The
+   callback custodies the delegate token with `MerchantCredentialStore.put`, which requires
+   `MEMORY_ENCRYPTION_KEY__merchant-cred` for their tenant to already be provisioned — missing it makes the
+   callback return 502 and store nothing.
+3. **Before touching the flag**, prove the custodied token actually authenticates a Storefront read, with
+   the operator harness (`packages/widget-backend/src/shopify-verify-smoke.ts` — its own doc comment is the
+   source for this invocation):
+   ```bash
+   SHOPIFY_APP_CLIENT_ID=<the app's OAuth client id> \
+   PALUP_SECRETS='{"__shopify_app__":{"shopify_app_client_secret":"<the app's OAuth client secret>"}}' \
+   pnpm shopify:verify <shop>.myshopify.com <code>
+   ```
+   `<code>` is the single-use, short-lived OAuth code Shopify appends to the redirect once the merchant
+   approves the install: build the authorize URL (`buildInstallAuthorizeUrl`,
+   `shopify-install-identity.ts`), open it against the real dev store, approve, and copy `code` from the
+   redirect's query string **immediately** — a stale or already-used code makes the harness print
+   `FAIL (exchange)` rather than throw. On success it prints `PASS — read N product(s) via the Storefront
+   API` plus the granted/access scope arrays; it **never** logs or returns the token itself.
+4. Clear any grounding-cache entry already holding fixture context for this tenant, so the first grounded
+   turn after go-live reflects the real catalog instead of a stale fixture (`jobs/merchant.ts`'s own
+   `invalidate-grounding` doc string):
+   ```bash
+   pnpm grounding:invalidate --tenant <tenantId>
+   ```
+   (Documented here as the CLI actually parses it — `--tenant <tenantId>`, the same flag grammar
+   `show`/`status`/`set` already use in `jobs/merchant.ts` — rather than as a bare positional argument.)
+5. Only now flip `MERCHANT_CRED_READBACK_ENABLED=true` (repo variable / deploy env). From the next request,
+   serving reads this merchant's custodied credential.
+
+**Refusal behavior.** An `unreadable` credential makes `POST /chat` return **503** with
+`flags: ["grounding_unavailable"]` and the shopper-facing reply *"This store's assistant is temporarily
+unavailable. Please try again shortly."* — never fixtures, never an empty catalog, and no hint that this is
+specifically a credential/decryption problem (`server.ts:1964-1980`). This is deliberately a **different**
+shape from the servability 403 above (transient/operator-fixable, not a revocation).
+
+**Deferred — not built in this change, tracked, not guessed at:**
+- **Embed-key delivery** — nothing hands an operator-free merchant their own embed key today.
+- **Merchant-console self-serve go-live** (+ its own `HITL-POLICY.md` entry + App-Bridge auth) — steps 1–5
+  above are entirely operator/CLI-run; there is no in-product flow.
+- **Per-merchant read-back enablement** — `MERCHANT_CRED_READBACK_ENABLED` is one process-wide flag, not a
+  per-tenant toggle; flipping it changes behavior for every merchant whose credential is already custodied.
+- **Returns/shipping policy-scope widening.**
+- **Embedded/iframe install.**
+- The 7 install-boot preconditions in staging, and memoizing the credential read across the `/chat`
+  pre-flight + the grounding router (today a double decrypt per grounded turn — correct, not yet
+  optimized).
 
 ## What the staging deploy actually passes (D3)
 
