@@ -49,4 +49,16 @@ describe("embed routes", () => {
     expect(res.body.length).toBeGreaterThan(100);
     await app.close();
   });
+
+  it("GET /embed/panel serves HTML embeddable on the shop, not hostilely", async () => {
+    const app = await server();
+    const res = await app.inject({ method: "GET", url: "/embed/panel?shop=acme.myshopify.com" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    const csp = String(res.headers["content-security-policy"] || "");
+    expect(csp).toContain("frame-ancestors");
+    expect(csp).toContain("acme.myshopify.com");
+    expect(res.headers["x-frame-options"]).toBeUndefined();
+    await app.close();
+  });
 });
