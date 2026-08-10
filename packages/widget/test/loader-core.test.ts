@@ -6,7 +6,7 @@
 // the Vitest per-file pragma (must be the very first line of the file). This lets
 // `pnpm test` (root runner, which globs packages/**/*.test.ts) exercise this file in jsdom
 // without a separate packages/widget/vitest.config.ts or a workspace split.
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { initWidgetLoader } from "../src/loader-core.js";
 
 const ORIGIN = "https://widget.example";
@@ -70,5 +70,103 @@ describe("initWidgetLoader", () => {
 
   it("fail-safe: returns null instead of throwing when host is missing", () => {
     expect(initWidgetLoader({ ...cfg(), host: undefined as any })).toBeNull();
+  });
+
+  // I-4 — small-viewport handling (spec §5.2: "small-viewport ⇒ full-screen"). The panel iframe's
+  // layout now lives in a shadow-root <style> (so a media query can override it); assert the
+  // injected rule covers both the floating desktop card AND the full-screen small-viewport override.
+  it("injects a small-viewport full-screen media-query rule for the panel iframe, alongside the floating desktop layout", () => {
+    const c = cfg();
+    initWidgetLoader(c);
+    const root = (c.host as any).__palupRoot as ShadowRoot;
+    const style = root.querySelector("style");
+    expect(style).toBeTruthy();
+    const css = style!.textContent || "";
+    // desktop/tablet: the floating 380px card is unconditional (outside any media query)
+    expect(css).toContain(".palup-panel-iframe{position:fixed;");
+    expect(css).toContain("width:380px");
+    expect(css).toContain("height:600px");
+    // small viewport: a media query overrides to full-screen
+    expect(css).toMatch(/@media \(max-width:\s*480px\)/);
+    expect(css).toContain("width:100vw");
+    expect(css).toContain("height:100dvh");
+    expect(css).toContain("border-radius:0");
+  });
+
+  // M-2 — positive-path message-handler coverage (this is where the I-2 unread-dot bug hid: every
+  // existing test before this fix only exercised the NEGATIVE path — a rejected foreign-origin
+  // message). Each event below sets BOTH `origin` and `source` to the values onMessage actually
+  // checks (`e.origin !== origin` / `e.source !== iframe.contentWindow` in loader-core.ts) so valid
+  // messages reach the switch statement.
+  //
+  // jsdom (v30, verified empirically) never populates `contentWindow` for an <iframe> mounted
+  // inside a shadow root — a jsdom gap, not a production behavior (real browsers do populate it).
+  // We stub a real, non-null window-like object as the iframe's `contentWindow` so these tests
+  // exercise the SAME identity check `onMessage` runs in production, rather than the two sides
+  // incidentally both being `null`.
+  function stubContentWindow(iframe: HTMLIFrameElement): { postMessage: ReturnType<typeof vi.fn> } {
+    const fakeWindow = { postMessage: vi.fn() };
+    Object.defineProperty(iframe, "contentWindow", { value: fakeWindow, configurable: true });
+    return fakeWindow;
+  }
+
+  describe("valid same-origin postMessage handling", () => {
+    it("palup:ready → replies on the panel's contentWindow with palup:host {shop, position}", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:ready" } }),
+      );
+
+      expect(fakeWindow.postMessage).toHaveBeenCalledWith(
+        { type: "palup:host", shop: c.shop, position: c.position },
+        ORIGIN,
+      );
+    });
+
+    it("palup:close → hides the panel iframe", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      expect(iframe.style.display).toBe("block");
+
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:close" } }),
+      );
+
+      expect(iframe.style.display).toBe("none");
+    });
+
+    it("palup:unread → shows the dot, and it STAYS shown after a second buffered message (I-2 regression guard)", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open(); // mounts the iframe and resets the dot to "none"
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      const dot = (c.host as any).__palupRoot.querySelector("span") as HTMLElement;
+      expect(dot.style.display).toBe("none");
+
+      const postUnread = (count: number) =>
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            origin: ORIGIN,
+            source: fakeWindow as any,
+            data: { type: "palup:unread", count },
+          }),
+        );
+
+      postUnread(1);
+      expect(dot.style.display).toBe("block");
+
+      // The BUG (I-2): toggling on parity would hide the dot again here, on the 2nd message.
+      postUnread(2);
+      expect(dot.style.display).toBe("block");
+    });
   });
 });

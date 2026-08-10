@@ -39,6 +39,21 @@ function positionStyle(position: LoaderConfig["position"]): string {
   return `position:fixed;bottom:20px;${side}z-index:2147483000;`;
 }
 
+// I-4 fix (spec §5.2 "small-viewport ⇒ full-screen"): the panel iframe's LAYOUT lives in a
+// class-based stylesheet (not inline style) so a media query can override it. Desktop/tablet
+// keeps the floating 380px card; a small viewport (phone) goes full-screen instead of clipping
+// off the screen edge. Scoped to this shadow root only — never leaks into the merchant page.
+function panelStyleSheet(position: LoaderConfig["position"]): string {
+  const side = position === "bottom-left" ? "left:20px;" : "right:20px;";
+  return (
+    `.palup-panel-iframe{position:fixed;bottom:88px;${side}` +
+    "width:380px;height:600px;max-height:80vh;border:none;border-radius:16px;" +
+    "box-shadow:0 12px 40px rgba(0,0,0,.3);z-index:2147483000;}" +
+    "@media (max-width:480px){.palup-panel-iframe{inset:0;top:0;left:0;right:0;bottom:0;" +
+    "width:100vw;height:100dvh;max-height:none;border-radius:0;box-shadow:none;}}"
+  );
+}
+
 export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
   try {
     const { host, shop, position, origin } = cfg;
@@ -83,6 +98,10 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
     wrapper.appendChild(launcherBox);
     root.appendChild(wrapper);
 
+    const style = document.createElement("style");
+    style.textContent = panelStyleSheet(position);
+    root.appendChild(style);
+
     let iframe: HTMLIFrameElement | null = null;
     let destroyed = false;
 
@@ -90,14 +109,9 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       if (iframe) return iframe;
       const el = document.createElement("iframe");
       el.title = "Chat";
+      el.className = "palup-panel-iframe"; // layout (incl. the small-viewport media query) lives in `style` above
       el.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
-      el.setAttribute(
-        "style",
-        "position:fixed;bottom:88px;" +
-          (position === "bottom-left" ? "left:20px;" : "right:20px;") +
-          "width:380px;height:600px;max-height:80vh;border:none;border-radius:16px;" +
-          "box-shadow:0 12px 40px rgba(0,0,0,.3);z-index:2147483000;display:none;",
-      );
+      el.style.display = "none"; // only `display` is inline; open()/close() toggle just this property
       el.src = `${origin}/embed/panel?shop=${encodeURIComponent(shop)}`;
       root.appendChild(el);
       iframe = el;
@@ -139,7 +153,10 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
           close();
           break;
         case "palup:unread":
-          dot.style.display = dot.style.display === "none" ? "block" : "none";
+          // I-2 fix: ALWAYS show the dot — the panel sends one `palup:unread` per buffered
+          // agent message while minimized, so toggling on parity hid the dot again on the
+          // 2nd message. `open()` above is the only place that clears it back to "none".
+          dot.style.display = "block";
           break;
         default:
           break;

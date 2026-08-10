@@ -1099,6 +1099,8 @@ export async function buildServer(opts?: {
   // isolated webServer explicitly opts in — the shared widget/a11y e2e backend never sets it, so those
   // suites see zero change here.
   if (process.env.PALUP_E2E_FIXTURES === "true") {
+    // Intentionally unguarded: fail LOUD at boot. A mis-flagged prod image sets this env var but
+    // ships no `e2e/` dir, and should crash the process, not silently skip and serve no fixtures.
     const embedHostHtml = readFileSync(join(here, "..", "..", "..", "e2e", "fixtures", "embed-host.html"), "utf8");
     app.get("/embed-host", async (_req, reply) => {
       reply.type("text/html").send(embedHostHtml);
