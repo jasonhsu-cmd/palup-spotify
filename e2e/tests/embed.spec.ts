@@ -105,3 +105,36 @@ test("embed: loader on a host page -> launcher mounts -> open -> panel iframe ->
   await expect(reply).toBeVisible();
   await expect(reply).not.toHaveText("");
 });
+
+// Custom-domain CSP support — playwright.embed.config.ts sets SHOPIFY_PRIMARY_DOMAINS mapping the demo
+// shop to a (fictitious, non-resolving) custom domain. This asserts the ACTUAL `content-security-policy`
+// response header this real running backend process serves, over a real socket, to a real browser — a
+// genuinely different check than the unit suite's `app.inject()` (no socket, no browser, no real HTTP
+// response object). It does NOT navigate to the custom domain itself (nothing resolves it): proving
+// cross-origin frame permission would need a second real origin, which this single-process harness does
+// not have — the unit suite (embed-routes.test.ts) already covers the composed CSP string exhaustively;
+// this is the "does the real server actually emit it over the wire" check.
+test("embed: /embed/panel's real, on-the-wire CSP response header includes the shop's custom domain", async ({
+  page,
+}) => {
+  let panelCsp: string | undefined;
+  page.on("response", (res) => {
+    if (res.url().includes("/embed/panel")) panelCsp = res.headers()["content-security-policy"];
+  });
+
+  await page.goto("/embed-host");
+  await page.evaluate(() => {
+    type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
+    const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
+    const root = hostEl?.__palupRoot;
+    const launcher = root?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
+    launcher.click();
+  });
+  await panelFrame(page);
+
+  await expect.poll(() => panelCsp, { message: "/embed/panel never returned a content-security-policy header" }).toBeTruthy();
+  expect(panelCsp).toContain("frame-ancestors");
+  expect(panelCsp).toContain("https://acme.myshopify.com");
+  expect(panelCsp).toContain("https://shop.acme-brand.example"); // the SHOPIFY_PRIMARY_DOMAINS entry
+});

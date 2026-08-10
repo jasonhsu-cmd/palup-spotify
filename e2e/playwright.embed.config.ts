@@ -35,6 +35,13 @@ export default defineConfig({
       // tenant via merchant-resolver.ts's `tenantForShopDomain` (no DATABASE_URL here, so this is the
       // resolver's "env" mode — the same posture staging's own demo tenant uses).
       SHOPIFY_STORES: JSON.stringify({ demo: "acme.myshopify.com" }),
+      // Custom-domain CSP support — the named env fallback (no registry here either, same "env" posture
+      // as SHOPIFY_STORES above), keyed by SHOP domain rather than tenant. Exercised by embed.spec.ts's
+      // own custom-domain case, which reads the ACTUAL `/embed/panel` response header this real running
+      // process serves over a real socket to a real browser — a genuinely different verification than the
+      // unit suite's `app.inject()` (no socket, no browser). A fictitious, non-resolving host is
+      // deliberate: the test never navigates there, only asserts the served header string.
+      SHOPIFY_PRIMARY_DOMAINS: JSON.stringify({ "acme.myshopify.com": "shop.acme-brand.example" }),
       // Without a signing secret /widget/token always 401s (server.ts: `!WIDGET_TOKEN_SECRET` short-
       // circuits the mint) regardless of tenant resolution. Any non-empty value works — this process
       // never verifies a token minted by a different secret.
