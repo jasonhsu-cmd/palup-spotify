@@ -60,6 +60,7 @@ import {
   type CallbackResult,
 } from "./customer-account-flow.js";
 import { parseStoreDomains, parsePrimaryDomains } from "./merchant-store.js";
+import type { StorefrontFetch } from "./shopify-grounding.js";
 import { createMerchantResolver, consentModeFor } from "./merchant-resolver.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE, DELEGATE_SCOPES_DEFAULT } from "./shopify-install-identity.js";
 import {
@@ -272,6 +273,11 @@ export async function buildServer(opts?: {
    * store — the Storefront token comes from `SecretsPort` (merchant-store.ts). That is D2.
    */
   merchantCredentials?: MerchantCredentialSink;
+  /** D2 test seam (mirrors `caaFetch`/`installFetch`): the Storefront API fetch `createGroundingPort`'s
+   * Shopify adapter uses when read-back resolves a `live` credential. There is otherwise no way to inject
+   * a fake Storefront fetch into `buildServer`. Prod uses the live Storefront call (`storefrontFetch()`,
+   * `shopify-grounding.ts`'s default). */
+  shopifyFetch?: StorefrontFetch;
   /**
    * PR-8 test seam — mirrors `createMemoryService`'s own `enabled` override (service.ts), and is
    * subject to the EXACT SAME safeguard: honored ONLY under a real test runner (VITEST=true /
@@ -294,6 +300,13 @@ export async function buildServer(opts?: {
   const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
   const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
   assertMemoryAuthCoupling(memoryServiceEnabled, WIDGET_AUTH_REQUIRED);
+  // D2 — serving reads the delegate token an OAuth install already custodied (B2's
+  // `createMerchantCredentialStore`) instead of only the hand-provisioned `SecretsPort` token. Read once
+  // here, pure env, no I/O — mirrors every other posture flag's placement. The read HANDLE this gates is
+  // built further down (once `store`/`secrets` exist), right before `createGroundingPort`.
+  const MERCHANT_CRED_READBACK_ENABLED = process.env.MERCHANT_CRED_READBACK_ENABLED === "true";
+  if (MERCHANT_CRED_READBACK_ENABLED)
+    console.warn("[boot] MERCHANT_CRED_READBACK_ENABLED=true — serving reads custodied delegate tokens (D2 read-back).");
   // Same fail-fast placement, same reason: both inputs are pure env reads with no I/O, so a rejected boot
   // leaves no pool/DDL work behind. `PALUP_REQUIRE_DATABASE_URL` is the EXISTING marker the prod/staging
   // deploy sets (state-postgres/factory.ts) — reused as the "real deployment" signal rather than adding a
@@ -386,7 +399,22 @@ export async function buildServer(opts?: {
     const s = await merchants.servability(tenantId, "chat");
     return s.kind === "servable" ? s.config.region : undefined;
   };
-  const grounding = createGroundingPort(store, secrets, { shopDomainFor: (t) => merchants.shopDomainFor(t) });
+  // D2 read handle: a full `MerchantCredentialStore` over the SAME store+crypto install writes through.
+  // Deliberately NOT `merchantCredentials` (constructed further below, typed put-only `MerchantCredentialSink`)
+  // and NOT `opts.merchantCredentials` (a test double that may implement only `put`) — this composition
+  // root needs its OWN read-capable handle, built here (before `createGroundingPort`, and before
+  // `merchantCredentials` itself exists) because grounding needs it now. Only constructed when the flag is
+  // on, so an unconfigured/off deployment never even attempts a read. Kept in scope for Task 4's `/chat`
+  // pre-flight, which reuses this SAME handle rather than building a second one.
+  const credReadHandle = MERCHANT_CRED_READBACK_ENABLED
+    ? createMerchantCredentialStore(store, createAesGcmCrypto(secrets))
+    : undefined;
+  const grounding = createGroundingPort(store, secrets, {
+    shopDomainFor: (t) => merchants.shopDomainFor(t),
+    readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
+    credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
+    shopifyFetch: opts?.shopifyFetch,
+  });
   // Hoisted ABOVE `createMemoryService` below (it used to be declared much later, alongside
   // `shopperIdentity`) so the memory service can be constructed with a real `hmacKey` from the start —
   // security-review remediation MEDIUM finding, PR #152: a `acct:` subject's audit `subjectRef` must be
