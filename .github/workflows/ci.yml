@@ -48,3 +48,5 @@ jobs:
         run: pnpm e2e
       - name: Control-plane self-improvement E2E (mock)
         run: pnpm e2e:monitor
+      - name: Embed round-trip E2E (mock)
+        run: pnpm e2e:embed
