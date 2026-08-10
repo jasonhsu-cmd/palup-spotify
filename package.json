@@ -41,6 +41,7 @@
     "e2e": "playwright test --config e2e/playwright.config.ts",
     "e2e:live": "playwright test --config e2e/playwright.live.config.ts",
     "e2e:monitor": "playwright test --config e2e/playwright.monitor.config.ts",
+    "e2e:embed": "playwright test --config e2e/playwright.embed.config.ts",
     "typecheck": "tsc -b --pretty"
   },
   "devDependencies": {

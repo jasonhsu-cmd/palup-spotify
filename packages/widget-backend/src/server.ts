@@ -1076,9 +1076,34 @@ export async function buildServer(opts?: {
   registerEmbedRoutes(app, {
     loaderJs,
     panelHtml: widgetHtml,
-    frameAncestors: (shop) =>
-      shop && /^[a-z0-9.-]+\.myshopify\.com$/i.test(shop) ? `https://${shop} https://*.myshopify.com` : "https:",
+    frameAncestors: (shop) => {
+      const prod = shop && /^[a-z0-9.-]+\.myshopify\.com$/i.test(shop) ? `https://${shop} https://*.myshopify.com` : "https:";
+      // TEST-ONLY (task 7 embed e2e) — verified by executing the round trip in a real browser: Chromium
+      // enforces frame-ancestors for real, and the e2e harness's own host page is served by THIS SAME
+      // backend process over plain HTTP at 127.0.0.1 — an origin no real Shopify storefront is ever
+      // served from, so it can never satisfy `prod` above (which is exactly the point of `prod` — it
+      // must stay tight to the shop's own domain). Appending this origin to the allow-list is gated on
+      // PALUP_E2E_FIXTURES, the SAME flag that registers the only route this origin is used for
+      // (`/embed-host`, above) — grep-verified nowhere else in the repo, so it is never true in staging,
+      // prod, or the shared widget/a11y e2e process.
+      if (process.env.PALUP_E2E_FIXTURES === "true" && process.env.PORT) {
+        return `${prod} http://127.0.0.1:${process.env.PORT}`;
+      }
+      return prod;
+    },
   });
+
+  // Task 7 (embed e2e) — TEST-ONLY host-page fixture, never present in production or in any other
+  // deployment. Gated on a dedicated flag (never NODE_ENV/VITEST, which other suites in this process
+  // could set for unrelated reasons) so this route exists ONLY when e2e/playwright.embed.config.ts's own
+  // isolated webServer explicitly opts in — the shared widget/a11y e2e backend never sets it, so those
+  // suites see zero change here.
+  if (process.env.PALUP_E2E_FIXTURES === "true") {
+    const embedHostHtml = readFileSync(join(here, "..", "..", "..", "e2e", "fixtures", "embed-host.html"), "utf8");
+    app.get("/embed-host", async (_req, reply) => {
+      reply.type("text/html").send(embedHostHtml);
+    });
+  }
 
   // Mint a short-TTL widget token for a valid publishable embed key. The storefront snippet calls this
   // once, then sends the token on /chat. The tenant is bound here from the SERVER-side registry (never

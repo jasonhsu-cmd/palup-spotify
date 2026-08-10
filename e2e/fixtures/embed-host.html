@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>host</title>
+<!--
+  Task 7 e2e fixture — a bare storefront-style page that loads the loader exactly as a merchant's
+  theme would: one script tag, `data-shop` + `data-position` on it, nothing else. This is served by a
+  TEST-ONLY backend route (`/embed-host`, gated on `PALUP_E2E_FIXTURES=true` — see
+  e2e/playwright.embed.config.ts + routes/embed.ts) rather than baked into any production surface.
+
+  `initWidgetLoader` (loader-core.ts) reads `document.currentScript.dataset` and creates its own host
+  <div> appended to <body>, with a CLOSED shadow root holding the launcher button + (lazily) the panel
+  iframe. Nothing on this page reaches into that shadow root — the test does, via loader-core.ts's own
+  sanctioned `__palupRoot` test seam (see embed.spec.ts).
+-->
+<script src="/embed/loader.js" data-shop="acme.myshopify.com" data-position="bottom-right" async></script>
