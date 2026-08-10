@@ -1948,6 +1948,37 @@ export async function buildServer(opts?: {
     const servingConfig = servable.config;
     const CONSENT_MODE = consentModeFor(servingConfig.region);
 
+    // D2 Task 4 — a SECOND pre-flight, distinct from the servability check above. Servability answers
+    // "does this merchant's ROW say we may serve them" (identity/revocation/residency); this answers "CAN
+    // we actually read the delegate credential their install custodied." A merchant can be fully servable
+    // and still have an `unreadable` row (a rotated/misconfigured key, a corrupt write) — that is a
+    // transient, operator-fixable fault, not a deliberate revocation, so it gets its OWN flag
+    // (`grounding_unavailable`) and its OWN status (503, not 403) rather than reusing the servability
+    // 403's shape. `found`/`missing` are NOT refused here: `missing` (never installed / never custodied)
+    // and any tenant whose credential we successfully read both fall through to the existing
+    // resolveStorefrontCredential three-way (live/fixtures/refuse) inside grounding, unchanged. Only
+    // `credReadHandle` is called — never a second store construction — reusing Task 3's SAME handle. Fires
+    // ONLY when the flag is on AND the handle exists; an off/unconfigured deployment skips the read
+    // entirely (no store round trip, no behavior change). `tenantId` here is the SAME server-derived value
+    // the servability check above just used — never client input.
+    if (MERCHANT_CRED_READBACK_ENABLED && credReadHandle) {
+      const cred = await credReadHandle.read(tenantId);
+      if (cred.status === "unreadable") {
+        reply.code(503); // transient / operator-fixable, not a deliberate revocation
+        return {
+          // Shopper-facing copy: same promise-nothing discipline as the servability 403 above — no human,
+          // no export, no erasure, and no hint that this is a credential/decryption problem specifically.
+          reply: "This store's assistant is temporarily unavailable. Please try again shortly.",
+          mode: "support",
+          pitch: "none",
+          escalate: false,
+          flags: ["grounding_unavailable"],
+          memoryEnabled: memoryServiceEnabled,
+          consentMode: UNRESOLVED_CONSENT_MODE,
+        };
+      }
+    }
+
     try {
       // IDEMPOTENCY: a client retry (e.g. the widget's offline-retry replaying the same turn) must NOT
       // re-process — that would double-count the governed pitch budget, double-audit, and re-open
