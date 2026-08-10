@@ -318,7 +318,7 @@ On, `resolveStorefrontCredential` (same file) becomes a three-way resolver:
 | `missing` (never installed, or deleted) | falls back to `shopify_storefront_token` in `SecretsPort` — the pre-D2 behavior, unchanged |
 | `unreadable` (a row exists but is malformed or fails to decrypt) | **REFUSES** — never fixtures, never the `SecretsPort` fallback |
 
-`/chat`'s own pre-flight (`packages/widget-backend/src/server.ts:1964-1980`) runs the same check before the
+`/chat`'s own pre-flight (`packages/widget-backend/src/server.ts:1964-1988`) runs the same check before the
 model turn, so an `unreadable` credential is refused there too, not only inside grounding.
 
 **The crypto secret.** The delegate credential is encrypted under its own `CryptoPort` key scope,
@@ -365,21 +365,31 @@ been executed yet):
    redirect's query string **immediately** — a stale or already-used code makes the harness print
    `FAIL (exchange)` rather than throw. On success it prints `PASS — read N product(s) via the Storefront
    API` plus the granted/access scope arrays; it **never** logs or returns the token itself.
-4. Clear any grounding-cache entry already holding fixture context for this tenant, so the first grounded
-   turn after go-live reflects the real catalog instead of a stale fixture (`jobs/merchant.ts`'s own
-   `invalidate-grounding` doc string):
+4. Flip `MERCHANT_CRED_READBACK_ENABLED=true` (repo variable / deploy env). From the next request, serving
+   attempts to read this merchant's custodied credential.
+5. **Only now** clear any grounding-cache entry already holding fixture context for this tenant, so the
+   first grounded turn after go-live reflects the real catalog instead of a stale fixture
+   (`jobs/merchant.ts`'s own `invalidate-grounding` doc string):
    ```bash
    pnpm grounding:invalidate --tenant <tenantId>
    ```
    (Documented here as the CLI actually parses it — `--tenant <tenantId>`, the same flag grammar
    `show`/`status`/`set` already use in `jobs/merchant.ts` — rather than as a bare positional argument.)
-5. Only now flip `MERCHANT_CRED_READBACK_ENABLED=true` (repo variable / deploy env). From the next request,
-   serving reads this merchant's custodied credential.
+
+   **Order matters, and it is reversed from earlier drafts of this runbook.** Invalidating BEFORE the flip
+   left a window — any shopper turn between the invalidate and the flip — that re-populated the cache with
+   the fixture catalog for the full TTL (30 min default), because credential read-back was still off at that
+   moment. Flipping first is safe: while the flag is off nothing re-caches fixtures for this tenant path
+   differently than before, and once it is on, `resolveStorefrontCredential`'s `refuse` outcome is never
+   cached (it throws — `createCachingGroundingPort` only writes on a successful `inner.getContext`), so the
+   worst a shopper turn between steps 4 and 5 can do is cache one stale-but-real read that step 5 then
+   replaces. A `live` resolve in that window caches the merchant's real catalog, which invalidation then
+   correctly discards so step 5's read is fresh.
 
 **Refusal behavior.** An `unreadable` credential makes `POST /chat` return **503** with
 `flags: ["grounding_unavailable"]` and the shopper-facing reply *"This store's assistant is temporarily
 unavailable. Please try again shortly."* — never fixtures, never an empty catalog, and no hint that this is
-specifically a credential/decryption problem (`server.ts:1964-1980`). This is deliberately a **different**
+specifically a credential/decryption problem (`server.ts:1964-1988`). This is deliberately a **different**
 shape from the servability 403 above (transient/operator-fixable, not a revocation).
 
 **Deferred — not built in this change, tracked, not guessed at:**
@@ -388,6 +398,12 @@ shape from the servability 403 above (transient/operator-fixable, not a revocati
   above are entirely operator/CLI-run; there is no in-product flow.
 - **Per-merchant read-back enablement** — `MERCHANT_CRED_READBACK_ENABLED` is one process-wide flag, not a
   per-tenant toggle; flipping it changes behavior for every merchant whose credential is already custodied.
+- **Catalog-index blind spot for a read-back-only merchant.** `jobs/catalog-index.ts` enumerates
+  `SHOPIFY_STORES` and resolves creds via `resolveShopifyStore` — not `resolveStorefrontCredential`'s D2
+  read-back path — so a merchant served only through this go-live is never vector-indexed. If this
+  deployment also has `CATALOG_RETRIEVAL=true`, their shoppers keep getting the full-catalog fallback, not
+  top-K retrieval, until an operator adds them to `SHOPIFY_STORES` too (or the index job gains registry
+  enumeration — see D1's *not cut over* note above on why that's a separate `MerchantRegistryPort` change).
 - **Returns/shipping policy-scope widening.**
 - **Embedded/iframe install.**
 - The 7 install-boot preconditions in staging, and memoizing the credential read across the `/chat`
@@ -403,9 +419,9 @@ over that workflow file so the list cannot silently lose an entry again. (It pro
 deploy — only a real deploy proves that.)
 
 **Always passed** — `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `PALUP_MODEL`,
-`PALUP_REQUIRE_DATABASE_URL`, `WIDGET_AUTH_REQUIRED`, `WIDGET_EMBED_KEYS`, `SHOPIFY_STORES`, and (new in D3)
-`MERCHANT_REGION` + `MERCHANT_GROUNDING_MODE`. Secrets: `DATABASE_URL`, `WIDGET_TOKEN_SECRET`,
-`PALUP_SECRETS`.
+`PALUP_REQUIRE_DATABASE_URL`, `WIDGET_AUTH_REQUIRED`, `MERCHANT_CRED_READBACK_ENABLED`, `WIDGET_EMBED_KEYS`,
+`SHOPIFY_STORES`, and (new in D3) `MERCHANT_REGION` + `MERCHANT_GROUNDING_MODE`. Secrets: `DATABASE_URL`,
+`WIDGET_TOKEN_SECRET`, `PALUP_SECRETS`.
 
 **Optional, driven by repo variables** (`Settings → Secrets and variables → Actions → Variables`). Each is
 appended only when set, so an unset one never produces an empty env pair:
