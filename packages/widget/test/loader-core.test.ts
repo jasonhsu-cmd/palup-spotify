@@ -32,10 +32,14 @@ describe("initWidgetLoader", () => {
     // ...and per DOM spec, shadow content NEVER appears in host.childNodes (open or closed —
     // that's the whole point of encapsulation; verified directly against jsdom before writing
     // this). The brief's literal `c.host.childNodes.length` can't pass for any spec-compliant
-    // implementation, so we assert the same intent (a launcher was mounted inside the closed
-    // shadow root) via the documented test seam instead of weakening the check.
+    // implementation, so we assert the same intent via the documented test seam instead of
+    // weakening the check — and we assert the ACTUAL launcher, not just "something was
+    // appended": exactly one <button>, with the accessible name the launcher is required to
+    // have (see the e2e seam in the impl).
     expect(c.host.childNodes.length).toBe(0);
-    expect((c.host as any).__palupRoot.childNodes.length).toBeGreaterThan(0);
+    const root = (c.host as any).__palupRoot as ShadowRoot;
+    expect(root.querySelectorAll("button").length).toBe(1);
+    expect(root.querySelector('button[aria-label="Open chat"]')).toBeTruthy();
   });
 
   it("is single-instance (second init on same host returns null)", () => {
