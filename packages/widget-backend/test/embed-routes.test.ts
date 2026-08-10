@@ -39,3 +39,14 @@ describe("mint by shop domain", () => {
     await app.close();
   });
 });
+
+describe("embed routes", () => {
+  it("GET /embed/loader.js serves JS", async () => {
+    const app = await server();
+    const res = await app.inject({ method: "GET", url: "/embed/loader.js" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("javascript");
+    expect(res.body.length).toBeGreaterThan(100);
+    await app.close();
+  });
+});

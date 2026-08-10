@@ -10,6 +10,7 @@
     "@palup/state-postgres": "workspace:*",
     "@palup/widget-brain": "workspace:*",
     "@palup/widget-memory": "workspace:*",
+    "esbuild": "^0.21.5",
     "fastify": "^5.0.0",
     "google-auth-library": "^11.0.0"
   }

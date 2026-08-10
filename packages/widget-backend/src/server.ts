@@ -36,6 +36,7 @@ import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUN
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
+import { registerEmbedRoutes, bundleLoader } from "./routes/embed.js";
 // E3 — both functions return `{}` unless the `Decision` already carries cited products, so they are inert
 // for any turn E2 did not cite on. They are no longer inert BY CONSTRUCTION: this composition root now
 // reads PRODUCT_CITATIONS/PRODUCT_CARDS and can produce such a Decision (see the Wave 4 flag block below).
@@ -1064,6 +1065,19 @@ export async function buildServer(opts?: {
 
   app.get("/", async (_req, reply) => {
     reply.type("text/html").send(widgetHtml);
+  });
+
+  // Task 3 — the theme app extension's <script src> target: a boot-time esbuild bundle of the
+  // vanilla-DOM launcher (loader-entry.ts → loader-core.ts) served as a self-executing IIFE, plus the
+  // panel iframe route the loader points at. `frameAncestors` is v1: the resolved shop's own
+  // myshopify domain (+ a permissive https fallback) — the panel route's CSP is exercised by a later
+  // task's test; this task only serves /embed/loader.js.
+  const loaderJs = await bundleLoader();
+  registerEmbedRoutes(app, {
+    loaderJs,
+    panelHtml: widgetHtml,
+    frameAncestors: (shop) =>
+      shop && /^[a-z0-9.-]+\.myshopify\.com$/i.test(shop) ? `https://${shop} https://*.myshopify.com` : "https:",
   });
 
   // Mint a short-TTL widget token for a valid publishable embed key. The storefront snippet calls this

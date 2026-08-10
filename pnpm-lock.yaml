@@ -151,6 +151,9 @@ importers:
       '@palup/widget-memory':
         specifier: workspace:*
         version: link:../widget-memory
+      esbuild:
+        specifier: ^0.21.5
+        version: 0.21.5
       fastify:
         specifier: ^5.0.0
         version: 5.10.0
