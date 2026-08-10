@@ -99,3 +99,15 @@ export function createCachingGroundingPort(
     },
   };
 }
+
+// Go-live hygiene: when a merchant is flipped from a fixture/demo grounding source to the real
+// catalog, a stale fixture context can still be cached here for up to `ttlSeconds` (default 30 min),
+// so the first grounded turn after go-live could otherwise answer from the fixture. This is the
+// operator-mediated escape hatch — reuses the SAME private COLLECTION/KEY the decorator writes above
+// (never exported as raw strings, so this stays the only way to touch that row from outside the
+// decorator). Deliberately NOT on the hot /chat path and NOT timeout-wrapped: this runs from an
+// operator CLI, not a request handler, so a delete failure should throw and be seen, not be swallowed.
+export async function invalidateGroundingCache(store: RuntimeStatePort, tenantId: string): Promise<void> {
+  if (!tenantId) throw new Error("invalidateGroundingCache: a non-blank tenantId is required");
+  await store.delete({ tenantId }, COLLECTION, KEY);
+}
