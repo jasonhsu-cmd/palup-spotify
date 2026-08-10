@@ -1089,8 +1089,10 @@ export async function buildServer(opts?: {
     // distinguishable from outside, or this endpoint becomes an oracle for which merchants exist and which
     // were suspended (the same reason C1's callback has one uniform refusal — routes/shopify-install.ts:467).
     // The server-side log and the audit chain are where the distinction lives.
-    const key = (req.query as { key?: string })?.key;
-    const resolved = await merchants.resolveEmbedKey(key, "embed-key-mint");
+    const q = req.query as { key?: string; shop?: string };
+    const resolved = q.shop
+      ? await merchants.tenantForShopDomain(q.shop)
+      : await merchants.resolveEmbedKey(q.key, "embed-key-mint");
     if (resolved.kind !== "ok" || !WIDGET_TOKEN_SECRET) {
       reply.code(401);
       return { error: "invalid or unconfigured embed key" };
