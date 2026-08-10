@@ -1,3 +1,4 @@
+import { normalizePrimaryDomain } from "@palup/platform-ports";
 import type {
   MerchantGroundingMode,
   MerchantLookupOpts,
@@ -135,10 +136,12 @@ interface MerchantRow {
   status_reason: string | null;
   created_at: string;
   updated_at: string;
+  /** Custom-domain CSP support (merchant-registry-port.ts's `primaryDomain`). Nullable, non-secret. */
+  primary_domain: string | null;
 }
 
 const COLUMNS =
-  "tenant_id, shop_domain, embed_key, status, region, grounding_mode, plan, status_reason, created_at, updated_at";
+  "tenant_id, shop_domain, embed_key, status, region, grounding_mode, plan, status_reason, created_at, updated_at, primary_domain";
 
 /** The ONE row -> record mapping, used by every read AND by `create`'s `RETURNING` — so what a caller gets
  *  back from `create` is byte-identical to what a later lookup returns (no second, drifting projection).
@@ -158,6 +161,7 @@ function toRecord(row: MerchantRow): MerchantRecord {
   };
   if (row.plan !== null) rec.plan = row.plan;
   if (row.status_reason !== null) rec.statusReason = row.status_reason;
+  if (row.primary_domain !== null) rec.primaryDomain = row.primary_domain;
   return rec;
 }
 
@@ -221,6 +225,14 @@ export class PostgresMerchantRegistry implements MerchantRegistryPort {
       "CREATE UNIQUE INDEX IF NOT EXISTS pl_merchant_shop_domain_uq ON pl_merchant (lower(shop_domain))",
     );
     await this.sql.query("CREATE UNIQUE INDEX IF NOT EXISTS pl_merchant_embed_key_uq ON pl_merchant (embed_key)");
+    // Custom-domain CSP support, added AFTER this table already shipped — `CREATE TABLE IF NOT EXISTS`
+    // above does NOT retroactively add a column to a table that already exists (this file's own
+    // limitation note, above), so an existing `pl_merchant` needs an explicit `ALTER TABLE`. Idempotent
+    // (`ADD COLUMN IF NOT EXISTS`), so re-running this on every boot is free, exactly like the rest of
+    // `migrate()`. Nullable + no CHECK: absent means "no custom domain configured" (the port's own rule),
+    // and the app-level `normalizePrimaryDomain` — applied on every write AND read — is the actual guard;
+    // this column only needs to exist.
+    await this.sql.query("ALTER TABLE pl_merchant ADD COLUMN IF NOT EXISTS primary_domain text");
   }
 
   async create(input: NewMerchant): Promise<MerchantRecord> {
@@ -232,6 +244,7 @@ export class PostgresMerchantRegistry implements MerchantRegistryPort {
     const region = requireEnum("region", REGIONS, input?.region);
     const groundingMode = requireEnum("groundingMode", GROUNDING_MODES, input?.groundingMode ?? "full");
     const status = requireEnum("status", STATUSES, input?.status ?? "active");
+    const primaryDomain = input?.primaryDomain === undefined ? null : normalizePrimaryDomain(input.primaryDomain);
     const at = this.now();
 
     // Pre-check + insert in ONE transaction. The transaction is what makes check-then-insert consistent;
@@ -264,9 +277,9 @@ export class PostgresMerchantRegistry implements MerchantRegistryPort {
 
       const inserted = await tx.query<MerchantRow>(
         `INSERT INTO pl_merchant (${COLUMNS})
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$8)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$8,$9)
          RETURNING ${COLUMNS}`,
-        [tenantId, shopDomain, embedKey, status, region, groundingMode, input?.plan ?? null, at],
+        [tenantId, shopDomain, embedKey, status, region, groundingMode, input?.plan ?? null, at, primaryDomain],
       );
       const row = inserted.rows[0];
       if (!row) throw new Error(`MerchantRegistryPort: INSERT of tenant "${tenantId}" returned no row`);
@@ -334,6 +347,7 @@ export class PostgresMerchantRegistry implements MerchantRegistryPort {
     const region = patch?.region === undefined ? null : requireEnum("region", REGIONS, patch.region);
     const groundingMode =
       patch?.groundingMode === undefined ? null : requireEnum("groundingMode", GROUNDING_MODES, patch.groundingMode);
+    const primaryDomain = patch?.primaryDomain === undefined ? null : normalizePrimaryDomain(patch.primaryDomain);
     // COALESCE: a NULL parameter means "not in the patch", so the stored value stands. `status` is
     // deliberately not patchable here — revocation goes through setStatus only (port's rule).
     return this.mutate(
@@ -342,10 +356,11 @@ export class PostgresMerchantRegistry implements MerchantRegistryPort {
           SET region = COALESCE($2, region),
               grounding_mode = COALESCE($3, grounding_mode),
               plan = COALESCE($4, plan),
+              primary_domain = COALESCE($6, primary_domain),
               updated_at = $5
         WHERE tenant_id = $1
         RETURNING ${COLUMNS}`,
-      [id, region, groundingMode, patch?.plan ?? null, this.now()],
+      [id, region, groundingMode, patch?.plan ?? null, this.now(), primaryDomain],
     );
   }
 

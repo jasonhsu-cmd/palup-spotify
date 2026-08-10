@@ -175,6 +175,80 @@ written again — i.e. on re-install), and rotating the merchant's **token** is 
 rotating the **key**. The `__merchant-cred` scope exists so that a compromise of `MEMORY_ENCRYPTION_KEY`
 does **not** expose stored merchant credentials.
 
+## Embedding the widget on a storefront (theme app extension)
+
+The shopper widget mounts on a merchant's live storefront via a Shopify **theme app extension**
+(`extensions/palup-widget/`) — not a manual snippet or the deprecated ScriptTag API. Full design:
+`docs/superpowers/specs/2026-08-10-embeddable-widget-design.md`.
+
+**Install path:**
+1. `shopify app deploy` (human, Partners account) registers the app **and** the `palup-widget` app-embed
+   extension (`extensions/palup-widget/shopify.extension.toml`: `type = "theme"`, `api_version = "2026-07"`
+   — matches the api version pinned in `shopify.app.toml`'s `[webhooks]` block). `docs/PATH-TO-PRODUCTION.md`
+   notes this deploy has never been run (`shopify.app.toml:10`: "this repo does not deploy via the Shopify
+   CLI today").
+2. The merchant enables the app embed in their theme editor (Shopify's built-in on/off toggle — no code on
+   their side). Enabling it injects `blocks/app-embed.liquid`'s `<script>` tag onto every storefront page.
+3. That script (`data-shop="{{ shop.permanent_domain }}" data-position="…"`) loads `GET /embed/loader.js` —
+   the bundled loader IIFE (`bundleLoader()`, esbuild over `packages/widget/src/loader-entry.ts`,
+   `packages/widget-backend/src/routes/embed.ts`) — which mounts a closed-shadow launcher and, on first
+   open, an iframe at `GET /embed/panel?shop=…` (the chat UI, with a per-shop `frame-ancestors` CSP).
+4. The panel mints a widget token via `GET /widget/token?shop=…`. Tenant resolution is by **shop domain**
+   via `merchants.tenantForShopDomain` (`merchant-resolver.ts:254,567`; called from `server.ts:1133`): the
+   merchant registry (`pl_merchant`, populated by a completed OAuth install) wins when an **active** row
+   exists for that domain; otherwise `SHOPIFY_STORES`/`WIDGET_EMBED_KEYS` is the named fallback — today the
+   only populated case, and how the `demo` tenant is served.
+
+**Custom domains are supported for the panel's CSP.** A merchant browsing their storefront on their own
+domain (e.g. `shop.their-brand.com`) rather than `*.myshopify.com` still gets a widget that renders,
+because `GET /embed/panel`'s `frame-ancestors` widens to include that domain too — resolved **server-side
+only**, via `merchants.primaryDomainForShop(shop)` (`merchant-resolver.ts`), keyed by the already-accepted
+`?shop=` and never a second client-supplied parameter. Precedence is registry-first, same as identity: an
+**active** `pl_merchant` row's own `primaryDomain` wins (including "explicitly no custom domain
+configured" — a row that exists never blends with the env fallback below), a **revoked** row resolves to
+no custom domain, and only the **absence of any row at all** falls through to the named
+`SHOPIFY_PRIMARY_DOMAINS` env var (same JSON shape as `SHOPIFY_STORES`, but keyed by **shop domain**
+rather than tenant: `{"<shop>.myshopify.com": "<custom-domain>"}`).
+
+Populate a merchant's custom domain one of two ways:
+- **`SHOPIFY_PRIMARY_DOMAINS`** — the named env fallback, for the same "no registry row yet" posture
+  `SHOPIFY_STORES`/`WIDGET_EMBED_KEYS` already use (local/dev/e2e, or any tenant with no `pl_merchant` row).
+- **The operator CLI** — `pnpm exec tsx packages/widget-backend/src/jobs/merchant.ts set --tenant
+  <tenantId> --primary-domain <host>`, which writes it durably to the merchant's own registry row (read
+  back and audited, like every other `set`/`status` change — see `jobs/merchant.ts`'s own header).
+
+Both paths validate the value as a bare hostname (trim + lowercase; no scheme, path, port, space, `;`, or
+CR/LF) — the write-time guard — and the panel route re-validates it again immediately before it enters the
+`Content-Security-Policy` header, so a hand-edited registry row can never widen framing to an arbitrary
+value. **Install-time auto-population is a deferred fast-follow, not built here:** the OAuth install
+(`shopify-install.ts`) does not call Shopify's Admin API for the shop's `primaryDomain` today, so a
+merchant who installs still needs one of the two paths above populated by hand until that call is added.
+
+**The deploy-time host placeholder — no substitution mechanism exists yet.** Both
+`extensions/palup-widget/blocks/app-embed.liquid:12` (`https://REPLACE_WITH_APP_HOST/embed/loader.js`) and
+`shopify.app.toml:25` (`application_url = "https://REPLACE_WITH_APP_HOST"`) carry the literal string
+`REPLACE_WITH_APP_HOST`. Grepped the repo for anything that substitutes it (build script, `sed`, CI step,
+`pnpm` task): **none exists.** `shopify app deploy` alone does not fill it in — a human must hand-edit both
+occurrences to the real app host (or a build/templating step must be added later) **before** that deploy is
+meaningful for real traffic.
+
+**A merchant who installs today still gets the fixture catalog, not their own products.** The OAuth install
+(`shopify-install.ts`) records a `pl_merchant` row and a shop domain, which is enough for the embed to
+resolve a tenant — but serving still reads the Storefront access token from `SecretsPort`
+(`shopify_storefront_token`, hand-provisioned per tenant), never the delegate credential the install
+captures (`merchant-store.ts:16,54-61`). Until an operator provisions that secret for a tenant,
+`resolveShopifyStore` returns `undefined` and that merchant's shoppers ground on the built-in fixture
+catalog — the embed extension does not close this gap. See *Shopify app install* above ("Onboarding a
+merchant who installed the app themselves") and `docs/PATH-TO-PRODUCTION.md` Phase 1 #2/#3.
+
+**Extension schema — consistent with `shopify.app.toml`, not live-validated.** The schema shape
+(`type = "theme"`, one app-embed block, `target: "body"`, one `position` select setting in
+`app-embed.liquid`'s `{% schema %}`) matches the documented app-embed block conventions and the api version
+`shopify.app.toml` already pins, but neither file has been rendered by real Shopify tooling.
+`packages/widget/test/app-embed-liquid.test.ts` asserts the rendered Liquid as a string, not a live
+Shopify theme-editor render. `shopify app deploy` is the validation step — it may surface schema issues
+this repo cannot catch statically.
+
 ## Per-merchant region (D2) — the setting that decides a consent regime
 
 `region` is not a label. It selects the **consent regime**: `consentPermits(region, "ordinary", value)` is

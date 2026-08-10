@@ -30,9 +30,16 @@ A design-partner pilot can *defer* billing (invoice manually), EU/GDPR-export (U
    token from `SecretsPort`, not the C1 delegate credential, so an OAuth-installed merchant gets fixtures
    (`routes/shopify-install.ts:453,479`; `merchant-store.ts:54-78`). Close that loop so a self-installed
    merchant grounds on THEIR catalog.
-3. **[BUILD] The embeddable widget** — today the UI is a standalone demo page; there is no `w.js` loader, no
-   snippet, no theme app extension/ScriptTag (`packages/widget/public/index.html`; `shopify.app.toml`
-   `embedded=false`). Build the loader + storefront embed so the widget mounts on a live store.
+3. **[BUILD] The embeddable widget — code complete on `feat/embeddable-widget`, not yet merged to `main`.**
+   The theme app extension (`extensions/palup-widget/`), the loader (`packages/widget/src/loader-entry.ts`),
+   and the backend routes (`GET /embed/loader.js`, `GET /embed/panel` — `packages/widget-backend/src/
+   routes/embed.ts`) are built and tested on that branch. What remains once it merges is [INFRA]:
+   `shopify app deploy` (item 1) registers the extension; separately, a human must hand-edit the
+   `REPLACE_WITH_APP_HOST` placeholder in `app-embed.liquid` + `shopify.app.toml` to the real app host —
+   no build-time substitution exists for it (verified: nothing in the repo's scripts, CI, or package.json
+   touches that string). See `docs/DEPLOY.md` *Embedding the widget on a storefront* for the full path and
+   the storefront-token caveat (a self-installed merchant still gets fixtures, not their own catalog, until
+   item 2 closes).
 4. **[INFRA] A production deployment** — no prod workflow or service exists; staging-only
    (`docs/DEPLOY.md:3`; `.github/workflows/`). Stand up a prod Cloud Run service + deploy path, with
    `WIDGET_AUTH_REQUIRED=true` (staging already enforces it via smoke — `server.ts:285`).
@@ -50,7 +57,7 @@ A design-partner pilot can *defer* billing (invoice manually), EU/GDPR-export (U
 | 1 | Register Shopify app (`shopify app deploy`) | INFRA | pending — `shopify.app.toml:12-14` | — |
 | 2 | Install→embed-key handoff + storefront-token custody | BUILD | in_progress — `shopify-install.ts:453,479` | 1 |
 | 3 | Serve merchant's own catalog (D2 fix) | BUILD | pending — `merchant-store.ts:54-78` | 2 |
-| 4 | Embeddable widget (`w.js` loader + snippet) | BUILD | pending — `packages/widget/public/index.html` | 1 |
+| 4 | Embeddable widget (theme app extension + loader + `/embed/*` routes) | BUILD | **done (code, on `feat/embeddable-widget`, unmerged)** — `extensions/palup-widget/`, `packages/widget-backend/src/routes/embed.ts`; live traffic still gated on 1 | 1 |
 | 5 | Prod Cloud Run service + deploy workflow | INFRA | pending — `docs/DEPLOY.md:3` | — |
 | 6 | `WIDGET_AUTH_REQUIRED=true` in prod | INFRA(config) | in_progress — `server.ts:285` | 5 |
 | 7 | Human take-over: honest escalation copy OR a real producer | BUILD/BIZ | pending — `brain.ts:1100` | 5 |
@@ -58,6 +65,14 @@ A design-partner pilot can *defer* billing (invoice manually), EU/GDPR-export (U
 Phase-1 exit: a design-partner merchant installs the app, the widget mounts on their storefront, and their
 shoppers get grounded, guardrailed, sales-first answers on real Gemini — with support/commerce actions
 honestly escalated. Manual invoicing; no memory; US-only.
+
+**Remaining human steps for the embed (2026-08-10):** (a) merge `feat/embeddable-widget` to `main`, then
+`shopify app deploy` from a Partners account — registers the app + the `palup-widget` extension; separately,
+a human must hand-edit the `REPLACE_WITH_APP_HOST` placeholder (`extensions/palup-widget/blocks/
+app-embed.liquid:12`, `shopify.app.toml:25`) to the real host before that deploy is meaningful — nothing in
+the repo substitutes it automatically (verified: no script, CI step, or pnpm task touches that string);
+(b) standing up a production host (#5 above) so a real host value exists to set. Full detail:
+`docs/DEPLOY.md` *Embedding the widget on a storefront*.
 
 ## Phase 2 — quality, freshness, scale (mostly already built, gated behind promotion)
 
@@ -117,7 +132,9 @@ merchant launch.
 **Recommended first work item:** the **embeddable widget (Phase 1 #4)** — it is pure [BUILD], has no
 dependency except the app registration decision, converts the existing demo page into a real `w.js` loader +
 snippet, and is the visible proof a merchant can mount the agent. Design it first (embed mechanism: iframe vs
-shadow-DOM inline script; the embed-key flow), then build test-first.
+shadow-DOM inline script; the embed-key flow), then build test-first. **Status update (2026-08-10): code
+done on `feat/embeddable-widget` (unmerged)** — see Phase 1 #4 above; once merged, only the [INFRA] step
+(`shopify app deploy` + hand-setting the real host) remains.
 
 Sequence to a pilot: **decide pilot scope (5) → register the app (1, human) → build the install/token chain
 (2,3) + the embed (4) in parallel → stand up prod (5,6) → soft-launch to the design partner → the pilot

@@ -1,3 +1,4 @@
+import { normalizePrimaryDomain } from "@palup/platform-ports";
 import type { MerchantGroundingMode, MerchantRecord, MerchantRegion, MerchantRegistryPort, MerchantStatus, RuntimeStatePort } from "@palup/platform-ports";
 import { createRuntimeStore, PostgresMerchantRegistry } from "@palup/state-postgres";
 
@@ -61,6 +62,8 @@ export interface MerchantCommand {
   region?: MerchantRegion;
   groundingMode?: MerchantGroundingMode;
   plan?: string;
+  /** Custom-domain CSP support. Like `plan`, there is no flag to CLEAR it — set a new value to change it. */
+  primaryDomain?: string;
   reason?: string;
 }
 
@@ -88,7 +91,7 @@ const RUN = "pnpm exec tsx packages/widget-backend/src/jobs/merchant.ts";
 export const MERCHANT_USAGE = `usage:
   ${RUN} show   --tenant <tenantId>
   ${RUN} status --tenant <tenantId> --status active|suspended|uninstalled [--reason "..."]
-  ${RUN} set    --tenant <tenantId> [--region us|eu|uk|other] [--grounding-mode off|general|full] [--plan <plan>]
+  ${RUN} set    --tenant <tenantId> [--region us|eu|uk|other] [--grounding-mode off|general|full] [--plan <plan>] [--primary-domain <host>]
 
 "uninstalled"/"suspended" make the merchant INERT — every registry lookup resolves to null — without
 deleting the row, so support/billing/erasure can still reach it and reactivation is one command. This does
@@ -135,8 +138,18 @@ export function parseMerchantArgv(argv: string[]): MerchantCommand {
   }
   const planRaw = flag("plan");
   if (planRaw !== undefined) cmd.plan = planRaw;
-  if (cmd.region === undefined && cmd.groundingMode === undefined && cmd.plan === undefined)
-    throw new MerchantArgsError("`set` needs at least one of --region / --grounding-mode / --plan");
+  const domainRaw = flag("primary-domain");
+  if (domainRaw !== undefined) {
+    // Validated + normalized HERE too (not just at the registry write path) so a bad value fails fast,
+    // with a clear CLI error, before any I/O — the same posture --region/--grounding-mode already take.
+    try {
+      cmd.primaryDomain = normalizePrimaryDomain(domainRaw);
+    } catch (e) {
+      throw new MerchantArgsError(`--primary-domain: ${(e as Error).message}`);
+    }
+  }
+  if (cmd.region === undefined && cmd.groundingMode === undefined && cmd.plan === undefined && cmd.primaryDomain === undefined)
+    throw new MerchantArgsError("`set` needs at least one of --region / --grounding-mode / --plan / --primary-domain");
   return cmd;
 }
 
@@ -194,6 +207,7 @@ export async function runMerchant(
     ...(cmd.region === undefined ? {} : { region: cmd.region }),
     ...(cmd.groundingMode === undefined ? {} : { groundingMode: cmd.groundingMode }),
     ...(cmd.plan === undefined ? {} : { plan: cmd.plan }),
+    ...(cmd.primaryDomain === undefined ? {} : { primaryDomain: cmd.primaryDomain }),
   };
   await store.audit(
     { tenantId: cmd.tenantId },
@@ -201,18 +215,29 @@ export async function runMerchant(
       actor: "operator",
       action: "merchant.updated",
       input: { tenantId: cmd.tenantId, ...patch },
-      decision: { previous: { region: before.region, groundingMode: before.groundingMode, plan: before.plan } },
+      decision: {
+        previous: { region: before.region, groundingMode: before.groundingMode, plan: before.plan, primaryDomain: before.primaryDomain },
+      },
       // The reversal restores exactly the fields this command changed, to the values it changed them from.
       reversalPath:
         `${RUN} set --tenant ${cmd.tenantId}` +
         (cmd.region === undefined ? "" : ` --region ${before.region}`) +
         (cmd.groundingMode === undefined ? "" : ` --grounding-mode ${before.groundingMode}`) +
-        (cmd.plan === undefined ? "" : ` --plan ${before.plan ?? "(unset — no flag can clear a plan; see MERCHANT_USAGE)"}`),
+        (cmd.plan === undefined ? "" : ` --plan ${before.plan ?? "(unset — no flag can clear a plan; see MERCHANT_USAGE)"}`) +
+        (cmd.primaryDomain === undefined
+          ? ""
+          : ` --primary-domain ${before.primaryDomain ?? "(unset — no flag can clear it; see MERCHANT_USAGE)"}`),
     },
   );
   const after = await registry.update(cmd.tenantId, patch);
   if (cmd.region !== undefined && after.region !== cmd.region) throw new Error("region did not take effect");
   if (cmd.groundingMode !== undefined && after.groundingMode !== cmd.groundingMode) throw new Error("groundingMode did not take effect");
+  // `primaryDomain` is normalized by the registry on write (trim + lowercase), so the confirm check
+  // compares against the SAME normalization — not raw `cmd.primaryDomain` — regardless of whether the
+  // caller went through `parseMerchantArgv` (which already normalized it) or constructed a
+  // `MerchantCommand` directly (several tests do; normalization here is idempotent either way).
+  if (cmd.primaryDomain !== undefined && after.primaryDomain !== normalizePrimaryDomain(cmd.primaryDomain))
+    throw new Error("primaryDomain did not take effect");
   return done(after);
 }
 
@@ -255,7 +280,7 @@ export async function resolveMerchantStore(
  * The actual credential (the delegate token) lives encrypted in a different store and is never read here.
  */
 export function describeMerchantForOperator(m: MerchantRecord): string {
-  return `${m.tenantId}  shop=${m.shopDomain}  embedKey=${m.embedKey}  status=${m.status}${m.statusReason ? ` ("${m.statusReason}")` : ""}  region=${m.region}  grounding=${m.groundingMode}${m.plan ? `  plan=${m.plan}` : ""}  updated=${m.updatedAt}`;
+  return `${m.tenantId}  shop=${m.shopDomain}  embedKey=${m.embedKey}  status=${m.status}${m.statusReason ? ` ("${m.statusReason}")` : ""}  region=${m.region}  grounding=${m.groundingMode}${m.plan ? `  plan=${m.plan}` : ""}${m.primaryDomain ? `  primaryDomain=${m.primaryDomain}` : ""}  updated=${m.updatedAt}`;
 }
 
 async function main(): Promise<void> {

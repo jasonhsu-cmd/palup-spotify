@@ -41,6 +41,7 @@
     "e2e": "playwright test --config e2e/playwright.config.ts",
     "e2e:live": "playwright test --config e2e/playwright.live.config.ts",
     "e2e:monitor": "playwright test --config e2e/playwright.monitor.config.ts",
+    "e2e:embed": "playwright test --config e2e/playwright.embed.config.ts",
     "typecheck": "tsc -b --pretty"
   },
   "devDependencies": {
@@ -48,6 +49,7 @@
     "@playwright/test": "^1.48.0",
     "@types/node": "^26.1.2",
     "@types/pg": "^8.20.3",
+    "jsdom": "^30.0.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

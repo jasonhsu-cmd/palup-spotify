@@ -142,6 +142,49 @@ describe("merchant CLI — status changes are confirmed by reading back, and aud
   });
 });
 
+describe("merchant CLI — custom-domain CSP support (`set --primary-domain`)", () => {
+  it("parses --primary-domain, normalized, and requires a bare hostname", () => {
+    expect(parseMerchantArgv(["set", "--tenant", "acme-store", "--primary-domain", "Shop.Example.com"])).toEqual({
+      action: "set",
+      tenantId: "acme-store",
+      primaryDomain: "shop.example.com",
+    });
+    expect(() =>
+      parseMerchantArgv(["set", "--tenant", "acme-store", "--primary-domain", "https://shop.example.com"]),
+    ).toThrow(/--primary-domain/);
+    expect(() => parseMerchantArgv(["set", "--tenant", "acme-store", "--primary-domain", "shop example.com"])).toThrow(
+      /--primary-domain/,
+    );
+  });
+
+  it("sets and reads back a primaryDomain (round trip), and it is auditable + reversible (NN#5)", async () => {
+    const { store, registry } = await fixture();
+    const report = await runMerchant(
+      { store, registry },
+      { action: "set", tenantId: "acme-store", primaryDomain: "Shop.Example.com" },
+    );
+    expect(report.merchant?.primaryDomain).toBe("shop.example.com"); // registry normalizes on write
+    expect((await registry.lookupByTenantId("acme-store"))?.primaryDomain).toBe("shop.example.com");
+
+    const rec = (await store.readAudit({ tenantId: "acme-store" })).find((r) => r.action === "merchant.updated");
+    expect(rec).toBeTruthy();
+    expect(rec?.reversalPath).toContain("--primary-domain");
+    expect((await store.verifyAudit({ tenantId: "acme-store" })).ok).toBe(true);
+
+    // The reversal actually restores the PREVIOUS value (here, "unset" since none was configured before).
+    expect(rec?.reversalPath).toContain("(unset");
+  });
+
+  it("a malformed primaryDomain (bypassing parseMerchantArgv's own guard) is rejected by the registry's " +
+    "write-time validation and leaves the row untouched", async () => {
+    const { store, registry } = await fixture();
+    await expect(
+      runMerchant({ store, registry }, { action: "set", tenantId: "acme-store", primaryDomain: "https://evil.com" }),
+    ).rejects.toThrow();
+    expect((await registry.lookupByTenantId("acme-store"))?.primaryDomain).toBeUndefined();
+  });
+});
+
 describe("merchant CLI — it refuses a store nobody else can see", () => {
   it("without DATABASE_URL it hard-fails instead of silently using a per-process store", async () => {
     await expect(resolveMerchantStore({} as NodeJS.ProcessEnv)).rejects.toThrow(/DATABASE_URL/);

@@ -1,3 +1,4 @@
+import { normalizePrimaryDomain } from "@palup/platform-ports";
 import type {
   MerchantGroundingMode,
   MerchantRecord,
@@ -235,6 +236,14 @@ export interface MerchantResolverDeps {
   envRegion: MerchantRegion;
   /** `MERCHANT_GROUNDING_MODE`, same rank and same reason for being required. */
   envGroundingMode: MerchantGroundingMode;
+  /**
+   * Custom-domain CSP support — `SHOPIFY_PRIMARY_DOMAINS`, parsed by `parsePrimaryDomains`
+   * (merchant-store.ts). Keyed by SHOP DOMAIN (not tenant, unlike `storeDomains`), because
+   * `primaryDomainForShop` is the panel route's own lookup and only ever has the shop. Optional, defaults
+   * to `{}` — an env-less deployment simply never widens the panel CSP beyond the shop's own
+   * `*.myshopify.com` host.
+   */
+  primaryDomains?: Record<string, string>;
 }
 
 export interface MerchantResolver {
@@ -252,6 +261,18 @@ export interface MerchantResolver {
   /** Shop host → tenant, case-insensitively (hosts are case-insensitive; the registry indexes
    *  `lower(shop_domain)` — postgres-merchant-registry.ts:220-222). */
   tenantForShopDomain(shopDomain: unknown): Promise<TenantResolution>;
+  /**
+   * Custom-domain CSP support. Shop host (the already-accepted `*.myshopify.com` domain — NEVER a
+   * second, client-supplied parameter) → the merchant's own custom/primary domain, or `undefined`. A
+   * registry row is AUTHORITATIVE the moment it exists: an active row's own `primaryDomain` (which may
+   * itself be absent — "explicitly no custom domain") NEVER blends with the env fallback below, and a
+   * revoked row resolves to `undefined` rather than its stale custom domain. Only the ABSENCE of any row
+   * at all falls through to `SHOPIFY_PRIMARY_DOMAINS`. Fails closed (`undefined`) on an unreadable
+   * registry or a value that fails read-side hostname validation — see the header on why a fallback here
+   * is a "widen the CSP" decision, not a servability one, so it never needs an `error`/`revoked` kind of
+   * its own.
+   */
+  primaryDomainForShop(shop: unknown): Promise<string | undefined>;
 }
 
 /** Own-property read against a null-prototype map, so `__proto__`/`constructor` can never resolve a
@@ -279,7 +300,7 @@ const isGroundingMode = (v: unknown): v is MerchantGroundingMode =>
   typeof v === "string" && (GROUNDING_MODES as readonly string[]).includes(v);
 
 export function createMerchantResolver(deps: MerchantResolverDeps): MerchantResolver {
-  const { store, registry, embedKeys, storeDomains, envRegion, envGroundingMode } = deps;
+  const { store, registry, embedKeys, storeDomains, envRegion, envGroundingMode, primaryDomains = {} } = deps;
   // Fail fast at CONSTRUCTION, not per request — the same posture as `resolveEmbedKeys` and
   // `assertMemoryAuthCoupling`, and for the same reason: this runs in the composition root, so a bad value
   // makes the process refuse to boot instead of quietly serving every fallback tenant under a region
@@ -598,6 +619,44 @@ export function createMerchantResolver(deps: MerchantResolverDeps): MerchantReso
       if (s.kind === "revoked") return { kind: "revoked", tenantId: envTenant, status: s.status };
       if (s.kind === "region-unset") return { kind: "region-unset", tenantId: envTenant };
       return { kind: "ok", tenantId: envTenant, source: "env" };
+    },
+
+    async primaryDomainForShop(shopRaw) {
+      const raw = nonBlank(shopRaw);
+      if (!raw) return undefined;
+      const shop = raw.toLowerCase();
+
+      if (registry) {
+        let row: MerchantRecord | null;
+        try {
+          // `includeInactive: true` for the same reason `rowFor` uses it: a revoked row must be seen and
+          // refused, not silently treated as "no row" and handed to the env fallback below.
+          row = await registry.lookupByShopDomain(shop, { includeInactive: true });
+        } catch {
+          logRegistryFailure("lookupByShopDomain", "custom-domain");
+          return undefined; // fail closed: an unreadable registry must never widen the panel CSP
+        }
+        if (row) {
+          // The row is AUTHORITATIVE the instant it exists — including "explicitly no custom domain"
+          // (primaryDomain absent) and "revoked" (never the merchant's own stale custom domain). NEITHER
+          // case falls through to SHOPIFY_PRIMARY_DOMAINS: a row answers this question completely.
+          if (row.status !== "active" || !row.primaryDomain) return undefined;
+          try {
+            // Read-side re-validation: defense in depth against a hand-edited pl_merchant row that
+            // bypassed create()/update()'s own guard (the identical check — merchant-registry-port.ts).
+            return normalizePrimaryDomain(row.primaryDomain);
+          } catch {
+            console.error(
+              `[merchant] tenant "${row.tenantId}" has a malformed primaryDomain on its registry row — ` +
+                `ignoring it rather than widening the panel CSP with an unvalidated value. Fix: ` +
+                `${MERCHANT_CLI} set --tenant ${row.tenantId} --primary-domain <host>`,
+            );
+            return undefined;
+          }
+        }
+      }
+
+      return own(primaryDomains, shop);
     },
   };
 }

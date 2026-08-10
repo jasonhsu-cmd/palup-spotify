@@ -1,3 +1,4 @@
+import { normalizePrimaryDomain } from "@palup/platform-ports";
 import type { SecretsPort } from "@palup/platform-ports";
 
 // Tenant → Shopify store resolution (M2). Splits into a NON-SECRET part (the shop domain, which merely
@@ -27,6 +28,35 @@ export function parseStoreDomains(raw: string | undefined = process.env.SHOPIFY_
       }
     } catch {
       console.warn("[config] SHOPIFY_STORES is not valid JSON — no Shopify stores configured");
+    }
+  }
+  return map;
+}
+
+// Custom-domain CSP support — the NAMED env fallback for `MerchantResolver.primaryDomainForShop`, at
+// exactly the rank `SHOPIFY_STORES` holds for identity: consulted ONLY when the merchant registry has NO
+// row at all for a shop (never when a row exists, even one with no primaryDomain — see
+// merchant-resolver.ts). Keyed by SHOP DOMAIN directly (not by tenant, unlike `SHOPIFY_STORES`), because
+// the panel route already has the shop and never the tenant id at the point it needs this. Both the key
+// and the value are hostnames, so BOTH are normalized here — the read-side re-validation this repo
+// requires for every hostname that reaches a CSP, applied even to an operator-supplied env var.
+export function parsePrimaryDomains(raw: string | undefined = process.env.SHOPIFY_PRIMARY_DOMAINS): Record<string, string> {
+  const map: Record<string, string> = Object.create(null);
+  if (raw) {
+    try {
+      const o = JSON.parse(raw);
+      if (o && typeof o === "object") {
+        for (const [k, v] of Object.entries(o)) {
+          if (typeof k !== "string" || !k.trim() || typeof v !== "string" || !v) continue;
+          try {
+            map[k.trim().toLowerCase()] = normalizePrimaryDomain(v);
+          } catch {
+            console.warn(`[config] SHOPIFY_PRIMARY_DOMAINS entry for "${k}" is not a bare hostname — skipped`);
+          }
+        }
+      }
+    } catch {
+      console.warn("[config] SHOPIFY_PRIMARY_DOMAINS is not valid JSON — no custom domains configured");
     }
   }
   return map;

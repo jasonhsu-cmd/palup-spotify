@@ -1,0 +1,34 @@
+{% comment %}
+  PalUp shopper widget — app-embed block. Injects the loader script on every storefront page
+  once a merchant enables this app embed in their theme editor.
+
+  REPLACE_WITH_APP_HOST is a deploy-time placeholder (same convention as
+  shopify.app.toml:application_url). No build-time substitution for it exists in this repo today
+  (grep-verified: no script, CI step, or pnpm task touches this string) — a human must hand-edit
+  this line to the real app host before `shopify app deploy` is meaningful for real traffic. See
+  docs/DEPLOY.md "Embedding the widget on a storefront". This file does not deploy anywhere today.
+{% endcomment %}
+<script
+  src="https://REPLACE_WITH_APP_HOST/embed/loader.js"
+  data-shop="{{ shop.permanent_domain }}"
+  data-position="{{ block.settings.position }}"
+  async></script>
+
+{% schema %}
+{
+  "name": "PalUp widget",
+  "target": "body",
+  "settings": [
+    {
+      "type": "select",
+      "id": "position",
+      "label": "Launcher position",
+      "options": [
+        { "value": "bottom-right", "label": "Bottom right" },
+        { "value": "bottom-left", "label": "Bottom left" }
+      ],
+      "default": "bottom-right"
+    }
+  ]
+}
+{% endschema %}

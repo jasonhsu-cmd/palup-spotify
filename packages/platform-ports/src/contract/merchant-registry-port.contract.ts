@@ -239,6 +239,49 @@ export function runMerchantRegistryPortContract(
       expect((await r.lookupByShopDomain("shop.example.com"))?.tenantId).toBe("woo");
     });
 
+    // --- primaryDomain (custom-domain CSP support) ---
+
+    it("create/update round-trips primaryDomain, normalized (trim + lowercase)", async () => {
+      const r = await makeAdapter();
+      const created = await r.create({ ...ACME, primaryDomain: "  Shop.Example.com  " });
+      expect(created.primaryDomain).toBe("shop.example.com");
+      expect((await r.lookupByTenantId("acme"))?.primaryDomain).toBe("shop.example.com");
+
+      const updated = await r.update("acme", { primaryDomain: "New.Example.com" });
+      expect(updated.primaryDomain).toBe("new.example.com");
+      expect((await r.lookupByShopDomain("acme.myshopify.com"))?.primaryDomain).toBe("new.example.com");
+    });
+
+    it("a merchant with no primaryDomain configured has the field ABSENT — not null, not empty string " +
+      "(so a resolver can tell 'never configured' from 'explicitly cleared')", async () => {
+      const r = await makeAdapter();
+      const created = await r.create(ACME);
+      expect(Object.hasOwn(created, "primaryDomain")).toBe(false);
+      expect((await r.lookupByTenantId("acme"))?.primaryDomain).toBeUndefined();
+    });
+
+    it("create rejects a malformed primaryDomain (space, slash, scheme, semicolon, CR/LF) and creates NOTHING", async () => {
+      const r = await makeAdapter();
+      for (const bad of [
+        "shop example.com",
+        "shop.example.com/path",
+        "https://shop.example.com",
+        "shop.example.com;drop",
+        "shop.example.com\r\nSet-Cookie:x",
+      ]) {
+        await expect(r.create({ ...ACME, primaryDomain: bad })).rejects.toThrow();
+      }
+      expect(await r.lookupByTenantId("acme", { includeInactive: true })).toBeNull();
+    });
+
+    it("update rejects a malformed primaryDomain and leaves the row untouched", async () => {
+      const r = await makeAdapter();
+      await r.create(ACME);
+      await expect(r.update("acme", { primaryDomain: "https://evil.com" })).rejects.toThrow();
+      await expect(r.update("acme", { primaryDomain: "evil.com; DROP" })).rejects.toThrow();
+      expect((await r.lookupByTenantId("acme"))?.primaryDomain).toBeUndefined();
+    });
+
     // --- callers cannot mutate stored state by reference (mirrors VectorPort's clone discipline) ---
 
     it("returned records are copies — mutating one does not change the registry", async () => {

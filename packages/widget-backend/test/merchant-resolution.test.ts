@@ -539,6 +539,140 @@ describe("D1 (9) grounding resolves its shop domain through the SAME resolver", 
 });
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────────
+// Custom-domain CSP support — `primaryDomainForShop`, the ONE new resolver method the panel route's
+// `frameAncestors` closure calls (server.ts). Registry row wins and is AUTHORITATIVE the moment it
+// exists (including "explicitly no custom domain" — never blended with the env fallback); revoked ⇒
+// undefined; no row at all ⇒ the named `SHOPIFY_PRIMARY_DOMAINS` env fallback, same rank `SHOPIFY_STORES`
+// holds for the shop domain itself. See merchant-registry-port.ts's `primaryDomain` doc and the design
+// note (.superpowers/sdd/2026-08-10-embeddable-widget/custom-domain-design.md) for the full rule.
+describe("primaryDomainForShop — custom-domain CSP resolution (registry-first, env fallback, never blended)", () => {
+  it("a registry row WITH a primaryDomain wins", async () => {
+    const registry = createInMemoryMerchantRegistry();
+    await registry.create({ tenantId: TENANT, shopDomain: SHOP, embedKey: KEY, region: "us", primaryDomain: "shop.example.com" });
+    const r = createMerchantResolver({
+      store: new InMemoryRuntimeStore(),
+      registry,
+      embedKeys: {},
+      storeDomains: () => ({}),
+      envRegion: "us",
+      envGroundingMode: "full",
+    });
+    expect(await r.primaryDomainForShop(SHOP)).toBe("shop.example.com");
+  });
+
+  it("a registry row WITHOUT a primaryDomain resolves to undefined — and NEVER blends with an env entry " +
+    "for the same shop (a row that exists is authoritative, full stop)", async () => {
+    const registry = await activeRegistry(); // TENANT row exists, no primaryDomain set
+    const r = createMerchantResolver({
+      store: new InMemoryRuntimeStore(),
+      registry,
+      embedKeys: {},
+      storeDomains: () => ({}),
+      envRegion: "us",
+      envGroundingMode: "full",
+      primaryDomains: { [SHOP]: "should-never-be-used.example.com" },
+    });
+    expect(await r.primaryDomainForShop(SHOP)).toBeUndefined();
+  });
+
+  it("a REVOKED row resolves to undefined too — never the merchant's own stale custom domain", async () => {
+    const registry = createInMemoryMerchantRegistry();
+    await registry.create({ tenantId: TENANT, shopDomain: SHOP, embedKey: KEY, region: "us", primaryDomain: "shop.example.com" });
+    await registry.setStatus(TENANT, "uninstalled", { reason: "app/uninstalled webhook" });
+    const r = createMerchantResolver({
+      store: new InMemoryRuntimeStore(),
+      registry,
+      embedKeys: {},
+      storeDomains: () => ({}),
+      envRegion: "us",
+      envGroundingMode: "full",
+    });
+    expect(await r.primaryDomainForShop(SHOP)).toBeUndefined();
+  });
+
+  it("no row at all falls through to the named SHOPIFY_PRIMARY_DOMAINS env fallback", async () => {
+    const registry = createInMemoryMerchantRegistry(); // empty — no row for SHOP
+    const r = createMerchantResolver({
+      store: new InMemoryRuntimeStore(),
+      registry,
+      embedKeys: {},
+      storeDomains: () => ({}),
+      envRegion: "us",
+      envGroundingMode: "full",
+      primaryDomains: { [SHOP]: "shop.example.com" },
+    });
+    expect(await r.primaryDomainForShop(SHOP)).toBe("shop.example.com");
+  });
+
+  it("an env miss and an unknown shop both resolve to undefined", async () => {
+    const r = createMerchantResolver({
+      store: new InMemoryRuntimeStore(),
+      embedKeys: {},
+      storeDomains: () => ({}),
+      envRegion: "us",
+      envGroundingMode: "full",
+      primaryDomains: { "other.myshopify.com": "x.example.com" },
+    });
+    expect(await r.primaryDomainForShop(SHOP)).toBeUndefined();
+    expect(await r.primaryDomainForShop("nonexistent.myshopify.com")).toBeUndefined();
+    expect(await r.primaryDomainForShop(undefined)).toBeUndefined();
+  });
+
+  it("with no registry at all (env-only posture), the SHOPIFY_PRIMARY_DOMAINS fallback still resolves", async () => {
+    const r = createMerchantResolver({
+      store: new InMemoryRuntimeStore(),
+      embedKeys: {},
+      storeDomains: () => ({}),
+      envRegion: "us",
+      envGroundingMode: "full",
+      primaryDomains: { [SHOP]: "shop.example.com" },
+    });
+    expect(await r.primaryDomainForShop(SHOP)).toBe("shop.example.com");
+  });
+
+  it("a hand-edited, malformed primaryDomain on the row is rejected at READ time (defense in depth vs a " +
+    "row that bypassed create()/update()'s own guard) — resolves to undefined, not the raw value", async () => {
+    const registry = await activeRegistry();
+    vi.spyOn(registry, "lookupByShopDomain").mockResolvedValue({
+      tenantId: TENANT,
+      shopDomain: SHOP,
+      embedKey: KEY,
+      status: "active",
+      region: "us",
+      groundingMode: "full",
+      primaryDomain: "https://evil.com",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const r = createMerchantResolver({
+      store: new InMemoryRuntimeStore(),
+      registry,
+      embedKeys: {},
+      storeDomains: () => ({}),
+      envRegion: "us",
+      envGroundingMode: "full",
+    });
+    expect(await r.primaryDomainForShop(SHOP)).toBeUndefined();
+  });
+
+  it("a registry read failure resolves to undefined — fail closed, never a widened CSP on an unreadable registry", async () => {
+    const registry = await activeRegistry();
+    vi.spyOn(registry, "lookupByShopDomain").mockRejectedValue(new Error("connection terminated unexpectedly"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const r = createMerchantResolver({
+      store: new InMemoryRuntimeStore(),
+      registry,
+      embedKeys: {},
+      storeDomains: () => ({}),
+      envRegion: "us",
+      envGroundingMode: "full",
+    });
+    expect(await r.primaryDomainForShop(SHOP)).toBeUndefined();
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────────
 describe("D1 (10) the OTHER tenant-resolving routes honour revocation too", () => {
   it("/shopper/session 404s for a revoked merchant (no shopper session is minted on a dead store)", async () => {
     process.env.WIDGET_AUTH_REQUIRED = "true";
