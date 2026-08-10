@@ -199,6 +199,31 @@ The shopper widget mounts on a merchant's live storefront via a Shopify **theme 
    exists for that domain; otherwise `SHOPIFY_STORES`/`WIDGET_EMBED_KEYS` is the named fallback — today the
    only populated case, and how the `demo` tenant is served.
 
+**Custom domains are supported for the panel's CSP.** A merchant browsing their storefront on their own
+domain (e.g. `shop.their-brand.com`) rather than `*.myshopify.com` still gets a widget that renders,
+because `GET /embed/panel`'s `frame-ancestors` widens to include that domain too — resolved **server-side
+only**, via `merchants.primaryDomainForShop(shop)` (`merchant-resolver.ts`), keyed by the already-accepted
+`?shop=` and never a second client-supplied parameter. Precedence is registry-first, same as identity: an
+**active** `pl_merchant` row's own `primaryDomain` wins (including "explicitly no custom domain
+configured" — a row that exists never blends with the env fallback below), a **revoked** row resolves to
+no custom domain, and only the **absence of any row at all** falls through to the named
+`SHOPIFY_PRIMARY_DOMAINS` env var (same JSON shape as `SHOPIFY_STORES`, but keyed by **shop domain**
+rather than tenant: `{"<shop>.myshopify.com": "<custom-domain>"}`).
+
+Populate a merchant's custom domain one of two ways:
+- **`SHOPIFY_PRIMARY_DOMAINS`** — the named env fallback, for the same "no registry row yet" posture
+  `SHOPIFY_STORES`/`WIDGET_EMBED_KEYS` already use (local/dev/e2e, or any tenant with no `pl_merchant` row).
+- **The operator CLI** — `pnpm exec tsx packages/widget-backend/src/jobs/merchant.ts set --tenant
+  <tenantId> --primary-domain <host>`, which writes it durably to the merchant's own registry row (read
+  back and audited, like every other `set`/`status` change — see `jobs/merchant.ts`'s own header).
+
+Both paths validate the value as a bare hostname (trim + lowercase; no scheme, path, port, space, `;`, or
+CR/LF) — the write-time guard — and the panel route re-validates it again immediately before it enters the
+`Content-Security-Policy` header, so a hand-edited registry row can never widen framing to an arbitrary
+value. **Install-time auto-population is a deferred fast-follow, not built here:** the OAuth install
+(`shopify-install.ts`) does not call Shopify's Admin API for the shop's `primaryDomain` today, so a
+merchant who installs still needs one of the two paths above populated by hand until that call is added.
+
 **The deploy-time host placeholder — no substitution mechanism exists yet.** Both
 `extensions/palup-widget/blocks/app-embed.liquid:12` (`https://REPLACE_WITH_APP_HOST/embed/loader.js`) and
 `shopify.app.toml:25` (`application_url = "https://REPLACE_WITH_APP_HOST"`) carry the literal string
