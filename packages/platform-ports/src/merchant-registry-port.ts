@@ -78,6 +78,18 @@ export interface MerchantRecord {
   groundingMode: MerchantGroundingMode;
   /** Commercial plan, opaque to this port. */
   plan?: string;
+  /**
+   * The merchant's storefront domain as shoppers actually see it (Shopify calls this the "primary
+   * domain"), if different from `shopDomain` (the `*.myshopify.com` host, which always keeps working
+   * regardless of a custom domain). Non-secret identity/config, same class as `shopDomain` — a plain,
+   * normalized (trim + lowercase) hostname, never a URL/scheme/path. Absent means "no custom domain
+   * configured", which is a fact this port is authoritative about: a caller must never blend an absent
+   * value with an env fallback (see `MerchantResolver.primaryDomainForShop`, widget-backend). Consumed
+   * ONLY to widen the embeddable panel's `frame-ancestors` CSP so the widget renders on the merchant's
+   * own storefront host — reached ONLY via a registry/env lookup keyed by an already-accepted shop
+   * domain, never a second client-supplied parameter.
+   */
+  primaryDomain?: string;
   /** Operator-facing note for the CURRENT status (e.g. "app/uninstalled webhook"). Never secret. */
   statusReason?: string;
   /** ISO-8601. Set once at create and never rewritten. */
@@ -97,6 +109,8 @@ export interface NewMerchant {
   /** Defaults to `"full"` — the same default the env var it replaces has (server.ts:493). */
   groundingMode?: MerchantGroundingMode;
   plan?: string;
+  /** See `MerchantRecord.primaryDomain`. Validated/normalized the same way on every write. */
+  primaryDomain?: string;
   /** Defaults to `"active"`. Present so an adapter can seed a pre-provisioned/suspended row. */
   status?: MerchantStatus;
 }
@@ -107,6 +121,9 @@ export interface MerchantUpdate {
   region?: MerchantRegion;
   groundingMode?: MerchantGroundingMode;
   plan?: string;
+  /** See `MerchantRecord.primaryDomain`. Like `plan`, there is no flag that CLEARS it once set — set a
+   *  new value to change it. */
+  primaryDomain?: string;
 }
 
 export interface MerchantLookupOpts {
@@ -162,6 +179,31 @@ function requireId(kind: string, value: unknown): string {
  *  exists to prevent. */
 function normalizeShopDomain(value: unknown): string {
   return requireId("shopDomain", value).toLowerCase();
+}
+
+/**
+ * Custom-domain CSP support: validate + normalize a `primaryDomain` value (trim + lowercase, same as
+ * `normalizeShopDomain`). Rejects anything that is not a bare hostname — whitespace (including CR/LF),
+ * `/`, `;`, or `:` (which covers every scheme: `https://`, `javascript:`, a port suffix). This is a
+ * SHARED gate, exported so every write path (this port's in-memory adapter, the Postgres adapter's
+ * `create`/`update`) AND every read/interpolation path (the merchant resolver, the panel route's CSP
+ * composition — widget-backend) apply the IDENTICAL check. That second application is not redundant: a
+ * hand-edited `pl_merchant` row bypasses every TypeScript writer, so the read side must not simply trust
+ * a stored string is still a bare hostname before it is interpolated into a `Content-Security-Policy`
+ * header.
+ */
+export function normalizePrimaryDomain(value: unknown): string {
+  if (typeof value !== "string" || !value.trim())
+    throw new Error(
+      "MerchantRegistryPort: primaryDomain must be a non-blank string (omit the field entirely to leave it unset)",
+    );
+  const trimmed = value.trim();
+  if (/[\s/;:]/.test(trimmed))
+    throw new Error(
+      `MerchantRegistryPort: primaryDomain ${JSON.stringify(trimmed)} is not a bare hostname — it must not ` +
+        `contain whitespace, "/", ";", or ":" (no scheme, path, port, or query string)`,
+    );
+  return trimmed.toLowerCase();
 }
 
 function requireEnum<T extends string>(kind: string, allowed: readonly T[], value: unknown): T {
@@ -225,6 +267,10 @@ export function createInMemoryMerchantRegistry(opts: InMemoryMerchantRegistryOpt
       const region = requireEnum("region", REGIONS, input?.region);
       const groundingMode = requireEnum("groundingMode", GROUNDING_MODES, input?.groundingMode ?? "full");
       const status = requireEnum("status", STATUSES, input?.status ?? "active");
+      // Validated BEFORE any row/index is touched (same discipline as every other field here) so a
+      // rejected create is a pure no-op — no dangling tenant/domain/embedKey claim from a create that
+      // failed on this field alone.
+      const primaryDomain = input?.primaryDomain === undefined ? undefined : normalizePrimaryDomain(input.primaryDomain);
 
       if (Object.hasOwn(byTenant, tenantId))
         throw new Error(`MerchantRegistryPort: tenantId "${tenantId}" is already registered`);
@@ -255,6 +301,7 @@ export function createInMemoryMerchantRegistry(opts: InMemoryMerchantRegistryOpt
         updatedAt: at,
       };
       if (input?.plan !== undefined) rec.plan = input.plan;
+      if (primaryDomain !== undefined) rec.primaryDomain = primaryDomain;
       byTenant[tenantId] = rec;
       tenantByDomain[shopDomain] = tenantId;
       tenantByEmbedKey[embedKey] = tenantId;
@@ -293,10 +340,12 @@ export function createInMemoryMerchantRegistry(opts: InMemoryMerchantRegistryOpt
       const region = patch?.region === undefined ? undefined : requireEnum("region", REGIONS, patch.region);
       const groundingMode =
         patch?.groundingMode === undefined ? undefined : requireEnum("groundingMode", GROUNDING_MODES, patch.groundingMode);
+      const primaryDomain = patch?.primaryDomain === undefined ? undefined : normalizePrimaryDomain(patch.primaryDomain);
       return mutate(tenantId, (rec) => {
         if (region !== undefined) rec.region = region;
         if (groundingMode !== undefined) rec.groundingMode = groundingMode;
         if (patch?.plan !== undefined) rec.plan = patch.plan;
+        if (primaryDomain !== undefined) rec.primaryDomain = primaryDomain;
         return rec;
       });
     },
