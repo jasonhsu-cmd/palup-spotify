@@ -61,4 +61,16 @@ describe("embed routes", () => {
     expect(res.headers["x-frame-options"]).toBeUndefined();
     await app.close();
   });
+
+  // Task 5 — the panel HTML must actually carry the panel-mode CSS hook and speak the loader's
+  // postMessage protocol. The inline-script UI itself isn't unit-testable without refactoring the panel
+  // into modules (out of scope, see task-5-brief.md); this is the served-HTML marker check that stands
+  // in for it, plus a later e2e.
+  it("panel HTML carries the panel-mode + postMessage wiring", async () => {
+    const app = await server();
+    const res = await app.inject({ method: "GET", url: "/embed/panel?shop=acme.myshopify.com" });
+    expect(res.body).toContain("data-palup-panel");
+    expect(res.body).toContain("palup:ready");
+    await app.close();
+  });
 });

@@ -56,6 +56,18 @@
     background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow);
     display:flex; flex-direction:column; overflow:hidden; z-index:50 }
   #widget[hidden]{ display:none }
+
+  /* PANEL MODE (Task 5) — this same file is also served at /embed/panel?shop=… inside the loader's
+     iframe (packages/widget/src/loader-core.ts), which already renders its OWN launcher bubble in the
+     host page's shadow DOM. `data-palup-panel` is set only by the PANEL_MODE branch of the script below
+     (SHOP query param present, or genuinely running inside a frame) — standalone (`/`) never sets it, so
+     these rules never match there and standalone stays byte-identical. Hides this file's own launcher
+     (never two bubbles) and expands this file's panel to fill the iframe the loader already sized,
+     instead of floating as a fixed 390px card positioned relative to its OWN viewport corner. The fake
+     storefront (`.store`) is also hidden — the panel is the iframe's entire content, not a demo page. */
+  :root[data-palup-panel] .store{ display:none }
+  :root[data-palup-panel] #launcher{ display:none }
+  :root[data-palup-panel] #widget{ position:fixed; inset:0; width:100%; height:100%; max-width:none; border-radius:0; border:0; box-shadow:none }
   .wh{ background:var(--brand); color:var(--brand-ink); padding:13px 15px; display:flex; align-items:center; gap:11px }
   .wh.handoff-mode{ background:#0f766e }
   .avatar{ width:34px; height:34px; border-radius:50%; background:color-mix(in srgb, var(--brand-ink) 22%, transparent); display:grid; place-items:center; font-weight:700 }
@@ -248,14 +260,27 @@
   }
   let handedOff = false, lastSend = null;
 
+  // PANEL MODE (Task 5) — this same file is served at /embed/panel?shop=… inside the loader's iframe
+  // (packages/widget/src/loader-core.ts sets `el.src`). Detected by the query param the loader always
+  // supplies OR by genuinely running inside a frame (belt-and-suspenders — a merchant could in principle
+  // frame the standalone page too), computed FIRST and used by both the mint below and the panel-mode UI
+  // block at the end of this script. Standalone (`/`) has neither signal, so PANEL_MODE is false there
+  // and every branch it gates is dead code — byte-identical standalone behavior.
+  const Q = new URLSearchParams(location.search);
+  const SHOP = Q.get("shop");
+  const PANEL_MODE = SHOP != null || window.parent !== window;
+
   // Merchant tenant identity: the publishable embed key ships in this snippet; the widget mints a
   // short-TTL token from it and sends it on /chat so the backend serves the right merchant's agent.
+  // In panel mode the loader identifies the tenant by SHOP domain instead — no embed key travels through
+  // the iframe URL — so the mint call hits /widget/token?shop=… there rather than ?key=….
   const EMBED_KEY = (window.PALUP && window.PALUP.embedKey) || "demo-embed-key";
+  const MINT_URL = SHOP ? ("/widget/token?shop=" + encodeURIComponent(SHOP)) : ("/widget/token?key=" + encodeURIComponent(EMBED_KEY));
   let widgetToken = null;
   async function ensureToken(force){
     if (widgetToken && !force) return widgetToken;
     try {
-      const r = await fetch("/widget/token?key=" + encodeURIComponent(EMBED_KEY));
+      const r = await fetch(MINT_URL);
       if (r.ok){ widgetToken = (await r.json()).token || null; }
     } catch { /* backend may not require it yet; /chat falls back during rollout */ }
     return widgetToken;
@@ -1030,6 +1055,51 @@
   // Stamp the sessionId now, so a reload OR a closed tab before the first turn still continues this
   // conversation rather than opening a second one the server can't connect to the first.
   persistSession();
+
+  // --- PANEL MODE (Task 5) — postMessage protocol with the loader --------------------------------
+  // This file is also served at /embed/panel?shop=… inside the loader's iframe. PANEL_MODE (computed at
+  // the top of this script, before ensureToken's mint URL) gates this whole block; standalone (`/`) never
+  // sets SHOP and never runs framed, so PANEL_MODE is false there and this block never runs.
+  //
+  // Message types match packages/widget/src/loader-core.ts EXACTLY (read before writing this — the
+  // loader is the source of truth, never invent a type name): panel→loader `palup:ready` (loader replies
+  // `palup:host` {shop,position}), `palup:close`, `palup:unread` {count}; loader→panel `palup:open`,
+  // `palup:host`. No secrets travel on this channel (no token, no message content), so postMessage uses
+  // targetOrigin "*" here — the loader validates `e.origin === origin` AND `e.source ===
+  // iframe.contentWindow` on ITS side (onMessage in loader-core.ts); this side validates
+  // `e.source === window.parent`, the one thing a same-origin `"*"` post cannot itself guarantee.
+  //
+  // `palup:resize` is deliberately NOT sent — v1's panel fills a loader-sized iframe (the CSS above), so
+  // there is no dynamic panel size to report (YAGNI per the task brief).
+  if (PANEL_MODE){
+    document.documentElement.setAttribute("data-palup-panel", "1"); // CSS above: hide #launcher/.store, expand #widget to fill the iframe
+    const sendToLoader = (type, extra) => { try { window.parent.postMessage(Object.assign({ type }, extra), "*"); } catch {} };
+    let unreadCount = 0;
+    window.addEventListener("message", (e) => {
+      if (e.source !== window.parent) return; // only trust our own parent frame — never e.origin alone, per the loader's own comment on this exact tradeoff
+      const d = e.data;
+      if (!d || typeof d.type !== "string") return;
+      if (d.type === "palup:open"){ unreadCount = 0; setOpen(true); }
+      // `palup:host` {shop,position} carries nothing this panel needs to act on: it already knows its
+      // own shop from SHOP above, and `position` only matters to the loader's OWN bubble placement.
+    });
+    // Close-from-inside and new-message-while-closed both funnel through the two existing single entry
+    // points (`setOpen`/`add`) rather than each call site, so this covers every path that closes the
+    // panel (minimize button, Escape key) or adds an agent message (a normal reply, a proactive nudge)
+    // without duplicating logic at each one.
+    const _setOpen = setOpen;
+    setOpen = function(open){
+      _setOpen(open);
+      if (!open) sendToLoader("palup:close"); // e.g. the "—" minimize button, or Escape
+    };
+    const _add = add;
+    add = function(text, who, decision){
+      const el = _add(text, who, decision);
+      if (who === "agent" && widget.hidden){ unreadCount++; sendToLoader("palup:unread", { count: unreadCount }); }
+      return el;
+    };
+    sendToLoader("palup:ready");
+  }
 </script>
 </body>
 </html>
