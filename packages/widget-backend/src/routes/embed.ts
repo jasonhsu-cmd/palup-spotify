@@ -37,7 +37,9 @@ export async function bundleLoader(): Promise<string> {
 export interface EmbedDeps {
   loaderJs: string;
   panelHtml: string;
-  frameAncestors: (shop: string | undefined) => string;
+  /** Async so it can call `MerchantResolver.primaryDomainForShop` (custom-domain CSP support) before
+   *  composing the header — server.ts's own registry/env lookup, never a second client-supplied param. */
+  frameAncestors: (shop: string | undefined) => Promise<string>;
 }
 
 export function registerEmbedRoutes(app: FastifyInstance, deps: EmbedDeps): void {
@@ -49,7 +51,7 @@ export function registerEmbedRoutes(app: FastifyInstance, deps: EmbedDeps): void
   app.get("/embed/panel", async (req, reply) => {
     const shop = (req.query as { shop?: string })?.shop;
     reply.header("content-type", "text/html; charset=utf-8");
-    reply.header("content-security-policy", `frame-ancestors ${deps.frameAncestors(shop)}`);
+    reply.header("content-security-policy", `frame-ancestors ${await deps.frameAncestors(shop)}`);
     reply.removeHeader("x-frame-options");
     return deps.panelHtml;
   });

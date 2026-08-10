@@ -59,7 +59,7 @@ import {
   CAA_CLIENT_SECRET_NAME,
   type CallbackResult,
 } from "./customer-account-flow.js";
-import { parseStoreDomains } from "./merchant-store.js";
+import { parseStoreDomains, parsePrimaryDomains } from "./merchant-store.js";
 import { createMerchantResolver, consentModeFor } from "./merchant-resolver.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE, DELEGATE_SCOPES_DEFAULT } from "./shopify-install-identity.js";
 import {
@@ -136,6 +136,15 @@ const RL_WINDOW = posInt("RL_WINDOW_SECONDS", 60);
 //
 // The error names the variable and the rule but never echoes the configured value (it is operator input
 // that lands in a boot log).
+// Custom-domain CSP support — a generic bare-hostname shape (dot-separated labels, alnum + internal
+// hyphens, at least one dot), used as the LAST read-side guard on a custom domain immediately before it
+// is interpolated into `Content-Security-Policy` (server.ts's `frameAncestors`). Deliberately more
+// permissive than the myshopify-specific regex below (a custom domain is any merchant's own host, not a
+// `*.myshopify.com` one) but still rejects anything with a scheme, path, port, space, or the like — the
+// same class `normalizePrimaryDomain` (@palup/platform-ports) already rejects at write/read time; this is
+// the belt-and-suspenders re-check at the actual interpolation point.
+const HOSTNAME_SHAPE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
 export function resolveEmbedKeys(raw: string | undefined, requireExplicitRegistry: boolean): Record<string, string> {
   const reject = (why: string): never => {
     throw new Error(
@@ -357,6 +366,10 @@ export async function buildServer(opts?: {
     storeDomains: () => parseStoreDomains(),
     envRegion: MERCHANT_REGION,
     envGroundingMode: MERCHANT_GROUNDING_MODE,
+    // Custom-domain CSP support — the named `SHOPIFY_PRIMARY_DOMAINS` fallback, same rank `SHOPIFY_STORES`
+    // holds for the shop domain itself. Parsed once at boot, like `EMBED_KEYS` (env does not change during
+    // a process's life; unlike `storeDomains`, nothing else needs to re-read it per call).
+    primaryDomains: parsePrimaryDomains(),
   });
   /**
    * D2 — the merchant's region for the DATA-RIGHTS paths, which are deliberately NOT gated on servability
@@ -1076,20 +1089,40 @@ export async function buildServer(opts?: {
   registerEmbedRoutes(app, {
     loaderJs,
     panelHtml: widgetHtml,
-    frameAncestors: (shop) => {
-      const prod = shop && /^[a-z0-9.-]+\.myshopify\.com$/i.test(shop) ? `https://${shop} https://*.myshopify.com` : "https:";
+    frameAncestors: async (shop) => {
+      const isMyshopify = Boolean(shop && /^[a-z0-9.-]+\.myshopify\.com$/i.test(shop));
+      // Security-review F1: a missing/malformed `?shop=` can never resolve a tenant anyway (the mint
+      // 401s), so the old permissive `"https:"` fallback bought nothing and denying framing outright is
+      // strictly better. `*.myshopify.com` breadth (F2) is unchanged — a documented follow-up, not this
+      // change's job.
+      let allow = isMyshopify ? `https://${shop} https://*.myshopify.com` : "'none'";
+      if (isMyshopify) {
+        // Custom-domain CSP support. Reached ONLY via this SERVER-side registry/env lookup keyed by the
+        // already-accepted, myshopify-shaped `shop` — NEVER a second, client-supplied query parameter
+        // (there isn't one: `registerEmbedRoutes` reads only `?shop=` — routes/embed.ts). `shop` is typed
+        // `string` here (not `unknown`), and TypeScript's own literal-type narrowing already proves it
+        // matched the myshopify regex above, so `HOSTNAME_SHAPE` below is guarding the RETURNED custom
+        // domain, not this one.
+        const custom = await merchants.primaryDomainForShop(shop);
+        // Read-side validation AGAIN, immediately before the value is interpolated into the CSP header —
+        // defense in depth against ANYTHING upstream (a hand-edited pl_merchant row, a malformed
+        // SHOPIFY_PRIMARY_DOMAINS entry) that slipped past every earlier guard. `custom` is already
+        // normalized (trim + lowercase) by the resolver, so this is a shape check, not a re-parse.
+        if (custom && HOSTNAME_SHAPE.test(custom)) allow += ` https://${custom}`;
+      }
       // TEST-ONLY (task 7 embed e2e) — verified by executing the round trip in a real browser: Chromium
       // enforces frame-ancestors for real, and the e2e harness's own host page is served by THIS SAME
       // backend process over plain HTTP at 127.0.0.1 — an origin no real Shopify storefront is ever
-      // served from, so it can never satisfy `prod` above (which is exactly the point of `prod` — it
-      // must stay tight to the shop's own domain). Appending this origin to the allow-list is gated on
-      // PALUP_E2E_FIXTURES, the SAME flag that registers the only route this origin is used for
-      // (`/embed-host`, above) — grep-verified nowhere else in the repo, so it is never true in staging,
-      // prod, or the shared widget/a11y e2e process.
+      // served from, so it can never satisfy `allow` above (which is exactly the point of `allow` — it
+      // must stay tight to the shop's own domain, and now its custom domain). Appending this origin to
+      // the allow-list is gated on PALUP_E2E_FIXTURES, the SAME flag that registers the only route this
+      // origin is used for (`/embed-host`, above) — grep-verified nowhere else in the repo, so it is
+      // never true in staging, prod, or the shared widget/a11y e2e process. MUST stay the LAST thing
+      // appended (task 7's own seam), so it never precedes a later, real allow-list entry.
       if (process.env.PALUP_E2E_FIXTURES === "true" && process.env.PORT) {
-        return `${prod} http://127.0.0.1:${process.env.PORT}`;
+        return `${allow} http://127.0.0.1:${process.env.PORT}`;
       }
-      return prod;
+      return allow;
     },
   });
 
