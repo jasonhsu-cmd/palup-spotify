@@ -26,6 +26,7 @@
     "try": "tsx packages/control-plane/src/try.ts",
     "monitor": "tsx packages/control-plane/src/server.ts",
     "model:smoke": "tsx packages/model-vertex/src/smoke.ts",
+    "shopify:verify": "tsx packages/widget-backend/src/shopify-verify-smoke.ts",
     "push:smoke": "tsx packages/widget-backend/src/pubsub-push-smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
     "sweep": "tsx packages/widget-backend/src/jobs/retention-sweep.ts",
