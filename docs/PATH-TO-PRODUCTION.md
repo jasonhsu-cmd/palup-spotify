@@ -69,7 +69,7 @@ honestly escalated. Manual invoicing; no memory; US-only.
 **Remaining human steps for the embed (2026-08-10):** (a) merge `feat/embeddable-widget` to `main`, then
 `shopify app deploy` from a Partners account — registers the app + the `palup-widget` extension; separately,
 a human must hand-edit the `REPLACE_WITH_APP_HOST` placeholder (`extensions/palup-widget/blocks/
-app-embed.liquid:10`, `shopify.app.toml:25`) to the real host before that deploy is meaningful — nothing in
+app-embed.liquid:12`, `shopify.app.toml:25`) to the real host before that deploy is meaningful — nothing in
 the repo substitutes it automatically (verified: no script, CI step, or pnpm task touches that string);
 (b) standing up a production host (#5 above) so a real host value exists to set. Full detail:
 `docs/DEPLOY.md` *Embedding the widget on a storefront*.

@@ -200,7 +200,7 @@ The shopper widget mounts on a merchant's live storefront via a Shopify **theme 
    only populated case, and how the `demo` tenant is served.
 
 **The deploy-time host placeholder — no substitution mechanism exists yet.** Both
-`extensions/palup-widget/blocks/app-embed.liquid:10` (`https://REPLACE_WITH_APP_HOST/embed/loader.js`) and
+`extensions/palup-widget/blocks/app-embed.liquid:12` (`https://REPLACE_WITH_APP_HOST/embed/loader.js`) and
 `shopify.app.toml:25` (`application_url = "https://REPLACE_WITH_APP_HOST"`) carry the literal string
 `REPLACE_WITH_APP_HOST`. Grepped the repo for anything that substitutes it (build script, `sed`, CI step,
 `pnpm` task): **none exists.** `shopify app deploy` alone does not fill it in — a human must hand-edit both
