@@ -79,6 +79,29 @@ describe("PostgresMerchantRegistry — pl_merchant schema", () => {
     expect(rows[0]?.n).toBe("1");
   });
 
+  it("migrate() ADDS primary_domain to a table that PREDATES this column, without losing data — the " +
+    "explicit ALTER TABLE path, since CREATE TABLE IF NOT EXISTS alone would silently no-op here", async () => {
+    const db = new PGlite();
+    // A table shaped by an OLDER version of this file's migrate(), before primaryDomain existed.
+    await db.query(
+      `CREATE TABLE pl_merchant (
+         tenant_id text PRIMARY KEY, shop_domain text NOT NULL, embed_key text NOT NULL,
+         status text NOT NULL, region text NOT NULL, grounding_mode text NOT NULL,
+         plan text, status_reason text, created_at text NOT NULL, updated_at text NOT NULL)`,
+    );
+    await db.query(
+      `INSERT INTO pl_merchant (tenant_id, shop_domain, embed_key, status, region, grounding_mode, created_at, updated_at)
+       VALUES ('acme','acme.myshopify.com','pk-acme','active','us','full','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`,
+    );
+    const reg = new PostgresMerchantRegistry(pgliteSql(db));
+    await reg.migrate();
+    expect((await reg.lookupByTenantId("acme"))?.shopDomain).toBe("acme.myshopify.com"); // pre-existing row survived
+    expect((await reg.lookupByTenantId("acme"))?.primaryDomain).toBeUndefined(); // new column, no data yet
+    const updated = await reg.update("acme", { primaryDomain: "shop.example.com" });
+    expect(updated.primaryDomain).toBe("shop.example.com");
+    expect((await reg.lookupByTenantId("acme"))?.primaryDomain).toBe("shop.example.com");
+  });
+
   it("holds NO secret material: the column set is an exact allowlist (a Storefront/delegate token lives " +
     "in SecretsPort, never here)", async () => {
     const { db } = await makeWithDb();
@@ -95,6 +118,7 @@ describe("PostgresMerchantRegistry — pl_merchant schema", () => {
       "embed_key",
       "grounding_mode",
       "plan",
+      "primary_domain",
       "region",
       "shop_domain",
       "status",
@@ -202,7 +226,7 @@ describe("PostgresMerchantRegistry — cross-tenant lookup cannot resolve the wr
       `CREATE TABLE pl_merchant (
          tenant_id text PRIMARY KEY, shop_domain text NOT NULL, embed_key text NOT NULL,
          status text NOT NULL, region text NOT NULL, grounding_mode text NOT NULL,
-         plan text, status_reason text, created_at text NOT NULL, updated_at text NOT NULL)`,
+         plan text, status_reason text, created_at text NOT NULL, updated_at text NOT NULL, primary_domain text)`,
     );
     const seed = (tenantId: string, domain: string, key: string) =>
       db.query(
@@ -226,7 +250,7 @@ describe("PostgresMerchantRegistry — cross-tenant lookup cannot resolve the wr
       `CREATE TABLE pl_merchant (
          tenant_id text PRIMARY KEY, shop_domain text NOT NULL, embed_key text NOT NULL,
          status text NOT NULL, region text NOT NULL, grounding_mode text NOT NULL,
-         plan text, status_reason text, created_at text NOT NULL, updated_at text NOT NULL)`,
+         plan text, status_reason text, created_at text NOT NULL, updated_at text NOT NULL, primary_domain text)`,
     );
     for (const [t, d] of [
       ["first", "a.myshopify.com"],
@@ -371,7 +395,7 @@ describe("PostgresMerchantRegistry — revocation is inert by default", () => {
       `CREATE TABLE pl_merchant (
          tenant_id text PRIMARY KEY, shop_domain text NOT NULL, embed_key text NOT NULL,
          status text NOT NULL, region text NOT NULL, grounding_mode text NOT NULL,
-         plan text, status_reason text, created_at text NOT NULL, updated_at text NOT NULL)`,
+         plan text, status_reason text, created_at text NOT NULL, updated_at text NOT NULL, primary_domain text)`,
     );
     await db.query(
       `INSERT INTO pl_merchant (tenant_id, shop_domain, embed_key, status, region, grounding_mode, created_at, updated_at)
