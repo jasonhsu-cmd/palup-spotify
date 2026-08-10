@@ -1964,6 +1964,11 @@ export async function buildServer(opts?: {
     if (MERCHANT_CRED_READBACK_ENABLED && credReadHandle) {
       const cred = await credReadHandle.read(tenantId);
       if (cred.status === "unreadable") {
+        // I-2: make the refusal observable/alarmable (spec §2.2/§4/§7) — a tenant id and the closed
+        // two-value reason set (`undecryptable` | `malformed-record`), NEVER the token or the raw stored
+        // row. Rate-safe: this can fire at most once per unreadable turn for this tenant, same cardinality
+        // as the 503 it accompanies — no separate amplification vector.
+        req.log.warn({ tenantId, reason: cred.reason }, "grounding credential unreadable — serving grounding_unavailable");
         reply.code(503); // transient / operator-fixable, not a deliberate revocation
         return {
           // Shopper-facing copy: same promise-nothing discipline as the servability 403 above — no human,
@@ -1974,7 +1979,10 @@ export async function buildServer(opts?: {
           escalate: false,
           flags: ["grounding_unavailable"],
           memoryEnabled: memoryServiceEnabled,
-          consentMode: UNRESOLVED_CONSENT_MODE,
+          // M-1: from here the merchant IS resolved (servability passed above) — report THEIR resolved
+          // regime, not the pre-resolution UNRESOLVED_CONSENT_MODE (that value is for the 403 path above,
+          // where we never learned who the merchant is).
+          consentMode: CONSENT_MODE,
         };
       }
     }
