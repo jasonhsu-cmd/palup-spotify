@@ -1,4 +1,4 @@
-import { normalizePrimaryDomain } from "@palup/platform-ports";
+import { invalidateGroundingCache, normalizePrimaryDomain } from "@palup/platform-ports";
 import type { MerchantGroundingMode, MerchantRecord, MerchantRegion, MerchantRegistryPort, MerchantStatus, RuntimeStatePort } from "@palup/platform-ports";
 import { createRuntimeStore, PostgresMerchantRegistry } from "@palup/state-postgres";
 
@@ -67,6 +67,17 @@ export interface MerchantCommand {
   reason?: string;
 }
 
+/**
+ * Go-live hygiene (separate from `MerchantCommand`/`runMerchant` on purpose): this needs the tenant-scoped
+ * `RuntimeStatePort` cache row, not the merchant REGISTRY, and it is not a lifecycle change worth auditing
+ * the same way `status`/`set` are — so it is parsed alongside them (same `--tenant` flag, same argv
+ * grammar) but dispatched directly in `main()`, never through `runMerchant()`.
+ */
+export interface InvalidateGroundingCommand {
+  action: "invalidate-grounding";
+  tenantId: string;
+}
+
 export class MerchantArgsError extends Error {
   constructor(message: string) {
     super(message);
@@ -92,15 +103,19 @@ export const MERCHANT_USAGE = `usage:
   ${RUN} show   --tenant <tenantId>
   ${RUN} status --tenant <tenantId> --status active|suspended|uninstalled [--reason "..."]
   ${RUN} set    --tenant <tenantId> [--region us|eu|uk|other] [--grounding-mode off|general|full] [--plan <plan>] [--primary-domain <host>]
+  ${RUN} invalidate-grounding --tenant <tenantId>
 
 "uninstalled"/"suspended" make the merchant INERT — every registry lookup resolves to null — without
 deleting the row, so support/billing/erasure can still reach it and reactivation is one command. This does
-NOT halt a running agent: for that use pnpm kill:arm --scope tenant:<tenantId>.`;
+NOT halt a running agent: for that use pnpm kill:arm --scope tenant:<tenantId>.
+
+"invalidate-grounding" clears a merchant's cached grounding context (TTL 30 min) so the first grounded
+turn after go-live reflects the real catalog, not a stale fixture. Alias: pnpm grounding:invalidate.`;
 
 /** Parse argv. Nothing is implicit: no default tenant, no default status, and no `--all`. */
-export function parseMerchantArgv(argv: string[]): MerchantCommand {
+export function parseMerchantArgv(argv: string[]): MerchantCommand | InvalidateGroundingCommand {
   const action = argv[0];
-  if (action !== "show" && action !== "status" && action !== "set")
+  if (action !== "show" && action !== "status" && action !== "set" && action !== "invalidate-grounding")
     throw new MerchantArgsError(`unknown subcommand ${JSON.stringify(action ?? "")}`);
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
@@ -113,6 +128,8 @@ export function parseMerchantArgv(argv: string[]): MerchantCommand {
   const reason = flag("reason");
 
   if (action === "show") return { action, tenantId };
+
+  if (action === "invalidate-grounding") return { action, tenantId };
 
   if (action === "status") {
     const raw = flag("status");
@@ -284,13 +301,28 @@ export function describeMerchantForOperator(m: MerchantRecord): string {
 }
 
 async function main(): Promise<void> {
-  let cmd: MerchantCommand;
+  let cmd: MerchantCommand | InvalidateGroundingCommand;
   try {
     cmd = parseMerchantArgv(process.argv.slice(2));
   } catch (e) {
     console.error(`[merchant] ${(e as Error).message}\n\n${MERCHANT_USAGE}`);
     return exit(2);
   }
+
+  if (cmd.action === "invalidate-grounding") {
+    try {
+      // Needs the STORE, not the registry — resolveMerchantStore() builds both from the same
+      // DATABASE_URL-guarded factory, so this reuses it rather than opening a second connection.
+      const { store, kind } = await resolveMerchantStore();
+      await invalidateGroundingCache(store, cmd.tenantId);
+      console.log(`[merchant] invalidate-grounding CONFIRMED for tenant ${cmd.tenantId} (store=${kind})`);
+      return exit(0);
+    } catch (e) {
+      console.error(`[merchant] FAILED: ${(e as Error).message}`);
+      return exit(1);
+    }
+  }
+
   try {
     const { store, registry, kind } = await resolveMerchantStore();
     const report = await runMerchant({ store, registry }, cmd);

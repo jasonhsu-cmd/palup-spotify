@@ -36,6 +36,9 @@ const REQUIRED_ENV: Array<[name: string, why: string]> = [
   ["PALUP_MODEL", "the pinned model id"],
   ["PALUP_REQUIRE_DATABASE_URL", "the 'this is a real deployment' marker — fails boot without DATABASE_URL"],
   ["WIDGET_AUTH_REQUIRED", "the app-level tenancy gate (server.ts)"],
+  // D2 — ships dark (`|| 'false'`) like WIDGET_AUTH_REQUIRED immediately above; absent here would silently
+  // revert an operator's go-live flip on the very next merge-deploy (docs/DEPLOY.md's D2 go-live section).
+  ["MERCHANT_CRED_READBACK_ENABLED", "D2 — gates the custodied-credential read-back path (model.ts)"],
   ["WIDGET_EMBED_KEYS", "the publishable-key registry; REQUIRED, refuses to boot without it (resolveEmbedKeys)"],
   ["SHOPIFY_STORES", "the tenant -> shop-domain map for grounding (merchant-store.ts)"],
   // D2 — the two that decide the CONSENT REGIME and the grounding posture for every tenant the merchant

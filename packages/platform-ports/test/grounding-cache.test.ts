@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createCachingGroundingPort } from "../src/grounding-cache.js";
+import { createCachingGroundingPort, invalidateGroundingCache } from "../src/grounding-cache.js";
 import { InMemoryRuntimeStore } from "../src/in-memory-runtime-store.js";
 import type { GroundingContext, GroundingPort } from "../src/grounding-port.js";
 
@@ -112,5 +112,45 @@ describe("createCachingGroundingPort", () => {
     // re-read acme → its own cache, not northwind's
     expect((await cached.getContext("acme")).brandName).toBe("Brand-acme");
     expect(state.calls).toBe(2);
+  });
+});
+
+describe("invalidateGroundingCache — go-live hygiene", () => {
+  it("evicts a tenant's cached context so the next getContext is a fresh miss", async () => {
+    const { state, port } = fakeInner();
+    const store = new InMemoryRuntimeStore();
+    const cached = createCachingGroundingPort(port, store, { ttlSeconds: 60 });
+
+    await cached.getContext("t"); // populates + caches
+    await cached.getContext("t"); // fresh hit — inner NOT re-invoked
+    expect(state.calls).toBe(1);
+
+    await invalidateGroundingCache(store, "t");
+
+    await cached.getContext("t"); // cache miss after invalidation — inner IS re-invoked
+    expect(state.calls).toBe(2);
+  });
+
+  it("invalidating one tenant never evicts another tenant's cache", async () => {
+    const { state, port } = fakeInner();
+    const store = new InMemoryRuntimeStore();
+    const cached = createCachingGroundingPort(port, store, { ttlSeconds: 60 });
+
+    await cached.getContext("t"); // populates "t"
+    await cached.getContext("other"); // populates "other"
+    expect(state.calls).toBe(2);
+
+    await invalidateGroundingCache(store, "t");
+
+    await cached.getContext("other"); // still a fresh hit — "t"'s invalidation did not touch it
+    expect(state.calls).toBe(2);
+
+    await cached.getContext("t"); // "t" was evicted — a fresh fetch
+    expect(state.calls).toBe(3);
+  });
+
+  it("rejects a blank tenantId rather than deleting under a meaningless key", async () => {
+    const store = new InMemoryRuntimeStore();
+    await expect(invalidateGroundingCache(store, "")).rejects.toThrow(/tenantId/);
   });
 });

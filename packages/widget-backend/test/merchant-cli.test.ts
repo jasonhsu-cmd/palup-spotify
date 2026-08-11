@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { InMemoryRuntimeStore, createInMemoryMerchantRegistry } from "@palup/platform-ports";
-import type { MerchantRegistryPort, RuntimeStatePort } from "@palup/platform-ports";
+import { InMemoryRuntimeStore, createCachingGroundingPort, createInMemoryMerchantRegistry, invalidateGroundingCache } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, MerchantRegistryPort, RuntimeStatePort } from "@palup/platform-ports";
 import {
   MERCHANT_USAGE,
   MerchantArgsError,
@@ -188,5 +188,47 @@ describe("merchant CLI — custom-domain CSP support (`set --primary-domain`)", 
 describe("merchant CLI — it refuses a store nobody else can see", () => {
   it("without DATABASE_URL it hard-fails instead of silently using a per-process store", async () => {
     await expect(resolveMerchantStore({} as NodeJS.ProcessEnv)).rejects.toThrow(/DATABASE_URL/);
+  });
+});
+
+describe("merchant CLI — `invalidate-grounding` (go-live hygiene)", () => {
+  it("parses --tenant and nothing else is required", () => {
+    expect(parseMerchantArgv(["invalidate-grounding", "--tenant", "acme-store"])).toEqual({
+      action: "invalidate-grounding",
+      tenantId: "acme-store",
+    });
+  });
+
+  it("requires --tenant, same as every other subcommand", () => {
+    expect(() => parseMerchantArgv(["invalidate-grounding"])).toThrow(/--tenant/);
+    expect(() => parseMerchantArgv(["invalidate-grounding", "--tenant", "  "])).toThrow(/--tenant/);
+  });
+
+  it("round-trips through the real port: clears a cached context so the next grounded turn refetches", async () => {
+    const store = new InMemoryRuntimeStore();
+    let calls = 0;
+    const inner: GroundingPort = {
+      async getContext(tenantId): Promise<GroundingContext> {
+        calls++;
+        return { tenantId, brandName: `Brand-${tenantId}`, products: [], policy: { returns: "r", shipping: "s" } };
+      },
+    };
+    const grounding = createCachingGroundingPort(inner, store, { ttlSeconds: 1800 });
+
+    await grounding.getContext("acme-store"); // populates the cache (e.g. from a fixture, pre-go-live)
+    await grounding.getContext("acme-store"); // fresh hit — not refetched
+    expect(calls).toBe(1);
+
+    const cmd = parseMerchantArgv(["invalidate-grounding", "--tenant", "acme-store"]);
+    expect(cmd.action).toBe("invalidate-grounding");
+    await invalidateGroundingCache(store, cmd.tenantId); // the operator action `main()` dispatches to
+
+    await grounding.getContext("acme-store"); // cache miss after go-live — refetches the real catalog
+    expect(calls).toBe(2);
+  });
+
+  it("the usage text documents it, without naming a route or a console", () => {
+    expect(MERCHANT_USAGE).toContain("invalidate-grounding");
+    expect(MERCHANT_USAGE).not.toMatch(/https?:|POST \/|control-plane/);
   });
 });

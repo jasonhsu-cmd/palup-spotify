@@ -61,7 +61,7 @@ export { createStoreTelemetry, rollupEvents } from "./telemetry-port.js";
 export { createMeteringModelPort } from "./metering.js";
 export type { ModelPrice, ModelPriceTable, CostBreakdown } from "./telemetry-cost.js";
 export { deriveCostUsd, loadModelPrices, PLACEHOLDER_MODEL_PRICES } from "./telemetry-cost.js";
-export { createCachingGroundingPort } from "./grounding-cache.js";
+export { createCachingGroundingPort, invalidateGroundingCache } from "./grounding-cache.js";
 export type { CachingGroundingOpts } from "./grounding-cache.js";
 export type { SecretsPort } from "./secrets-port.js";
 export { createEnvSecrets } from "./secrets-port.js";

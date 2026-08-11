@@ -2,8 +2,20 @@ import type { CommercePort, GroundingContext, GroundingPort, ModelPort, RuntimeS
 import { createRedactingModelPort, createCachingGroundingPort } from "@palup/platform-ports";
 import { MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
-import { resolveShopifyStore } from "./merchant-store.js";
+import type { MerchantCredentialRead } from "@palup/state-postgres";
+import { resolveStorefrontCredential } from "./merchant-store.js";
 import { createShopifyGroundingAdapter, type StorefrontFetch } from "./shopify-grounding.js";
+
+// D2: the router refuses rather than silently falling back to fixtures when a custodied credential
+// exists but cannot be read back (undecryptable / malformed) — never serve a merchant's shoppers the
+// wrong brand's catalog. The caching wrapper below degrades a cold throw to safe-empty defensively; a
+// graceful shopper-facing "unavailable" surface is a later task's pre-flight, not this router's job.
+export class GroundingCredentialUnreadableError extends Error {
+  constructor(public readonly reason: "undecryptable" | "malformed-record") {
+    super(`grounding credential unreadable: ${reason}`);
+    this.name = "GroundingCredentialUnreadableError";
+  }
+}
 
 // Composition root: pick the real Vertex adapter when GOOGLE_CLOUD_PROJECT is set, else the
 // deterministic mock. Feature code only ever sees a ModelPort — it never knows which (ADR-0001).
@@ -33,6 +45,10 @@ export function createGroundingPort(
     shopifyFetch?: StorefrontFetch; // injectable for tests; defaults to the live Storefront call
     /** D1: registry-first shop-domain resolution. Absent ⇒ the pre-D1 `SHOPIFY_STORES`-only path. */
     shopDomainFor?: (tenantId: string) => Promise<string | undefined>;
+    /** D2: the custodied delegate credential store's read(). Consulted only when `readbackEnabled`. */
+    credRead?: (tenantId: string) => Promise<MerchantCredentialRead>;
+    /** D2: gates the read-back path above; off ⇒ unchanged SecretsPort-only resolution. */
+    readbackEnabled?: boolean;
   } = {},
 ): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
@@ -40,13 +56,15 @@ export function createGroundingPort(
     async getContext(tenantId: string): Promise<GroundingContext> {
       // tenantId here is the SERVER-DERIVED request tenant (threaded from the verified widget token via
       // the brain) — never client input, so one merchant can never resolve another's store creds.
-      const creds = await resolveShopifyStore(
-        tenantId,
+      const outcome = await resolveStorefrontCredential(tenantId, {
         secrets,
-        undefined,
-        opts.shopDomainFor ? { shopDomainFor: opts.shopDomainFor } : {},
-      );
-      if (creds) return createShopifyGroundingAdapter(creds, opts.shopifyFetch).getContext(tenantId);
+        credRead: opts.credRead,
+        readbackEnabled: opts.readbackEnabled,
+        shopDomainFor: opts.shopDomainFor,
+      });
+      if (outcome.status === "live")
+        return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch).getContext(tenantId);
+      if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
       return fixtures.getContext(tenantId);
     },
   };

@@ -1,5 +1,6 @@
 import { normalizePrimaryDomain } from "@palup/platform-ports";
 import type { SecretsPort } from "@palup/platform-ports";
+import type { MerchantCredentialRead } from "@palup/state-postgres";
 
 // Tenant → Shopify store resolution (M2). Splits into a NON-SECRET part (the shop domain, which merely
 // names which store a tenant maps to — safe in config) and a SECRET part (the Storefront access token,
@@ -97,13 +98,63 @@ export async function resolveShopifyStore(
   opts: ResolveShopifyStoreOpts = {},
 ): Promise<ShopifyStoreCreds | undefined> {
   if (!tenantId) return undefined;
-  const shopDomain = opts.shopDomainFor
-    ? await opts.shopDomainFor(tenantId)
-    : Object.hasOwn(domains, tenantId)
-      ? domains[tenantId]
-      : undefined;
+  const shopDomain = await resolveShopDomain(tenantId, domains, opts.shopDomainFor);
   if (!shopDomain) return undefined;
   const accessToken = await secrets.get(tenantId, SHOPIFY_TOKEN_SECRET);
   if (!accessToken) return undefined; // not fully configured → caller uses fixtures
   return { shopDomain, accessToken };
+}
+
+/** Resolve a tenant's shop domain (registry-first when shopDomainFor is given, else the SHOPIFY_STORES map). */
+async function resolveShopDomain(
+  tenantId: string,
+  domains: Record<string, string> = parseStoreDomains(),
+  shopDomainFor?: (tenantId: string) => Promise<string | undefined>,
+): Promise<string | undefined> {
+  if (shopDomainFor) return shopDomainFor(tenantId);
+  return Object.hasOwn(domains, tenantId) ? domains[tenantId] : undefined;
+}
+
+export type CredentialOutcome =
+  | { status: "live"; creds: ShopifyStoreCreds }
+  | { status: "fixtures" }
+  | { status: "refuse"; reason: "undecryptable" | "malformed-record" };
+
+export interface StorefrontCredentialDeps {
+  secrets: SecretsPort;
+  /** The credential store's read(). Present ⇒ read-back is possible; consulted only when readbackEnabled. */
+  credRead?: (tenantId: string) => Promise<MerchantCredentialRead>;
+  readbackEnabled?: boolean;
+  domains?: Record<string, string>;
+  shopDomainFor?: (tenantId: string) => Promise<string | undefined>;
+}
+
+/**
+ * D2: the token source. When read-back is ON we read the custodied delegate credential first; an
+ * `unreadable` credential REFUSES (never fixtures, never fallback), a `missing` one falls back to the
+ * hand-provisioned SecretsPort token (keeps the demo/staging tenant serving), and `found` yields live
+ * creds. When OFF, this delegates to the unchanged `resolveShopifyStore` (SecretsPort only) — no refusal.
+ */
+export async function resolveStorefrontCredential(
+  tenantId: string,
+  deps: StorefrontCredentialDeps,
+): Promise<CredentialOutcome> {
+  if (!tenantId) return { status: "fixtures" };
+  if (deps.readbackEnabled && deps.credRead) {
+    const r = await deps.credRead(tenantId);
+    if (r.status === "unreadable") return { status: "refuse", reason: r.reason };
+    if (r.status === "found") {
+      const shopDomain = await resolveShopDomain(tenantId, deps.domains, deps.shopDomainFor);
+      if (!shopDomain) return { status: "fixtures" };
+      return { status: "live", creds: { shopDomain, accessToken: r.token } };
+    }
+    // r.status === "missing" → fall through to the SecretsPort fallback.
+  }
+  const creds = await resolveShopifyStore(
+    tenantId,
+    deps.secrets,
+    deps.domains,
+    deps.shopDomainFor ? { shopDomainFor: deps.shopDomainFor } : {},
+  );
+  return creds ? { status: "live", creds } : { status: "fixtures" };
 }
