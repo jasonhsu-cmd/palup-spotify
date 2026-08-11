@@ -48,6 +48,24 @@ describe("initWidgetLoader", () => {
     expect(initWidgetLoader(c)).toBeNull();
   });
 
+  // a11y hardening — the launcher toggles the panel, so assistive tech needs `aria-expanded` to know
+  // whether the panel it controls is currently open. Starts "false" (panel closed at mount), flips to
+  // "true" on open() and back to "false" on close() — mirroring the dot/display-style toggles already
+  // covered above, just via the accessible-state attribute instead of an inline style.
+  it("launcher button reflects panel open/closed state via aria-expanded", () => {
+    const c = cfg();
+    const api = initWidgetLoader(c)!;
+    const root = (c.host as any).__palupRoot as ShadowRoot;
+    const launcher = root.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement;
+    expect(launcher.getAttribute("aria-expanded")).toBe("false");
+
+    api.open();
+    expect(launcher.getAttribute("aria-expanded")).toBe("true");
+
+    api.close();
+    expect(launcher.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("mounts the panel iframe only on open, pointing at origin/embed/panel?shop=", () => {
     const c = cfg();
     const api = initWidgetLoader(c)!;

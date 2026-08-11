@@ -182,15 +182,33 @@ function normalizeShopDomain(value: unknown): string {
 }
 
 /**
+ * The exact hostname SHAPE the READ side requires immediately before CSP interpolation
+ * (widget-backend/src/server.ts's `HOSTNAME_SHAPE`, restated here — `platform-ports` has no dependency on
+ * `widget-backend`, and that file already re-applies its own copy as defense in depth, so duplicating the
+ * pattern rather than importing it is deliberate, not an oversight). A bare, dotted hostname: each
+ * label starts and ends with an alphanumeric (no leading/trailing hyphen), may hold internal hyphens, and
+ * at least two labels are required (a dot) — no wildcard (`*`), no underscore, no scheme/path/port/query.
+ *
+ * Security follow-up (write/read alignment): before this existed, `normalizePrimaryDomain` was MORE
+ * permissive than this shape — it rejected only whitespace/`/`/`;`/`:`, so `*.foo.com`, `foo_bar.com`,
+ * `-foo.com`, `foo-.com`, or a bare single-label value like `localhost` would be ACCEPTED and STORED here,
+ * then silently fail `HOSTNAME_SHAPE.test(custom)` at read time and never widen the CSP — a confusing,
+ * deferred failure discovered on a support ticket instead of an immediate rejection at write/CLI time.
+ * Applying the SAME regex on both sides closes that gap: a bad value now fails fast, here.
+ */
+const HOSTNAME_SHAPE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+/**
  * Custom-domain CSP support: validate + normalize a `primaryDomain` value (trim + lowercase, same as
- * `normalizeShopDomain`). Rejects anything that is not a bare hostname — whitespace (including CR/LF),
- * `/`, `;`, or `:` (which covers every scheme: `https://`, `javascript:`, a port suffix). This is a
- * SHARED gate, exported so every write path (this port's in-memory adapter, the Postgres adapter's
- * `create`/`update`) AND every read/interpolation path (the merchant resolver, the panel route's CSP
- * composition — widget-backend) apply the IDENTICAL check. That second application is not redundant: a
- * hand-edited `pl_merchant` row bypasses every TypeScript writer, so the read side must not simply trust
- * a stored string is still a bare hostname before it is interpolated into a `Content-Security-Policy`
- * header.
+ * `normalizeShopDomain`). Rejects anything that is not a bare, dotted hostname per `HOSTNAME_SHAPE` above
+ * — which subsumes the original whitespace/`/`/`;`/`:` checks (none of those characters are in the
+ * allowed label charset) and additionally rejects a wildcard, an underscore, a leading/trailing hyphen on
+ * any label, and a bare single-label value. This is a SHARED gate, exported so every write path (this
+ * port's in-memory adapter, the Postgres adapter's `create`/`update`) AND every read/interpolation path
+ * (the merchant resolver, the panel route's CSP composition — widget-backend) apply the IDENTICAL check.
+ * That second application is not redundant: a hand-edited `pl_merchant` row bypasses every TypeScript
+ * writer, so the read side must not simply trust a stored string is still a bare hostname before it is
+ * interpolated into a `Content-Security-Policy` header.
  */
 export function normalizePrimaryDomain(value: unknown): string {
   if (typeof value !== "string" || !value.trim())
@@ -198,10 +216,12 @@ export function normalizePrimaryDomain(value: unknown): string {
       "MerchantRegistryPort: primaryDomain must be a non-blank string (omit the field entirely to leave it unset)",
     );
   const trimmed = value.trim();
-  if (/[\s/;:]/.test(trimmed))
+  if (!HOSTNAME_SHAPE.test(trimmed))
     throw new Error(
-      `MerchantRegistryPort: primaryDomain ${JSON.stringify(trimmed)} is not a bare hostname — it must not ` +
-        `contain whitespace, "/", ";", or ":" (no scheme, path, port, or query string)`,
+      `MerchantRegistryPort: primaryDomain ${JSON.stringify(trimmed)} is not a bare dotted hostname — it must ` +
+        `not contain whitespace, "/", ";", ":", a wildcard ("*"), an underscore, or a leading/trailing hyphen on ` +
+        `any label (no scheme, path, port, or query string) — this is the SAME shape the read side requires ` +
+        `before CSP interpolation`,
     );
   return trimmed.toLowerCase();
 }

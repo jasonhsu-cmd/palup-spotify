@@ -282,6 +282,53 @@ export function runMerchantRegistryPortContract(
       expect((await r.lookupByTenantId("acme"))?.primaryDomain).toBeUndefined();
     });
 
+    // Security follow-up: write/read alignment. Before this, `normalizePrimaryDomain` (the write-side gate)
+    // was MORE PERMISSIVE than `HOSTNAME_SHAPE` (the read-side gate widget-backend's server.ts applies
+    // immediately before CSP interpolation) — so a wildcard, an underscore, a leading/trailing hyphen, or a
+    // bare single-label value could be WRITTEN here and then silently dropped (never widen the CSP) at read
+    // time. That is a confusing, deferred failure an operator only discovers days later on a support
+    // ticket, instead of an immediate, loud rejection at create/update/CLI time. These shapes must now fail
+    // FAST, at the write gate, identically to how the read gate already refuses them.
+    it("create rejects a wildcard, an underscore, a leading/trailing hyphen, and a bare single-label value " +
+      "— the SAME shapes the read-side HOSTNAME_SHAPE guard rejects before CSP interpolation — and creates NOTHING", async () => {
+      const r = await makeAdapter();
+      for (const bad of [
+        "*.shop.example.com", // wildcard — never valid in a literal frame-ancestors host
+        "shop_example.com", // underscore — not a valid hostname label character
+        "-shop.example.com", // leading hyphen on a label
+        "shop-.example.com", // trailing hyphen on a label
+        "localhost", // bare single-label — not a dotted hostname
+      ]) {
+        await expect(r.create({ ...ACME, primaryDomain: bad })).rejects.toThrow();
+      }
+      expect(await r.lookupByTenantId("acme", { includeInactive: true })).toBeNull();
+    });
+
+    it("update rejects the same newly-tightened shapes and leaves the row untouched", async () => {
+      const r = await makeAdapter();
+      await r.create(ACME);
+      for (const bad of ["*.evil.com", "evil_domain.com", "-evil.com", "evil-.com", "evil"]) {
+        await expect(r.update("acme", { primaryDomain: bad })).rejects.toThrow();
+      }
+      expect((await r.lookupByTenantId("acme"))?.primaryDomain).toBeUndefined();
+    });
+
+    it("currently-valid hostnames (including internal hyphens and multi-level subdomains) stay valid", async () => {
+      const r = await makeAdapter();
+      let i = 0;
+      for (const ok of ["shop.example.com", "my-shop.example.co.uk", "a.b.c.example.com"]) {
+        i += 1;
+        const created = await r.create({
+          tenantId: `valid-host-${i}`,
+          shopDomain: `valid-host-${i}.myshopify.com`,
+          embedKey: `pk-valid-host-${i}`,
+          region: "us",
+          primaryDomain: ok,
+        });
+        expect(created.primaryDomain).toBe(ok.toLowerCase());
+      }
+    });
+
     // --- callers cannot mutate stored state by reference (mirrors VectorPort's clone discipline) ---
 
     it("returned records are copies — mutating one does not change the registry", async () => {

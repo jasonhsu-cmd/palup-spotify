@@ -47,6 +47,40 @@ describe("mint by shop domain", () => {
     expect(res.statusCode).toBe(200);
     await app.close();
   });
+
+  // Precedence documentation (server.ts:1195: `q.shop ? tenantForShopDomain(q.shop) : resolveEmbedKey(...)`
+  // — `?key=` is never even READ when `?shop=` is present). When BOTH are sent, `?shop=` must win: the
+  // shop's own tenant is minted, never the (here deliberately DIFFERENT) tenant `?key=` would resolve to.
+  // A registry-backed second tenant is used (rather than a second WIDGET_EMBED_KEYS entry) so the two
+  // resolution paths are unambiguously distinguishable by which tenant ends up signed into the token.
+  it("?shop= wins when BOTH ?shop= and ?key= are sent — the shop's tenant is minted, not the key's", async () => {
+    const registry = createInMemoryMerchantRegistry();
+    await registry.create({
+      tenantId: "beta",
+      shopDomain: "beta.myshopify.com",
+      embedKey: "beta-embed-key",
+      region: "us",
+    });
+    const app = await server({}, registry);
+    try {
+      // `?key=demo-embed-key` alone resolves to "demo" (see the `?key=`-only test above); `?shop=` here
+      // points at a DIFFERENT tenant ("beta"). Sending both must resolve to "beta", proving `?shop=` takes
+      // precedence rather than either an OR-of-both-succeeding or the key silently winning.
+      const res = await app.inject({
+        method: "GET",
+        url: "/widget/token?shop=beta.myshopify.com&key=demo-embed-key",
+      });
+      expect(res.statusCode).toBe(200);
+      const { token } = JSON.parse(res.body) as { token: string };
+      // Token shape is `body.sig` (widget-token-identity.ts's mintWidgetToken) — decode the body, not a
+      // JWT-style middle segment, and read the tenant off its `m` (merchantId) claim.
+      const claims = JSON.parse(Buffer.from(token.split(".")[0]!, "base64url").toString("utf8")) as { m: string };
+      expect(claims.m).toBe("beta");
+      expect(claims.m).not.toBe("demo");
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe("embed routes", () => {
