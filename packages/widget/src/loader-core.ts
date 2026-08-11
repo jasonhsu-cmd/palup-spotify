@@ -77,6 +77,10 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
     const launcher = document.createElement("button");
     launcher.type = "button";
     launcher.setAttribute("aria-label", "Open chat");
+    // a11y: the launcher toggles the panel it controls, so assistive tech needs to know whether that
+    // panel is currently open. Starts "false" (panel closed at mount); open()/close() below keep it in
+    // sync with the SAME state their `display` toggle tracks.
+    launcher.setAttribute("aria-expanded", "false");
     launcher.setAttribute(
       "style",
       "width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;" +
@@ -123,6 +127,7 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       const el = ensureIframe();
       el.style.display = "block";
       dot.style.display = "none";
+      launcher.setAttribute("aria-expanded", "true");
       const send = () => el.contentWindow?.postMessage({ type: "palup:open" }, origin);
       if (el.contentWindow) send();
       else el.addEventListener("load", send, { once: true });
@@ -130,6 +135,7 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
 
     function close(): void {
       if (iframe) iframe.style.display = "none";
+      launcher.setAttribute("aria-expanded", "false");
     }
 
     function onMessage(e: MessageEvent): void {
