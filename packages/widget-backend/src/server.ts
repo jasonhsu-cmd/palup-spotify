@@ -1962,12 +1962,24 @@ export async function buildServer(opts?: {
     // entirely (no store round trip, no behavior change). `tenantId` here is the SAME server-derived value
     // the servability check above just used — never client input.
     if (MERCHANT_CRED_READBACK_ENABLED && credReadHandle) {
-      const cred = await credReadHandle.read(tenantId);
+      // M-2 fix (D2 final review): this read must never let a STORE/CRYPTO FAULT — a thrown exception,
+      // distinct from the store's own honest `unreadable` classification below — escape past this
+      // pre-flight. Before this fix the `await` sat outside any try/catch, so a thrown fault propagated
+      // straight to Fastify's default error handler (a RAW 500) instead of the SAME fail-closed
+      // `grounding_unavailable` 503 the `unreadable` branch already returns for an honest read failure.
+      // Folded into that SAME branch (reason "read-error") rather than a second response shape, so a
+      // caller sees ONE unavailability signal regardless of whether the store returned an honest
+      // classification or threw — fail CLOSED either way.
+      const cred = await credReadHandle
+        .read(tenantId)
+        .catch((): { status: "unreadable"; reason: string } => ({ status: "unreadable", reason: "read-error" }));
       if (cred.status === "unreadable") {
-        // I-2: make the refusal observable/alarmable (spec §2.2/§4/§7) — a tenant id and the closed
-        // two-value reason set (`undecryptable` | `malformed-record`), NEVER the token or the raw stored
-        // row. Rate-safe: this can fire at most once per unreadable turn for this tenant, same cardinality
-        // as the 503 it accompanies — no separate amplification vector.
+        // I-2: make the refusal observable/alarmable (spec §2.2/§4/§7) — a tenant id and a closed reason
+        // set (`undecryptable` | `malformed-record` | the M-2 fault marker `read-error`), NEVER the token,
+        // the raw stored row, or the caught error's own message (which could in principle echo something
+        // store-internal — the reason marker is all this ever logs). Rate-safe: this can fire at most once
+        // per unreadable/faulting turn for this tenant, same cardinality as the 503 it accompanies — no
+        // separate amplification vector.
         req.log.warn({ tenantId, reason: cred.reason }, "grounding credential unreadable — serving grounding_unavailable");
         reply.code(503); // transient / operator-fixable, not a deliberate revocation
         return {

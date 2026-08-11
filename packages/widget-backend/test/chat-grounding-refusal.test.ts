@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import type { RuntimeStatePort, RuntimeStateCtx } from "@palup/platform-ports";
 import { InMemoryRuntimeStore } from "@palup/platform-ports";
 import { MERCHANT_CRED_COLLECTION, MERCHANT_CRED_RECORD_KEY } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
@@ -42,6 +43,32 @@ async function putMalformedCredential(store: InMemoryRuntimeStore, tenantId: str
     c: 12345,
     updatedAt: "x",
   });
+}
+
+/**
+ * M-2 — wraps a real store so its `.get` THROWS for exactly the credential row `credReadHandle.read()`
+ * reads (server.ts's `credReadHandle = createMerchantCredentialStore(store, ...)`, which calls
+ * `state.get({tenantId}, MERCHANT_CRED_COLLECTION, MERCHANT_CRED_RECORD_KEY)`). Everything else on the
+ * store (sessions, rate limits, kill/cost-cap lookups, ...) is delegated to the real implementation
+ * unchanged, so this proves specifically that a STORE FAULT during the credential read — not a store
+ * fault anywhere else, and not the store's own honest `unreadable` classification — is what the `/chat`
+ * pre-flight must fail closed on.
+ */
+function storeThatFaultsOnCredentialRead(base: InMemoryRuntimeStore, tenantId: string): RuntimeStatePort {
+  return new Proxy(base, {
+    get(target, prop, receiver) {
+      if (prop === "get") {
+        return async (ctx: RuntimeStateCtx, collection: string, key: string) => {
+          if (ctx.tenantId === tenantId && collection === MERCHANT_CRED_COLLECTION && key === MERCHANT_CRED_RECORD_KEY) {
+            throw new Error("simulated store fault reading the merchant credential");
+          }
+          return (target.get as (...a: unknown[]) => unknown)(ctx, collection, key);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as unknown as RuntimeStatePort;
 }
 
 describe("/chat pre-flight refuses gracefully on an unreadable credential", () => {
@@ -92,6 +119,37 @@ describe("/chat pre-flight refuses gracefully on an unreadable credential", () =
       const loggedText = JSON.stringify(warnSpy.mock.calls);
       expect(loggedText).not.toMatch(/shpat_/);
       expect(loggedText).not.toContain("12345"); // the malformed row's `c` value (putMalformedCredential)
+    } finally {
+      await app.close();
+    }
+  });
+
+  // M-2 (D2 final review) — the pre-flight's `await credReadHandle.read(tenantId)` sat OUTSIDE any
+  // try/catch, so a thrown store/crypto FAULT (distinct from the store's own honest `unreadable`
+  // classification above) propagated straight to Fastify's default error handler — a raw 500 — instead of
+  // the SAME fail-closed `grounding_unavailable` 503 shape. This is the fail-CLOSED requirement: a store
+  // fault on the credential read must degrade to "unavailable", never to a generic crash.
+  it("flag ON + the credential read THROWS (store fault) → still 503 grounding_unavailable, never a raw 500", async () => {
+    process.env[ENV_KEY] = "true";
+    delete process.env[REGION_ENV_KEY];
+    const store = storeThatFaultsOnCredentialRead(new InMemoryRuntimeStore(), TENANT);
+
+    const app = await buildServer({ store });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/chat",
+        payload: { sessionId: "sess-read-throws", message: "hi", signals: {}, idempotencyKey: "read-throws-0" },
+      });
+
+      expect(res.statusCode).toBe(503);
+      const body = res.json();
+      expect(body.flags).toContain("grounding_unavailable");
+      expect(body.reply).toBe("This store's assistant is temporarily unavailable. Please try again shortly.");
+      expect(body.mode).toBe("support");
+      expect(body.pitch).toBe("none");
+      expect(body.escalate).toBe(false);
+      expect(body.consentMode).toBe("opt_out"); // same M-1 resolved-regime assertion as the unreadable case
     } finally {
       await app.close();
     }
