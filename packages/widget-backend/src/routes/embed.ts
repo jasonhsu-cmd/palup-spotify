@@ -19,19 +19,31 @@ const jsToTs = {
   },
 };
 
-/** Bundle the loader to a self-executing IIFE once, at boot. */
+// Perf hardening (deferred #287/#288 review minor): `bundleLoader()` is called once per `buildServer()`
+// boot — once per prod process, but once per TEST BOOT too (200+ across this package's own suite). esbuild
+// re-running a full bundle+minify pass on every one of those is pure waste: the entry point is a fixed
+// file, never a request-time input, so the output can never differ within one process. Memoized at MODULE
+// scope (not e.g. a closure inside `buildServer`) so it survives across every caller in this process.
+// Cached as the in-flight PROMISE, not the resolved string, so concurrent early callers (a burst of test
+// boots racing at process start) share the ONE build instead of each independently kicking off esbuild
+// before the first has resolved.
+let bundlePromise: Promise<string> | undefined;
+
+/** Bundle the loader to a self-executing IIFE once, at boot — and only once per process (see above). */
 export async function bundleLoader(): Promise<string> {
-  const out = await build({
-    entryPoints: [LOADER_ENTRY],
-    bundle: true,
-    format: "iife",
-    minify: true,
-    write: false,
-    target: "es2019",
-    logLevel: "silent",
-    plugins: [jsToTs],
-  });
-  return out.outputFiles[0]!.text;
+  if (!bundlePromise) {
+    bundlePromise = build({
+      entryPoints: [LOADER_ENTRY],
+      bundle: true,
+      format: "iife",
+      minify: true,
+      write: false,
+      target: "es2019",
+      logLevel: "silent",
+      plugins: [jsToTs],
+    }).then((out) => out.outputFiles[0]!.text);
+  }
+  return bundlePromise;
 }
 
 export interface EmbedDeps {
