@@ -507,7 +507,11 @@ describe("PostgresMerchantRegistry ↔ InMemoryMerchantRegistry parity on the tr
         await memReg.lookupByShopDomain(shopDomain.toUpperCase()),
       );
     }
-  });
+    // This test spins up THREE fresh in-WASM Postgres (pglite) instances — one per tricky domain — so it
+    // is materially slower than its siblings. It stays well under the 5s default locally but exceeded it on
+    // CI's slower runner (main went red on a timeout, not a logic failure). A generous per-test timeout
+    // keeps it robust in CI without masking anything: the assertions are unchanged.
+  }, 30_000);
 
   it("both adapters reject the same bad inputs (blank ids, unknown region, duplicate keys)", async () => {
     const pg = new PostgresMerchantRegistry(pgliteSql(new PGlite()), { now });
