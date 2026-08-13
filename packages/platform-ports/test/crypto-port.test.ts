@@ -254,3 +254,154 @@ describe("createAesGcmCrypto — key scope (A3)", () => {
     expect(() => keyScopeSecretName("MEMORY_ENCRYPTION_KEY", "bad scope")).toThrow();
   });
 });
+
+// Opt-in SHARED BASE KEY (self-serve install). When `sharedKeyTenantId` is set and a tenant has NO
+// per-tenant key for the requested scope, the adapter derives that tenant's key from a single shared base
+// secret (read under the SAME per-scope secret name, held under a reserved non-real-tenant SecretsPort id)
+// instead of throwing. Cross-tenant isolation is preserved BY CONSTRUCTION: `deriveKey` mixes tenantId
+// into HKDF `info`, so two tenants deriving from the identical shared base still get DIFFERENT AES keys.
+// The opt defaults UNDEFINED (off) — behavior is then byte-for-byte today's. Per-tenant keys always win.
+describe("createAesGcmCrypto — opt-in shared base key (self-serve install fallback)", () => {
+  const SCOPE = "merchant-cred"; // the merchant-credential store's key scope (state-postgres)
+  const SHARED_TENANT = "__shared__"; // reserved, non-real-tenant SecretsPort id (real tenants have no leading `_`)
+  const sharedSecretName = keyScopeSecretName("MEMORY_ENCRYPTION_KEY", SCOPE); // "MEMORY_ENCRYPTION_KEY__merchant-cred"
+
+  // T1 — opt OFF is byte-for-byte today's behavior.
+  it("T1: opt OFF — no per-tenant key throws; a per-tenant key round-trips with the unchanged v1/v2 envelope shape", async () => {
+    // No shared opt, no per-tenant key ⇒ fail closed (unchanged).
+    const bare = createAesGcmCrypto(createEnvSecrets(undefined));
+    await expect(bare.encrypt("brand-new-merchant", "a delegate token", "grant-1|accessToken", SCOPE)).rejects.toThrow(/fail closed/i);
+
+    // A per-tenant key, opt off ⇒ round-trips; default scope stays v1, an explicit scope stays v2.
+    const keyed = createAesGcmCrypto(
+      createEnvSecrets(
+        JSON.stringify({
+          acme: {
+            MEMORY_ENCRYPTION_KEY: "a-perfectly-fine-default-scope-key",
+            [sharedSecretName]: "a-perfectly-fine-merchant-cred-key",
+          },
+        }),
+      ),
+    );
+    const v1 = await keyed.encrypt("acme", "an ordinary fact", "record-1|text");
+    expect(v1.startsWith("v1:")).toBe(true);
+    expect(v1.split(":")).toHaveLength(5);
+    expect(await keyed.decrypt("acme", v1, "record-1|text")).toBe("an ordinary fact");
+    const v2 = await keyed.encrypt("acme", "a delegate token", "grant-1|accessToken", SCOPE);
+    expect(v2.startsWith(`v2:${SCOPE}:`)).toBe(true);
+    expect(v2.split(":")).toHaveLength(6);
+    expect(await keyed.decrypt("acme", v2, "grant-1|accessToken", SCOPE)).toBe("a delegate token");
+  });
+
+  // T2 — the shared base lets a brand-new tenant (no per-tenant key) encrypt and round-trip.
+  it("T2: shared base enables encrypt for a tenant with NO per-tenant key, and round-trips", async () => {
+    const secrets = createEnvSecrets(
+      JSON.stringify({ [SHARED_TENANT]: { [sharedSecretName]: "the-single-shared-base-merchant-cred-key" } }),
+    );
+    const crypto = createAesGcmCrypto(secrets, { sharedKeyTenantId: SHARED_TENANT });
+    const envelope = await crypto.encrypt("brand-new-merchant", "a delegate token", "grant-1|accessToken", SCOPE);
+    expect(envelope.startsWith(`v2:${SCOPE}:`)).toBe(true);
+    expect(await crypto.decrypt("brand-new-merchant", envelope, "grant-1|accessToken", SCOPE)).toBe("a delegate token");
+  });
+
+  // T3 — CRITICAL cross-tenant isolation: identical shared base, DIFFERENT derived keys.
+  it("T3: two tenants sharing the SAME shared base derive DIFFERENT keys — one's ciphertext never decrypts for the other", async () => {
+    const secrets = createEnvSecrets(
+      JSON.stringify({ [SHARED_TENANT]: { [sharedSecretName]: "the-single-shared-base-merchant-cred-key" } }),
+    );
+    const crypto = createAesGcmCrypto(secrets, { sharedKeyTenantId: SHARED_TENANT });
+    const acme = await crypto.encrypt("acme", "acme delegate token", "grant-1|accessToken", SCOPE);
+    const globex = await crypto.encrypt("globex", "globex delegate token", "grant-1|accessToken", SCOPE);
+
+    // acme's envelope must NOT decrypt under globex's derived key (and vice versa).
+    expect(await crypto.decrypt("globex", acme, "grant-1|accessToken", SCOPE)).toBeUndefined();
+    expect(await crypto.decrypt("acme", globex, "grant-1|accessToken", SCOPE)).toBeUndefined();
+    // Each still decrypts for its own tenant.
+    expect(await crypto.decrypt("acme", acme, "grant-1|accessToken", SCOPE)).toBe("acme delegate token");
+    expect(await crypto.decrypt("globex", globex, "grant-1|accessToken", SCOPE)).toBe("globex delegate token");
+    // The derived keyId embedded in the two envelopes differs — proof the keys are distinct, not luck.
+    expect(acme.split(":")[2]).not.toBe(globex.split(":")[2]);
+  });
+
+  // T4 — per-tenant precedence over the shared base.
+  it("T4: a per-tenant key takes precedence over the shared base, and its ciphertext survives the shared base being removed", async () => {
+    const withBoth = createAesGcmCrypto(
+      createEnvSecrets(
+        JSON.stringify({
+          acme: { [sharedSecretName]: "acme-own-per-tenant-merchant-cred-key" },
+          [SHARED_TENANT]: { [sharedSecretName]: "the-single-shared-base-merchant-cred-key" },
+        }),
+      ),
+      { sharedKeyTenantId: SHARED_TENANT },
+    );
+    const envelope = await withBoth.encrypt("acme", "a delegate token", "grant-1|accessToken", SCOPE);
+    expect(await withBoth.decrypt("acme", envelope, "grant-1|accessToken", SCOPE)).toBe("a delegate token");
+
+    // Remove the shared base entirely — the envelope was written under acme's OWN key, so it still reads.
+    const perTenantOnly = createAesGcmCrypto(
+      createEnvSecrets(JSON.stringify({ acme: { [sharedSecretName]: "acme-own-per-tenant-merchant-cred-key" } })),
+    );
+    expect(await perTenantOnly.decrypt("acme", envelope, "grant-1|accessToken", SCOPE)).toBe("a delegate token");
+  });
+
+  // T5 — scope isolation: a merchant-cred shared base never serves the default scope.
+  it("T5: the shared base is per-scope — a default-scope encrypt with no default key STILL throws", async () => {
+    const secrets = createEnvSecrets(
+      JSON.stringify({ [SHARED_TENANT]: { [sharedSecretName]: "the-single-shared-base-merchant-cred-key" } }),
+    );
+    const crypto = createAesGcmCrypto(secrets, { sharedKeyTenantId: SHARED_TENANT });
+    // No default-scope per-tenant key and no default-scope shared base ⇒ fail closed (no cross-scope leak).
+    await expect(crypto.encrypt("brand-new-merchant", "an ordinary fact", "record-1|text")).rejects.toThrow(/fail closed/i);
+    // …while the merchant-cred scope IS served, proving the refusal is about the scope, not the tenant.
+    await expect(crypto.encrypt("brand-new-merchant", "a delegate token", "grant-1|accessToken", SCOPE)).resolves.toBeTruthy();
+  });
+
+  // T6 — fail closed when neither a per-tenant key nor the shared base is configured.
+  it("T6: opt ON but the shared base secret is ALSO absent (and no per-tenant key) ⇒ encrypt throws", async () => {
+    const crypto = createAesGcmCrypto(createEnvSecrets(undefined), { sharedKeyTenantId: SHARED_TENANT });
+    await expect(crypto.encrypt("brand-new-merchant", "a delegate token", "grant-1|accessToken", SCOPE)).rejects.toThrow(/fail closed/i);
+  });
+
+  // T7 — migration robustness: shared-base ciphertext stays readable after a per-tenant key is added.
+  it("T7: a token encrypted under the shared base still decrypts after a per-tenant key is later provisioned", async () => {
+    const sharedOnly = createAesGcmCrypto(
+      createEnvSecrets(JSON.stringify({ [SHARED_TENANT]: { [sharedSecretName]: "the-single-shared-base-merchant-cred-key" } })),
+      { sharedKeyTenantId: SHARED_TENANT },
+    );
+    const envelope = await sharedOnly.encrypt("acme", "a delegate token", "grant-1|accessToken", SCOPE);
+
+    // Operator later provisions acme its OWN key. currentKey now prefers the per-tenant key, but the
+    // shared-base candidate must keep the pre-existing envelope readable.
+    const afterProvision = createAesGcmCrypto(
+      createEnvSecrets(
+        JSON.stringify({
+          acme: { [sharedSecretName]: "acme-own-per-tenant-merchant-cred-key" },
+          [SHARED_TENANT]: { [sharedSecretName]: "the-single-shared-base-merchant-cred-key" },
+        }),
+      ),
+      { sharedKeyTenantId: SHARED_TENANT },
+    );
+    expect(await afterProvision.decrypt("acme", envelope, "grant-1|accessToken", SCOPE)).toBe("a delegate token");
+  });
+
+  // T8 — the entropy floor applies to the shared base too.
+  it("T8: a shared base shorter than the entropy floor ⇒ encrypt throws", async () => {
+    const secrets = createEnvSecrets(JSON.stringify({ [SHARED_TENANT]: { [sharedSecretName]: "short" } }));
+    const crypto = createAesGcmCrypto(secrets, { sharedKeyTenantId: SHARED_TENANT });
+    await expect(crypto.encrypt("brand-new-merchant", "a delegate token", "grant-1|accessToken", SCOPE)).rejects.toThrow(/minimum|entropy/i);
+  });
+
+  // T9 — the reserved shared-key id is never a real tenant (enforced in code, not just in a comment).
+  it("T9: with the opt ON, the reserved shared-key id used AS a tenantId is refused (encrypt throws, decrypt is undefined)", async () => {
+    const secrets = createEnvSecrets(
+      JSON.stringify({ [SHARED_TENANT]: { [sharedSecretName]: "the-single-shared-base-merchant-cred-key" } }),
+    );
+    const crypto = createAesGcmCrypto(secrets, { sharedKeyTenantId: SHARED_TENANT });
+    // A real tenant encrypts fine…
+    const ok = await crypto.encrypt("acme", "a delegate token", "grant-1|accessToken", SCOPE);
+    // …but the reserved id used AS a tenantId is refused on encrypt (fail closed).
+    await expect(crypto.encrypt(SHARED_TENANT, "a delegate token", "grant-1|accessToken", SCOPE)).rejects.toThrow(/fail closed/i);
+    // …and decrypt with the reserved id as tenant is unreadable (undefined), NOT a throw — honoring the port contract.
+    expect(await crypto.decrypt(SHARED_TENANT, ok, "grant-1|accessToken", SCOPE)).toBeUndefined();
+  });
+});

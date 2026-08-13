@@ -82,6 +82,17 @@ export interface AesGcmCryptoOpts {
    * stay decryptable across the rotation instead of silently failing en masse. A non-default key scope
    * reads its own name, `keyScopeSecretName(secretName, scope)`, and rotates the same way. */
   secretName?: string;
+  /**
+   * OPT-IN shared base key. When set, it is a reserved, NON-real-tenant SecretsPort id (e.g. "__shared__")
+   * under which a single shared base key is provisioned. If a tenant has NO per-tenant key for the requested
+   * scope, the adapter derives that tenant's key from the shared base (via deriveKey, which mixes tenantId
+   * into HKDF — so each tenant STILL gets a distinct AES key) instead of throwing. The shared base is read
+   * under the SAME per-scope secret name as the per-tenant key (keyScopeSecretName(secretName, keyScope)), so
+   * each key scope has its own independent shared base — a merchant-cred shared base can never serve the
+   * default/memory scope. When UNDEFINED (the default), behavior is byte-for-byte today's: per-tenant key
+   * required, encrypt throws if absent. Per-tenant keys always take precedence over the shared base.
+   */
+  sharedKeyTenantId?: string;
 }
 
 const ENVELOPE_V1 = "v1"; // pre-scope envelope. By definition the DEFAULT key scope: it could not have
@@ -234,14 +245,44 @@ function gcmAad(aad: string, keyScope: string): Buffer {
  */
 export function createAesGcmCrypto(secrets: SecretsPort, opts: AesGcmCryptoOpts = {}): CryptoPort {
   const secretName = opts.secretName ?? "MEMORY_ENCRYPTION_KEY";
+  const sharedKeyTenantId = opts.sharedKeyTenantId; // opt-in; undefined ⇒ byte-for-byte today's behavior
 
-  /** Key material for one scope. The default scope reads the bare `secretName` — exactly as before. */
+  /** Per-tenant key MATERIAL for one scope, or undefined — never throws. The default scope reads the bare
+   *  `secretName` (exactly as before); other scopes read `keyScopeSecretName(secretName, scope)`. */
+  async function perTenantRaw(tenantId: string, keyScope: string): Promise<string | undefined> {
+    return secrets.get(tenantId, keyScopeSecretName(secretName, keyScope));
+  }
+
+  /** Shared-base key MATERIAL for one scope, or undefined. Opt-in only (returns undefined when the opt is
+   *  off, so the opt-OFF path never even queries the shared id). Read under the SAME per-scope secret name
+   *  as the per-tenant key, so each scope has its OWN independent shared base — no cross-scope leak. */
+  async function sharedRaw(keyScope: string): Promise<string | undefined> {
+    if (!sharedKeyTenantId) return undefined;
+    return secrets.get(sharedKeyTenantId, keyScopeSecretName(secretName, keyScope));
+  }
+
+  /** Key material for one scope: per-tenant FIRST, else the opt-in shared base. Throws the existing
+   *  fail-closed error when NEITHER is configured. Both branches go through `deriveKey(tenantId, …)`, so the
+   *  entropy floor AND the tenantId-into-HKDF mixing apply to the shared base too — two tenants deriving
+   *  from the identical shared base still get DIFFERENT AES keys. */
   async function currentKey(tenantId: string, keyScope: string): Promise<DerivedKey> {
+    // Belt-and-suspenders (security review, defense-in-depth): the reserved shared-key id is NOT a real
+    // tenant. Only reachable when the opt is on, so opt-OFF behavior is byte-for-byte unchanged. If a
+    // future call site ever routed the reserved id AS a tenantId, refuse rather than let that "tenant"
+    // read the shared base as its own per-tenant key — the reserved-id safety is now enforced in code,
+    // not only in a comment. Real tenants (lowercased shop subdomains) can never equal it, so this is
+    // unreachable today. Encrypt propagates the throw (fail closed); decrypt catches it → undefined.
+    if (sharedKeyTenantId && tenantId === sharedKeyTenantId)
+      throw new Error(
+        `CryptoPort: tenantId must not equal the reserved shared-key id (key scope "${keyScope}") — ` +
+          `refusing to encrypt/decrypt (fail closed)`,
+      );
     const name = keyScopeSecretName(secretName, keyScope);
-    const raw = await secrets.get(tenantId, name);
+    const raw = (await perTenantRaw(tenantId, keyScope)) ?? (await sharedRaw(keyScope));
     if (!raw) {
       // Names the tenant, the secret it looked for, and the scope — all non-secret — and never the
-      // material (there is none configured to leak). NO fallback to another scope's key.
+      // material (there is none configured to leak). NO fallback to another scope's key, and — when the
+      // opt is off — no shared base either (sharedRaw returned undefined).
       throw new Error(
         `CryptoPort: no "${name}" key configured for tenant "${tenantId}" (key scope "${keyScope}") — ` +
           `refusing to encrypt/decrypt (fail closed)`,
@@ -257,6 +298,21 @@ export function createAesGcmCrypto(secrets: SecretsPort, opts: AesGcmCryptoOpts 
       return deriveKey(tenantId, raw);
     } catch {
       return undefined; // a too-short/garbage previous-key value is just treated as "no previous key"
+    }
+  }
+
+  /** The tenant's key DERIVED FROM THE SHARED BASE for one scope, or undefined (opt-off ⇒ undefined). A
+   *  decrypt-only fallback candidate: it keeps an envelope written under the shared base readable even
+   *  after an operator later provisions a per-tenant key (which then WINS in `currentKey`). Gated on the
+   *  opt so opt-OFF decrypt is byte-identical to today. */
+  async function sharedKey(tenantId: string, keyScope: string): Promise<DerivedKey | undefined> {
+    if (sharedKeyTenantId && tenantId === sharedKeyTenantId) return undefined; // reserved id is not a tenant
+    const raw = await sharedRaw(keyScope);
+    if (!raw) return undefined;
+    try {
+      return deriveKey(tenantId, raw);
+    } catch {
+      return undefined; // a too-short/garbage shared base is treated as "no shared candidate" on read
     }
   }
 
@@ -309,7 +365,16 @@ export function createAesGcmCrypto(secrets: SecretsPort, opts: AesGcmCryptoOpts 
           const previous = await previousKey(tenantId, scope);
           if (previous?.keyId === keyId) key = previous.key;
         }
-        if (!key) return undefined; // no configured key (current or previous) matches this envelope
+        // Shared-base fallback (opt-in only): a token written under the shared base must stay readable even
+        // after an operator provisions a per-tenant key for this tenant — which now WINS in `currentKey`,
+        // so neither `current` (per-tenant) nor `previous` matches the shared-derived keyId. `sharedKey`
+        // returns undefined when the opt is off, so the opt-OFF read path is byte-identical to before; and
+        // when the shared base already WAS `current`, `key` is set so this block is skipped (no-op).
+        if (!key && sharedKeyTenantId) {
+          const shared = await sharedKey(tenantId, scope);
+          if (shared?.keyId === keyId) key = shared.key;
+        }
+        if (!key) return undefined; // no configured key (current, previous, or shared base) matches this envelope
 
         const iv = Buffer.from(ivB64, "base64");
         const authTag = Buffer.from(tagB64, "base64");

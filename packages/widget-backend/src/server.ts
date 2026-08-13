@@ -81,6 +81,13 @@ import { runCatalogIndex, shopifyCatalogSource } from "./jobs/catalog-index.js";
 // against the kill registry (NN #4) — a single source of truth, no drift.
 const RUNTIME_TENANT = "demo";
 
+// Reserved, NON-real-tenant SecretsPort id for the OPT-IN merchant-cred shared base key (self-serve
+// install). A real tenant is a lowercased myshopify shop subdomain, which can never start with an
+// underscore, so `__shared__` can never collide with one. Only ever passed to `createAesGcmCrypto` as
+// `sharedKeyTenantId` when `MERCHANT_CRED_SHARED_KEY_ENABLED=true` — the shared base still derives a
+// DISTINCT per-tenant AES key (deriveKey mixes tenantId into HKDF), so cross-tenant isolation holds.
+const MERCHANT_CRED_SHARED_KEY_TENANT = "__shared__";
+
 // Reclamation bounds (F3/F4): TTLs cap growth of the client-keyed idem/session KV; traffic is trimmed.
 // Reclamation runs opportunistically every N requests (Cloud Run throttles CPU between requests, so a
 // setInterval is unreliable — request-driven is the safe trigger). All overridable via env.
@@ -326,6 +333,25 @@ export async function buildServer(opts?: {
   // Per-merchant grounding needs the store (cache) + secrets (Shopify creds), so it is built here (not
   // module-level). Construct secrets in the composition root after config load (per the slice-2 review).
   const secrets = createEnvSecrets();
+  // OPT-IN shared base key for merchant-credential custody (self-serve install). Default OFF (ships dark).
+  // When ON, the AES-GCM adapter derives a brand-new merchant's merchant-cred key from a single shared base
+  // secret (held under the reserved `MERCHANT_CRED_SHARED_KEY_TENANT` id) instead of failing custody because
+  // no per-tenant key was pre-provisioned. Cross-tenant isolation is preserved BY CONSTRUCTION — deriveKey
+  // mixes tenantId into HKDF, so each tenant still gets a DISTINCT AES key. Scoped to the merchant-cred
+  // crypto ONLY; widget-memory's crypto (service.ts) is untouched and stays per-tenant/fail-closed.
+  const MERCHANT_CRED_SHARED_KEY_ENABLED = process.env.MERCHANT_CRED_SHARED_KEY_ENABLED === "true";
+  if (MERCHANT_CRED_SHARED_KEY_ENABLED)
+    console.warn(
+      "[boot] MERCHANT_CRED_SHARED_KEY_ENABLED=true — merchant-cred custody derives brand-new merchants' keys " +
+        "from a SHARED base key (per-tenant keys still derived DISTINCTLY via HKDF/tenantId). Blast radius on a " +
+        "base-key compromise is ALL tenants served by the shared base in this scope — provision it high-entropy.",
+    );
+  // DRY: both merchant-cred crypto call sites build the SAME adapter — per-tenant/fail-closed when the flag
+  // is off (byte-for-byte today's construction), shared-base-enabled when on. Nothing else changes.
+  const merchantCredCrypto = () =>
+    MERCHANT_CRED_SHARED_KEY_ENABLED
+      ? createAesGcmCrypto(secrets, { sharedKeyTenantId: MERCHANT_CRED_SHARED_KEY_TENANT })
+      : createAesGcmCrypto(secrets);
   // ── D1 — the merchant registry, and the resolver that is now the ONLY way the serving path decides
   // which merchant a request belongs to and whether it may still be served. See merchant-resolver.ts for
   // the precedence rule, what stayed on env, and why. HOISTED HERE (it used to be constructed ~300 lines
@@ -407,7 +433,7 @@ export async function buildServer(opts?: {
   // on, so an unconfigured/off deployment never even attempts a read. Kept in scope for Task 4's `/chat`
   // pre-flight, which reuses this SAME handle rather than building a second one.
   const credReadHandle = MERCHANT_CRED_READBACK_ENABLED
-    ? createMerchantCredentialStore(store, createAesGcmCrypto(secrets))
+    ? createMerchantCredentialStore(store, merchantCredCrypto())
     : undefined;
   const grounding = createGroundingPort(store, secrets, {
     shopDomainFor: (t) => merchants.shopDomainFor(t),
@@ -917,11 +943,12 @@ export async function buildServer(opts?: {
   // `merchantRegistry` is now constructed MUCH EARLIER (alongside the D1 merchant resolver, which needs
   // it before `createGroundingPort`) — reused here unchanged.
   // B2's store satisfies `MerchantCredentialSink` STRUCTURALLY (`put(tenantId, token, {actor})`), so this is
-  // an assignment with no adapter. `createAesGcmCrypto(secrets)` is the same CryptoPort construction
-  // widget-memory uses; the `merchant-cred` key scope keeps a memory-key compromise from exposing merchant
-  // credentials (crypto-port key separation).
+  // an assignment with no adapter. `merchantCredCrypto()` is the same CryptoPort construction widget-memory
+  // uses (per-tenant/fail-closed by default), optionally shared-base-enabled behind
+  // MERCHANT_CRED_SHARED_KEY_ENABLED; the `merchant-cred` key scope keeps a memory-key compromise from
+  // exposing merchant credentials (crypto-port key separation).
   const merchantCredentials: MerchantCredentialSink | undefined =
-    opts?.merchantCredentials ?? createMerchantCredentialStore(store, createAesGcmCrypto(secrets));
+    opts?.merchantCredentials ?? createMerchantCredentialStore(store, merchantCredCrypto());
   const SHOPIFY_INSTALL_ENABLED = Boolean(
     SHOPIFY_APP_CLIENT_ID &&
       SHOPIFY_INSTALL_REDIRECT_URI &&
