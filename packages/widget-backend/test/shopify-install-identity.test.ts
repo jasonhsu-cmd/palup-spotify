@@ -10,9 +10,11 @@ import {
   grantedScopesCover,
   isValidShopDomain,
   normalizeOauthQuery,
+  registerWebhookSubscriptions,
   signOauthQuery,
   timestampWithinTolerance,
   verifyOauthHmac,
+  type WebhookSubscriptionSpec,
 } from "../src/shopify-install-identity.js";
 
 // C1 — the Shopify install/OAuth WIRE FORMAT adapter. Every assertion here is traceable to a primary
@@ -424,5 +426,149 @@ describe("shopify-install-identity — delegateAccessTokenCreate", () => {
     // The grounding adapter reads products only (shopify-grounding.ts). Anything beyond that is scope we
     // do not need and must not hold.
     expect(DELEGATE_SCOPES_DEFAULT).toEqual(["unauthenticated_read_product_listings"]);
+  });
+});
+
+describe("shopify-install-identity — registerWebhookSubscriptions (shop-specific webhook registration)", () => {
+  // The linked app runs `use_legacy_install_flow = true`, which forbids declarative [webhooks], so under
+  // that flow webhooks must be registered SHOP-SPECIFICALLY via the Admin API during install. This wire
+  // function mirrors createDelegateAccessToken: same POST to the pinned admin graphql endpoint, same
+  // x-shopify-access-token (PARENT) auth, module-constant mutation, host re-validated before any fetch,
+  // NEVER throws, and it leaks nothing — only closed-set topic names in two tallies.
+  function fetchStub(impl: (url: string, init?: RequestInit) => unknown): typeof globalThis.fetch {
+    return (async (url: unknown, init?: unknown) => impl(String(url), init as RequestInit)) as unknown as typeof globalThis.fetch;
+  }
+
+  const PARENT = "shpat_PARENT_TOKEN_0001";
+  const SUBS: WebhookSubscriptionSpec[] = [
+    { topic: "APP_UNINSTALLED", uri: "https://widget.palup.ai/shopify/webhooks/app/uninstalled" },
+    { topic: "PRODUCTS_CREATE", uri: "https://widget.palup.ai/shopify/webhooks/products/create" },
+  ];
+
+  const okBody = (id = "gid://shopify/WebhookSubscription/1") => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id }, userErrors: [] } } }),
+  });
+
+  it("POSTs one webhookSubscriptionCreate per subscription to the pinned admin endpoint, authed by the PARENT token", async () => {
+    const calls: Array<{ url: string; headers: Record<string, string>; body: { query?: string; variables?: unknown } }> = [];
+    const res = await registerWebhookSubscriptions(
+      { shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: SUBS },
+      fetchStub((url, init) => {
+        calls.push({ url, headers: (init?.headers ?? {}) as Record<string, string>, body: JSON.parse(String(init?.body)) });
+        return okBody();
+      }),
+    );
+    expect(calls).toHaveLength(SUBS.length);
+    for (const c of calls) {
+      expect(c.url).toBe(`https://${SHOP}/admin/api/${ADMIN_API_VERSION}/graphql.json`);
+      expect(c.headers["x-shopify-access-token"]).toBe(PARENT);
+      expect(c.headers["content-type"]).toBe("application/json");
+      expect(c.body.query).toContain("webhookSubscriptionCreate");
+    }
+    // The input field is `uri` (NOT the deprecated `callbackUrl`), plus `format: "JSON"`.
+    expect(calls[0]?.body.variables).toEqual({ topic: "APP_UNINSTALLED", webhookSubscription: { uri: SUBS[0]!.uri, format: "JSON" } });
+    expect(calls[1]?.body.variables).toEqual({ topic: "PRODUCTS_CREATE", webhookSubscription: { uri: SUBS[1]!.uri, format: "JSON" } });
+    // all-ok ⇒ every topic registered, none failed.
+    expect(res).toEqual({ registered: ["APP_UNINSTALLED", "PRODUCTS_CREATE"], failed: [] });
+  });
+
+  it("classifies a topic with userErrors as failed and still registers the rest — and never echoes the message text", async () => {
+    const res = await registerWebhookSubscriptions(
+      { shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: SUBS },
+      fetchStub((_url, init) => {
+        const topic = JSON.parse(String(init?.body)).variables.topic as string;
+        if (topic === "PRODUCTS_CREATE") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: null, userErrors: [{ field: ["topic"], message: "requires read_products access scope" }] } } }),
+          };
+        }
+        return okBody();
+      }),
+    );
+    expect(res.registered).toEqual(["APP_UNINSTALLED"]);
+    expect(res.failed).toEqual(["PRODUCTS_CREATE"]);
+    // Closed-set topic names only — the raw Shopify userErrors message must never surface.
+    expect(JSON.stringify(res)).not.toContain("requires read_products access scope");
+  });
+
+  it("classifies a response with a top-level GraphQL `errors` array as failed", async () => {
+    const res = await registerWebhookSubscriptions(
+      { shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: [SUBS[0]!] },
+      fetchStub(() => ({ ok: true, status: 200, json: async () => ({ errors: [{ message: "Throttled" }] }) })),
+    );
+    expect(res).toEqual({ registered: [], failed: ["APP_UNINSTALLED"] });
+  });
+
+  it("classifies as FAILED any 200 that does not POSITIVELY confirm a created subscription id (audit integrity)", async () => {
+    // A topic must count as `registered` ONLY on a truthy webhookSubscription.id — otherwise the immutable
+    // audit could record a subscription Shopify never created. Each of these shapes has no top-level
+    // `errors` and no `userErrors`, so the old "fell through to registered" bug is exactly what this pins.
+    const shapes: unknown[] = [
+      { data: { webhookSubscriptionCreate: null } }, //                         (i)   null payload
+      { data: {} }, //                                                          (ii)  no payload key
+      {}, //                                                                    (iii) no data at all
+      { data: { webhookSubscriptionCreate: { webhookSubscription: {}, userErrors: [] } } }, // (iv) no id
+      { data: { webhookSubscriptionCreate: { webhookSubscription: null, userErrors: [] } } }, //     null sub
+    ];
+    for (const shape of shapes) {
+      const res = await registerWebhookSubscriptions(
+        { shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: [SUBS[0]!] },
+        fetchStub(() => ({ ok: true, status: 200, json: async () => shape })),
+      );
+      expect(res, `shape ${JSON.stringify(shape)}`).toEqual({ registered: [], failed: ["APP_UNINSTALLED"] });
+    }
+  });
+
+  it("classifies a non-2xx (401/403 for a missing scope) as failed and never throws", async () => {
+    const res = await registerWebhookSubscriptions(
+      { shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: [SUBS[1]!] },
+      fetchStub(() => ({ ok: false, status: 403, json: async () => ({}) })),
+    );
+    expect(res).toEqual({ registered: [], failed: ["PRODUCTS_CREATE"] });
+  });
+
+  it("catches a per-topic transport fault (never throws, never leaks) and keeps registering the others", async () => {
+    let message = "unset";
+    const res = await registerWebhookSubscriptions(
+      { shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: SUBS },
+      fetchStub((_url, init) => {
+        const topic = JSON.parse(String(init?.body)).variables.topic as string;
+        if (topic === "PRODUCTS_CREATE") throw new Error("network down");
+        return okBody();
+      }),
+    ).catch((err: unknown) => {
+      message = err instanceof Error ? err.message : String(err);
+      return "THREW" as const;
+    });
+    expect(message).toBe("unset");
+    expect(res).toEqual({ registered: ["APP_UNINSTALLED"], failed: ["PRODUCTS_CREATE"] });
+  });
+
+  it("makes NO fetch for a non-myshopify shop — the parent Admin token never egresses to a hostile host", async () => {
+    let called = false;
+    const res = await registerWebhookSubscriptions(
+      { shopDomain: "evil.test", parentAccessToken: PARENT, subscriptions: SUBS },
+      fetchStub(() => {
+        called = true;
+        return okBody();
+      }),
+    );
+    expect(called).toBe(false);
+    expect(res).toEqual({ registered: [], failed: [] });
+  });
+
+  it("makes NO fetch when there are no subscriptions or no parent token (additive/back-compat)", async () => {
+    let called = false;
+    const stub = fetchStub(() => {
+      called = true;
+      return okBody();
+    });
+    expect(await registerWebhookSubscriptions({ shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: [] }, stub)).toEqual({ registered: [], failed: [] });
+    expect(await registerWebhookSubscriptions({ shopDomain: SHOP, parentAccessToken: "", subscriptions: SUBS }, stub)).toEqual({ registered: [], failed: [] });
+    expect(called).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createHmac } from "node:crypto";
+import Fastify from "fastify";
 import { InMemoryRuntimeStore, createInMemoryMerchantRegistry, createAesGcmCrypto, createEnvSecrets, keyScopeSecretName } from "@palup/platform-ports";
 import type { AuditRecord, MerchantRegistryPort, RuntimeStatePort } from "@palup/platform-ports";
 import {
@@ -12,10 +13,12 @@ import {
 } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE } from "../src/shopify-install-identity.js";
+import { WEBHOOK_ROUTES } from "../src/routes/shopify-webhooks.js";
 import {
   INSTALL_APP_SCOPE,
   INSTALL_PENDING_COLLECTION,
   INSTALL_STATE_COOKIE,
+  registerShopifyInstallRoutes,
   type MerchantCredentialSink,
 } from "../src/routes/shopify-install.js";
 
@@ -114,11 +117,22 @@ async function harness(
   const registry = seams.registry === null ? undefined : (seams.registry ?? createInMemoryMerchantRegistry());
   const sink = recordingSink();
   const fetchCalls: string[] = [];
-  let impl: (url: string, init?: RequestInit) => unknown = (url) => {
+  let impl: (url: string, init?: RequestInit) => unknown = (url, init) => {
     if (url.endsWith("/admin/oauth/access_token")) {
       return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
     }
     if (url.includes("/graphql.json")) {
+      // The Admin graphql endpoint now serves TWO mutations in this flow: delegateAccessTokenCreate (mint
+      // the delegate) and webhookSubscriptionCreate (register shop-specific webhooks). Discriminate on the
+      // mutation text so each returns its own well-formed payload.
+      const query = init?.body ? String((JSON.parse(String(init.body)) as { query?: string }).query ?? "") : "";
+      if (query.includes("webhookSubscriptionCreate")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid://shopify/WebhookSubscription/1" }, userErrors: [] } } }),
+        };
+      }
       return {
         ok: true,
         status: 200,
@@ -563,7 +577,12 @@ describe("C1 the happy path — install → callback → delegateAccessTokenCrea
     let delegateInput: { delegateAccessScope?: string[]; expiresIn?: number } | undefined;
     h.setFetch((url, init) => {
       if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
-      delegateInput = JSON.parse(String(init?.body)).variables?.input;
+      const body = JSON.parse(String(init?.body)) as { query?: string; variables?: { input?: { delegateAccessScope?: string[]; expiresIn?: number } } };
+      // The graphql endpoint now also serves webhookSubscriptionCreate — only capture the DELEGATE input.
+      if ((body.query ?? "").includes("webhookSubscriptionCreate")) {
+        return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid" }, userErrors: [] } } }) };
+      }
+      delegateInput = body.variables?.input;
       return {
         ok: true,
         status: 200,
@@ -717,6 +736,17 @@ describe("C1 audit (NN#5) — every governed registry write is recorded, with a 
       "shopDomain",
       "tenantId",
     ]);
+    // The webhook registration result folds into the audit `decision` — and it too is an EXACT allowlist:
+    // ONLY the two topic-name tallies, so a later "record the token / the raw userErrors message" change
+    // fails HERE rather than leaking into an immutable log.
+    const decision = (created.decision ?? {}) as Record<string, unknown>;
+    expect(Object.keys((decision.webhooks ?? {}) as Record<string, unknown>).sort()).toEqual(["failed", "registered"]);
+    const wh = decision.webhooks as { registered: unknown[]; failed: unknown[] };
+    expect(Array.isArray(wh.registered)).toBe(true);
+    expect(Array.isArray(wh.failed)).toBe(true);
+    // Every entry is a closed-set topic-name string; no secret is anywhere in the decision.
+    for (const t of [...wh.registered, ...wh.failed]) expect(typeof t).toBe("string");
+    expectNoSecrets(JSON.stringify(decision), "the audit decision");
   });
 
   it("a refused callback appends NOTHING to any audit chain (no attacker-driven audit flood)", async () => {
@@ -892,5 +922,191 @@ describe("C1 no secret leaves the process", () => {
     const pending = await h.store.list({ tenantId: INSTALL_APP_SCOPE }, INSTALL_PENDING_COLLECTION);
     expectNoSecrets(JSON.stringify(pending), "the pending-install collection");
     expect(pending).toEqual([]); // consumed
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Track B — shop-specific webhook registration at install (legacy install flow). Under
+// use_legacy_install_flow=true, declarative [webhooks] are forbidden, so the app registers webhook
+// subscriptions via the Admin API DURING install. This is BEST-EFFORT / NON-FATAL: a webhook failure must
+// never change the install outcome (custody + registry write intact, install still ok:true).
+
+/** A webhook graphql call is one whose mutation text is webhookSubscriptionCreate (delegate is the other). */
+function webhookVariablesFrom(init?: RequestInit): { topic: string; webhookSubscription: { uri: string; format: string } } | null {
+  if (!init?.body) return null;
+  const body = JSON.parse(String(init.body)) as { query?: string; variables?: { topic: string; webhookSubscription: { uri: string; format: string } } };
+  if (!(body.query ?? "").includes("webhookSubscriptionCreate")) return null;
+  return body.variables ?? null;
+}
+
+describe("Track B — install registers shop-specific webhooks with the PARENT token", () => {
+  it("(a) a full install registers the configured subscriptions with the PARENT offline token and returns ok:true", async () => {
+    const h = await harness();
+    const webhookCalls: Array<{ url: string; token: string; variables: NonNullable<ReturnType<typeof webhookVariablesFrom>> }> = [];
+    h.setFetch((url, init) => {
+      if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+      const vars = webhookVariablesFrom(init);
+      if (vars) {
+        webhookCalls.push({ url, token: ((init?.headers ?? {}) as Record<string, string>)["x-shopify-access-token"]!, variables: vars });
+        return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid" }, userErrors: [] } } }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: { accessToken: DELEGATE_TOKEN, accessScopes: [GRANTED_SCOPES] }, userErrors: [] } } }) };
+    });
+    const { state, cookie } = await begin(h);
+    expect((await callback(h, { state, cookie })).statusCode).toBe(200);
+
+    // At least APP_UNINSTALLED is always registered, all against the shop's own admin host.
+    expect(webhookCalls.length).toBeGreaterThanOrEqual(1);
+    for (const c of webhookCalls) {
+      expect(c.url).toContain(`https://${SHOP}/admin/api/`);
+      // The PARENT offline Admin token (the one that can create subscriptions), NOT the delegate.
+      expect(c.token).toBe(PARENT_TOKEN);
+      expect(c.token).not.toBe(DELEGATE_TOKEN);
+      expect(c.variables.webhookSubscription.format).toBe("JSON");
+    }
+    expect(webhookCalls.map((c) => c.variables.topic)).toContain("APP_UNINSTALLED");
+    const appUninstalled = webhookCalls.find((c) => c.variables.topic === "APP_UNINSTALLED")!;
+    expect(appUninstalled.variables.webhookSubscription.uri).toBe(`${new URL(REDIRECT_URI).origin}${WEBHOOK_ROUTES.appUninstalled}`);
+  });
+
+  it("(b) a webhook failure (userErrors) is NON-FATAL — install ok:true, custody + registry intact, decision.webhooks tallies present", async () => {
+    const h = await harness();
+    h.setFetch((url, init) => {
+      if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+      if (webhookVariablesFrom(init)) {
+        // A missing-scope failure — exactly what a default-scope install would hit for a catalog topic.
+        return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: null, userErrors: [{ field: ["topic"], message: "requires read_products access scope" }] } } }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: { accessToken: DELEGATE_TOKEN, accessScopes: [GRANTED_SCOPES] }, userErrors: [] } } }) };
+    });
+    const { state, cookie } = await begin(h);
+    const res = await callback(h, { state, cookie });
+    expect(res.statusCode).toBe(200); // install still succeeds
+
+    // Custody happened once, the registry row is live — the webhook failure changed neither.
+    expect(h.sink.puts).toHaveLength(1);
+    expect(h.sink.puts[0]?.token).toBe(DELEGATE_TOKEN);
+    const rec = (await h.registry.lookupByShopDomain(SHOP))!;
+    expect(rec.status).toBe("active");
+
+    const created = (await auditFor(h.store, rec.tenantId)).find((r) => r.action === "merchant.registered")!;
+    const webhooks = (created.decision as { webhooks?: { registered: string[]; failed: string[] } }).webhooks!;
+    expect(webhooks.failed).toContain("APP_UNINSTALLED");
+    expect(webhooks.registered).toEqual([]);
+    // The raw Shopify userErrors message must never reach the immutable audit log.
+    expect(JSON.stringify(created)).not.toContain("requires read_products access scope");
+    expectNoSecrets(JSON.stringify(created), "the audit record");
+    expect((await h.store.verifyAudit({ tenantId: rec.tenantId })).ok).toBe(true);
+  });
+
+  it("(e) posted URIs come from operator config only (origin(redirectUri)+WEBHOOK_ROUTES); catalog topics ONLY when CATALOG_WEBHOOKS is on", async () => {
+    const origin = new URL(REDIRECT_URI).origin;
+
+    // Default: CATALOG_WEBHOOKS off ⇒ APP_UNINSTALLED only.
+    {
+      const h = await harness();
+      const topics = new Map<string, string>();
+      h.setFetch((url, init) => {
+        if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+        const vars = webhookVariablesFrom(init);
+        if (vars) {
+          topics.set(vars.topic, vars.webhookSubscription.uri);
+          return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid" }, userErrors: [] } } }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: { accessToken: DELEGATE_TOKEN, accessScopes: [GRANTED_SCOPES] }, userErrors: [] } } }) };
+      });
+      const { state, cookie } = await begin(h);
+      await callback(h, { state, cookie });
+      expect([...topics.keys()].sort()).toEqual(["APP_UNINSTALLED"]);
+      expect(topics.get("APP_UNINSTALLED")).toBe(`${origin}${WEBHOOK_ROUTES.appUninstalled}`);
+    }
+
+    // CATALOG_WEBHOOKS on ⇒ APP_UNINSTALLED + the four catalog topics, each pointed at its own route.
+    {
+      const h = await harness({ CATALOG_WEBHOOKS: "true" });
+      const topics = new Map<string, string>();
+      h.setFetch((url, init) => {
+        if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+        const vars = webhookVariablesFrom(init);
+        if (vars) {
+          topics.set(vars.topic, vars.webhookSubscription.uri);
+          return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid" }, userErrors: [] } } }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: { accessToken: DELEGATE_TOKEN, accessScopes: [GRANTED_SCOPES] }, userErrors: [] } } }) };
+      });
+      const { state, cookie } = await begin(h);
+      await callback(h, { state, cookie });
+      expect([...topics.keys()].sort()).toEqual(["APP_UNINSTALLED", "INVENTORY_LEVELS_UPDATE", "PRODUCTS_CREATE", "PRODUCTS_DELETE", "PRODUCTS_UPDATE"]);
+      expect(topics.get("PRODUCTS_CREATE")).toBe(`${origin}${WEBHOOK_ROUTES.productsCreate}`);
+      expect(topics.get("PRODUCTS_UPDATE")).toBe(`${origin}${WEBHOOK_ROUTES.productsUpdate}`);
+      expect(topics.get("PRODUCTS_DELETE")).toBe(`${origin}${WEBHOOK_ROUTES.productsDelete}`);
+      expect(topics.get("INVENTORY_LEVELS_UPDATE")).toBe(`${origin}${WEBHOOK_ROUTES.inventoryLevelsUpdate}`);
+      // The URI host is ALWAYS the app's own origin (operator config), never the shop domain (SSRF defence).
+      for (const uri of topics.values()) expect(new URL(uri).origin).toBe(origin);
+    }
+  });
+});
+
+describe("Track B — the webhookSubscriptions dep is additive (absent ⇒ zero webhook fetches)", () => {
+  /** A raw install app so we can drive the flow with the new dep ABSENT — the composed server always
+   *  configures APP_UNINSTALLED, so back-compat can only be exercised at the route level. */
+  function rawInstallApp(webhookSubscriptions?: readonly { topic: string; uri: string }[]) {
+    const store = new InMemoryRuntimeStore();
+    const registry = createInMemoryMerchantRegistry();
+    const sink = recordingSink();
+    const graphqlBodies: Array<{ query?: string }> = [];
+    const fetchFn = (async (url: unknown, init?: unknown) => {
+      const u = String(url);
+      const rq = init as RequestInit;
+      if (u.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+      if (u.includes("/graphql.json")) {
+        const body = JSON.parse(String(rq?.body)) as { query?: string };
+        graphqlBodies.push(body);
+        if ((body.query ?? "").includes("webhookSubscriptionCreate")) return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid" }, userErrors: [] } } }) };
+        return { ok: true, status: 200, json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: { accessToken: DELEGATE_TOKEN, accessScopes: [GRANTED_SCOPES] }, userErrors: [] } } }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }) as unknown as typeof globalThis.fetch;
+    const app = Fastify({ logger: false });
+    registerShopifyInstallRoutes(app, {
+      store,
+      registry,
+      credentials: sink,
+      clientSecret: async () => APP_SECRET,
+      fetchFn,
+      clientId: CLIENT_ID,
+      redirectUri: REDIRECT_URI,
+      requestedScopes: GRANTED_SCOPES,
+      delegateScopes: [GRANTED_SCOPES],
+      region: "us",
+      killCheck: async () => false,
+      now: () => Math.floor(Date.now() / 1000),
+      webhookSubscriptions,
+    });
+    return { app, store, registry, sink, graphqlBodies };
+  }
+
+  it("(d) with NO webhookSubscriptions dep, install succeeds and makes ZERO webhook fetches — behaviour unchanged", async () => {
+    const ctx = rawInstallApp(undefined);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const install = await ctx.app.inject({ method: "GET", url: `/shopify/install?${qs({ shop: SHOP, timestamp: ts })}` });
+    expect(install.statusCode).toBe(302);
+    const state = new URL(install.headers.location as string).searchParams.get("state")!;
+    const rawCookie = install.headers["set-cookie"];
+    const cookie = String(Array.isArray(rawCookie) ? rawCookie[0] : rawCookie).split(";")[0];
+
+    const cb = await ctx.app.inject({
+      method: "GET",
+      url: `/shopify/callback?${qs({ code: AUTH_CODE, shop: SHOP, state, timestamp: String(Math.floor(Date.now() / 1000)) })}`,
+      headers: { cookie },
+    });
+    expect(cb.statusCode).toBe(200); // install still succeeds
+
+    // The delegate mutation ran; NO webhookSubscriptionCreate mutation was ever sent.
+    expect(ctx.graphqlBodies.some((b) => (b.query ?? "").includes("delegateAccessTokenCreate"))).toBe(true);
+    expect(ctx.graphqlBodies.filter((b) => (b.query ?? "").includes("webhookSubscriptionCreate"))).toEqual([]);
+    // Custody + registry write unchanged.
+    expect(ctx.sink.puts).toHaveLength(1);
+    expect(await ctx.registry.lookupByShopDomain(SHOP)).toBeTruthy();
   });
 });

@@ -10,8 +10,10 @@ import {
   grantedScopesCover,
   isValidShopDomain,
   normalizeOauthQuery,
+  registerWebhookSubscriptions,
   timestampWithinTolerance,
   verifyOauthHmac,
+  type WebhookSubscriptionSpec,
 } from "../shopify-install-identity.js";
 
 // C1 — `GET /shopify/install` → `GET /shopify/callback` → `delegateAccessTokenCreate`. The first real
@@ -135,6 +137,15 @@ export interface ShopifyInstallDeps {
   killCheck: (tenantId: string) => Promise<boolean>;
   /** Unix seconds. */
   now: () => number;
+  /**
+   * Shop-specific webhook subscriptions to register at install, under the legacy install flow (which
+   * forbids declarative `[webhooks]`). Built by the composition root from OPERATOR CONFIG ONLY (the
+   * redirect URI's origin + `WEBHOOK_ROUTES`), never from the shop or the request (SSRF defence).
+   * ADDITIVE: absent/empty ⇒ no registration is attempted and behaviour is byte-identical to before.
+   * Registration is BEST-EFFORT / NON-FATAL — see the call site — so a webhook failure never changes the
+   * install outcome.
+   */
+  webhookSubscriptions?: readonly WebhookSubscriptionSpec[];
   /**
    * Per-IP rate limit for these PUBLIC, unauthenticated routes — `false` ⇒ refuse with 429. Every sibling
    * public route in server.ts caps itself the same way (`/widget/token`, `/shopper/session`, the CAA
@@ -407,6 +418,22 @@ async function completeInstallInner(
     return { ok: false, failed: "custody_failed" };
   }
 
+  // Shop-specific webhook registration — BEST-EFFORT / NON-FATAL, and only when the composition root
+  // configured any subscriptions (absent ⇒ zero fetches; back-compat). Under the legacy install flow this
+  // is how Shopify learns to push to `/shopify/webhooks/*`; but webhooks are only a freshness optimisation
+  // with the scheduled poll as the backstop, so a failure here must NOT strand a merchant who already has
+  // valid custody. `registerWebhookSubscriptions` never throws and re-validates the host before any fetch,
+  // so the parent Admin token never egresses to a non-myshopify host. `grant.accessToken` is the PARENT
+  // offline token (the one that can create subscriptions), not the delegate. The result is TALLIES ONLY —
+  // closed-set topic names, never the token or a raw `userErrors` message — so folding it into the audit
+  // record below records what happened without leaking anything (NN#5).
+  const webhooks = deps.webhookSubscriptions?.length
+    ? await registerWebhookSubscriptions(
+        { shopDomain, parentAccessToken: grant.accessToken, subscriptions: deps.webhookSubscriptions },
+        deps.fetchFn,
+      )
+    : { registered: [], failed: [] };
+
   // The audit input. PII/secret-free by construction and asserted as an EXACT key allowlist by test, so a
   // later "just record the code / the token / the hmac for debugging" change fails a test rather than
   // shipping. `delegateScopes` is recorded because WHAT privilege was granted is the governance-relevant
@@ -427,14 +454,19 @@ async function completeInstallInner(
         actor: "system:shopify-install",
         action: "merchant.reactivated",
         input: auditInput,
-        decision: { status: "active", previousStatus: existing.status },
+        decision: { status: "active", previousStatus: existing.status, webhooks: { registered: webhooks.registered, failed: webhooks.failed } },
         reversalPath,
       }
     : {
         actor: "system:shopify-install",
         action: "merchant.registered",
         input: auditInput,
-        decision: { status: "active", servable: false, reason: "serving still resolves tenancy from env vars (C1 is record-only)" },
+        decision: {
+          status: "active",
+          servable: false,
+          reason: "serving still resolves tenancy from env vars (C1 is record-only)",
+          webhooks: { registered: webhooks.registered, failed: webhooks.failed },
+        },
         reversalPath,
       };
 

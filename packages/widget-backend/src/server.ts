@@ -68,7 +68,7 @@ import {
   INSTALL_SCOPES_DEFAULT,
   type MerchantCredentialSink,
 } from "./routes/shopify-install.js";
-import { registerShopifyWebhookRoutes } from "./routes/shopify-webhooks.js";
+import { registerShopifyWebhookRoutes, WEBHOOK_ROUTES } from "./routes/shopify-webhooks.js";
 import { subscribeCatalogReconcile } from "./catalog-webhook-queue.js";
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
@@ -949,6 +949,13 @@ export async function buildServer(opts?: {
   // exposing merchant credentials (crypto-port key separation).
   const merchantCredentials: MerchantCredentialSink | undefined =
     opts?.merchantCredentials ?? createMerchantCredentialStore(store, merchantCredCrypto());
+  // HOISTED above the C1 install block (their defining comment blocks stay in the C2 section below) so the
+  // install flow can build its shop-specific webhook subscription list. Under `use_legacy_install_flow`
+  // declarative `[webhooks]` are forbidden, so webhooks are subscribed via the Admin API DURING install;
+  // the CATALOG topics register ONLY when CATALOG_WEBHOOKS is on, because their handler routes 404 while it
+  // is off (Shopify auto-deletes a subscription after 8 failed deliveries).
+  const SHOPIFY_WEBHOOKS_ENABLED = Boolean(shopifyAppSecretPresent && merchantRegistry);
+  const CATALOG_WEBHOOKS = SHOPIFY_WEBHOOKS_ENABLED && process.env.CATALOG_WEBHOOKS === "true";
   const SHOPIFY_INSTALL_ENABLED = Boolean(
     SHOPIFY_APP_CLIENT_ID &&
       SHOPIFY_INSTALL_REDIRECT_URI &&
@@ -962,6 +969,27 @@ export async function buildServer(opts?: {
   const app = Fastify({ logger: false });
 
   if (SHOPIFY_INSTALL_ENABLED) {
+    // Shop-specific webhook subscriptions to register during install (legacy flow forbids declarative
+    // `[webhooks]`). The topic→uri list comes from OPERATOR CONFIG ONLY — the redirect URI's own origin
+    // plus the exported `WEBHOOK_ROUTES` paths — never the shop domain or the request, so a hostile `shop`
+    // can never point Shopify's push at an attacker URL (SSRF defence). APP_UNINSTALLED is always
+    // registered; the catalog topics are added ONLY when CATALOG_WEBHOOKS is on, because their handler
+    // routes only register then (subscribing to them while off would point Shopify at 404s, which it
+    // auto-deletes after 8 failed deliveries). Registration is best-effort/non-fatal in the flow, and each
+    // topic also needs its resource read scope on the parent token (see docs/DEPLOY.md / the report note on
+    // SHOPIFY_INSTALL_SCOPES) — a topic whose scope was not granted simply fails its tally.
+    const webhookOrigin = new URL(SHOPIFY_INSTALL_REDIRECT_URI!).origin;
+    const webhookSubscriptions: Array<{ topic: string; uri: string }> = [
+      { topic: "APP_UNINSTALLED", uri: webhookOrigin + WEBHOOK_ROUTES.appUninstalled },
+    ];
+    if (CATALOG_WEBHOOKS) {
+      webhookSubscriptions.push(
+        { topic: "PRODUCTS_CREATE", uri: webhookOrigin + WEBHOOK_ROUTES.productsCreate },
+        { topic: "PRODUCTS_UPDATE", uri: webhookOrigin + WEBHOOK_ROUTES.productsUpdate },
+        { topic: "PRODUCTS_DELETE", uri: webhookOrigin + WEBHOOK_ROUTES.productsDelete },
+        { topic: "INVENTORY_LEVELS_UPDATE", uri: webhookOrigin + WEBHOOK_ROUTES.inventoryLevelsUpdate },
+      );
+    }
     // Idempotent DDL, exactly like the runtime/vector stores' own `migrate()` — one more table in the
     // existing database, never a new cloud resource. Only for the real Postgres adapter; an injected
     // registry (test seam) has no migration.
@@ -983,6 +1011,7 @@ export async function buildServer(opts?: {
       // /shopper/session, the CAA routes) — one rate-limit mechanism, not a second one that could drift.
       checkRateLimit: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
       now: nowSec,
+      webhookSubscriptions,
     });
   }
 
@@ -1005,14 +1034,14 @@ export async function buildServer(opts?: {
   // retries 8 times over 4 hours, and then DELETES a subscription configured through the Admin API. A
   // half-working endpoint that 500s is therefore worse than an absent one: it burns the retries either
   // way, but a 404 is unambiguous to whoever is debugging the app's configuration.
-  const SHOPIFY_WEBHOOKS_ENABLED = Boolean(shopifyAppSecretPresent && merchantRegistry);
-  // A3 (ADR-0020 D4) — catalog/inventory webhook INGESTION, behind CATALOG_WEBHOOKS (default OFF, and only
-  // meaningful when the compliance-webhook plumbing is already enabled). ON ⇒ the catalog webhook routes
-  // register and enqueue a reconcile per delivery; a worker re-fetches that tenant's current catalog via
-  // runCatalogIndex (never trusting the payload) and refreshes the Tier-2 facts. OFF ⇒ the catalog routes
-  // 404 and no queue/worker is built — byte-identical to before. The scheduled poll job (PRODUCT_FACTS_POLL)
-  // remains the missed-event backstop, so webhooks are an optimisation, never the only freshness path.
-  const CATALOG_WEBHOOKS = SHOPIFY_WEBHOOKS_ENABLED && process.env.CATALOG_WEBHOOKS === "true";
+  //
+  // NOTE — `SHOPIFY_WEBHOOKS_ENABLED` and `CATALOG_WEBHOOKS` are declared ABOVE the C1 install block (the
+  // install flow reads CATALOG_WEBHOOKS to decide which webhook topics to subscribe Shopify to). A3
+  // (ADR-0020 D4): CATALOG_WEBHOOKS ON ⇒ the catalog webhook routes register and enqueue a reconcile per
+  // delivery; a worker re-fetches that tenant's current catalog via runCatalogIndex (never trusting the
+  // payload) and refreshes the Tier-2 facts. OFF ⇒ the catalog routes 404 and no queue/worker is built —
+  // byte-identical to before. The scheduled poll job (PRODUCT_FACTS_POLL) remains the missed-event
+  // backstop, so webhooks are an optimisation, never the only freshness path.
   // P4 — Pub/Sub push settings. The CONSUME side (the OIDC push route) is gated on these THREE ALONE, NOT on
   // CATALOG_WEBHOOKS: the route's OIDC verify is the sole control on an internet-reachable,
   // --allow-unauthenticated endpoint, and decoupling it lets an operator smoke-verify that gate in staging
