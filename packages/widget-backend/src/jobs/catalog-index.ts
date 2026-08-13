@@ -899,8 +899,8 @@ export const CATALOG_USAGE = [
   "",
   "DATABASE_URL must point at the SAME store the deployed backend uses, or the corpus is written to a",
   "per-process store that dies with this process. --reindex REPLACES a corpus (use it after an embedding",
-  "model or PURPOSE change). NOTHING READS THIS CORPUS ON A LIVE PATH: the retriever exists (E1) but its",
-  "CATALOG_RETRIEVAL flag is off, unwired, and human-promotion-gated.",
+  "model or PURPOSE change). NOTHING READS THIS CORPUS ON A LIVE PATH: the retriever exists (E1) and the",
+  "server composes it, but its CATALOG_RETRIEVAL flag is off by default and human-promotion-gated.",
 ].join("\n");
 
 /** Split `--flag=value`; a bare `--flag` yields no inline value. */
@@ -1063,9 +1063,10 @@ async function main(): Promise<void> {
       );
     }
     console.log(
-      "[catalog] NOTE: nothing reads this corpus on a live path. The retriever exists (E1) but the " +
-        "CATALOG_RETRIEVAL flag is off by default, has no env wiring, and is not composed by the server — " +
-        "enabling it is a human promotion step (HITL-POLICY §5), not a deploy setting.",
+      "[catalog] NOTE: nothing reads this corpus on a live path by default. The retriever exists (E1) and " +
+        "the server composes it when CATALOG_RETRIEVAL is set, but that flag is off by default — enabling it " +
+        "is a governed human promotion step (eval gate → shadow → canary → named-human approval, HITL-POLICY §5), " +
+        "not a routine deploy toggle.",
     );
   } catch (e) {
     console.error(`[catalog] FAILED: ${(e as Error).message}`);
