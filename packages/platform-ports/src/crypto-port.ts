@@ -266,6 +266,17 @@ export function createAesGcmCrypto(secrets: SecretsPort, opts: AesGcmCryptoOpts 
    *  entropy floor AND the tenantId-into-HKDF mixing apply to the shared base too — two tenants deriving
    *  from the identical shared base still get DIFFERENT AES keys. */
   async function currentKey(tenantId: string, keyScope: string): Promise<DerivedKey> {
+    // Belt-and-suspenders (security review, defense-in-depth): the reserved shared-key id is NOT a real
+    // tenant. Only reachable when the opt is on, so opt-OFF behavior is byte-for-byte unchanged. If a
+    // future call site ever routed the reserved id AS a tenantId, refuse rather than let that "tenant"
+    // read the shared base as its own per-tenant key — the reserved-id safety is now enforced in code,
+    // not only in a comment. Real tenants (lowercased shop subdomains) can never equal it, so this is
+    // unreachable today. Encrypt propagates the throw (fail closed); decrypt catches it → undefined.
+    if (sharedKeyTenantId && tenantId === sharedKeyTenantId)
+      throw new Error(
+        `CryptoPort: tenantId must not equal the reserved shared-key id (key scope "${keyScope}") — ` +
+          `refusing to encrypt/decrypt (fail closed)`,
+      );
     const name = keyScopeSecretName(secretName, keyScope);
     const raw = (await perTenantRaw(tenantId, keyScope)) ?? (await sharedRaw(keyScope));
     if (!raw) {
@@ -295,6 +306,7 @@ export function createAesGcmCrypto(secrets: SecretsPort, opts: AesGcmCryptoOpts 
    *  after an operator later provisions a per-tenant key (which then WINS in `currentKey`). Gated on the
    *  opt so opt-OFF decrypt is byte-identical to today. */
   async function sharedKey(tenantId: string, keyScope: string): Promise<DerivedKey | undefined> {
+    if (sharedKeyTenantId && tenantId === sharedKeyTenantId) return undefined; // reserved id is not a tenant
     const raw = await sharedRaw(keyScope);
     if (!raw) return undefined;
     try {

@@ -390,4 +390,18 @@ describe("createAesGcmCrypto — opt-in shared base key (self-serve install fall
     const crypto = createAesGcmCrypto(secrets, { sharedKeyTenantId: SHARED_TENANT });
     await expect(crypto.encrypt("brand-new-merchant", "a delegate token", "grant-1|accessToken", SCOPE)).rejects.toThrow(/minimum|entropy/i);
   });
+
+  // T9 — the reserved shared-key id is never a real tenant (enforced in code, not just in a comment).
+  it("T9: with the opt ON, the reserved shared-key id used AS a tenantId is refused (encrypt throws, decrypt is undefined)", async () => {
+    const secrets = createEnvSecrets(
+      JSON.stringify({ [SHARED_TENANT]: { [sharedSecretName]: "the-single-shared-base-merchant-cred-key" } }),
+    );
+    const crypto = createAesGcmCrypto(secrets, { sharedKeyTenantId: SHARED_TENANT });
+    // A real tenant encrypts fine…
+    const ok = await crypto.encrypt("acme", "a delegate token", "grant-1|accessToken", SCOPE);
+    // …but the reserved id used AS a tenantId is refused on encrypt (fail closed).
+    await expect(crypto.encrypt(SHARED_TENANT, "a delegate token", "grant-1|accessToken", SCOPE)).rejects.toThrow(/fail closed/i);
+    // …and decrypt with the reserved id as tenant is unreadable (undefined), NOT a throw — honoring the port contract.
+    expect(await crypto.decrypt(SHARED_TENANT, ok, "grant-1|accessToken", SCOPE)).toBeUndefined();
+  });
 });
