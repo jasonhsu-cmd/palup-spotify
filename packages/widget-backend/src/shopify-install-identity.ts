@@ -493,7 +493,17 @@ export async function registerWebhookSubscriptions(
         failed.push(sub.topic);
         continue;
       }
-      registered.push(sub.topic);
+      // FAIL CLOSED on the success path (audit integrity): count `registered` ONLY on POSITIVE confirmation
+      // that Shopify actually created a subscription — a truthy `webhookSubscription.id` — mirroring
+      // `createDelegateAccessToken`, which rejects an absent payload / empty token the same way. An absent
+      // or null payload, or a payload with no id, with no `errors` and no `userErrors`, would otherwise let
+      // the IMMUTABLE audit record a subscription that was never created.
+      const createdId = payload?.webhookSubscription?.id;
+      if (typeof createdId === "string" && createdId) {
+        registered.push(sub.topic);
+      } else {
+        failed.push(sub.topic);
+      }
     } catch {
       // A per-topic transport fault is a `failed` tally, never an exception carrying the parent token or a
       // stack upward — one topic failing must not abandon the rest.

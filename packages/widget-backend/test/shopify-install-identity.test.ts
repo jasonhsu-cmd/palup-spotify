@@ -503,6 +503,26 @@ describe("shopify-install-identity — registerWebhookSubscriptions (shop-specif
     expect(res).toEqual({ registered: [], failed: ["APP_UNINSTALLED"] });
   });
 
+  it("classifies as FAILED any 200 that does not POSITIVELY confirm a created subscription id (audit integrity)", async () => {
+    // A topic must count as `registered` ONLY on a truthy webhookSubscription.id — otherwise the immutable
+    // audit could record a subscription Shopify never created. Each of these shapes has no top-level
+    // `errors` and no `userErrors`, so the old "fell through to registered" bug is exactly what this pins.
+    const shapes: unknown[] = [
+      { data: { webhookSubscriptionCreate: null } }, //                         (i)   null payload
+      { data: {} }, //                                                          (ii)  no payload key
+      {}, //                                                                    (iii) no data at all
+      { data: { webhookSubscriptionCreate: { webhookSubscription: {}, userErrors: [] } } }, // (iv) no id
+      { data: { webhookSubscriptionCreate: { webhookSubscription: null, userErrors: [] } } }, //     null sub
+    ];
+    for (const shape of shapes) {
+      const res = await registerWebhookSubscriptions(
+        { shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: [SUBS[0]!] },
+        fetchStub(() => ({ ok: true, status: 200, json: async () => shape })),
+      );
+      expect(res, `shape ${JSON.stringify(shape)}`).toEqual({ registered: [], failed: ["APP_UNINSTALLED"] });
+    }
+  });
+
   it("classifies a non-2xx (401/403 for a missing scope) as failed and never throws", async () => {
     const res = await registerWebhookSubscriptions(
       { shopDomain: SHOP, parentAccessToken: PARENT, subscriptions: [SUBS[1]!] },
