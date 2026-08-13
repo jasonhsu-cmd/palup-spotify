@@ -395,3 +395,110 @@ export async function createDelegateAccessToken(
     return null;
   }
 }
+
+// ── Shop-specific webhook registration (legacy install flow) ─────────────────────────────────────────
+//
+// The linked app config sets `use_legacy_install_flow = true`, which is INCOMPATIBLE with declarative
+// `[webhooks]` subscriptions ([S1]/the app TOML). Under that flow, webhooks must be registered
+// SHOP-SPECIFICALLY via the Admin API during install. The `/shopify/webhooks/*` handler routes already
+// exist (routes/shopify-webhooks.ts); this is the missing producer that subscribes Shopify to them.
+//
+// [S7] shopify.dev — `webhookSubscriptionCreate` mutation, GraphQL Admin API **2026-07** (same version
+//      picker "latest" as [S3]). VERIFIED on 2026-08-14: the input field is `uri` (NOT the deprecated
+//      `callbackUrl`), and `format` is a `WebhookSubscriptionFormat` enum whose value here is `JSON`.
+//      https://shopify.dev/docs/api/admin-graphql/latest/mutations/webhookSubscriptionCreate
+//   • Signature: `mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!,
+//     $webhookSubscription: WebhookSubscriptionInput!)`; payload `{ webhookSubscription, userErrors }`.
+//   • Creating a subscription needs no EXTRA scope, but each TOPIC needs its resource read scope
+//     (PRODUCTS_* → read_products, INVENTORY_LEVELS_UPDATE → read_inventory, APP_UNINSTALLED → none). The
+//     PARENT token holds only what the merchant granted at install, so a topic whose scope was not granted
+//     comes back as a `userErrors` failure — which is exactly why this is best-effort (see the call site).
+
+/** One subscription to create: a GraphQL `WebhookSubscriptionTopic` enum name and an absolute https URL on
+ *  THIS app host. Both come from OPERATOR CONFIG at the composition root — never from the shop or a
+ *  request (SSRF defence): the `uri` decides where Shopify posts, so it must never be attacker-derived. */
+export interface WebhookSubscriptionSpec {
+  topic: string;
+  uri: string;
+}
+
+/** The outcome, in closed-set topic names only. NEVER the token, never a raw Shopify `userErrors` message —
+ *  those must not enter a log or an immutable audit record (NN#5). Tallies are the whole contract. */
+export interface WebhookRegistrationResult {
+  registered: string[];
+  failed: string[];
+}
+
+/** The mutation text ([S7]). A module constant, never built from input. The input field is `uri`, not the
+ *  deprecated `callbackUrl`. */
+const WEBHOOK_SUBSCRIPTION_CREATE_MUTATION = `mutation webhookSubscriptionCreate($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+    webhookSubscription { id }
+    userErrors { field message }
+  }
+}`;
+
+/**
+ * Register each webhook subscription against the shop's Admin API, authenticated by the PARENT offline
+ * token (the same one used to mint the delegate). Mirrors `createDelegateAccessToken`:
+ *   • host RE-VALIDATED before any fetch — the Admin token must never egress to a non-myshopify host, the
+ *     same credential-exfiltration defence the other identity fns apply;
+ *   • NEVER throws — a per-topic transport fault, a non-2xx, a top-level `errors` array or a non-empty
+ *     `userErrors` is a `failed` tally, not an exception;
+ *   • leaks NOTHING upward — only closed-set topic names, never the token or the raw `userErrors` text.
+ *
+ * Returns WITHOUT any fetch (empty tallies) when the host is invalid, the token is empty, or there are no
+ * subscriptions — so an unconfigured or back-compat caller makes zero outbound calls.
+ */
+export async function registerWebhookSubscriptions(
+  args: { shopDomain: string; parentAccessToken: string; subscriptions: readonly WebhookSubscriptionSpec[] },
+  fetchFn: typeof fetch = fetch,
+): Promise<WebhookRegistrationResult> {
+  const registered: string[] = [];
+  const failed: string[] = [];
+  // Same leak boundary as the other identity fns: no fetch at all for a host we do not recognise, an empty
+  // token, or nothing to do. The Admin token would otherwise be POSTed to whatever host was supplied.
+  if (!isValidShopDomain(args.shopDomain)) return { registered, failed };
+  if (!args.parentAccessToken) return { registered, failed };
+  const subscriptions = args.subscriptions ?? [];
+  if (subscriptions.length === 0) return { registered, failed };
+
+  const endpoint = `https://${args.shopDomain}/admin/api/${ADMIN_API_VERSION}/graphql.json`;
+  for (const sub of subscriptions) {
+    try {
+      const res = await fetchFn(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-shopify-access-token": args.parentAccessToken },
+        body: JSON.stringify({
+          query: WEBHOOK_SUBSCRIPTION_CREATE_MUTATION,
+          variables: { topic: sub.topic, webhookSubscription: { uri: sub.uri, format: "JSON" } },
+        }),
+      });
+      if (!res.ok) {
+        failed.push(sub.topic);
+        continue;
+      }
+      const json = (await res.json()) as {
+        data?: { webhookSubscriptionCreate?: { webhookSubscription?: { id?: unknown } | null; userErrors?: unknown[] } };
+        errors?: unknown[];
+      } | null;
+      // A GraphQL 200 can still be a failure two ways: a top-level `errors` array (request-level) or a
+      // populated `userErrors` (mutation-level — e.g. a topic whose read scope was not granted). Both fail.
+      if (Array.isArray(json?.errors) && json.errors.length > 0) {
+        failed.push(sub.topic);
+        continue;
+      }
+      const payload = json?.data?.webhookSubscriptionCreate;
+      if (payload && Array.isArray(payload.userErrors) && payload.userErrors.length > 0) {
+        failed.push(sub.topic);
+        continue;
+      }
+      registered.push(sub.topic);
+    } catch {
+      // A per-topic transport fault is a `failed` tally, never an exception carrying the parent token or a
+      // stack upward — one topic failing must not abandon the rest.
+      failed.push(sub.topic);
+    }
+  }
+  return { registered, failed };
+}
