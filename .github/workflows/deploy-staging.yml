@@ -106,6 +106,12 @@ jobs:
           # straight on Cloud Run (docs/DEPLOY.md's go-live step) would otherwise have it silently reverted
           # to false by the very next merge-deploy, because --set-env-vars below REPLACES the whole set.
           MERCHANT_CRED_READBACK_ENABLED: ${{ vars.MERCHANT_CRED_READBACK_ENABLED || 'false' }}
+          # Self-serve install (#291) — the OPT-IN shared base key for merchant-cred custody. Ships dark via
+          # `|| 'false'`, same revert-guard rationale as READBACK above (a bare Cloud Run flip would be
+          # reverted by the next merge-deploy). Enabling ALSO requires a high-entropy shared base secret
+          # provisioned under the `__shared__` scope of the palup-secrets blob (secret name
+          # `MEMORY_ENCRYPTION_KEY__merchant-cred`); the flag alone is fail-closed without it.
+          MERCHANT_CRED_SHARED_KEY_ENABLED: ${{ vars.MERCHANT_CRED_SHARED_KEY_ENABLED || 'false' }}
           # D2 — the named fallback region/grounding mode for a tenant with NO pl_merchant row (staging's
           # `demo`). Registry merchants are served under their own row's values and ignore these entirely.
           # Defaulted here so the pair is never emitted empty, and so the value is VISIBLE rather than
@@ -139,6 +145,7 @@ jobs:
           for pair in "MERCHANT_REGION=${MERCHANT_REGION}" "MERCHANT_GROUNDING_MODE=${MERCHANT_GROUNDING_MODE}" \
                       "WIDGET_AUTH_REQUIRED=${WIDGET_AUTH_REQUIRED}" \
                       "MERCHANT_CRED_READBACK_ENABLED=${MERCHANT_CRED_READBACK_ENABLED}" \
+                      "MERCHANT_CRED_SHARED_KEY_ENABLED=${MERCHANT_CRED_SHARED_KEY_ENABLED}" \
                       "SHOPIFY_APP_CLIENT_ID=${SHOPIFY_APP_CLIENT_ID:-}" \
                       "SHOPIFY_INSTALL_REDIRECT_URI=${SHOPIFY_INSTALL_REDIRECT_URI:-}" \
                       "SHOPIFY_INSTALL_REGION=${SHOPIFY_INSTALL_REGION:-}" \
@@ -184,6 +191,7 @@ jobs:
           ENVS="${ENVS}@PALUP_REQUIRE_DATABASE_URL=true"
           ENVS="${ENVS}@WIDGET_AUTH_REQUIRED=${WIDGET_AUTH_REQUIRED}"
           ENVS="${ENVS}@MERCHANT_CRED_READBACK_ENABLED=${MERCHANT_CRED_READBACK_ENABLED}"
+          ENVS="${ENVS}@MERCHANT_CRED_SHARED_KEY_ENABLED=${MERCHANT_CRED_SHARED_KEY_ENABLED}"
           ENVS="${ENVS}@WIDGET_EMBED_KEYS={\"demo-embed-key\":\"demo\"}"
           ENVS="${ENVS}@SHOPIFY_STORES={\"demo\":\"palup-skincare-jason.myshopify.com\"}"
           ENVS="${ENVS}@MERCHANT_REGION=${MERCHANT_REGION}"
