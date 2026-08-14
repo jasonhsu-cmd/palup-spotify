@@ -120,6 +120,48 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > recall/latency number in this repo is real — the fakes say nothing about semantic retrieval), and the
 > fact that a narrowed catalog is a **partial** one, mitigated in-prompt by a rule forbidding "we don't
 > carry that" from mere absence but not eliminated.
+>
+> ---
+> **OWNER PROMOTION DECISION — `CATALOG_RETRIEVAL` (PROPOSED; the named owner records it by merging this
+> PR).** Named owner: **jason.hsu@framy.co**. The merge commit of this PR is the dated record of the
+> decision; the Audit Log entry at each per-tenant flip is the operational record.
+>
+> *Classification.* `CATALOG_RETRIEVAL` is a **product feature**, not agent self-modification: it narrows
+> the CATALOG block of the prompt to the **top-k** products most relevant to the shopper's turn instead of
+> rendering the merchant's whole catalog — a cost/relevance win, and the retrieval architecture the
+> larger-catalog escape (ADR-0020 D2/D5) is built on. **Scope caveat, verified 2026-08-14:** today it
+> operates within the SAME ~1000-product ceiling as full-render grounding (`catalog-index.ts`
+> `MAX_INDEXED_PRODUCTS = 1000` hard-refuses above it; `shopify-grounding.ts` `catalog-ceiling-exceeded`), so
+> it does **not** by itself serve catalogs above 1000 SKUs — raising that ceiling (and adding a pgvector ANN
+> adapter) is separate, unbuilt A2 work. It is code humans wrote and a human operator enables. It **remains
+> a §3.1 shopper-facing behaviour change** (it changes which products/facts the agent sees and says — a
+> money/accuracy risk: wrong, stale, or missing product claims), so it is **not ungoverned**. This decision
+> changes the *promotion bar*, not the existence of the gate.
+>
+> *Enablement bar (ALL required, per tenant to be served):*
+> 1. **Eval gate — recorded, on REAL embeddings.** A recorded `pnpm eval:retrieval` pass (real Vertex
+>    embeddings, the production embedding model) grading recall@k + no-wrong-product against a corpus
+>    representative of the tenant's catalog. The CI `pnpm eval` (mock) gate does **not** satisfy this — the
+>    real number comes only from `eval:retrieval` (`packages/widget-backend/src/eval-retrieval.ts`), whose
+>    output is retained under `reports/`.
+> 2. **Shadow smoke test — recorded.** A recorded `pnpm shadow:retrieval` pass (champion full-catalog vs
+>    candidate top-k) with **zero** fabricated / stale / missing-product violations.
+> 3. **Named-owner sign-off**, recorded by merging the enablement change and in the Audit Log at flip.
+>
+> *Canary is WAIVED for this feature* — the single deviation from §5's `eval → shadow → canary → approve`.
+> Justification: the compensating controls give the rollback safety a 1–5% canary provides. The flag is
+> enabled **per tenant** (staged, one merchant at a time, never global) and the **Kill Switch** halts it
+> instantly at that scope (NN #4), so a bad flip is contained and reverted without a traffic-percentage
+> ramp. A live canary stays RECOMMENDED where a merchant's traffic allows, but is not a blocker for this
+> feature. This waiver is **scoped to `CATALOG_RETRIEVAL` alone** — every other Wave-4 flag
+> (`PRODUCT_CITATIONS`, `PRODUCT_CARDS`, `PRODUCT_FACTS_HYDRATION`, …) keeps the full
+> `eval → shadow → canary → approve` promotion unless separately reclassified by the owner.
+>
+> *Non-waivable protections that REMAIN in force (untouched by this decision):* the un-silenceable boot
+> warning naming every on-flag (`server.ts` / `wave4-composition.test.ts`); the Kill Switch at the flip
+> scope; the in-prompt partial-catalog rule (`CATALOG_SUBSET_RULE` — never infer "we don't carry that" from
+> mere absence); the standing eval floor; per-tenant instant reversibility.
+> ---
 
 > **Product citations (`PRODUCT_CITATIONS` flag) — NOT yet flipped, no owner assigned (E2).**
 > `packages/widget-brain` can prefix each rendered CATALOG line with a per-turn citation tag

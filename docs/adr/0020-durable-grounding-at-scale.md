@@ -53,6 +53,11 @@ and cross-store erasure problem. *Fallback:* if the eval gate shows degraded ret
 with this embedding to serve shoppers still passes the standing eval gate → shadow → canary → human
 promotion. Re-confirm the 3072-default and the exact task-type params from the Vertex model page before A2
 pins the corpus manifest `{model, dimension}`.
+*Amended (owner decision, `docs/HITL-POLICY.md` → "OWNER PROMOTION DECISION — `CATALOG_RETRIEVAL`"):* the
+**canary** stage is WAIVED for `CATALOG_RETRIEVAL` specifically — its bar is a recorded real-Vertex
+`eval:retrieval` + `shadow:retrieval` pass + named-owner sign-off, with per-tenant staged enablement and the
+Kill Switch as the compensating rollback control. The eval-gate and shadow requirements, and this model/dim
+decision, are unchanged; the waiver is scoped to this one flag.
 
 ### D4 — Queue port + worker runtime
 Build the `QueuePort` ADR-0006 already names (enqueue/schedule + publish/subscribe, tenant-scoped ctx, a
