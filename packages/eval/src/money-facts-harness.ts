@@ -1,6 +1,6 @@
 import { createBrain, DEFAULT_CATALOG_RETRIEVAL_K, DEFAULT_POLICY, MockCommerceAdapter, type Brain } from "@palup/widget-brain";
 import { createInMemoryProductFactsStore } from "@palup/platform-ports";
-import type { GroundingContext, GroundingPort, ModelPort } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, GroundingShell, ModelPort } from "@palup/platform-ports";
 
 // go-live §B — the MONEY-FACTS eval harness. It exercises the A1b fresh-price serving path END TO END:
 // build a brain with retrieval + hydration on, seed the Tier-2 fact store, run the shopper's price
@@ -51,6 +51,9 @@ export async function buildMoneyFactsBrain(spec: MoneyFactsCase, model: ModelPor
   const grounding: GroundingPort = {
     async getContext(tenantId) {
       return { tenantId, brandName: "Test Store", products, policy: { returns: "30 days", shipping: "free over $75" } };
+    },
+    async getShell(tenantId): Promise<GroundingShell> {
+      return { tenantId, brandName: "Test Store", policy: { returns: "30 days", shipping: "free over $75" } };
     },
   };
   // Nearest-first on the case's REAL ids only, so hydration applies exactly to them.

@@ -14,6 +14,7 @@ export { EMBED_PURPOSES, canEmbed, requireEmbedInputs, requireEmbedAlignment } f
 export type {
   GroundingPort,
   GroundingContext,
+  GroundingShell,
   Product,
   StorePolicy,
 } from "./grounding-port.js";

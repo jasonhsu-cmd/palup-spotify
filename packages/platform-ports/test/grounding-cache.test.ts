@@ -17,6 +17,10 @@ function fakeInner() {
       if (state.mode === "hang") return new Promise<GroundingContext>(() => {}); // never resolves
       return state.ctx(tenantId);
     },
+    async getShell(tenantId) {
+      const { brandName, policy } = state.ctx(tenantId);
+      return { tenantId, brandName, policy };
+    },
   };
   return { state, port };
 }
@@ -81,7 +85,10 @@ describe("createCachingGroundingPort", () => {
   });
 
   it("fails closed (never launders) when the upstream returns a MISMATCHED tenant (F2)", async () => {
-    const inner: GroundingPort = { async getContext() { return ctxFor("attacker-tenant", 3); } }; // wrong tenant!
+    const inner: GroundingPort = {
+      async getContext() { return ctxFor("attacker-tenant", 3); }, // wrong tenant!
+      async getShell() { const { tenantId, brandName, policy } = ctxFor("attacker-tenant", 3); return { tenantId, brandName, policy }; },
+    };
     const cached = createCachingGroundingPort(inner, new InMemoryRuntimeStore(), { ttlSeconds: 60 });
     const out = await cached.getContext("victim");
     expect(out.tenantId).toBe("victim");

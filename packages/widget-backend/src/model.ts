@@ -1,4 +1,4 @@
-import type { CommercePort, GroundingContext, GroundingPort, ModelPort, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
+import type { CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
 import { createRedactingModelPort, createCachingGroundingPort } from "@palup/platform-ports";
 import { MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
@@ -66,6 +66,18 @@ export function createGroundingPort(
         return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch).getContext(tenantId);
       if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
       return fixtures.getContext(tenantId);
+    },
+    async getShell(tenantId: string): Promise<GroundingShell> {
+      const outcome = await resolveStorefrontCredential(tenantId, {
+        secrets,
+        credRead: opts.credRead,
+        readbackEnabled: opts.readbackEnabled,
+        shopDomainFor: opts.shopDomainFor,
+      });
+      if (outcome.status === "live")
+        return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch).getShell(tenantId);
+      if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
+      return fixtures.getShell(tenantId);
     },
   };
   return createCachingGroundingPort(router, store);

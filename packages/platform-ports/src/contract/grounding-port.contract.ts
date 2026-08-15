@@ -18,5 +18,15 @@ export function runGroundingPortContract(makeAdapter: () => GroundingPort): void
         expect(p.price.length).toBeGreaterThan(0);
       }
     });
+
+    it("getShell returns the same brand + policy as getContext, without products", async () => {
+      const a = makeAdapter();
+      const ctx = await a.getContext("demo");
+      const shell = await a.getShell("demo");
+      expect(shell.tenantId).toBe(ctx.tenantId);
+      expect(shell.brandName).toBe(ctx.brandName);
+      expect(shell.policy).toEqual(ctx.policy);
+      expect("products" in (shell as object)).toBe(false);
+    });
   });
 }

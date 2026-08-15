@@ -23,6 +23,7 @@ function bigCatalog(): GroundingContext {
 
 const groundingOf = (ctx: GroundingContext): GroundingPort => ({
   async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; },
+  async getShell() { return { tenantId: ctx.tenantId, brandName: ctx.brandName, policy: ctx.policy }; },
 });
 
 const fakeRetriever = (ids: string[]): CatalogRetrieverPort => ({

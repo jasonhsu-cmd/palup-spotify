@@ -49,7 +49,10 @@ function catalogOf(n: number, extra: Partial<Product> = {}): GroundingContext {
 }
 
 function groundingOf(ctx: GroundingContext): GroundingPort {
-  return { async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; } };
+  return {
+    async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; },
+    async getShell() { return { tenantId: ctx.tenantId, brandName: ctx.brandName, policy: ctx.policy }; },
+  };
 }
 
 function fakeRetriever(ids: string[]): CatalogRetrieverPort {

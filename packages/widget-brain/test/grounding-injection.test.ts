@@ -87,6 +87,9 @@ describe("catalog injection hardening", () => {
           policy: { returns: "<p>30-day returns &amp; refunds</p>", shipping: "" },
         };
       },
+      async getShell(tenantId) {
+        return { tenantId, brandName: "Acme <b>Store</b>", policy: { returns: "<p>30-day returns &amp; refunds</p>", shipping: "" } };
+      },
     };
     const spy = vi.fn<ModelPort["complete"]>(async () => ({ text: "ok", model: "spy" }));
     const brain = createBrain({ complete: spy }, grounding);

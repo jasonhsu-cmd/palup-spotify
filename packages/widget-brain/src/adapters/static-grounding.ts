@@ -1,4 +1,4 @@
-import type { GroundingContext, GroundingPort } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, GroundingShell } from "@palup/platform-ports";
 
 // Rich in-memory demo catalog (the "Auria" store) — stands in for the Shopify Storefront-MCP/Catalog
 // adapter, which implements the same port later (ADR-0001). Tenant-scoped.
@@ -66,5 +66,10 @@ export class StaticGroundingAdapter implements GroundingPort {
       return { tenantId, brandName: fx.brandName, products: fx.products.map((p) => ({ ...p })), policy: { ...fx.policy } };
     }
     return { tenantId, brandName: "this store", products: [], policy: { returns: "", shipping: "" } };
+  }
+
+  async getShell(tenantId: string): Promise<GroundingShell> {
+    const { brandName, policy } = await this.getContext(tenantId);
+    return { tenantId, brandName, policy };
   }
 }
