@@ -30,6 +30,7 @@ EXPECT=(
   "Application E2E (blocking pre-promotion gate)"
   "Control-plane self-improvement E2E (mock)"
   "Embed round-trip E2E (mock)"
+  "pgvector ANN adapter (testcontainer)"
 )
 
 die() { echo "REFUSE #$PR: $*" >&2; exit 1; }
@@ -77,6 +78,7 @@ gate_step "Self-improvement eval gate (safety floor + no-regression)" "pnpm eval
 gate_step "Application E2E (blocking pre-promotion gate)" "pnpm e2e"
 gate_step "Control-plane self-improvement E2E (mock)" "pnpm e2e:monitor"
 gate_step "Embed round-trip E2E (mock)" "pnpm e2e:embed"
+gate_step "pgvector ANN adapter (testcontainer)" "pnpm test:pgvector"
 
 # The diff MUST be fetched. A transient failure once left this empty and every check below "passed" over
 # nothing while still merging — an absent measurement reading as a pass. Retry, then refuse.

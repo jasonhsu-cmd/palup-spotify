@@ -1,4 +1,4 @@
-import { GenericContainer, type StartedTestContainer } from "testcontainers";
+import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import { pgPoolSqlFromUrl, type PgPoolSql, type Sql } from "../../src/sql.js";
 
 // Docker reachability: the merge-gate sets PGVECTOR_TESTCONTAINER unset (⇒ required);
@@ -12,6 +12,12 @@ export async function withPgvector(fn: (sql: Sql) => Promise<void>): Promise<voi
     container = await new GenericContainer("pgvector/pgvector:pg16")
       .withEnvironment({ POSTGRES_PASSWORD: "test", POSTGRES_DB: "palup" })
       .withExposedPorts(5432)
+      // The container reports "started" before Postgres accepts connections, causing an
+      // intermittent "the database system is starting up" error. The pg image logs
+      // "database system is ready to accept connections" TWICE on a fresh init: once for the
+      // initdb bootstrap server (which then shuts down and restarts), once for the final
+      // server. Waiting for the 2nd occurrence avoids racing the init-then-restart cycle.
+      .withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/, 2))
       .start();
     const url = `postgres://postgres:test@${container.getHost()}:${container.getMappedPort(5432)}/palup`;
     sql = pgPoolSqlFromUrl(url);
