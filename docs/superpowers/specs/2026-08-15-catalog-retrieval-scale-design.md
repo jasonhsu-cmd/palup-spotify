@@ -156,12 +156,12 @@ guard enforces it fail-closed).
   the `vector` extension, so it cannot exercise HNSW DDL/recall (ADR-0020 refinement, 2026-08-08). S1's
   contract + recall tests must run against a real Postgres+pgvector — a Docker service / testcontainer
   (e.g. `pgvector/pgvector:pg16`).
-- **⚠️ OPEN PREREQUISITE:** the local `merge-gate.sh` runs `pnpm test` on the dev machine with no Docker
-  assumption. Standing up a pgvector container in that gate is a real infra decision. Options to resolve at
-  plan time: (a) a dedicated gate step that boots a pgvector testcontainer (adds Docker as a gate dependency);
-  (b) mark the pgvector suite `describe.skipIf(!pgvectorAvailable)` locally and run it in a separate CI job
-  that has Docker. **This must be settled before/within the S1 plan** — without a real-pgvector run, S1 is
-  unverified (green ≠ correct).
+- **DECIDED (owner jason.hsu, 2026-08-15): a pgvector testcontainer as a merge-gate step.** The S1
+  contract + recall suite runs against a real `pgvector/pgvector:pg16` container booted within the
+  merge-gate (a dedicated gate step, or folded into `pnpm test` behind a Docker-backed testcontainer — the
+  S1 plan picks the exact wiring). This adds Docker as a merge-gate dependency, accepted deliberately so the
+  ANN adapter is genuinely exercised (pglite cannot). The no-weakening gate step names must be updated in
+  lockstep (`merge-gate.sh` EXPECT + `ci.yml`) so the step can't be silently dropped.
 - Unit/adapter tests: parameterized VectorPort contract on real pgvector; dimension-mismatch rejection;
   `text`-query unsupported; `migrate()` idempotency (run twice); erasure transaction; namespace isolation;
   the ~5k recall spot-check.
@@ -210,10 +210,7 @@ guard enforces it fail-closed).
   `CATALOG_RETRIEVAL` enablement (replace the process-global flag) and a retrieval-scoped kill the `/chat`
   path reads; produce the recorded eval+shadow evidence the §5 bar requires.
 
-## 7. Open questions for review
-1. **S1 CI/Docker** (§4.9): dedicated gate step with a pgvector testcontainer, or a separate Docker-enabled CI
-   job with a local skip? (Blocks S1 verification.)
-2. **Table name / layout** (§4.3): separate `vp_ann` table (spec'd) vs a typed column added beside the jsonb
-   one — confirm the separate-table choice.
-3. **Selection flag** (§4.7): `VECTOR_ANN` env flag (spec'd) vs corpus-size auto-selection — confirm explicit
-   flag (no magic).
+## 7. Review decisions (settled 2026-08-15, owner jason.hsu)
+1. **S1 CI** — **pgvector testcontainer as a merge-gate step** (Docker accepted as a gate dependency). See §4.9.
+2. **Table layout** — **separate `vp_ann` table** (confirmed). See §4.3.
+3. **Selection** — **explicit `VECTOR_ANN` env flag**, no corpus-size auto-selection (confirmed). See §4.7.
