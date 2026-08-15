@@ -109,10 +109,13 @@ export class PgVectorStore implements VectorPort {
       return rows.map((r) => ({ id: r.id, score: Number(r.score), metadata: r.metadata ?? undefined }));
     });
   }
-  async deleteById(): Promise<void> {
-    throw new Error("PgVectorStore: not implemented");
+  async deleteById(namespace: string, ids: string[]): Promise<void> {
+    const ns = requireNamespace(namespace);
+    if (ids.length === 0) return;
+    await this.sql.query("DELETE FROM vp_ann WHERE namespace=$1 AND id = ANY($2::text[])", [ns, ids]);
   }
-  async deleteNamespace(): Promise<void> {
-    throw new Error("PgVectorStore: not implemented");
+  async deleteNamespace(namespace: string): Promise<void> {
+    const ns = requireNamespace(namespace);
+    await this.sql.query("DELETE FROM vp_ann WHERE namespace=$1", [ns]);
   }
 }
