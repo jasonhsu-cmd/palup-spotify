@@ -4,7 +4,7 @@
 # "checks passed" — never treat it as a pass signal.
 #
 # LOCAL GATE (owner decision 2026-08-07). GitHub CI (`ci.yml`) no longer runs on pull requests — it runs
-# only on `push: main`, purely as the deploy gate. So this script RUNS THE FIVE GATE STEPS LOCALLY against
+# only on `push: main`, purely as the deploy gate. So this script RUNS THE SEVEN GATE STEPS LOCALLY against
 # the PR head before merging, instead of reading a GitHub Actions run. Rationale: a GitHub Actions outage
 # must not be able to block a merge, and CI minutes are reserved for the deploy path. Trust model is
 # unchanged (no branch protection; the merger runs this honestly); what is lost is CI's clean room, so it
@@ -19,7 +19,7 @@ set -uo pipefail
 PR="${1:?usage: merge-gate.sh <pr>}"
 R="${MERGE_GATE_REPO:-jasonhsu-cmd/palup-spotify}"
 
-# The five gate steps. HARDCODED ON PURPOSE — never derived from the PR's own ci.yml, or a PR that
+# The seven gate steps. HARDCODED ON PURPOSE — never derived from the PR's own ci.yml, or a PR that
 # deletes a gate step would be measured against its own weakened definition. Used TWICE below: to run the
 # gate locally, and (by the no-weakening check) to guard against a PR deleting these names from ci.yml,
 # which still runs them on push:main as the deploy gate.
@@ -30,6 +30,7 @@ EXPECT=(
   "Application E2E (blocking pre-promotion gate)"
   "Control-plane self-improvement E2E (mock)"
   "Embed round-trip E2E (mock)"
+  "pgvector ANN adapter (testcontainer)"
 )
 
 die() { echo "REFUSE #$PR: $*" >&2; exit 1; }
@@ -46,7 +47,7 @@ read -r BASE DRAFT STATE HEAD <<<"$(gh pr view "$PR" -R "$R" \
 [ "${#HEAD}" -eq 40 ] || die "head sha is not a full 40-char sha — the API will not match a short sha"
 echo "head: $HEAD"
 
-# --- LOCAL execution of the five gate steps against the PR head (replaces reading a GitHub CI run) ------
+# --- LOCAL execution of the seven gate steps against the PR head (replaces reading a GitHub CI run) -----
 # A dirty tree would mean we test something other than the PR head — refuse rather than measure the wrong
 # thing (the same failure class as the empty-diff bug guarded below).
 [ -z "$(git status --porcelain)" ] || die "working tree is dirty — commit or stash before running the gate"
@@ -77,6 +78,19 @@ gate_step "Self-improvement eval gate (safety floor + no-regression)" "pnpm eval
 gate_step "Application E2E (blocking pre-promotion gate)" "pnpm e2e"
 gate_step "Control-plane self-improvement E2E (mock)" "pnpm e2e:monitor"
 gate_step "Embed round-trip E2E (mock)" "pnpm e2e:embed"
+# Cannot pass vacuously: (a) refuses if Docker is unreachable rather than silently skipping every
+# pgvector test, (b) forces PGVECTOR_TESTCONTAINER to a value that is NOT "off" so an inherited/local skip flag can never
+# disable this REQUIRED step, and (c) greps its own output for a non-zero passed count — a testcontainer
+# run that reports 0 tests executed (e.g. every file skipIf'd) fails the gate instead of reading green.
+gate_step "pgvector ANN adapter (testcontainer)" '
+  docker info >/dev/null 2>&1 || { echo "Docker is not reachable — required for the pgvector ANN adapter gate" >&2; exit 1; }
+  OUT=$(PGVECTOR_TESTCONTAINER=required pnpm test:pgvector 2>&1)
+  STATUS=$?
+  echo "$OUT"
+  [ $STATUS -eq 0 ] || exit 1
+  echo "$OUT" | grep -qE "Tests[[:space:]]+[1-9][0-9]*[[:space:]]+passed" \
+    || { echo "pgvector suite reported zero passed tests — refusing a vacuous gate" >&2; exit 1; }
+'
 
 # The diff MUST be fetched. A transient failure once left this empty and every check below "passed" over
 # nothing while still merging — an absent measurement reading as a pass. Retry, then refuse.

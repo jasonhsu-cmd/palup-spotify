@@ -4,7 +4,7 @@ name: ci
 # application E2E. No auto-deploy: promotion to prod is a human action (locked decision §1).
 on:
   # main ONLY (owner decision 2026-08-07). PER-PR CI IS DISABLED: pull requests are gated LOCALLY by
-  # `.claude/scripts/merge-gate.sh`, which runs these same five steps on the merger's machine before a
+  # `.claude/scripts/merge-gate.sh`, which runs these same seven steps on the merger's machine before a
   # merge — so a GitHub Actions outage can never block a merge, and CI minutes are reserved for the deploy
   # path. This run on `push: main` is kept ONLY as the gate `deploy-staging.yml` keys off
   # (`workflow_run: [ci]`, deploys iff conclusion == success), so nothing red reaches staging. A branch
@@ -50,3 +50,5 @@ jobs:
         run: pnpm e2e:monitor
       - name: Embed round-trip E2E (mock)
         run: pnpm e2e:embed
+      - name: pgvector ANN adapter (testcontainer)
+        run: pnpm test:pgvector
