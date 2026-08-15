@@ -1,5 +1,6 @@
 import { createInMemoryVectorStore, type VectorPort } from "@palup/platform-ports";
 import { PostgresVectorStore } from "./postgres-vector-store.js";
+import { PgVectorStore } from "./pgvector-store.js";
 import { pgPoolSqlFromUrl, type Sql } from "./sql.js";
 
 // Composition root for the vector store (ADR-0001 `vector` port; ADR-0015 durable cross-visit memory).
@@ -24,6 +25,13 @@ import { pgPoolSqlFromUrl, type Sql } from "./sql.js";
 export async function createVectorStore(sql?: Sql): Promise<{ store: VectorPort; kind: string }> {
   const url = process.env.DATABASE_URL;
   if (url) {
+    if (process.env.VECTOR_ANN === "true") {
+      const dimension = Number(process.env.PALUP_EMBED_DIMENSION ?? 1536);
+      const efSearch = process.env.HNSW_EF_SEARCH ? Number(process.env.HNSW_EF_SEARCH) : undefined;
+      const store = new PgVectorStore(sql ?? pgPoolSqlFromUrl(url), { dimension, efSearch });
+      await store.migrate();
+      return { store, kind: "ann" };
+    }
     const store = new PostgresVectorStore(sql ?? pgPoolSqlFromUrl(url));
     await store.migrate();
     return { store, kind: "postgres" };
