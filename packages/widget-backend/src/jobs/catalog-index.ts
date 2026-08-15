@@ -646,14 +646,32 @@ async function indexOneTenant(
   }
 
   // ── write ──
-  const records: VectorRecord[] = toEmbed.map((p) => ({
-    id: p.recordId,
-    vector: vectors.get(p.recordId)!,
-    // No `text`, no title, no price: the corpus is a relevance index over product IDS, not a second copy
-    // of the catalog (see productEmbedText). Without `text`, `scoreRecord` can only rank these records by
-    // cosine, so a text-modality query can never silently match a stale copy of merchant content.
-    metadata: { kind: "product", productId: p.productId, contentHash: p.hash },
-  }));
+  // S2 (serving-unlock, Task 1): the corpus metadata carries the STABLE render fields — `title` and
+  // `variantId` — so a later retriever can build a shopper-facing product card without a second fetch of
+  // the whole catalog. Price/availability stay OUT (unchanged money/NN#1 invariant — those live in
+  // ProductFactsPort and are re-confirmed at serve time, never read from this corpus). No `text` is
+  // stored: the corpus is still a relevance index over product IDs, not a second copy of the catalog (see
+  // productEmbedText). Without `text`, `scoreRecord` can only rank these records by cosine, so a
+  // text-modality query can never silently match a stale copy of merchant content.
+  const byId = new Map(catalog.products.map((p) => [p.id, p]));
+  const records: VectorRecord[] = toEmbed.map((p) => {
+    const src = byId.get(p.productId);
+    // `title` is guaranteed non-empty by planProducts (a product with no indexable text already refused
+    // the whole catalog upstream), so `src?.title` is defensive, not expected to trigger. `variantId` is
+    // OPTIONAL on `Product` (grounding-port.ts) — absent when the source reports no purchasable variant —
+    // and is carried only when present so the metadata never stores a literal `undefined`.
+    return {
+      id: p.recordId,
+      vector: vectors.get(p.recordId)!,
+      metadata: {
+        kind: "product",
+        productId: p.productId,
+        contentHash: p.hash,
+        title: src?.title ?? "",
+        ...(src?.variantId ? { variantId: src.variantId } : {}),
+      },
+    };
+  });
 
   if (opts.reindex) await deps.vector.deleteNamespace(ns);
   if (records.length > 0) await deps.vector.upsert(ns, records); // ONE call = one transaction (durable adapter)

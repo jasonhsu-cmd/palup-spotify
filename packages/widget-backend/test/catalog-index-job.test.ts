@@ -814,16 +814,23 @@ describe("C3 audit — the write is audited with a reversal an operator can actu
 // ── corpus shape: no stale merchant facts, nothing for retrieval to trip over ──────────────────────
 
 describe("C3 corpus shape — a relevance index over ids, not a copy of the catalog", () => {
-  it("stores the vector + the product id + a content hash, and NO price/title/availability", async () => {
-    const h = harness([product(1, { price: "$99", availableForSale: true })]);
+  it("stores the vector + the product id + a content hash + the stable render fields, and NO price/availability", async () => {
+    // S2 (serving-unlock, Task 1): `title`/`variantId` are now written as STABLE render fields so a later
+    // retriever can build a shopper-facing card without a second catalog fetch. Price/availability remain
+    // OUT — that money/NN#1 invariant is unchanged; only the "no title" half of the old assertion is gone.
+    const h = harness([product(1, { price: "$99", availableForSale: true, variantId: "v1" })]);
     await runCatalogIndex(h, [h.tenantId]);
     const [rec] = await recordsIn(h.vector, h.tenantId);
-    expect(rec!.metadata).toMatchObject({ kind: "product", productId: "gid://shopify/Product/1" });
+    expect(rec!.metadata).toMatchObject({
+      kind: "product",
+      productId: "gid://shopify/Product/1",
+      title: "Product 1",
+      variantId: "v1",
+    });
     expect(typeof (rec!.metadata as { contentHash?: unknown }).contentHash).toBe("string");
     const serialized = JSON.stringify(rec!.metadata);
     expect(serialized).not.toContain("$99"); // a stale price must never be quotable from the corpus
     expect(serialized).not.toContain("availableForSale");
-    expect(serialized).not.toContain("Product 1");
   });
 
   it("keeps the manifest OUT of the vector namespace, so retrieval can never rank it", async () => {
