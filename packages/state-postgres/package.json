@@ -3,13 +3,16 @@
   "version": "0.0.0",
   "type": "module",
   "main": "src/index.ts",
-  "exports": { ".": "./src/index.ts" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "dependencies": {
     "@palup/platform-ports": "workspace:*",
     "@palup/widget-brain": "workspace:*",
     "pg": "^8.13.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.0"
+    "@electric-sql/pglite": "^0.5.0",
+    "testcontainers": "^12.1.0"
   }
 }

@@ -3,5 +3,9 @@ packages:
 allowBuilds:
   # Approved for the live Vertex path (Google's official SDK, Apache-2.0; vet-then-adopt §4).
   '@google/genai': true
+  # testcontainers' optional Docker-over-SSH tunnel support (unused here — local Docker
+  # socket only); denying their native build scripts keeps least-privilege supply chain.
+  cpu-features: false
   esbuild: true
   protobufjs: true
+  ssh2: false
