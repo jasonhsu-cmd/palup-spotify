@@ -1,4 +1,4 @@
-import type { VectorPort, VectorMatch } from "@palup/platform-ports";
+import { requireCleanText, type VectorPort, type VectorRecord, type VectorMatch } from "@palup/platform-ports";
 import type { Sql } from "./sql.js";
 
 // pgvector-HNSW adapter for VectorPort (ADR-0020 D3 / A2). Sibling to PostgresVectorStore (brute-force),
@@ -8,6 +8,20 @@ import type { Sql } from "./sql.js";
 const VECTOR_INDEX_DIM_CAP = 2000; // pgvector `vector` HNSW cap; halfvec above it. RE-CONFIRMED against a
 // live pgvector/pgvector:pg16 container (see task-2-report.md): `vector(D)` + `vector_cosine_ops` for
 // D <= 2000, else `halfvec(D)` + `halfvec_cosine_ops`.
+
+// Same pattern as the sibling adapter (postgres-vector-store.ts): a blank/missing namespace is a
+// cross-tenant wildcard, so we fail closed rather than widen scope; `tenant_id` is a defense-in-depth
+// column derived from widget-memory's Option B `${tenantId}::${anonId}` namespace scheme.
+function requireNamespace(namespace: string): string {
+  if (!namespace || !namespace.trim())
+    throw new Error("VectorPort: a non-blank namespace is required (tenant isolation)");
+  return namespace;
+}
+
+function tenantIdFromNamespace(namespace: string): string {
+  const idx = namespace.indexOf("::");
+  return idx === -1 ? namespace : namespace.slice(0, idx);
+}
 
 export class PgVectorTextQueryUnsupported extends Error {
   constructor() {
@@ -46,8 +60,28 @@ export class PgVectorStore implements VectorPort {
     await this.sql.query("CREATE INDEX IF NOT EXISTS vp_ann_tenant ON vp_ann (tenant_id)");
   }
 
-  async upsert(): Promise<void> {
-    throw new Error("PgVectorStore: not implemented");
+  async upsert(namespace: string, records: VectorRecord[]): Promise<void> {
+    const ns = requireNamespace(namespace);
+    if (records.length === 0) return;
+    for (const rec of records) {
+      requireCleanText(rec.text);
+      if (!rec.vector || rec.vector.length !== this.dimension)
+        throw new Error(
+          `PgVectorStore: record "${rec.id}" must carry a vector of dimension ${this.dimension} ` +
+            `(got ${rec.vector ? rec.vector.length : "none"}) — refusing to store (fail closed)`,
+        );
+    }
+    const tenantId = tenantIdFromNamespace(ns);
+    await this.sql.tx(async (tx) => {
+      for (const rec of records) {
+        await tx.query(
+          `INSERT INTO vp_ann (namespace, tenant_id, id, embedding, metadata)
+           VALUES ($1,$2,$3,$4::${this.colType}(${this.dimension}),$5)
+           ON CONFLICT (namespace, id) DO UPDATE SET embedding = EXCLUDED.embedding, metadata = EXCLUDED.metadata`,
+          [ns, tenantId, rec.id, JSON.stringify(rec.vector), rec.metadata !== undefined ? JSON.stringify(rec.metadata) : null],
+        );
+      }
+    });
   }
   async query(): Promise<VectorMatch[]> {
     throw new Error("PgVectorStore: not implemented");
