@@ -53,6 +53,6 @@ When `catalogRetrievalEnabled` (`:847`) AND a retriever + query are present:
 - **Serving requires `VECTOR_ANN=true`** for >5000 SKUs (pgvector); a >5000 store on the brute-force store would silently truncate at 5000. Document the `VECTOR_ANN` precondition.
 - **Governance:** S2 is build-time/dark; enabling `CATALOG_RETRIEVAL` to serve is still §5 (S4). S2 does NOT flip it.
 
-## 7. Open questions for review
-1. `getShell` port method (spec'd) — confirmed by the owner. Any objection to the `GroundingShell{brandName,policy}` shape?
-2. `MAX_INDEXED_PRODUCTS` = 50000 (the ADR ceiling) — or a lower first-cut cap to bound index time/cost while proving the path? (Indexing 50k is cheap in $ but ~50k batched embeds; a lower cap, e.g. 10k, proves serving sooner.)
+## 7. Review decisions (settled 2026-08-16, owner jason.hsu)
+1. **`getShell` port method + `GroundingShell{brandName,policy}` shape — confirmed.**
+2. **`MAX_INDEXED_PRODUCTS = 50000`** (the full ADR-0020 design ceiling) — batch embedding makes it tractable; the durable "scales" target, not a first-cut cap.
