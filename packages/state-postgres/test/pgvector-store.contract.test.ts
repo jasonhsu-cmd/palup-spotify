@@ -34,9 +34,4 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("PgVectorStore — ANN contract", () => {
     // never masks exact-ordering assertions (ef_search is only load-bearing in the recall spot-check).
     return new PgVectorStore(sql, { dimension: DIMENSION, efSearch: 200 });
   }, DIMENSION);
-
-  // The recall spot-check needs its own (larger, unrelated) namespace and a realistic efSearch — kept
-  // out of the shared-table per-`it` truncation cadence above so it doesn't collide with other tests'
-  // rows if it ever runs concurrently with them (vitest runs `it`s in the same file serially, but the
-  // separate store instance keeps this test self-contained regardless).
 });

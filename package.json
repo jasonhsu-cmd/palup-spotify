@@ -7,7 +7,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "test": "vitest run",
+    "test": "PGVECTOR_TESTCONTAINER=off vitest run",
     "test:watch": "vitest",
     "eval": "tsx packages/eval/src/run.ts",
     "eval:judge": "tsx packages/eval/src/judge-run.ts",
