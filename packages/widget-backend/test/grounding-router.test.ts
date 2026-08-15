@@ -75,3 +75,55 @@ describe("createGroundingPort — credential read-back routing (D2)", () => {
     expect(err).toBeInstanceOf(Error);
   });
 });
+
+// S2 — getShell mirrors getContext's routing exactly (live Shopify shell / refuse / fixtures), just
+// over the brand+policy-only shape. One test per branch, same fixtures/discriminating-tenant choices
+// as the getContext cases above so a `getShell` regression is caught the same way a `getContext` one is.
+describe("createGroundingPort — getShell routing (S2)", () => {
+  it("readback ON + found → serves the merchant's real SHELL via the injected shell fetch", async () => {
+    const g = createGroundingPort(store(), secrets, {
+      readbackEnabled: true,
+      credRead: async () => ({ status: "found", token: "shpat_live" }),
+      shopDomainFor: async () => "acme.myshopify.com",
+      // Deliberately a DIFFERENT fake than shopifyFetch/shopifyShellFetch's sibling — proves getShell
+      // never touches the (paginated) catalog fetch, only the shell-only one.
+      shopifyFetch: async () => { throw new Error("getShell must never call the catalog fetch"); },
+      shopifyShellFetch: async () => ({ shop: { name: "Acme", refundPolicy: { body: "30 days" }, shippingPolicy: { body: "free" } } }),
+    });
+    const shell = await g.getShell("acme");
+    expect(shell.tenantId).toBe("acme");
+    expect(shell.brandName).toBe("Acme");
+    expect(shell.policy).toEqual({ returns: "30 days", shipping: "free" });
+    expect("products" in (shell as object)).toBe(false);
+  });
+
+  it("readback ON + unreadable → fails CLOSED to a safe-empty shell (router does NOT serve fixtures)", async () => {
+    // Same discriminating-tenant reasoning as the getContext case above: "demo" has a real fixture
+    // (brandName "Auria"), so a `refuse → fixtures` regression is provably distinguishable from the
+    // correct refuse→throw→safe-empty-shell outcome asserted below.
+    const g = createGroundingPort(store(), secrets, {
+      readbackEnabled: true,
+      credRead: async () => ({ status: "unreadable", reason: "undecryptable" }),
+      shopDomainFor: async () => "demo-store.myshopify.com",
+    });
+    const shell = await g.getShell("demo");
+    expect(shell.tenantId).toBe("demo");
+    expect(shell.brandName).toBe("this store"); // safe-empty brandName — NOT "Auria" (the demo fixture)
+    expect(shell.policy).toEqual({ returns: "", shipping: "" }); // safe-empty policy — NOT AURIA's real policy
+  });
+
+  it("readback OFF → unchanged SecretsPort path (missing token → fixtures SHELL for demo)", async () => {
+    const g = createGroundingPort(
+      store(),
+      { get: async (_t: string, _n: string) => undefined } as any,
+      {
+        readbackEnabled: false,
+        credRead: async () => ({ status: "unreadable", reason: "undecryptable" }),
+        shopDomainFor: async () => "demo-store.myshopify.com",
+      },
+    );
+    const shell = await g.getShell("demo");
+    expect(shell.brandName).not.toBe("this store"); // demo resolves the AURIA fixture's shell, credRead never consulted
+    expect(shell.brandName).toBe("Auria");
+  });
+});

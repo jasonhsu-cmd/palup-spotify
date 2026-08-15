@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryRuntimeStore, createCachingGroundingPort, type GroundingPort } from "@palup/platform-ports";
-import { StaticGroundingAdapter } from "@palup/widget-brain";
+import { StaticGroundingAdapter } from "../src/index.js";
 
+// S2 — lives here (not platform-ports/test) because it needs a concrete adapter (StaticGroundingAdapter)
+// to run the contract-shaped assertions against. widget-brain already depends on platform-ports (the
+// base port layer), so this direction is legal; the reverse (platform-ports depending on widget-brain)
+// would be a layering inversion and was removed (see the platform-ports package.json history).
 describe("GroundingShell — brand+policy only, no products", () => {
   const adapters: Array<[string, () => GroundingPort]> = [
     ["static", () => new StaticGroundingAdapter()],

@@ -93,6 +93,13 @@ describe("createCachingGroundingPort", () => {
     const out = await cached.getContext("victim");
     expect(out.tenantId).toBe("victim");
     expect(out.products).toEqual([]); // safe-empty, NOT the attacker-tenant catalog
+
+    // getShell must fail closed IDENTICALLY (same F2 guard, grounding-cache.ts): a mismatched inner
+    // tenantId is treated as a fetch failure → the safe-empty SHELL default, never the attacker's brand.
+    const shellOut = await cached.getShell("victim");
+    expect(shellOut.tenantId).toBe("victim");
+    expect(shellOut.brandName).toBe("this store"); // safe-empty, NOT "Brand-attacker-tenant"
+    expect(shellOut.policy).toEqual({ returns: "", shipping: "" });
   });
 
   it("treats a corrupt cached row as a miss (F5)", async () => {

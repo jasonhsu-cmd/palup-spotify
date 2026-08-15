@@ -111,11 +111,7 @@ importers:
         specifier: workspace:*
         version: link:../platform-ports
 
-  packages/platform-ports:
-    devDependencies:
-      '@palup/widget-brain':
-        specifier: workspace:*
-        version: link:../widget-brain
+  packages/platform-ports: {}
 
   packages/state-postgres:
     dependencies:
