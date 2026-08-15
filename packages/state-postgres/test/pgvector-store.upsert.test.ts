@@ -31,6 +31,8 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("PgVectorStore.upsert", () => {
         const s = await migrated(sql);
         await expect(s.upsert("t", [{ id: "b", vector: [1, 0, 0] }])).rejects.toThrow(/dimension/i);
         await expect(s.upsert("t", [{ id: "c", metadata: { x: 1 } }])).rejects.toThrow(/dimension/i);
+        const { rows } = await sql.query("SELECT id FROM vp_ann WHERE namespace='t'");
+        expect(rows).toHaveLength(0);
       });
     },
     120_000,
@@ -46,6 +48,26 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("PgVectorStore.upsert", () => {
           /control character|surrogate/i,
         );
         await expect(s.upsert("", [{ id: "e", vector: [1, 0, 0, 0] }])).rejects.toThrow(/namespace/i);
+        const { rows } = await sql.query("SELECT id FROM vp_ann WHERE namespace='t'");
+        expect(rows).toHaveLength(0);
+      });
+    },
+    120_000,
+  );
+
+  it(
+    "a wrong-dimension record ANYWHERE in a batch rolls back the WHOLE batch (all-or-nothing)",
+    async () => {
+      await withPgvector(async (sql) => {
+        const s = await migrated(sql);
+        await expect(
+          s.upsert("t", [
+            { id: "good", vector: [1, 0, 0, 0] },
+            { id: "bad", vector: [1, 0, 0] },
+          ]),
+        ).rejects.toThrow(/dimension/i);
+        const { rows } = await sql.query("SELECT id FROM vp_ann WHERE namespace='t'");
+        expect(rows).toHaveLength(0);
       });
     },
     120_000,
