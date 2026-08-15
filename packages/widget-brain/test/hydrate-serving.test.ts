@@ -26,8 +26,18 @@ const groundingOf = (ctx: GroundingContext): GroundingPort => ({
   async getShell() { return { tenantId: ctx.tenantId, brandName: ctx.brandName, policy: ctx.policy }; },
 });
 
+// S2 — the render path builds each Product from the hit's own metadata (title/variantId), never a live
+// catalog fetch, so the fake here must carry `metadata.title` (matching bigCatalog's `Product ${n}`
+// naming for id `p${n}`) or nothing would render for the hydrate overlay to act on.
 const fakeRetriever = (ids: string[]): CatalogRetrieverPort => ({
-  async retrieve() { return ids.map((productId, rank): RetrievedProduct => ({ productId, score: 1 - rank / 100 })); },
+  async retrieve() {
+    const hits = ids.map((productId, rank): RetrievedProduct => ({
+      productId,
+      score: 1 - rank / 100,
+      metadata: { title: `Product ${productId.match(/\d+$/)?.[0] ?? productId}` },
+    }));
+    return { hits, corpusProductCount: hits.length };
+  },
 });
 
 interface FakeFacts extends ProductFactsPort {
@@ -92,12 +102,16 @@ describe("A1b — hydrate-by-ID serving (flag ON)", () => {
     expect(facts.calls).toEqual([{ tenantId: "acme", ids: ["p3", "p5"] }]);
   });
 
-  it("fails OPEN: a store error still answers the turn with the un-hydrated catalog price", async () => {
+  it("fails OPEN: a store error still answers the turn, with no price invented (S2 has no live-catalog price to fall back to)", async () => {
+    // Pre-S2, a hydrate failure fell back to the LIVE catalog's own price. S2's render path never carries
+    // a live-catalog price at all (it builds price:"" from corpus metadata; only the hydrate overlay ever
+    // fills it in) — so a hydrate failure here means the un-hydrated product renders with NO price shown,
+    // never a stale/base number invented from a source this path no longer reads.
     const model = new RecordingModelPort();
     const facts = fakeFacts([], { throws: new Error("db down") });
     const d = await brainWithHydration(model, groundingOf(bigCatalog()), fakeRetriever(["p1"]), facts, true).decide(SALES, ASK);
     expect(d.reply).toBeTruthy();               // the turn is answered, not thrown
-    expect(lastSystemPrompt(model)).toMatch(/\$1\b/); // catalog price survives the failure
+    expect(lastSystemPrompt(model)).toContain("Product 1 ()"); // no price number invented on the failure path
   });
 });
 

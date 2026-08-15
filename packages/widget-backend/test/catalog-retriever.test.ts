@@ -128,7 +128,7 @@ describe("E1 — createCatalogRetriever: the query side of the catalog corpus", 
         return { vectors: [[1, 0, 0, 0]], dimension: 4, model: "fake-embed-4d", purpose: "query" };
       },
     };
-    const hits = await createCatalogRetriever({ store, vector, model }).retrieve({
+    const { hits } = await createCatalogRetriever({ store, vector, model }).retrieve({
       tenantId: TENANT,
       query: "q",
       k: 2,
@@ -143,7 +143,7 @@ describe("E1 — createCatalogRetriever: the query side of the catalog corpus", 
       { id: "product:mystery", vector: [9, 9, 9, 9], metadata: { kind: "something-else" } },
     ]);
     const { port } = fakeEmbedder();
-    const hits = await createCatalogRetriever({ store, vector, model: port }).retrieve({
+    const { hits } = await createCatalogRetriever({ store, vector, model: port }).retrieve({
       tenantId: TENANT,
       query: "q",
       k: 10,
@@ -158,7 +158,7 @@ describe("E1 — createCatalogRetriever: the query side of the catalog corpus", 
       { id: catalogRecordId("secret"), vector: [1, 0, 0, 0], metadata: { kind: "product", productId: "secret" } },
     ]);
     const { port } = fakeEmbedder();
-    const hits = await createCatalogRetriever({ store, vector, model: port }).retrieve({
+    const { hits } = await createCatalogRetriever({ store, vector, model: port }).retrieve({
       tenantId: TENANT,
       query: "q",
       k: 10,

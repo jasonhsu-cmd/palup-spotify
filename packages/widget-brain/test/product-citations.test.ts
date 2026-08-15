@@ -50,11 +50,18 @@ function groundingOf(ctx: GroundingContext): GroundingPort {
   };
 }
 
-/** Returns the given ids as hits, in the given order. */
+/** Returns the given ids as hits, in the given order. S2 — the render path builds each Product from the
+ *  hit's own metadata (title/variantId), never a live catalog fetch, so every fake retriever must carry
+ *  `metadata.title` (derived here from the fixture's own `Product ${n}` naming) or nothing would render. */
 function fakeRetriever(ids: string[]): CatalogRetrieverPort {
   return {
     async retrieve() {
-      return ids.map((productId, rank): RetrievedProduct => ({ productId, score: 1 - rank / 100 }));
+      const hits = ids.map((productId, rank): RetrievedProduct => ({
+        productId,
+        score: 1 - rank / 100,
+        metadata: { title: `Product ${productId.match(/\d+$/)?.[0] ?? productId}` },
+      }));
+      return { hits, corpusProductCount: hits.length };
     },
   };
 }

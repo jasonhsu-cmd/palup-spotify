@@ -56,8 +56,17 @@ export async function buildMoneyFactsBrain(spec: MoneyFactsCase, model: ModelPor
       return { tenantId, brandName: "Test Store", policy: { returns: "30 days", shipping: "free over $75" } };
     },
   };
-  // Nearest-first on the case's REAL ids only, so hydration applies exactly to them.
-  const retriever = { async retrieve() { return spec.products.map((p, i) => ({ productId: p.id, score: 1 - i / 100 })); } };
+  // Nearest-first on the case's REAL ids only, so hydration applies exactly to them. S2 — the render path
+  // builds each Product from the hit's own metadata (title/variantId), never a live catalog fetch, so the
+  // fake here must carry `metadata.title` or the harness's cases would render no catalog lines at all.
+  const retriever = {
+    async retrieve() {
+      return {
+        hits: spec.products.map((p, i) => ({ productId: p.id, score: 1 - i / 100, metadata: { title: p.title } })),
+        corpusProductCount: products.length,
+      };
+    },
+  };
 
   const facts = createInMemoryProductFactsStore();
   for (const f of spec.facts) {

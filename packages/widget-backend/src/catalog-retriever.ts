@@ -5,7 +5,7 @@ import {
   type RuntimeStatePort,
   type VectorPort,
 } from "@palup/platform-ports";
-import type { CatalogRetrieverPort, RetrievedProduct } from "@palup/widget-brain";
+import type { CatalogRetrievalResult, CatalogRetrieverPort, RetrievedProduct } from "@palup/widget-brain";
 import {
   CATALOG_CORPUS_PURPOSE,
   MANIFEST_COLLECTION,
@@ -93,11 +93,10 @@ function productIdOf(metadata: Record<string, unknown> | undefined): string | un
  */
 export function createCatalogRetriever(deps: CatalogRetrieverDeps): CatalogRetrieverPort {
   return {
-    async retrieve({ tenantId, query, k }): Promise<RetrievedProduct[]> {
+    async retrieve({ tenantId, query, k }): Promise<CatalogRetrievalResult> {
       const text = query.trim();
       if (!text) throw new CatalogRetrievalUnavailable("catalog-retrieval: refusing to embed a blank query");
       const limit = Math.max(0, Math.floor(k));
-      if (limit === 0) return [];
 
       // ── the manifest first: every check it can answer costs nothing ──
       const manifest = await deps.store.get<CatalogManifest>({ tenantId }, MANIFEST_COLLECTION, MANIFEST_KEY);
@@ -106,6 +105,8 @@ export function createCatalogRetriever(deps: CatalogRetrieverDeps): CatalogRetri
           "catalog-retrieval: no catalog corpus is indexed for this tenant (run `pnpm catalog:index --tenant <id>`)",
         );
       }
+      const corpusProductCount = manifest.products;
+      if (limit === 0) return { hits: [], corpusProductCount };
       if (manifest.purpose !== CATALOG_CORPUS_PURPOSE) {
         // THE B3 (#192) GAP, now catchable. A corpus embedded on the QUERY side reports the same model and
         // the same dimension as a correct one, so `{model, dimension}` cannot see it — and the resulting
@@ -152,9 +153,9 @@ export function createCatalogRetriever(deps: CatalogRetrieverDeps): CatalogRetri
         // calibrated relevance floor — a real floor needs real embeddings and the eval gate to set, and
         // inventing one here would be a number with nothing behind it.
         if (!(m.score > 0)) continue;
-        hits.push({ productId, score: m.score });
+        hits.push({ productId, score: m.score, ...(m.metadata ? { metadata: m.metadata } : {}) });
       }
-      return hits;
+      return { hits, corpusProductCount };
     },
   };
 }
