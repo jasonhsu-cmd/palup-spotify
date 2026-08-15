@@ -1,8 +1,7 @@
 import { describe, beforeAll, afterAll } from "vitest";
-import { GenericContainer, type StartedTestContainer } from "testcontainers";
 import { runVectorPortAnnContract } from "@palup/platform-ports/contract/vector-ann";
-import { PGVECTOR_AVAILABLE } from "./helpers/pgvector-container.js";
-import { pgPoolSqlFromUrl, type PgPoolSql } from "../src/sql.js";
+import { PGVECTOR_AVAILABLE, startPgvectorContainer } from "./helpers/pgvector-container.js";
+import type { Sql } from "../src/sql.js";
 import { PgVectorStore } from "../src/pgvector-store.js";
 
 // Sibling to postgres-vector-store.test.ts's runVectorPortContract wiring, but for the pgvector-HNSW
@@ -15,24 +14,18 @@ import { PgVectorStore } from "../src/pgvector-store.js";
 const DIMENSION = 8;
 
 describe.skipIf(!PGVECTOR_AVAILABLE)("PgVectorStore — ANN contract", () => {
-  let container: StartedTestContainer;
-  let sql: PgPoolSql;
+  let sql: Sql;
+  let stop: () => Promise<void>;
 
   beforeAll(async () => {
-    container = await new GenericContainer("pgvector/pgvector:pg16")
-      .withEnvironment({ POSTGRES_PASSWORD: "test", POSTGRES_DB: "palup" })
-      .withExposedPorts(5432)
-      .start();
-    const url = `postgres://postgres:test@${container.getHost()}:${container.getMappedPort(5432)}/palup`;
-    sql = pgPoolSqlFromUrl(url);
+    ({ sql, stop } = await startPgvectorContainer());
     // Migrate once up front so per-`it` makeAdapter calls only need a cheap TRUNCATE.
     const bootstrap = new PgVectorStore(sql, { dimension: DIMENSION, efSearch: 200 });
     await bootstrap.migrate();
   }, 120_000);
 
   afterAll(async () => {
-    await (sql as unknown as { pool: { end(): Promise<void> } } | undefined)?.pool.end().catch(() => {});
-    await container?.stop();
+    await stop?.();
   }, 120_000);
 
   runVectorPortAnnContract(async () => {
