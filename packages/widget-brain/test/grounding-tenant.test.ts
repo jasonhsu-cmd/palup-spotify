@@ -12,6 +12,9 @@ describe("per-tenant grounding threading", () => {
         seen.push(tenantId);
         return { tenantId, brandName: `T-${tenantId}`, products: [{ id: "p", title: "X", price: "$1", description: "d" }], policy: { returns: "", shipping: "" } };
       },
+      async getShell(tenantId) {
+        return { tenantId, brandName: `T-${tenantId}`, policy: { returns: "", shipping: "" } };
+      },
     };
     return { seen, port };
   };

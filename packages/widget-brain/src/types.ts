@@ -166,6 +166,24 @@ export interface RetrievedProduct {
   productId: string;
   /** Similarity, higher = nearer. Reported for audit/debugging; the brain does not threshold on it. */
   score: number;
+  /**
+   * S2 — the corpus row's render metadata (title, variantId, …), written by the index job from Task 1's
+   * stable fields. Opaque to the brain except for the known keys it reads (`title`/`variantId`); NEVER
+   * carries price/availability (those live in `ProductFactsPort`, never the corpus, so a stale price
+   * cannot be quoted from it). Optional so a pre-S2 corpus record (no metadata) still type-checks.
+   */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * S2 — the retriever's full answer for one turn: the ranked hits plus the corpus's own product count, so
+ * the render path's "N of M" prompt header can report how much of the catalog this narrowed FROM without a
+ * second port method or a full catalog fetch.
+ */
+export interface CatalogRetrievalResult {
+  hits: RetrievedProduct[];
+  /** manifest.products — the corpus size, for the render path's "N of M" prompt header. */
+  corpusProductCount: number;
 }
 
 /**
@@ -173,22 +191,31 @@ export interface RetrievedProduct {
  * imported, for the same no-dep-cycle reason as `MemoryRecallPort` above: widget-backend implements it
  * (`catalog-retriever.ts`) and this package never depends on that one.
  *
- * IT RETURNS IDS, NOT TEXT, and that is load-bearing. The corpus behind it stores ids only — "a relevance
- * index over product IDS, not a second copy of the catalog" (catalog-index.ts) — precisely so that a
- * price or description cannot go stale inside it and be quoted at a shopper. The brain resolves each id
- * against the LIVE `GroundingContext` and drops anything it cannot find, so a delisted product is
- * physically unquotable no matter what the corpus still remembers (#157/#180's stale-falsehood lesson).
+ * IT RETURNS IDS PLUS RENDER METADATA, NEVER PRICE/AVAILABILITY, and that is load-bearing. The corpus
+ * behind it stores ids + stable render fields (title, variantId) — "a relevance index over product IDS,
+ * not a second copy of the catalog" (catalog-index.ts) — precisely so that a price cannot go stale inside
+ * it and be quoted at a shopper (price is filled in later, by-id, from `ProductFactsPort`).
+ *
+ * S2 — the render path (`brain.retrieveViaShell`) builds each rendered `Product` directly from a hit's own
+ * `metadata`, NOT by resolving against a live `GroundingContext` (that full-catalog fetch is exactly what
+ * the shell replaces — see `GroundingPort.getShell`). A hit with no `metadata.title` is dropped (unusable
+ * for render) rather than rendered blank; there is deliberately no "is this id still in the live catalog"
+ * check on this path — corpus freshness is the index job's job (reconciliation on re-index), not a
+ * per-turn one. Older, per-id "resolve against the live catalog and drop what's not found" behaviour
+ * (#157/#180's stale-falsehood lesson) predates S2 and no longer applies to this path; keeping a corpus
+ * row from outliving a delisted product is now the producer's responsibility.
  *
  * Consulted ONLY on the clean sales path, behind the CATALOG_RETRIEVAL posture flag, and only for a
  * shopper's own non-empty turn — never on the kill/injection/safety/support/uncertainty/b2b rungs, and
  * never on a proactive turn (where the "message" is the agent's own prompt, not the shopper's words).
  *
- * FAIL-OPEN CONTRACT: an implementation that cannot answer must REJECT. The brain treats a rejection and
- * an empty result identically — it renders the FULL catalog exactly as it does today. Retrieval can
- * therefore make a prompt smaller, never make an answer worse-grounded than the flag-off baseline.
+ * FAIL-OPEN CONTRACT: an implementation that cannot answer must REJECT. On the S2 shell-based render path
+ * there is no full catalog to fall back to (that is the whole point of the shell), so a rejection — or a
+ * result with zero renderable hits — resolves to brand+policy with NO catalog block, never a throw and
+ * never a worse/wrong catalog. See `brain.retrieveViaShell`.
  */
 export interface CatalogRetrieverPort {
-  retrieve(ctx: { tenantId: string; query: string; k: number }): Promise<RetrievedProduct[]>;
+  retrieve(ctx: { tenantId: string; query: string; k: number }): Promise<CatalogRetrievalResult>;
 }
 
 /**

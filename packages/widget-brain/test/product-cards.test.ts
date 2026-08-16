@@ -49,13 +49,24 @@ function catalogOf(n: number, extra: Partial<Product> = {}): GroundingContext {
 }
 
 function groundingOf(ctx: GroundingContext): GroundingPort {
-  return { async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; } };
+  return {
+    async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; },
+    async getShell() { return { tenantId: ctx.tenantId, brandName: ctx.brandName, policy: ctx.policy }; },
+  };
 }
 
+/** S2 — the render path builds each Product from the hit's own metadata (title/variantId), never a live
+ *  catalog fetch, so a fake retriever must carry `metadata.title` (derived from this fixture's own
+ *  `Product ${n}` naming, matching `product(i)` above) or nothing would render. */
 function fakeRetriever(ids: string[]): CatalogRetrieverPort {
   return {
     async retrieve() {
-      return ids.map((productId, rank): RetrievedProduct => ({ productId, score: 1 - rank / 100 }));
+      const hits = ids.map((productId, rank): RetrievedProduct => ({
+        productId,
+        score: 1 - rank / 100,
+        metadata: { title: `Product ${productId.match(/\d+$/)?.[0] ?? productId}` },
+      }));
+      return { hits, corpusProductCount: hits.length };
     },
   };
 }
@@ -169,10 +180,14 @@ describe("E3 — availability on a card says only what the catalog says", () => 
   });
 });
 
-// ── provenance: the rendered set, never the corpus, never a second fetch ─────────────────────────
+// ── provenance: the rendered set, built from the retriever's own metadata (S2), never a second fetch ────
+// S2 note: pre-S2 this section's cards were sourced from the LIVE GroundingContext the retriever's ids
+// were resolved against — that live-catalog resolve (and its "drop a delisted id" side effect) is REMOVED
+// by the shell-based render path (`brain.retrieveViaShell`): a card's title now comes from the hit's own
+// `metadata.title`, and its price comes ONLY from `ProductFactsPort` hydration (absent here, so "").
 
 describe("E3 — a card can only ever describe a product the model was shown THIS TURN", () => {
-  it("with retrieval narrowing the block, the card comes from the narrowed set (same objects, same prices)", async () => {
+  it("with retrieval narrowing the block, the card comes from the retriever's own metadata (S2), not a live-catalog fetch", async () => {
     const ctx = catalogOf(20);
     const model = new ScriptedModelPort(citeNth(1));
     const d = await brainWith(model, groundingOf(ctx), {
@@ -183,26 +198,41 @@ describe("E3 — a card can only ever describe a product the model was shown THI
       k: 2,
     }).decide(SALES, ASK);
     expect(d.flags).toContain("retrieval:applied");
+    // S2 — no ProductFactsPort/hydration is wired here, so price is the un-hydrated "" the render path
+    // builds every retrieved product with; a real deployment sources it from A1b hydration (see
+    // hydrate-serving.test.ts), never from a live catalog re-fetch.
     expect(d.recommendedProductCards).toEqual([
-      { productId: "gid://shopify/Product/17", title: "Product 17", price: "$17" },
+      { productId: "gid://shopify/Product/17", title: "Product 17", price: "" },
     ]);
   });
 
-  it("a STALE corpus id never becomes a card: it is dropped before rendering, so no tag exists for it", async () => {
-    // The corpus still remembers a delisted product. E1 drops it against the live catalog; E2 therefore
-    // never mints a tag for it; E3 therefore can never card it. Three independent layers, one outcome.
+  it("a corpus hit with NO render metadata (no title) never becomes a card: it is dropped before rendering, so no tag exists for it", async () => {
+    // S2 — the render path trusts the corpus row's own metadata; a row with no title is unusable and is
+    // dropped rather than rendered blank (never resolved against a live catalog at all). E2 therefore
+    // never mints a tag for the dropped id; E3 therefore can never card it.
     const ctx = catalogOf(20);
-    const model = new ScriptedModelPort((sys) => `Delisted is great. ${tagsIn(sys).join(" ")}`);
+    const model = new ScriptedModelPort((sys) => `Untitled is great. ${tagsIn(sys).join(" ")}`);
+    const titleless: CatalogRetrieverPort = {
+      async retrieve() {
+        return {
+          corpusProductCount: 2,
+          hits: [
+            { productId: "gid://shopify/Product/9999", score: 0.9 }, // no metadata at all ⇒ no title
+            { productId: "gid://shopify/Product/5", score: 0.8, metadata: { title: "Product 5" } },
+          ],
+        };
+      },
+    };
     const d = await brainWith(model, groundingOf(ctx), {
       citations: true,
       cards: true,
       retrieval: true,
-      retriever: fakeRetriever(["gid://shopify/Product/9999", "gid://shopify/Product/5"]),
+      retriever: titleless,
       k: 2,
     }).decide(SALES, ASK);
     expect(JSON.stringify(d.recommendedProductCards)).not.toContain("9999");
     expect(d.recommendedProductCards).toEqual([
-      { productId: "gid://shopify/Product/5", title: "Product 5", price: "$5" },
+      { productId: "gid://shopify/Product/5", title: "Product 5", price: "" },
     ]);
   });
 

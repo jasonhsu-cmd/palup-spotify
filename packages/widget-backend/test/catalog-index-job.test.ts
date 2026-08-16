@@ -152,20 +152,27 @@ function harness(products: Product[], embedOpts: Parameters<typeof fakeEmbedder>
 // ── the ceiling: hard-fail, never truncate ─────────────────────────────────────────────────────────
 
 describe("C3 ceiling — the job REFUSES an oversized catalog rather than indexing part of it", () => {
-  it("stays strictly below the vector adapter's own row-scan cap, which truncates by ID ORDER", () => {
-    // postgres-vector-store.ts caps every query() at MAX_SCAN_ROWS with `ORDER BY id LIMIT` — id order,
-    // NOT relevance — so beyond that cap records silently vanish from a query. Read the real constant out
-    // of the real file so this can never drift into an unsafe corpus size.
+  it("VECTOR_SCAN_ROWS_MIRRORED still mirrors the real vector-store scan cap (drift guard)", () => {
+    // postgres-vector-store.ts caps every non-ANN query() at MAX_SCAN_ROWS with `ORDER BY id LIMIT` — id
+    // order, NOT relevance — so beyond that cap records silently vanish from a query on the LEGACY
+    // brute-force store. Read the real constant out of the real file so this mirror can never drift.
+    //
+    // S2 RETIRED invariant: this describe block used to also assert `MAX_INDEXED_PRODUCTS < scanCap`.
+    // That invariant is SUPERSEDED, not loosened — `MAX_INDEXED_PRODUCTS` (50000) now EXCEEDS this cap by
+    // design, because the index ceiling is decoupled from the brute-force adapter's 5000-row scan limit.
+    // That coupling only ever applied to the non-`VECTOR_ANN` store; on the S1 pgvector (HNSW) path there
+    // is no id-ordered LIMIT scan, so serving a corpus above this cap is safe ONLY when `VECTOR_ANN=true`
+    // (see the ceiling comment on `MAX_INDEXED_PRODUCTS`, catalog-index.ts). This job does not read
+    // `VECTOR_ANN`; it only writes the corpus — the precondition is enforced on the serving side.
     const src = readFileSync(new URL("../../state-postgres/src/postgres-vector-store.ts", import.meta.url), "utf8");
     const scanCap = Number(/MAX_SCAN_ROWS = (\d+)/.exec(src)?.[1]);
     expect(scanCap).toBeGreaterThan(0);
     expect(VECTOR_SCAN_ROWS_MIRRORED).toBe(scanCap);
-    // +1 row of headroom is needed for the completeness probe, so the ceiling must be STRICTLY below.
-    expect(MAX_INDEXED_PRODUCTS).toBeLessThan(scanCap);
   });
 
-  it("is coherent with #180's fetch ceiling — never larger by accident", () => {
-    expect(MAX_INDEXED_PRODUCTS).toBe(MAX_CATALOG_PRODUCTS);
+  it("MAX_INDEXED_PRODUCTS is decoupled from serving's fetch ceiling (S2) — larger by design, not by accident", () => {
+    expect(MAX_INDEXED_PRODUCTS).toBe(50000);
+    expect(MAX_INDEXED_PRODUCTS).toBeGreaterThan(MAX_CATALOG_PRODUCTS);
   });
 
   it("a catalog OVER the ceiling writes NOTHING — no partial corpus, and the refusal is reported", async () => {
@@ -814,16 +821,23 @@ describe("C3 audit — the write is audited with a reversal an operator can actu
 // ── corpus shape: no stale merchant facts, nothing for retrieval to trip over ──────────────────────
 
 describe("C3 corpus shape — a relevance index over ids, not a copy of the catalog", () => {
-  it("stores the vector + the product id + a content hash, and NO price/title/availability", async () => {
-    const h = harness([product(1, { price: "$99", availableForSale: true })]);
+  it("stores the vector + the product id + a content hash + the stable render fields, and NO price/availability", async () => {
+    // S2 (serving-unlock, Task 1): `title`/`variantId` are now written as STABLE render fields so a later
+    // retriever can build a shopper-facing card without a second catalog fetch. Price/availability remain
+    // OUT — that money/NN#1 invariant is unchanged; only the "no title" half of the old assertion is gone.
+    const h = harness([product(1, { price: "$99", availableForSale: true, variantId: "v1" })]);
     await runCatalogIndex(h, [h.tenantId]);
     const [rec] = await recordsIn(h.vector, h.tenantId);
-    expect(rec!.metadata).toMatchObject({ kind: "product", productId: "gid://shopify/Product/1" });
+    expect(rec!.metadata).toMatchObject({
+      kind: "product",
+      productId: "gid://shopify/Product/1",
+      title: "Product 1",
+      variantId: "v1",
+    });
     expect(typeof (rec!.metadata as { contentHash?: unknown }).contentHash).toBe("string");
     const serialized = JSON.stringify(rec!.metadata);
     expect(serialized).not.toContain("$99"); // a stale price must never be quotable from the corpus
     expect(serialized).not.toContain("availableForSale");
-    expect(serialized).not.toContain("Product 1");
   });
 
   it("keeps the manifest OUT of the vector namespace, so retrieval can never rank it", async () => {

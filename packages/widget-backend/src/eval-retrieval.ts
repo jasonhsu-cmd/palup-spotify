@@ -33,7 +33,7 @@ async function main() {
   const rows: { id: string; pass: boolean; fails: string[] }[] = [];
   for (const c of cases) {
     try {
-      const hits = await retriever.retrieve({ tenantId, query: c.query, k: c.k ?? defaultK });
+      const { hits } = await retriever.retrieve({ tenantId, query: c.query, k: c.k ?? defaultK });
       const g = gradeRetrieval(c, hits);
       rows.push({ id: c.id, ...g });
       process.stdout.write(`${g.pass ? "✅" : "❌"} ${c.id} `);

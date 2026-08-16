@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { mapStorefrontToContext, createShopifyGroundingAdapter, storefrontFetch, STOREFRONT_API_VERSION, type StorefrontData } from "../src/shopify-grounding.js";
+import {
+  mapStorefrontToContext,
+  mapStorefrontToShell,
+  createShopifyGroundingAdapter,
+  storefrontFetch,
+  storefrontShellFetch,
+  STOREFRONT_API_VERSION,
+  type StorefrontData,
+} from "../src/shopify-grounding.js";
 
 const SAMPLE: StorefrontData = {
   shop: {
@@ -36,12 +44,44 @@ describe("mapStorefrontToContext", () => {
   });
 });
 
+describe("mapStorefrontToShell", () => {
+  it("maps Storefront shop data onto GroundingShell — brand + policy only, no products key", () => {
+    const shell = mapStorefrontToShell("acme", SAMPLE);
+    expect(shell.tenantId).toBe("acme"); // requested tenant, never from the response
+    expect(shell.brandName).toBe("Acme Skincare");
+    expect(shell.policy.returns).toContain("30-day");
+    expect(shell.policy.shipping).toContain("Free US shipping");
+    expect("products" in shell).toBe(false);
+  });
+
+  it("degrades to a safe-empty-ish shell on sparse data (no invented fields)", () => {
+    const shell = mapStorefrontToShell("t", {});
+    expect(shell.tenantId).toBe("t");
+    expect(shell.brandName).toBe("this store");
+    expect(shell.policy).toEqual({ returns: "", shipping: "" });
+  });
+});
+
 describe("createShopifyGroundingAdapter", () => {
   it("fetches + maps via the injected fetch (the wire works when a real fetch exists)", async () => {
     const adapter = createShopifyGroundingAdapter({ shopDomain: "acme.myshopify.com", accessToken: "tok" }, async () => SAMPLE);
     const ctx = await adapter.getContext("acme");
     expect(ctx.brandName).toBe("Acme Skincare");
     expect(ctx.products).toHaveLength(2);
+  });
+
+  it("getShell fetches + maps via the injected SHELL fetch, independent of the catalog fetch", async () => {
+    let catalogFetchCalls = 0;
+    const adapter = createShopifyGroundingAdapter(
+      { shopDomain: "acme.myshopify.com", accessToken: "tok" },
+      async () => { catalogFetchCalls++; return SAMPLE; },
+      async () => ({ shop: SAMPLE.shop }), // shell fetch never returns a products connection
+    );
+    const shell = await adapter.getShell("acme");
+    expect(shell.tenantId).toBe("acme");
+    expect(shell.brandName).toBe("Acme Skincare");
+    expect("products" in shell).toBe(false);
+    expect(catalogFetchCalls).toBe(0); // getShell never touches the (paginated) catalog fetch
   });
 
   it("bounds merchant-supplied text (prompt bloat / injection surface)", () => {
@@ -120,5 +160,42 @@ describe("storefrontFetch (verified Storefront API 2026-07 call)", () => {
     const { fn } = fakeFetch(() => ({ ok: false, status: 503, json: async () => ({}) }));
     await expect(storefrontFetch(fn, { log: (i) => logs.push(i) })(creds)).rejects.toThrow();
     expect(logs[0]).toMatchObject({ status: 503, ok: false });
+  });
+});
+
+describe("storefrontShellFetch (S2 — brand + policy ONLY, no products connection)", () => {
+  const creds = { shopDomain: "acme.myshopify.com", accessToken: "shptok_secret" };
+
+  function fakeFetch(handler: (url: string, init: any) => { ok?: boolean; status?: number; json: () => Promise<unknown> }) {
+    const calls: Array<{ url: string; init: any }> = [];
+    const fn = (async (url: string, init: any) => {
+      calls.push({ url, init });
+      const r = handler(url, init);
+      return { ok: r.ok ?? true, status: r.status ?? 200, json: r.json } as Response;
+    }) as unknown as typeof globalThis.fetch;
+    return { fn, calls };
+  }
+
+  it("POSTs a query with NO products connection — a single round-trip that can never hit the catalog ceiling", async () => {
+    const { fn, calls } = fakeFetch(() => ({ json: async () => ({ data: { shop: SAMPLE.shop } }) }));
+    const data = await storefrontShellFetch(fn)(creds);
+    expect(calls).toHaveLength(1); // exactly one HTTP call — no pagination loop
+    expect(calls[0].url).toBe(`https://acme.myshopify.com/api/${STOREFRONT_API_VERSION}/graphql.json`);
+    expect(calls[0].init.headers["Shopify-Storefront-Private-Token"]).toBe("shptok_secret");
+    const body = JSON.parse(calls[0].init.body);
+    expect(body.query).not.toContain("products");
+    expect(body.query).toContain("refundPolicy { body }");
+    expect(data.shop!.name).toBe("Acme Skincare");
+  });
+
+  it("throws a STATIC error on a non-2xx response (F1 — caching wrapper degrades)", async () => {
+    const { fn } = fakeFetch(() => ({ ok: false, status: 401, json: async () => ({}) }));
+    await expect(storefrontShellFetch(fn)(creds)).rejects.toThrow(/request failed/);
+  });
+
+  it("REFUSES a non-*.myshopify.com host (never leaks the token to an arbitrary server)", async () => {
+    const { fn, calls } = fakeFetch(() => ({ json: async () => ({ data: { shop: SAMPLE.shop } }) }));
+    await expect(storefrontShellFetch(fn)({ shopDomain: "evil.com", accessToken: "shptok_secret" })).rejects.toThrow(/myshopify\.com/);
+    expect(calls.length).toBe(0);
   });
 });

@@ -1,10 +1,10 @@
-import type { CommercePort, GroundingContext, GroundingPort, ModelPort, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
+import type { CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
 import { createRedactingModelPort, createCachingGroundingPort } from "@palup/platform-ports";
 import { MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import type { MerchantCredentialRead } from "@palup/state-postgres";
 import { resolveStorefrontCredential } from "./merchant-store.js";
-import { createShopifyGroundingAdapter, type StorefrontFetch } from "./shopify-grounding.js";
+import { createShopifyGroundingAdapter, type StorefrontFetch, type StorefrontShellFetch } from "./shopify-grounding.js";
 
 // D2: the router refuses rather than silently falling back to fixtures when a custodied credential
 // exists but cannot be read back (undecryptable / malformed) — never serve a merchant's shoppers the
@@ -43,6 +43,8 @@ export function createGroundingPort(
   secrets: SecretsPort,
   opts: {
     shopifyFetch?: StorefrontFetch; // injectable for tests; defaults to the live Storefront call
+    /** S2 — the shell-only (brand+policy, no products) fetch. Injectable for tests; defaults to the live single-round-trip Storefront call, mirroring `shopifyFetch` above. */
+    shopifyShellFetch?: StorefrontShellFetch;
     /** D1: registry-first shop-domain resolution. Absent ⇒ the pre-D1 `SHOPIFY_STORES`-only path. */
     shopDomainFor?: (tenantId: string) => Promise<string | undefined>;
     /** D2: the custodied delegate credential store's read(). Consulted only when `readbackEnabled`. */
@@ -66,6 +68,18 @@ export function createGroundingPort(
         return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch).getContext(tenantId);
       if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
       return fixtures.getContext(tenantId);
+    },
+    async getShell(tenantId: string): Promise<GroundingShell> {
+      const outcome = await resolveStorefrontCredential(tenantId, {
+        secrets,
+        credRead: opts.credRead,
+        readbackEnabled: opts.readbackEnabled,
+        shopDomainFor: opts.shopDomainFor,
+      });
+      if (outcome.status === "live")
+        return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch, opts.shopifyShellFetch).getShell(tenantId);
+      if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
+      return fixtures.getShell(tenantId);
     },
   };
   return createCachingGroundingPort(router, store);

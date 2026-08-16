@@ -44,14 +44,24 @@ function catalogOf(n: number, extra: Partial<Product> = {}): GroundingContext {
 }
 
 function groundingOf(ctx: GroundingContext): GroundingPort {
-  return { async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; } };
+  return {
+    async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; },
+    async getShell() { return { tenantId: ctx.tenantId, brandName: ctx.brandName, policy: ctx.policy }; },
+  };
 }
 
-/** Returns the given ids as hits, in the given order. */
+/** Returns the given ids as hits, in the given order. S2 — the render path builds each Product from the
+ *  hit's own metadata (title/variantId), never a live catalog fetch, so every fake retriever must carry
+ *  `metadata.title` (derived here from the fixture's own `Product ${n}` naming) or nothing would render. */
 function fakeRetriever(ids: string[]): CatalogRetrieverPort {
   return {
     async retrieve() {
-      return ids.map((productId, rank): RetrievedProduct => ({ productId, score: 1 - rank / 100 }));
+      const hits = ids.map((productId, rank): RetrievedProduct => ({
+        productId,
+        score: 1 - rank / 100,
+        metadata: { title: `Product ${productId.match(/\d+$/)?.[0] ?? productId}` },
+      }));
+      return { hits, corpusProductCount: hits.length };
     },
   };
 }

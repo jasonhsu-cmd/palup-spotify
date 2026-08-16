@@ -99,3 +99,15 @@ Follow-on decisions taken while sequencing the A/B/C build; they refine (and in 
   fixtures now; non-English *promotion* still waits on the native vet.
 - **Governed PR flow:** the remaining money/safety/serving-path increments (broaden, 3b, A1b, B-T3) are
   built to **review-passed PRs that queue for a named-human merge** — never auto-merged (§3).
+
+## Update / Amendment (2026-08-16)
+
+D3's decision text above (`gemini-embedding-2`) is left as originally decided — ADR history is immutable.
+**As of the S2 build-verify (2026-08-16), the actual embedding pin is `gemini-embedding-001`@1536**
+(GA-confirmed on Vertex, MRL-truncated to 1536, same `vector(1536)` schema): `gemini-embedding-2` did go
+GA (2026-04-22), but its exact GA model-id on Vertex was not confirmable at build time (Vertex docs showed
+only `gemini-embedding-2-preview`). Adopting `gemini-embedding-2` later is a human/§5 step requiring BOTH
+the exact GA model-id confirmed AND a full reindex (the `gemini-embedding-001`/`gemini-embedding-2`
+embedding spaces are incompatible). Current source of truth for the pin:
+`docs/superpowers/specs/2026-08-15-s2-serving-unlock-design.md` §2 (D-embed) and §8 (Promotion
+preconditions).

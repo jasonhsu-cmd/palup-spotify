@@ -1,6 +1,6 @@
 import { createBrain, DEFAULT_CATALOG_RETRIEVAL_K, DEFAULT_POLICY, MockCommerceAdapter, type Brain } from "@palup/widget-brain";
 import { createInMemoryProductFactsStore } from "@palup/platform-ports";
-import type { GroundingContext, GroundingPort, ModelPort } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, GroundingShell, ModelPort } from "@palup/platform-ports";
 
 // go-live §B — the MONEY-FACTS eval harness. It exercises the A1b fresh-price serving path END TO END:
 // build a brain with retrieval + hydration on, seed the Tier-2 fact store, run the shopper's price
@@ -8,6 +8,15 @@ import type { GroundingContext, GroundingPort, ModelPort } from "@palup/platform
 // stochastic judge, because "did the reply quote $29" and "did it withhold a stale number" are precisely
 // the properties a judge is worst at and a code check is best at (the same reason the safety floor is
 // code-graded). The staleness ceiling here is the same 1h default the server ships (PRODUCT_FACTS_MAX_AGE_MS).
+//
+// S2 (owner-ruled 2026-08-16): every case here runs the CATALOG_RETRIEVAL shell render path (retrieval is
+// always on below) — the harness has no flag-off case. On this path there is no live-catalog price to fall
+// back to (`retrieveViaShell` fetches a brand/policy SHELL, never products), so `ProductFactsPort` is the
+// SOLE price source: a "missing" or "cross_tenant" case (no fresh fact under the shopper's own tenant) now
+// asserts NO price is quoted at all — never the live catalog's base price, which this path no longer even
+// reads. This is the more conservative, fail-honest direction for a money/NN#1 fact. Operational
+// precondition this makes explicit: priced retrieval serving REQUIRES the A3 ProductFacts producer to have
+// populated a fact for a SKU, or a shopper asking its price is told it needs confirming, not quoted one.
 
 export const MONEY_FACTS_MAX_AGE_MS = 3_600_000;
 
@@ -24,9 +33,11 @@ export interface MoneyFactsCase {
   expect: { quotes?: string; notQuotes?: string[]; withholdsPrice?: boolean; confirms?: boolean };
 }
 
-// Retrieval only narrows when the catalog is LARGER than k (retrieveCandidates returns undefined
-// otherwise), and hydration only applies to the retrieved subset — so a case with 1-2 products would never
-// hydrate. Pad with filler above k; the retriever then returns ONLY the case's real product ids.
+// Padding is now vestigial post-S2 (retrieveViaShell no longer short-circuits on catalog size — the fake
+// retriever below always returns exactly the case's own product ids, regardless of `products.length`), but
+// is kept here because `getContext` still needs a plausible catalog shape for any non-retrieval code path
+// that might read it. Hydration only ever applies to the retrieved subset, so a case's real ids are always
+// what gets hydrated, filler or not.
 function paddedProducts(spec: MoneyFactsCase): GroundingContext["products"] {
   const filler = Array.from({ length: DEFAULT_CATALOG_RETRIEVAL_K + 2 }, (_, i) => ({
     id: `__filler_${i}`,
@@ -52,9 +63,21 @@ export async function buildMoneyFactsBrain(spec: MoneyFactsCase, model: ModelPor
     async getContext(tenantId) {
       return { tenantId, brandName: "Test Store", products, policy: { returns: "30 days", shipping: "free over $75" } };
     },
+    async getShell(tenantId): Promise<GroundingShell> {
+      return { tenantId, brandName: "Test Store", policy: { returns: "30 days", shipping: "free over $75" } };
+    },
   };
-  // Nearest-first on the case's REAL ids only, so hydration applies exactly to them.
-  const retriever = { async retrieve() { return spec.products.map((p, i) => ({ productId: p.id, score: 1 - i / 100 })); } };
+  // Nearest-first on the case's REAL ids only, so hydration applies exactly to them. S2 — the render path
+  // builds each Product from the hit's own metadata (title/variantId), never a live catalog fetch, so the
+  // fake here must carry `metadata.title` or the harness's cases would render no catalog lines at all.
+  const retriever = {
+    async retrieve() {
+      return {
+        hits: spec.products.map((p, i) => ({ productId: p.id, score: 1 - i / 100, metadata: { title: p.title } })),
+        corpusProductCount: products.length,
+      };
+    },
+  };
 
   const facts = createInMemoryProductFactsStore();
   for (const f of spec.facts) {

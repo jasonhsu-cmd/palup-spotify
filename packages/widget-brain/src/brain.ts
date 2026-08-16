@@ -164,6 +164,7 @@ function systemPrompt(
   ctx?: GroundingContext,
   retrieved?: Product[],
   citations?: { map: CitationMap; rendered?: Product[] },
+  corpusTotal?: number, // S2 — the corpus size for the "N of M" header on the shell/retrieval path
 ): string {
   const rules = [
     policy.styleDirective, // ← the only policy-tunable line
@@ -228,7 +229,7 @@ function systemPrompt(
   // The header states plainly how much of the catalog is on show. Unchanged (`CATALOG:`) when it is all
   // of it, so the flag-off prompt is byte-identical.
   const catalogHeader = retrieved
-    ? `CATALOG (${retrieved.length} of ${ctx.products.length} products, selected for this question - NOT the whole catalog):`
+    ? `CATALOG (${retrieved.length} of ${corpusTotal ?? ctx.products.length} products, selected for this question - NOT the whole catalog):`
     : "CATALOG:";
   return [
     `You are ${sanitizeGroundingText(ctx.brandName, 120)}'s shopping assistant.`,
@@ -637,10 +638,10 @@ const EXIT_INTENT_PROMPT =
  * THE NUMBER OF CANDIDATES retrieval puts in the prompt, and the argument for it.
  *
  * The constraint it answers: `systemPrompt` renders EVERY product of the GroundingContext into EVERY
- * turn with no count cap — #180's finding, and the reason #190 capped the INDEX at 1000 products
- * (`MAX_INDEXED_PRODUCTS`) rather than let the serving path try to carry more. Retrieval is the fix for
- * the serving side, so k has to be small enough that a 1000-product merchant's prompt stops depending on
- * catalog size at all.
+ * turn with no count cap — #180's finding, and the reason #190 originally capped the INDEX at 1000
+ * products rather than let the serving path try to carry more. S2 decoupled that: `MAX_INDEXED_PRODUCTS`
+ * is now 50000 and serving retrieves top-K instead of rendering the whole corpus, so k has to be small
+ * enough that a merchant's prompt stops depending on catalog size at all, at any ceiling.
  *
  * Why 12 specifically, in the two directions that bound it:
  *  • BIG ENOUGH. The widest single honest answer this catalog shape produces names a handful of items —
@@ -656,10 +657,12 @@ const EXIT_INTENT_PROMPT =
  * and the eval gate, which is the promotion step, not this PR. It is a starting point chosen from the
  * two bounds above and overridable per deployment.
  *
- * Interaction with the vector store's own limits: a corpus is at most `MAX_INDEXED_PRODUCTS` (1000)
- * records and `PostgresVectorStore.query` scans up to `MAX_SCAN_ROWS` (5000, in ID ORDER) before ranking
- * — so the whole corpus is always scanned and that truncation never engages, and k is the slice taken
- * afterwards. Pinned against the real constants in widget-backend's catalog-retriever.test.ts.
+ * Interaction with the vector store's own limits: a corpus is at most `MAX_INDEXED_PRODUCTS` (50000)
+ * records. The legacy brute-force `PostgresVectorStore.query` path scans up to `MAX_SCAN_ROWS` (5000, in
+ * ID ORDER) before ranking, so a corpus above 5000 on that store silently truncates before k is ever
+ * applied — serving a corpus that large requires `VECTOR_ANN=true` (S1's pgvector HNSW store), which does
+ * not do an id-ordered scan; avoiding exactly that truncation is what `VECTOR_ANN` is for (S2 spec
+ * §D-backend / §6). Pinned against the real constants in widget-backend's catalog-retriever.test.ts.
  */
 export const DEFAULT_CATALOG_RETRIEVAL_K = 12;
 
@@ -946,45 +949,55 @@ export function createBrain(
     return false;
   };
 
-  const retrieveCandidates = async (
+  // S2 — the RENDER path: fetch a brand/policy SHELL (never the whole catalog), retrieve top-K ids, and
+  // BUILD each Product from the corpus row's stable render metadata (title/variantId). Price/availability
+  // are overlaid later by the A1b hydrate. NEVER THROWS: every failure resolves to "no catalog block",
+  // because there is no full catalog to fall back to on this path (that is the whole point of the shell).
+  const retrieveViaShell = async (
     retriever: CatalogRetrieverPort,
-    ctx: GroundingContext,
-    query: string,
     tenantId: string,
+    query: string,
     flags: string[],
-  ): Promise<Product[] | undefined> => {
+  ): Promise<{ ctx: GroundingContext | undefined; rendered?: Product[]; corpusTotal?: number }> => {
     const k = Math.max(1, Math.floor(catalogRetrievalK));
-    // A catalog that already fits is left alone: a subset of it could only LOSE facts the model can
-    // currently see, for no prompt-size gain. This is also what keeps the flag inert for every small
-    // merchant, which is a much narrower blast radius when it is eventually promoted.
-    if (ctx.products.length <= k) return undefined;
-    let hits;
+    let shell;
     try {
-      hits = await retriever.retrieve({ tenantId, query, k });
+      shell = await grounding!.getShell(tenantId);
     } catch {
-      // Fail-safe, in the same shape as classifyPersonaStyle: a corpus that is missing, a pin that
-      // disagrees, a provider error or a timeout all land here and all mean "render the full catalog".
-      // Deliberately swallowed rather than surfaced — the error text can carry provider detail, and the
-      // shopper's turn is still answered exactly as it would have been with the flag off.
       flags.push("retrieval:unavailable");
-      return undefined;
+      return { ctx: undefined }; // no brand/policy ⇒ generic assistant prompt (ctx undefined)
     }
-    // Resolve ids against the LIVE catalog and DROP anything not in it. The corpus is only a relevance
-    // index over ids, so a delisted product lingering in it must never become a product line in the
-    // prompt — the live GroundingContext stays the single source of everything a shopper is told.
-    const byId = new Map(ctx.products.map((p) => [p.id, p]));
-    const resolved: Product[] = [];
-    for (const hit of hits) {
-      const p = byId.get(hit.productId);
-      if (p && !resolved.includes(p)) resolved.push(p);
-      if (resolved.length >= k) break; // the port's k is a request, not a promise — enforce it here too
-    }
-    if (resolved.length === 0) {
+    const ctx: GroundingContext = { tenantId: shell.tenantId, brandName: shell.brandName, products: [], policy: shell.policy };
+    let result;
+    try {
+      result = await retriever.retrieve({ tenantId, query, k });
+    } catch {
       flags.push("retrieval:unavailable");
-      return undefined;
+      return { ctx }; // brand+policy, but no catalog block
+    }
+    const rendered: Product[] = [];
+    const seen = new Set<string>();
+    for (const hit of result.hits) {
+      if (seen.has(hit.productId)) continue;
+      const md = (hit.metadata ?? {}) as { title?: unknown; variantId?: unknown };
+      const title = typeof md.title === "string" ? md.title : "";
+      if (!title) continue; // a row with no render title is unusable — drop it rather than render blank
+      seen.add(hit.productId);
+      rendered.push({
+        id: hit.productId,
+        title,
+        description: "", // corpus carries no description for render; price filled by hydrate below
+        price: "",
+        ...(typeof md.variantId === "string" && md.variantId ? { variantId: md.variantId } : {}),
+      });
+      if (rendered.length >= k) break; // the port's k is a request, not a promise — enforce it here too
+    }
+    if (rendered.length === 0) {
+      flags.push("retrieval:unavailable");
+      return { ctx, corpusTotal: result.corpusProductCount };
     }
     flags.push("retrieval:applied");
-    return resolved;
+    return { ctx, rendered, corpusTotal: result.corpusProductCount };
   };
 
   const groundedMessages = async (
@@ -1006,11 +1019,17 @@ export function createBrain(
     // this file gains a cart block. `flags` is the turn's own audit surface, mirroring `retrieval`.
     cart?: { items: readonly CartLineItemRef[]; flags: string[] },
   ) => {
-    const ctx = grounding ? await grounding.getContext(tenantId) : undefined;
-    const retrieved =
-      catalogRetrievalEnabled && catalogRetriever && retrieval && ctx && retrieval.query.trim() !== ""
-        ? await retrieveCandidates(catalogRetriever, ctx, retrieval.query, tenantId, retrieval.flags)
-        : undefined;
+    // S2 — the RENDER path uses getShell + retrieval; every other path (and flag-off) uses getContext,
+    // byte-identically. `corpusTotal` reaches systemPrompt for the "N of M" header.
+    let ctx: GroundingContext | undefined;
+    let retrieved: Product[] | undefined;
+    let corpusTotal: number | undefined;
+    if (catalogRetrievalEnabled && catalogRetriever && grounding && retrieval && retrieval.query.trim() !== "") {
+      const built = await retrieveViaShell(catalogRetriever, tenantId, retrieval.query, retrieval.flags);
+      ({ ctx, rendered: retrieved, corpusTotal } = built);
+    } else {
+      ctx = grounding ? await grounding.getContext(tenantId) : undefined;
+    }
     // A1b — overlay fresh Tier-2 money-facts onto the RETRIEVED subset (never the full catalog). Runs only
     // behind PRODUCT_FACTS_HYDRATION and only when retrieval actually produced a subset, so with the flag
     // off (today) `hydrated === retrieved` and the prompt is byte-identical. Fail-OPEN in the same shape as
@@ -1059,7 +1078,7 @@ export function createBrain(
         ? (renderCartBlock(cart.items, ctx, cart.flags) ?? "")
         : "";
     return [
-      { role: "system" as const, content: systemPrompt(policy, ctx, hydrated, citations) + systemExtra + pageBlock + cartBlock },
+      { role: "system" as const, content: systemPrompt(policy, ctx, hydrated, citations, corpusTotal) + systemExtra + pageBlock + cartBlock },
       ...prior,
       { role: "user" as const, content: message },
     ];

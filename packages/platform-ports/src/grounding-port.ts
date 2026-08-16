@@ -65,7 +65,18 @@ export interface GroundingContext {
   policy: StorePolicy;
 }
 
+export interface GroundingShell {
+  tenantId: string;
+  brandName: string;
+  policy: StorePolicy;
+}
+
 export interface GroundingPort {
   /** Tenant-scoped (isolation): only ever returns the given tenant's own catalog/policy. */
   getContext(tenantId: string): Promise<GroundingContext>;
+  /**
+   * S2 — brand + policy ONLY (no products). The render path fetches this instead of the whole catalog,
+   * so it can never hit the catalog-size ceiling. Tenant-scoped exactly like `getContext`.
+   */
+  getShell(tenantId: string): Promise<GroundingShell>;
 }

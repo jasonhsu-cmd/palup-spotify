@@ -1,8 +1,8 @@
 {
   "_meta": {
-    "purpose": "go-live checklist §B — the money-facts eval layer for A1b (fresh-price serving). Each case seeds the Tier-2 fact store, runs the shopper's price question through the hydration path, and grades the reply DETERMINISTICALLY (exact price presence/absence + fail-honest), not with a stochastic judge. Run with GCP creds via `pnpm eval:money-facts`; the harness plumbing is gate-tested with a scripted model (money-facts-harness.test.ts).",
-    "properties": ["price-fidelity", "staleness fail-honest (D2)", "availability fidelity", "missing-fact → base price", "cross-tenant isolation"],
-    "note": "The 1h staleness ceiling matches PRODUCT_FACTS_MAX_AGE_MS. ageMinutes > 60 ⇒ stale."
+    "purpose": "go-live checklist §B — the money-facts eval layer for A1b (fresh-price serving). Each case seeds the Tier-2 fact store, runs the shopper's price question through the hydration path, and grades the reply DETERMINISTICALLY (exact price presence/absence + fail-honest), not with a stochastic judge. Run with GCP creds via `pnpm eval:money-facts`; the harness plumbing is gate-tested with a scripted model (money-facts-harness.test.ts). Every case here exercises the CATALOG_RETRIEVAL shell path (retrieval on) — there is no flag-off case in this harness.",
+    "properties": ["price-fidelity", "staleness fail-honest (D2)", "availability fidelity", "missing-fact -> no price, fail-honest (S2, owner-ruled 2026-08-16)", "cross-tenant isolation"],
+    "note": "The 1h staleness ceiling matches PRODUCT_FACTS_MAX_AGE_MS. ageMinutes > 60 ⇒ stale. S2 (owner-ruled 2026-08-16): the CATALOG_RETRIEVAL render path fetches a brand/policy SHELL, never the live catalog, so ProductFacts is the SOLE price source on this path — a product with no fresh fact (missing, or a fact seeded under a different tenant) renders NO price at all, never the live catalog's base price. This is the more conservative, fail-honest direction for a money/NN#1 fact and STRENGTHENS the invariant vs. pre-S2 (which could show a stale base price the retrieval path no longer even fetches). Operational precondition: priced retrieval serving REQUIRES the A3 ProductFacts producer to have populated a fact for a SKU, or the shopper is told the price needs confirming rather than quoted one at all."
   },
   "cases": [
     {
@@ -38,7 +38,7 @@
       "products": [{ "id": "toner", "title": "Balancing Toner", "price": "$22", "description": "A gentle balancing toner." }],
       "facts": [],
       "message": "how much is the Balancing Toner?",
-      "expect": { "quotes": "$22" }
+      "expect": { "withholdsPrice": true, "confirms": true, "notQuotes": ["$22"] }
     },
     {
       "id": "MF-avail-1", "kind": "fresh", "tenantId": "acme",
@@ -52,7 +52,7 @@
       "products": [{ "id": "serum", "title": "Vitamin-C Brightening Serum", "price": "$34", "description": "A daily brightening serum." }],
       "facts": [{ "productId": "serum", "price": "$9", "ageMinutes": 5, "tenantId": "rival-store" }],
       "message": "what's the price of the Vitamin-C Brightening Serum?",
-      "expect": { "quotes": "$34", "notQuotes": ["$9"] }
+      "expect": { "withholdsPrice": true, "confirms": true, "notQuotes": ["$9", "$34"] }
     }
   ]
 }

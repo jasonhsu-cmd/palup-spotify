@@ -1,4 +1,4 @@
-import type { GroundingContext, GroundingPort } from "./grounding-port.js";
+import type { GroundingContext, GroundingPort, GroundingShell } from "./grounding-port.js";
 import type { RuntimeStatePort } from "./runtime-state-port.js";
 
 // Caching + degradation wrapper for any GroundingPort (mirrors createRedactingModelPort). A merchant's
@@ -95,6 +95,21 @@ export function createCachingGroundingPort(
       } catch {
         if (cached) return cached.ctx; // stale-while-error: last-known-good beats a broken answer
         return safeEmpty(tenantId); // cold failure ⇒ fail closed, never invent / never leak
+      }
+    },
+
+    // S2 — a lightweight passthrough: a shell fetch is one cheap call (brand + policy, no products), so
+    // there's no TTL cache to maintain here — just the same timeout + tenant-isolation + fail-closed
+    // discipline as getContext's cold path.
+    async getShell(tenantId: string): Promise<GroundingShell> {
+      try {
+        const shell = await withTimeout(inner.getShell(tenantId), timeoutMs);
+        if (shell.tenantId !== tenantId) throw new Error("grounding tenant mismatch");
+        return shell;
+      } catch {
+        // Fail CLOSED, exactly like getContext's cold path: a brandless "this store" + empty policy, so the
+        // brain grounds honestly rather than inventing or leaking.
+        return { tenantId, brandName: "this store", policy: { returns: "", shipping: "" } };
       }
     },
   };

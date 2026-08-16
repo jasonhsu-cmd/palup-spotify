@@ -49,7 +49,7 @@ describe("CATALOG_RETRIEVAL eval — plumbing (real index + retrieve paths, fake
   it("indexes then retrieves the token-matching product on top (index→manifest→retrieve→grade round-trip)", async () => {
     const { retriever, tenantId } = await buildIndexedRetriever(synthetic, new FakeEmbedModel(), "t-synth");
     for (const [query, want] of [["a sweet crunchy apple", "p-apple"], ["soft tropical banana", "p-banana"], ["tart red cherry", "p-cherry"]] as const) {
-      const hits = await retriever.retrieve({ tenantId, query, k: 3 });
+      const { hits } = await retriever.retrieve({ tenantId, query, k: 3 });
       expect(hits[0]?.productId, `query="${query}" hits=${JSON.stringify(hits)}`).toBe(want);
       expect(gradeRetrieval({ id: query, query, expectTop: want }, hits).pass).toBe(true);
     }
@@ -57,7 +57,7 @@ describe("CATALOG_RETRIEVAL eval — plumbing (real index + retrieve paths, fake
 
   it("returns only products sharing a token (score>0 filter) — an unrelated query yields no false hit", async () => {
     const { retriever, tenantId } = await buildIndexedRetriever(synthetic, new FakeEmbedModel(), "t-synth2");
-    const hits = await retriever.retrieve({ tenantId, query: "quantum spreadsheet compiler", k: 3 });
+    const { hits } = await retriever.retrieve({ tenantId, query: "quantum spreadsheet compiler", k: 3 });
     expect(hits).toEqual([]);
   });
 });

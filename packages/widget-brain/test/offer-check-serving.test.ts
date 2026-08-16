@@ -16,6 +16,9 @@ const grounding: GroundingPort = {
       policy: { returns: "30 days", shipping: "free over $75" },
     };
   },
+  async getShell() {
+    return { tenantId: "acme", brandName: "Acme", policy: { returns: "30 days", shipping: "free over $75" } };
+  },
 };
 
 /** A generation model that always replies with the same text (so we control what the checker sees). */

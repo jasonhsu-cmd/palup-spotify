@@ -142,6 +142,13 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
     positiveIntEnv(process.env.PALUP_EMBED_MAX_BATCH) ??
     maxBatchForEmbedModel(embedModel);
   const embedDimension = opts.embedDimension ?? positiveIntEnv(process.env.PALUP_EMBED_DIMENSION);
+  // S2 batch-embed resilience knobs (index-side only; `complete` is unaffected). Defaults keep a
+  // production deploy that has never set these three envs from silently changing behaviour: 20s/request,
+  // 3 retries with capped exponential backoff, 4 requests in flight — sized for a 50k-product index
+  // (`MAX_INDEXED_PRODUCTS`, catalog-index.ts:115) without bursting past per-minute embedding quotas.
+  const embedTimeoutMs = positiveIntEnv(process.env.PALUP_EMBED_TIMEOUT_MS) ?? 20000;
+  const embedMaxRetries = positiveIntEnv(process.env.PALUP_EMBED_MAX_RETRIES) ?? 3;
+  const embedConcurrency = positiveIntEnv(process.env.PALUP_EMBED_CONCURRENCY) ?? 4;
 
   // The embedding capability is ALWAYS wired here, so a deployed adapter reports `canEmbed === true` and
   // the catalog index job stops reporting `no-embed-capability` (catalog-index.ts:352). A deployment that
@@ -157,6 +164,9 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
         model: embedModel,
         taskTypes: embedTaskTypes,
         maxBatch: embedMaxBatch,
+        timeoutMs: embedTimeoutMs,
+        maxRetries: embedMaxRetries,
+        concurrency: embedConcurrency,
         ...(embedDimension === undefined ? {} : { outputDimensionality: embedDimension }),
       },
     },

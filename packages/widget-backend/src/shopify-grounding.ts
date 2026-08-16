@@ -1,4 +1,4 @@
-import type { GroundingContext, GroundingPort, Product, StorePolicy } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, GroundingShell, Product, StorePolicy } from "@palup/platform-ports";
 import type { ShopifyStoreCreds } from "./merchant-store.js";
 
 // Shopify GroundingPort adapter (ADR-0012). Maps a merchant's Shopify **Storefront API** data onto the
@@ -110,6 +110,23 @@ export function mapStorefrontToContext(tenantId: string, data: StorefrontData): 
 
 export type StorefrontFetch = (creds: ShopifyStoreCreds) => Promise<StorefrontData>;
 
+/** Shop brand + policy ONLY — no products connection, so this is ALWAYS a single round-trip and can
+ *  never approach the catalog page ceiling. */
+const STOREFRONT_SHELL_QUERY = `query PalUpGroundingShell {
+  shop { name refundPolicy { body } shippingPolicy { body } }
+}`;
+
+export type StorefrontShellFetch = (creds: ShopifyStoreCreds) => Promise<StorefrontData>;
+
+/** Pure mapping: shell response → GroundingShell. Stamps the REQUESTED tenantId, bounds merchant text. */
+export function mapStorefrontToShell(tenantId: string, data: StorefrontData): GroundingShell {
+  const policy: StorePolicy = {
+    returns: bound(data.shop?.refundPolicy?.body, MAX_DESC),
+    shipping: bound(data.shop?.shippingPolicy?.body, MAX_DESC),
+  };
+  return { tenantId, brandName: bound(data.shop?.name, MAX_TITLE) || "this store", policy };
+}
+
 /** Current Storefront API version (verified 2026-07-30 against shopify.dev). */
 export const STOREFRONT_API_VERSION = "2026-07";
 
@@ -153,6 +170,14 @@ export const STOREFRONT_PAGE_SIZE = 250;
 export const MAX_CATALOG_PAGES = 4;
 
 /**
+ * The INDEX job's page ceiling — deep enough to page the whole `MAX_INDEXED_PRODUCTS` (50000 / 250 = 200
+ * pages). SEPARATE from `MAX_CATALOG_PAGES` (serving's per-turn cap, still 4): the offline index job pays
+ * ~200 sequential round-trips once, the /chat path never does. `getContext` keeps its 4-page cap so serving
+ * can never page 50k per turn.
+ */
+export const MAX_INDEX_CATALOG_PAGES = 200;
+
+/**
  * The catalog size this adapter supports: 4 pages × 250 = 1000 published products.
  *
  * Why 1000 and not more: the binding constraint is the PROMPT, not the network. widget-brain's
@@ -161,8 +186,11 @@ export const MAX_CATALOG_PAGES = 4;
  * widget-brain/src or widget-backend/src). At the per-product bounds this adapter enforces, 1000 products
  * is already a six-figure-character system prompt on every turn — the cost/latency ceiling arrives before
  * this one does. A merchant above 1000 SKUs does not need a bigger fetch; they need relevance retrieval
- * (fetch → index → retrieve top-K), which is a separate work item. Raising this number without that work
- * would quietly move the failure from "loud" to "unaffordable".
+ * (fetch → index → retrieve top-K) — S2 (`docs/superpowers/specs/2026-08-15-s2-serving-unlock-design.md`)
+ * built exactly that path (`catalog-index.ts`'s offline index job + `catalog-retriever.ts` + `brain.ts`'s
+ * `retrieveViaShell`), behind `catalogRetrievalEnabled` (dark; enabling it to serve is a separate,
+ * still-open HITL §5 promotion). This constant stays the SERVING fetch's cap either way: raising it
+ * without retrieval would quietly move the failure from "loud" to "unaffordable".
  */
 export const MAX_CATALOG_PRODUCTS = STOREFRONT_PAGE_SIZE * MAX_CATALOG_PAGES;
 
@@ -369,15 +397,56 @@ export function storefrontFetch(
   };
 }
 
+/** One-shot shell fetch: shop/policy only. Same host guard + token header + timeout as `storefrontFetch`,
+ *  but no pagination loop. */
+export function storefrontShellFetch(
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  opts: { version?: string; timeoutMs?: number; log?: (info: StorefrontEgressLog) => void } = {},
+): StorefrontShellFetch {
+  const version = opts.version ?? STOREFRONT_API_VERSION;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PAGE_TIMEOUT_MS;
+  const log = opts.log ?? ((info: StorefrontEgressLog) => console.log("[grounding.shopify] " + JSON.stringify(info)));
+  return async (creds) => {
+    if (!SHOP_HOST.test(creds.shopDomain)) {
+      throw new Error("refusing Shopify fetch: shopDomain is not a *.myshopify.com host");
+    }
+    const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
+    const start = Date.now();
+    let status = 0;
+    let ok = false;
+    try {
+      const res = await fetchFn(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Shopify-Storefront-Private-Token": creds.accessToken },
+        body: JSON.stringify({ query: STOREFRONT_SHELL_QUERY }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      status = res.status;
+      ok = res.ok;
+      if (!res.ok) throw new Error("Shopify Storefront API request failed");
+      const json = (await res.json()) as { data?: StorefrontData; errors?: Array<{ message?: string }> };
+      if (Array.isArray(json.errors) && json.errors.length) throw new Error("Shopify Storefront GraphQL error");
+      return json.data ?? {};
+    } finally {
+      try { log({ host: creds.shopDomain, status, ok, ms: Date.now() - start, page: 0 }); } catch { /* ignore */ }
+    }
+  };
+}
+
 /** GroundingPort backed by a merchant's Shopify store. `fetchImpl` defaults to the live Storefront call. */
 export function createShopifyGroundingAdapter(
   creds: ShopifyStoreCreds,
   fetchImpl: StorefrontFetch = storefrontFetch(),
+  shellFetchImpl: StorefrontShellFetch = storefrontShellFetch(),
 ): GroundingPort {
   return {
     async getContext(tenantId: string): Promise<GroundingContext> {
       const data = await fetchImpl(creds);
       return mapStorefrontToContext(tenantId, data);
+    },
+    async getShell(tenantId: string): Promise<GroundingShell> {
+      const data = await shellFetchImpl(creds);
+      return mapStorefrontToShell(tenantId, data);
     },
   };
 }

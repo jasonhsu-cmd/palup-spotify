@@ -17,6 +17,10 @@ function fakeInner() {
       if (state.mode === "hang") return new Promise<GroundingContext>(() => {}); // never resolves
       return state.ctx(tenantId);
     },
+    async getShell(tenantId) {
+      const { brandName, policy } = state.ctx(tenantId);
+      return { tenantId, brandName, policy };
+    },
   };
   return { state, port };
 }
@@ -81,11 +85,21 @@ describe("createCachingGroundingPort", () => {
   });
 
   it("fails closed (never launders) when the upstream returns a MISMATCHED tenant (F2)", async () => {
-    const inner: GroundingPort = { async getContext() { return ctxFor("attacker-tenant", 3); } }; // wrong tenant!
+    const inner: GroundingPort = {
+      async getContext() { return ctxFor("attacker-tenant", 3); }, // wrong tenant!
+      async getShell() { const { tenantId, brandName, policy } = ctxFor("attacker-tenant", 3); return { tenantId, brandName, policy }; },
+    };
     const cached = createCachingGroundingPort(inner, new InMemoryRuntimeStore(), { ttlSeconds: 60 });
     const out = await cached.getContext("victim");
     expect(out.tenantId).toBe("victim");
     expect(out.products).toEqual([]); // safe-empty, NOT the attacker-tenant catalog
+
+    // getShell must fail closed IDENTICALLY (same F2 guard, grounding-cache.ts): a mismatched inner
+    // tenantId is treated as a fetch failure → the safe-empty SHELL default, never the attacker's brand.
+    const shellOut = await cached.getShell("victim");
+    expect(shellOut.tenantId).toBe("victim");
+    expect(shellOut.brandName).toBe("this store"); // safe-empty, NOT "Brand-attacker-tenant"
+    expect(shellOut.policy).toEqual({ returns: "", shipping: "" });
   });
 
   it("treats a corrupt cached row as a miss (F5)", async () => {
