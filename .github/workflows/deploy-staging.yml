@@ -196,6 +196,19 @@ jobs:
           ENVS="${ENVS}@SHOPIFY_STORES={\"demo\":\"palup-skincare-jason.myshopify.com\"}"
           ENVS="${ENVS}@MERCHANT_REGION=${MERCHANT_REGION}"
           ENVS="${ENVS}@MERCHANT_GROUNDING_MODE=${MERCHANT_GROUNDING_MODE}"
+          # S2 — pins what a future `pnpm catalog:index` run embeds with (createVertexAdapter reads both
+          # envs; catalog-index.ts's OFFLINE job is the only consumer of the embed path today). CONFIG-ONLY
+          # and dark: this serves no shopper by itself — CATALOG_RETRIEVAL / VECTOR_ANN stay unset/off, so
+          # /chat's serving path (getShell, decoupled from the index job) is untouched.
+          # RE-CONFIRM AT BUILD (world fact, not independently verified in this session — no live Vertex/
+          # doc access here): "gemini-embedding-2" appears in this repo only as an illustrative id in
+          # comments/test fixtures (vertex-adapter.ts, vertex-embed.test.ts), never behind a dated primary
+          # citation the way gemini-embedding-001 is ([E1]-[E5], vertex-adapter.ts:59-121). Confirm the
+          # exact model-id string + GA status via `pnpm model:smoke` or a fresh docs.cloud.google.com check
+          # before this is ever wired to a live index run. FALLBACK if it does not resolve:
+          # gemini-embedding-001 @ 3072 (S1's halfvec(3072) path, pgvector-store.ts's VECTOR_INDEX_DIM_CAP).
+          ENVS="${ENVS}@PALUP_EMBED_MODEL=gemini-embedding-2"
+          ENVS="${ENVS}@PALUP_EMBED_DIMENSION=1536"
 
           # C1 — all-or-nothing. A partial set is a CONFIGURATION MISTAKE, and the runtime's correct
           # response to it (register nothing, 404) is the wrong response for a deploy: the operator who set

@@ -171,6 +171,12 @@ export interface VertexEmbedConfig {
    * exactly like a good vector, and this repo's standing rule is to refuse rather than silently degrade.
    */
   autoTruncate?: boolean;
+  /** Per-provider-request timeout (ms). Undefined ⇒ no timeout (the pre-S2 behaviour). */
+  timeoutMs?: number;
+  /** Max retries per chunk on a transient failure/timeout. Undefined/0 ⇒ no retry. */
+  maxRetries?: number;
+  /** Max provider requests in flight at once. Undefined ⇒ 1 (sequential, the pre-S2 behaviour). */
+  concurrency?: number;
 }
 
 /** The embedding side of the adapter: a transport plus the config it is called with. */
@@ -328,8 +334,16 @@ export class VertexModelAdapter implements ModelPort {
    * refunding spend. `createMeteringModelPort` does not meter a rejected embed (metering.ts:54), so a
    * failed run's already-billed chunks are not in the cost meter either — real spend, invisible to it.
    *
-   * NO TIMEOUT, deliberately matching `complete` above, which has none: adding one only here would be a
-   * second style in one adapter. It is a real gap for a 1000-product run (reported, not silently fixed).
+   * TIMEOUT + RETRY/BACKOFF + BOUNDED CONCURRENCY (S2): a 50k-product index (`MAX_INDEXED_PRODUCTS`,
+   * catalog-index.ts:115) run one-chunk-at-a-time, with no timeout and no retry, is the throughput and
+   * resilience gap the pre-S2 version of this method reported rather than fixed. `cfg.timeoutMs` bounds
+   * one provider request; `cfg.maxRetries` retries a chunk that throws or times out with exponential
+   * backoff (capped at 2s); `cfg.concurrency` runs that many chunks in flight via a simple pull-based
+   * worker pool. None of the three change the ALL-OR-NOTHING contract above: the first chunk that
+   * exhausts its retries rejects the whole batch, in-flight siblings included. Every field defaults to the
+   * pre-S2 behaviour (no timeout, no retry, concurrency 1 ⇒ strictly sequential), so `vertex-embed.test.ts`
+   * / `vertex-embed-purpose.test.ts` / `vertex-adapter.test.ts` — none of which set these fields — are
+   * unaffected.
    *
    * The port's `tenantId` is NOT forwarded to Google. Attribution happens locally in the metering
    * decorator (metering.ts:55); sending a tenant id to the provider would be egress with no purpose.
@@ -350,84 +364,78 @@ export class VertexModelAdapter implements ModelPort {
       throw new Error(`vertex: the task type configured for embed purpose ${JSON.stringify(req.purpose)} is blank`);
 
     const chunkSize = Math.max(1, Math.floor(cfg.maxBatch));
+    const concurrency = Math.max(1, Math.floor(cfg.concurrency ?? 1));
+    const maxRetries = Math.max(0, Math.floor(cfg.maxRetries ?? 0));
+
+    // Split into ordered, offset-tagged chunks; each is validated independently and placed back by index
+    // so concurrent completion order never affects the final `vectors` order.
+    const chunks: { offset: number; texts: string[] }[] = [];
+    for (let o = 0; o < req.texts.length; o += chunkSize) chunks.push({ offset: o, texts: req.texts.slice(o, o + chunkSize) });
+
+    const perChunk: { values: number[][]; tokens: number | undefined }[] = new Array(chunks.length);
+
+    const withTimeout = async <T>(p: Promise<T>): Promise<T> => {
+      if (cfg.timeoutMs === undefined) return p;
+      return await Promise.race([
+        p,
+        new Promise<T>((_r, rej) => setTimeout(() => rej(new Error("vertex: embed request timed out")), cfg.timeoutMs)),
+      ]);
+    };
+
+    const runChunk = async (ci: number): Promise<void> => {
+      const { offset, texts } = chunks[ci]!;
+      let lastErr: unknown;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          const res = await withTimeout(
+            call({
+              model: cfg.model,
+              contents: texts,
+              config: {
+                taskType,
+                autoTruncate: cfg.autoTruncate ?? false,
+                ...(cfg.outputDimensionality === undefined ? {} : { outputDimensionality: cfg.outputDimensionality }),
+              },
+            }),
+          );
+          perChunk[ci] = this.validateChunk(offset, texts, res, cfg.outputDimensionality); // throws on any anomaly
+          return;
+        } catch (e) {
+          lastErr = e;
+          if (attempt < maxRetries) await new Promise((r) => setTimeout(r, Math.min(2000, 100 * 2 ** attempt))); // backoff
+        }
+      }
+      throw lastErr;
+    };
+
+    // Bounded pool: at most `concurrency` chunks in flight. The first rejection propagates out of
+    // Promise.all and fails the whole batch — in-flight siblings are not awaited further by the caller,
+    // matching the pre-existing all-or-nothing contract.
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < chunks.length) {
+        const ci = next++;
+        await runChunk(ci);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, () => worker()));
+
+    // Reassemble in order + enforce a single dimension across chunks (a provider could in principle answer
+    // two chunks of the same request with two different dimensions; that is exactly as invalid here as it
+    // was in the old within-chunk check, just now across chunks instead of within one).
     const vectors: number[][] = [];
     let dimension = 0;
     let inputTokens = 0;
     let tokensKnown = true;
-
-    // Sequential, not parallel: one in-flight request per adapter keeps a full-catalog run from bursting
-    // into the per-minute embedding quotas, and makes "which chunk failed" unambiguous.
-    for (let offset = 0; offset < req.texts.length; offset += chunkSize) {
-      const chunk = req.texts.slice(offset, offset + chunkSize);
-      const res = await call({
-        model: cfg.model,
-        contents: chunk,
-        config: {
-          taskType,
-          autoTruncate: cfg.autoTruncate ?? false,
-          ...(cfg.outputDimensionality === undefined
-            ? {}
-            : { outputDimensionality: cfg.outputDimensionality }),
-        },
-      });
-
-      const got = res.embeddings ?? [];
-      if (got.length !== chunk.length) {
-        throw new Error(
-          `vertex: embed chunk at offset ${offset} sent ${chunk.length} text(s) and got ${got.length} ` +
-            "vector(s) back — rejecting the whole batch (which text lost its vector is not recoverable, " +
-            "and a hole in a corpus looks like data)",
-        );
+    for (const c of perChunk) {
+      for (const v of c.values) {
+        if (dimension === 0) dimension = v.length;
+        else if (v.length !== dimension)
+          throw new Error(`vertex: mixed dimensions across chunks (${v.length} vs ${dimension})`);
+        vectors.push(v);
       }
-
-      for (let j = 0; j < got.length; j++) {
-        const index = offset + j;
-        const e = got[j]!;
-
-        // Silent input truncation ([E1]) produces a perfectly well-formed vector built from PART of the
-        // text. `autoTruncate:false` should already have turned that into a provider error; this is the
-        // belt to that braces, for a provider that ignores the flag. Never the text itself in the message.
-        if (e.statistics?.truncated === true) {
-          throw new Error(
-            `vertex: the provider reports the text at index ${index} was TRUNCATED before embedding — ` +
-              "rejecting the batch rather than storing a vector built from part of the text",
-          );
-        }
-
-        const values = e.values;
-        if (!Array.isArray(values) || values.length === 0) {
-          throw new Error(
-            `vertex: no embedding values returned for the text at index ${index} — rejecting the whole ` +
-              "batch rather than returning an empty vector",
-          );
-        }
-
-        if (dimension === 0) {
-          dimension = values.length;
-          // A provider that silently ignored `outputDimensionality` must not have its vectors pinned
-          // under the dimension we ASKED for: the caller persists this number with the corpus.
-          if (cfg.outputDimensionality !== undefined && dimension !== cfg.outputDimensionality) {
-            throw new Error(
-              `vertex: asked for ${cfg.outputDimensionality} dimensions but the provider returned ` +
-                `${dimension} — refusing to pin a corpus to a dimension that was not honored`,
-            );
-          }
-        } else if (values.length !== dimension) {
-          throw new Error(
-            `vertex: the text at index ${index} came back with ${values.length} components but this ` +
-              `batch's dimension is ${dimension} — mixed dimensions in one corpus rank as garbage`,
-          );
-        }
-
-        // Usage is all-or-nothing too. A sum over only the texts that reported a count is a number that
-        // READS like a full cost and is not one, so an incomplete count omits `usage` entirely — the same
-        // rule `complete` follows and the port states (model-port.ts:77).
-        const tc = e.statistics?.tokenCount;
-        if (typeof tc === "number" && Number.isFinite(tc) && tc >= 0) inputTokens += tc;
-        else tokensKnown = false;
-
-        vectors.push(values);
-      }
+      if (c.tokens === undefined) tokensKnown = false;
+      else inputTokens += c.tokens;
     }
 
     const out: EmbedResponse = {
@@ -443,5 +451,83 @@ export class VertexModelAdapter implements ModelPort {
     // reported dimension, every component finite, and the purpose echoed. Adapter and contract cannot drift.
     requireEmbedAlignment(req, out);
     return out;
+  }
+
+  /**
+   * Validate ONE chunk's response against what was sent, returning its vectors + (if known) its token
+   * count. Extracted from the pre-S2 sequential loop verbatim (same error messages, same checks) so that
+   * bounded-concurrency callers and any future caller share one validator instead of two copies drifting.
+   * Throws on any anomaly — a throw here is what makes a chunk "fail" for `runChunk`'s retry loop above.
+   */
+  private validateChunk(
+    offset: number,
+    chunk: string[],
+    res: VertexEmbedResponse,
+    outputDimensionality: number | undefined,
+  ): { values: number[][]; tokens: number | undefined } {
+    const got = res.embeddings ?? [];
+    if (got.length !== chunk.length) {
+      throw new Error(
+        `vertex: embed chunk at offset ${offset} sent ${chunk.length} text(s) and got ${got.length} ` +
+          "vector(s) back — rejecting the whole batch (which text lost its vector is not recoverable, " +
+          "and a hole in a corpus looks like data)",
+      );
+    }
+
+    const values: number[][] = [];
+    let dimension = 0;
+    let inputTokens = 0;
+    let tokensKnown = true;
+
+    for (let j = 0; j < got.length; j++) {
+      const index = offset + j;
+      const e = got[j]!;
+
+      // Silent input truncation ([E1]) produces a perfectly well-formed vector built from PART of the
+      // text. `autoTruncate:false` should already have turned that into a provider error; this is the
+      // belt to that braces, for a provider that ignores the flag. Never the text itself in the message.
+      if (e.statistics?.truncated === true) {
+        throw new Error(
+          `vertex: the provider reports the text at index ${index} was TRUNCATED before embedding — ` +
+            "rejecting the batch rather than storing a vector built from part of the text",
+        );
+      }
+
+      const v = e.values;
+      if (!Array.isArray(v) || v.length === 0) {
+        throw new Error(
+          `vertex: no embedding values returned for the text at index ${index} — rejecting the whole ` +
+            "batch rather than returning an empty vector",
+        );
+      }
+
+      if (dimension === 0) {
+        dimension = v.length;
+        // A provider that silently ignored `outputDimensionality` must not have its vectors pinned
+        // under the dimension we ASKED for: the caller persists this number with the corpus.
+        if (outputDimensionality !== undefined && dimension !== outputDimensionality) {
+          throw new Error(
+            `vertex: asked for ${outputDimensionality} dimensions but the provider returned ` +
+              `${dimension} — refusing to pin a corpus to a dimension that was not honored`,
+          );
+        }
+      } else if (v.length !== dimension) {
+        throw new Error(
+          `vertex: the text at index ${index} came back with ${v.length} components but this ` +
+            `batch's dimension is ${dimension} — mixed dimensions in one corpus rank as garbage`,
+        );
+      }
+
+      // Usage is all-or-nothing too. A sum over only the texts that reported a count is a number that
+      // READS like a full cost and is not one, so an incomplete count omits `usage` entirely — the same
+      // rule `complete` follows and the port states (model-port.ts:77).
+      const tc = e.statistics?.tokenCount;
+      if (typeof tc === "number" && Number.isFinite(tc) && tc >= 0) inputTokens += tc;
+      else tokensKnown = false;
+
+      values.push(v);
+    }
+
+    return { values, tokens: tokensKnown ? inputTokens : undefined };
   }
 }
