@@ -38,6 +38,7 @@
     "cap:clear": "tsx packages/widget-backend/src/jobs/cost-cap.ts clear",
     "catalog:index": "tsx packages/widget-backend/src/jobs/catalog-index.ts index",
     "catalog:clear": "tsx packages/widget-backend/src/jobs/catalog-index.ts clear",
+    "catalog:enable": "tsx packages/widget-backend/src/jobs/catalog-enable.ts",
     "grounding:invalidate": "tsx packages/widget-backend/src/jobs/merchant.ts invalidate-grounding",
     "widget:dev": "pnpm --filter @palup/widget dev",
     "e2e": "playwright test --config e2e/playwright.config.ts",
