@@ -105,6 +105,11 @@ function posInt(name: string, def: number): number {
   }
   return v;
 }
+// A1b/D2 — the serve-time staleness ceiling default (S3 §D): the money safety net so a hydrated Tier-2
+// fact older than this is never quoted. Exported (named, not a magic number) so a silent revert of this
+// value — e.g. back to the pre-S3 1h default, which would let a stale price be quoted for up to an hour —
+// is caught by a test rather than only by reading the diff.
+export const PRODUCT_FACTS_MAX_AGE_MS_DEFAULT = 900_000;
 // Input bounds (T5) — reject oversized inputs before any work.
 const MAX_MESSAGE_CHARS = posInt("MAX_MESSAGE_CHARS", 4_000);
 const MAX_ID_CHARS = posInt("MAX_ID_CHARS", 200); // sessionId / idempotencyKey
@@ -598,7 +603,7 @@ export async function buildServer(opts?: {
   // this (or with no updatedAt) is NOT quoted — the agent offers to confirm rather than quote a stale number
   // (money/NN#1 fail-honest). This is the money safety net, independent of webhook/scheduler reliability.
   // Only takes effect on the flag-gated hydration path.
-  const PRODUCT_FACTS_MAX_AGE_MS = posInt("PRODUCT_FACTS_MAX_AGE_MS", 900_000);
+  const PRODUCT_FACTS_MAX_AGE_MS = posInt("PRODUCT_FACTS_MAX_AGE_MS", PRODUCT_FACTS_MAX_AGE_MS_DEFAULT);
   // 3b — OUTGOING_OFFER_CHECK: run the language-agnostic semantic check on the outgoing reply (a backstop to
   // the deterministic keyword floor) per sales turn. Same governed posture-flag discipline: env-read here,
   // default OFF, turning it on is a human promotion (HITL §5) — it adds a per-turn model call (cost) and is
