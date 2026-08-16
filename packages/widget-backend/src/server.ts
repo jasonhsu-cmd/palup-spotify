@@ -69,10 +69,11 @@ import {
   type MerchantCredentialSink,
 } from "./routes/shopify-install.js";
 import { registerShopifyWebhookRoutes, WEBHOOK_ROUTES } from "./routes/shopify-webhooks.js";
-import { subscribeCatalogReconcile } from "./catalog-webhook-queue.js";
+import { subscribeCatalogReconcile, type ReconcileReason } from "./catalog-webhook-queue.js";
+import { createReconcileCoalescer, CATALOG_RECONCILE_COALESCE_MS_DEFAULT } from "./catalog-reconcile-coalescer.js";
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
-import { runCatalogIndex, shopifyCatalogSource } from "./jobs/catalog-index.js";
+import { reconcileByReason, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
 // multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
@@ -104,6 +105,11 @@ function posInt(name: string, def: number): number {
   }
   return v;
 }
+// A1b/D2 — the serve-time staleness ceiling default (S3 §D): the money safety net so a hydrated Tier-2
+// fact older than this is never quoted. Exported (named, not a magic number) so a silent revert of this
+// value — e.g. back to the pre-S3 1h default, which would let a stale price be quoted for up to an hour —
+// is caught by a test rather than only by reading the diff.
+export const PRODUCT_FACTS_MAX_AGE_MS_DEFAULT = 900_000;
 // Input bounds (T5) — reject oversized inputs before any work.
 const MAX_MESSAGE_CHARS = posInt("MAX_MESSAGE_CHARS", 4_000);
 const MAX_ID_CHARS = posInt("MAX_ID_CHARS", 200); // sessionId / idempotencyKey
@@ -593,11 +599,11 @@ export async function buildServer(opts?: {
   // on is a human promotion (HITL-POLICY §5) — it changes which PRICE the agent quotes (money/NN#1). OFF ⇒
   // the store is never constructed, getMany never runs, and the CATALOG block is byte-identical.
   const PRODUCT_FACTS_HYDRATION = process.env.PRODUCT_FACTS_HYDRATION === "true";
-  // A1b/D2 — hard staleness ceiling (ms) for hydrated Tier-2 facts. Default 1h: a fact older than this (or
-  // one with no updatedAt) is NOT quoted — the agent offers to confirm rather than quote a stale number
-  // (money/NN#1 fail-honest). Only takes effect on the flag-gated hydration path. The promotion is expected
-  // to tune this against D2's ≤15-min freshness target (see the go-live checklist).
-  const PRODUCT_FACTS_MAX_AGE_MS = posInt("PRODUCT_FACTS_MAX_AGE_MS", 3_600_000);
+  // A1b/D2 — hard staleness ceiling (ms) for hydrated Tier-2 facts. Default 15 MIN (S3 §D): a fact older than
+  // this (or with no updatedAt) is NOT quoted — the agent offers to confirm rather than quote a stale number
+  // (money/NN#1 fail-honest). This is the money safety net, independent of webhook/scheduler reliability.
+  // Only takes effect on the flag-gated hydration path.
+  const PRODUCT_FACTS_MAX_AGE_MS = posInt("PRODUCT_FACTS_MAX_AGE_MS", PRODUCT_FACTS_MAX_AGE_MS_DEFAULT);
   // 3b — OUTGOING_OFFER_CHECK: run the language-agnostic semantic check on the outgoing reply (a backstop to
   // the deterministic keyword floor) per sales turn. Same governed posture-flag discipline: env-read here,
   // default OFF, turning it on is a human promotion (HITL §5) — it adds a per-turn model call (cost) and is
@@ -1064,11 +1070,16 @@ export async function buildServer(opts?: {
       vector: vectorPort,
       model: createMeteringModelPort(activeModelPort, telemetry, { agentType: "catalog-index" }),
       catalog: shopifyCatalogSource(secrets),
+      catalogById: shopifyCatalogByIdSource(secrets),
       productFacts: factsStore,
     };
-    const reconcile = async (tenantId: string) => {
-      await runCatalogIndex(reconcileDeps, [tenantId], {});
-    };
+    // S3 §C — `reconcileByReason` (catalog-index.ts) owns the routing: named product ids ⇒ the TARGETED
+    // reconcile (fetch+embed+upsert+ledger for just those SKUs, S3·T5); a bare "inventory" tick is a NO-OP
+    // — inventory freshness is covered by the hourly poll backstop (PRODUCT_FACTS_POLL) + the serve-time
+    // ceiling, not a proactive crawl (spec decision, S3 §C); "full"/absent (the backstop path, or an
+    // inventory message with no by-id target) runs the existing whole-catalog `runCatalogIndex`. Kept as a
+    // named export (not inlined here) so the routing decision is unit-testable on its own.
+    const reconcile = (tenantId: string, o?: { productIds?: string[]; reason?: ReconcileReason }) => reconcileByReason(reconcileDeps, tenantId, o);
 
     // CONSUME side — the durable OIDC-verified push route. Registered whenever Pub/Sub push is configured,
     // INDEPENDENT of CATALOG_WEBHOOKS (the P4 decoupling). With CATALOG_WEBHOOKS off nothing publishes, so the
@@ -1113,11 +1124,29 @@ export async function buildServer(opts?: {
           topicName: () => PUBSUB_TOPIC!,
         });
       } else {
+        // S3 §C (T6) — the in-memory path is the SYNCHRONOUS one (a webhook blocks on its reconcile), so a
+        // bulk edit firing N webhooks would otherwise fan out to N sequential re-indexes. Route it through
+        // the per-tenant coalescer: N deliveries in one CATALOG_RECONCILE_COALESCE_MS window collapse into
+        // ONE reconcile with the merged/deduped id set (see catalog-reconcile-coalescer.ts for the
+        // full-subsumes-targeted and over-cap-spills-to-full rules). The durable Pub/Sub push route above is
+        // NOT wrapped — it reconciles per delivery already targeted (S3·T5); cross-delivery coalescing there
+        // is an operational/S4 concern.
+        const COALESCE_MS = posInt("CATALOG_RECONCILE_COALESCE_MS", CATALOG_RECONCILE_COALESCE_MS_DEFAULT);
+        const coalescer = createReconcileCoalescer((tenantId, o) => reconcile(tenantId, o), { windowMs: COALESCE_MS });
         catalogQueue = createInMemoryQueue({});
-        subscribeCatalogReconcile(catalogQueue, reconcile);
+        subscribeCatalogReconcile(catalogQueue, async (tenantId, o) => {
+          coalescer.enqueue(tenantId, { ...(o?.productIds ? { productIds: o.productIds } : {}), reason: o?.reason ?? "full" });
+        });
+        // FIX 4 (final review, #5) — drain any still-pending coalesce window on shutdown, so a deploy/restart
+        // landing mid-window does not silently lose the targeted ids it was about to reconcile. The
+        // per-window timer is `unref()`d (catalog-reconcile-coalescer.ts) so it never holds the process
+        // open by itself; this hook is the actual drain path on a graceful `app.close()`.
+        app.addHook("onClose", async () => {
+          await coalescer.flush();
+        });
         console.warn(
-          "[config] CATALOG_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): delivery is SYNCHRONOUS, so a " +
-            "webhook blocks on a full re-index. Set PUBSUB_CATALOG_TOPIC + PUBSUB_PUSH_SERVICE_ACCOUNT + " +
+          "[config] CATALOG_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): deliveries COALESCE per " +
+            `tenant over ${COALESCE_MS}ms then reconcile once. Set PUBSUB_CATALOG_TOPIC + PUBSUB_PUSH_SERVICE_ACCOUNT + ` +
             "PUBSUB_PUSH_AUDIENCE for the durable async path before any real deployment.",
         );
       }

@@ -433,6 +433,93 @@ export function storefrontShellFetch(
   };
 }
 
+/**
+ * By-id product fetch. `nodes(ids:)` returns the products for the given GIDs; a missing/delisted id
+ * resolves to `null`, and a GID whose concrete type doesn't match the `... on Product` inline fragment
+ * resolves to an object with none of the fragment's fields selected (no `id`) — both are dropped, never
+ * mis-mapped into a product. The inline fragment requests the SAME fields as the page query so
+ * `mapStorefrontToContext` maps the result identically.
+ *
+ * VERIFIED against PRIMARY DOCS (shopify.dev, Storefront API **2026-07**, retrieved **2026-08-16**):
+ *   • .../api/storefront/latest/queries/nodes — `nodes(ids: [ID!]!): [Node]!`, one result per id, in the
+ *     SAME order as the input, `null` for an id that doesn't resolve.
+ *   • .../api/usage/limits — array arguments (including `nodes(ids:)`) accept a maximum of **250**
+ *     elements per call; see `STOREFRONT_NODES_MAX` below.
+ */
+export const STOREFRONT_NODES_QUERY = `query PalUpGroundingByIds($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Product { id title description tags availableForSale priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } } }
+  }
+}`;
+
+/** Max ids per `nodes(ids:)` call — "array arguments accept a maximum of 250 elements" (citation above). */
+export const STOREFRONT_NODES_MAX = 250;
+
+export type StorefrontByIdFetch = (creds: ShopifyStoreCreds, ids: string[]) => Promise<StorefrontData>;
+
+/**
+ * S3 §C — fetch ONLY the named products by Storefront GID, so a webhook can refresh exactly the SKUs that
+ * changed instead of paging the whole catalog. Returns the same `StorefrontData` shape the pagination path
+ * does (`{ products: { nodes } }`) so it flows through `mapStorefrontToContext` unchanged. Same host guard +
+ * private-token header + per-request timeout as `storefrontFetch`; the token never leaves this path and is
+ * never logged.
+ *
+ * CHUNKED at `STOREFRONT_NODES_MAX` (250): `nodes(ids:)` errors above that many ids in one call, and a
+ * webhook-coalesced batch (T6) can exceed it, so the ceiling lives HERE — every caller (T5/T6) is safe
+ * without chunking itself. Each slice is its own POST + its own egress log line (`page` = 1-based slice
+ * index); resolved products across ALL slices are merged into one result. The "return only resolved
+ * products; caller recovers missing ids via set-difference against what it asked for" contract is
+ * UNCHANGED by chunking — a null (or non-Product) node in any slice is still simply absent from the merged
+ * result, same as a single-call fetch.
+ */
+export function storefrontFetchByIds(
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  opts: { version?: string; timeoutMs?: number; log?: (info: StorefrontEgressLog) => void } = {},
+): StorefrontByIdFetch {
+  const version = opts.version ?? STOREFRONT_API_VERSION;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PAGE_TIMEOUT_MS;
+  const log = opts.log ?? ((info: StorefrontEgressLog) => console.log("[grounding.shopify] " + JSON.stringify(info)));
+  return async (creds, ids) => {
+    if (ids.length === 0) return { products: { nodes: [] } };
+    if (!SHOP_HOST.test(creds.shopDomain)) {
+      throw new Error("refusing Shopify fetch: shopDomain is not a *.myshopify.com host"); // never leak the token
+    }
+    const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
+    const nodes: StorefrontProductNode[] = [];
+    for (let offset = 0; offset < ids.length; offset += STOREFRONT_NODES_MAX) {
+      const batch = ids.slice(offset, offset + STOREFRONT_NODES_MAX);
+      const page = offset / STOREFRONT_NODES_MAX + 1;
+      const start = Date.now();
+      let status = 0;
+      let ok = false;
+      let nodeCount: number | undefined;
+      try {
+        const res = await fetchFn(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", "Shopify-Storefront-Private-Token": creds.accessToken },
+          body: JSON.stringify({ query: STOREFRONT_NODES_QUERY, variables: { ids: batch } }),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        status = res.status;
+        ok = res.ok;
+        if (!res.ok) throw new Error("Shopify Storefront API request failed"); // static; caching wrapper degrades
+        const json = (await res.json()) as { data?: { nodes?: (StorefrontProductNode | null)[] }; errors?: Array<{ message?: string }> };
+        if (Array.isArray(json.errors) && json.errors.length) throw new Error("Shopify Storefront GraphQL error");
+        const batchNodes = (json.data?.nodes ?? []).filter((n): n is StorefrontProductNode => n != null && typeof n.id === "string");
+        nodeCount = batchNodes.length;
+        nodes.push(...batchNodes);
+      } finally {
+        try {
+          log({ host: creds.shopDomain, status, ok, ms: Date.now() - start, page, nodes: nodeCount });
+        } catch {
+          /* ignore logging errors */
+        }
+      }
+    }
+    return { products: { nodes } };
+  };
+}
+
 /** GroundingPort backed by a merchant's Shopify store. `fetchImpl` defaults to the live Storefront call. */
 export function createShopifyGroundingAdapter(
   creds: ShopifyStoreCreds,

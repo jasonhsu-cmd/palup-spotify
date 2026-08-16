@@ -902,6 +902,82 @@ longer expired-and-present, and a subject with nothing expired produces no delet
 > memory is enabled, not after — the same "before the first real write" rule the checklist's rollback note
 > applies to B5/B6.
 
+## Scheduled catalog-index backstop (`palup-catalog-index`) — S3 §E
+
+The ADR-0020 missed-event backstop. Webhooks are the fast path; the 15-min serve-time ceiling is the money
+safety net; this hourly full reconcile (now ANN-safe via the S3 ledger) is the missed-event catch-all. It
+MAINTAINS THE DARK CORPUS — it spends real Vertex embedding on changed hashes — so **enabling it is a human
+cost decision (jason's), not a build agent's**. Nothing here flips a serving flag; serving stays HITL §5.
+
+> Same `/cloudsql/` unix-socket `DATABASE_URL` requirement, and same "REPLACE-set on every deploy" trap, as
+> the retention sweep above. A job without the Cloud SQL attachment cannot connect at all.
+
+**First-run cost — read before the first apply.** The first S3 reconcile against a pre-existing corpus has
+no ledger yet (no prior content-hashes to diff against), so it **RE-EMBEDS 100% of the catalog** — full
+metered Vertex embedding spend, not the bounded "changed products only" spend every run after it does. The
+owner should expect and budget for this one-time spend when the job first runs; it does not recur on
+subsequent hourly runs, which embed only products whose content hash changed since the last reconcile.
+
+> **Owner runs these — do NOT execute here.** These are the exact `gcloud` commands for jason to run by
+> hand; no `gcloud`/`terraform` command is executed by a build agent in this repo.
+
+```bash
+# 1. Create the job. `--command pnpm --args catalog:index` overrides the image CMD ["pnpm","backend"] to run
+#    the catalog index CLI (packages/widget-backend/src/jobs/catalog-index.ts) for every SHOPIFY_STORES tenant.
+gcloud run jobs deploy palup-catalog-index \
+  --source . --region us-central1 --project palup-jason \
+  --command pnpm --args catalog:index \
+  --set-cloudsql-instances palup-jason:us-central1:palup-staging \
+  --set-secrets "DATABASE_URL=palup-staging-database-url:latest,PALUP_SECRETS=palup-secrets:latest" \
+  --set-env-vars "^@^SHOPIFY_STORES=demo=palup-skincare-jason.myshopify.com@PALUP_REQUIRE_DATABASE_URL=true@GOOGLE_CLOUD_PROJECT=palup-jason@GOOGLE_CLOUD_LOCATION=us-central1@PALUP_MODEL=<pinned-model-id>"
+# NOTE: no serving-side flag is set here — the job WRITES the corpus, it does not serve it (see the
+# "Enabling note" below). Add PRODUCT_FACTS_POLL=true only when the Tier-2 poll producer is intended (§5).
+
+# 2. Run it once by hand and READ THE OUTPUT before scheduling anything. On a pre-existing corpus this first
+#    run is the 100%-re-embed run described above — expect it to take longer and cost more than every run
+#    after it.
+gcloud run jobs execute palup-catalog-index --region us-central1 --project palup-jason --wait
+
+# 3. Enable Cloud Scheduler (idempotent; give the API a few minutes to settle — see the sweep's note).
+gcloud services enable cloudscheduler.googleapis.com --project palup-jason
+
+# 4. A DEDICATED invoker identity whose ONLY power is starting this one job (mirrors palup-sweep-invoker).
+gcloud iam service-accounts create palup-catalog-index-invoker \
+  --display-name="Cloud Scheduler invoker for the catalog index backstop" --project palup-jason
+gcloud run jobs add-iam-policy-binding palup-catalog-index \
+  --region us-central1 --project palup-jason \
+  --member="serviceAccount:palup-catalog-index-invoker@palup-jason.iam.gserviceaccount.com" \
+  --role="roles/run.invoker"
+
+# 5. Schedule HOURLY, at an odd minute to dodge the top-of-hour herd. --time-zone=UTC so DST never shifts it.
+gcloud scheduler jobs create http palup-catalog-index-hourly \
+  --location=us-central1 --project palup-jason \
+  --schedule="23 * * * *" --time-zone=UTC \
+  --uri="https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/palup-jason/jobs/palup-catalog-index:run" \
+  --http-method=POST \
+  --oauth-service-account-email="palup-catalog-index-invoker@palup-jason.iam.gserviceaccount.com" \
+  --max-retry-attempts=3 --min-backoff=60s --max-backoff=600s
+
+# 6. Prove it fires.
+gcloud scheduler jobs run palup-catalog-index-hourly --location us-central1 --project palup-jason
+gcloud run jobs executions list --job palup-catalog-index --region us-central1 --project palup-jason
+```
+
+**Spend note (for the apply):** enabling the hourly job starts real Vertex embedding spend on the dark
+corpus. The **first** run is unbounded (100% re-embed — see above); every run after it is bounded, because
+only changed content hashes embed (content-hash + ledger diff). The apply, and its cost, is the owner's
+decision — this job does not enable serving (see below).
+
+**Known blind-spot (documented, not fixed here — S4 follow-up):** both this job and the sweep enumerate
+`SHOPIFY_STORES` for their tenant list (`catalog-index.ts` `tenantsToIndex`). A self-installed merchant
+absent from that env is **NOT reconciled** by this backstop. The tenant list should come from the install
+registry — deferred to S4 (spec §H(2)). Until then, a newly-installed merchant relies on webhooks + the
+15-min serve ceiling until its domain is added to `SHOPIFY_STORES`.
+
+**Enabling note:** deploying and running this job maintains the DARK corpus and spends on embeddings, but it
+does **NOT** enable serving. `CATALOG_RETRIEVAL` / `VECTOR_ANN` stay **§5 named-owner promotions** —
+nothing in this job's env or command flips them.
+
 ## Local
 
 ```bash

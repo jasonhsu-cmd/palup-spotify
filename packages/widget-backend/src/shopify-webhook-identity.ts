@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { SHOPIFY_PRODUCT_GID_PREFIX } from "./catalog-webhook-queue.js";
 
 // C2 — Shopify WEBHOOK wire-format adapter. Lives here, next to shopify-install-identity.ts (C1) and the
 // other named Shopify adapters, for the same reason they do: it is a Shopify-specific ADAPTER behind
@@ -351,6 +352,46 @@ export function customerIdOf(body: Record<string, unknown>): string | undefined 
     return Number.isSafeInteger(id) && id >= 0 ? String(id) : undefined;
   }
   if (typeof id === "string" && /^\d+$/.test(id)) return id;
+  return undefined;
+}
+
+/**
+ * S3 §C, fix round 2 (SUPERSEDES fix round 1's "return the bare numeric id" ruling) — the changed
+ * product's FULL Storefront/Admin GID (`"gid://shopify/Product/<id>"`), or `undefined`.
+ *
+ * WHY THE FULL GID, NOT THE BARE NUMBER. The corpus/ledger record key is `product:<FULL-GID>`
+ * (`catalogRecordId`, catalog-index.ts — built from the Storefront GID the full-catalog index path reads
+ * off `Product.id`), and Shopify's `nodes(ids:)` (the by-id fetch, Task 4) REQUIRES a GID, not a bare
+ * number. Fix round 1 had this function strip the GID down to its bare numeric tail, which built the
+ * WRONG record id (`product:123` never matches the real `product:gid://shopify/Product/123` key) and sent
+ * an invalid id to `nodes(ids:)` — the targeted reconcile would silently never refresh the changed
+ * product. Returning the whole GID string end-to-end fixes both: it IS the corpus key's id half, and it
+ * IS what `nodes(ids:)` expects.
+ *
+ * PRECISION IS UNCHANGED BY THIS FIX. Shopify's product webhook body carries the id in TWO fields: the
+ * numeric `id` (a JSON number, so it is already lossy for a large id — `JSON.parse`/the JS number type
+ * both round any integer beyond `Number.MAX_SAFE_INTEGER` before this function ever sees it) and
+ * `admin_graphql_api_id`, a GID STRING `"gid://shopify/Product/<id>"` — a string is never subject to
+ * float64 rounding. The GID string is read FIRST, as the precision-safe source, and returned VERBATIM
+ * (never parsed apart and never reassembled) — so an oversized id stays byte-exact. The numeric `id`
+ * field is a LAST-RESORT FALLBACK only, for a body that somehow lacks the GID: when it is used, this
+ * function CONSTRUCTS the GID (`SHOPIFY_PRODUCT_GID_PREFIX + String(id)`) so the return type is always a
+ * full Product GID or `undefined`, never a bare number — one id convention, not two. The fallback keeps
+ * the exact same safe-integer refusal `customerIdOf` uses (never silently rounds a value that has
+ * already lost precision).
+ *
+ * Same refuse-rather-than-coerce discipline as `customerIdOf`/`dataRequestIdOf` throughout: a value that
+ * does not exactly match the expected shape yields `undefined`, never a guess.
+ */
+export function productIdOf(body: Record<string, unknown>): string | undefined {
+  const gid = body.admin_graphql_api_id;
+  if (typeof gid === "string" && /^gid:\/\/shopify\/Product\/\d+$/.test(gid)) return gid;
+  // Fallback only — no valid GID present. Same safe-integer discipline as customerIdOf: a numeric id
+  // beyond Number.MAX_SAFE_INTEGER has already lost precision by the time it is a JS number, so it is
+  // refused rather than silently rounded. Constructed into a full GID, never returned bare.
+  const id = body.id;
+  if (typeof id === "number") return Number.isSafeInteger(id) && id >= 0 ? `${SHOPIFY_PRODUCT_GID_PREFIX}${id}` : undefined;
+  if (typeof id === "string" && /^\d+$/.test(id)) return `${SHOPIFY_PRODUCT_GID_PREFIX}${id}`;
   return undefined;
 }
 

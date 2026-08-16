@@ -29,12 +29,23 @@ import { parseStoreDomains, resolveShopifyStore } from "../merchant-store.js";
 import { createModelPort } from "../model.js";
 import {
   createShopifyGroundingAdapter,
+  mapStorefrontToContext,
   MAX_CATALOG_PRODUCTS,
   MAX_INDEX_CATALOG_PAGES,
   STOREFRONT_PAGE_SIZE,
   storefrontFetch,
+  storefrontFetchByIds,
+  type StorefrontByIdFetch,
   type StorefrontFetch,
 } from "../shopify-grounding.js";
+import type { ReconcileReason } from "../catalog-webhook-queue.js";
+import {
+  chunkLedgerEntries,
+  deleteLedgerInTx,
+  listLedgerChunkKeys,
+  readCorpusLedger,
+  writeLedgerInTx,
+} from "./catalog-ledger.js";
 
 // C3 — the scheduled/operator-run CATALOG INDEX job: fetch a merchant's catalog, embed it through the
 // `model` port, and write one vector per product into the `vector` port under `${tenantId}::catalog`.
@@ -98,6 +109,15 @@ export function catalogNamespace(tenantId: string): string {
 export function catalogRecordId(productId: string): string {
   return `product:${productId}`;
 }
+
+/**
+ * FIX 3 (security C2, final review) — the SAME shape `shopify-webhook-identity.ts`'s `productIdOf` validates
+ * at the producer. Re-declared (not imported) so this consumer-side check does not depend on the producer
+ * ever having validated correctly — defense-in-depth at the `reconcileProducts` boundary: a malformed or
+ * future producer must not be able to feed an arbitrary string into a record key or a GraphQL `nodes(ids:)`
+ * id.
+ */
+export const PRODUCT_GID_RE = /^gid:\/\/shopify\/Product\/\d+$/;
 
 /**
  * THE INDEX CEILING — the largest catalog this job will index. S2 raised it to the full ADR-0020 ~50k
@@ -223,12 +243,19 @@ export interface TenantIndexReport {
 /** Resolve one tenant's catalog, or `undefined` when the tenant has no configured store. */
 export type CatalogSource = (tenantId: string) => Promise<GroundingContext | undefined>;
 
+/** Resolve ONLY the named products (by corpus GID), or `undefined` when the tenant has no store. Missing/
+ *  delisted ids simply do not appear in the returned array (the caller treats those as deletions). */
+export type CatalogByIdSource = (tenantId: string, ids: string[]) => Promise<Product[] | undefined>;
+
 export interface CatalogIndexDeps {
   store: RuntimeStatePort;
   vector: VectorPort;
   /** Whatever adapter this deployment composed. `embed` is OPTIONAL — see `canEmbed` below. */
   model: ModelPort;
   catalog: CatalogSource;
+  /** S3 §C — by-id source for the TARGETED reconcile path (webhook-driven). Absent ⇒ reconcileProducts can
+   *  only fall back to the full `catalog` crawl. */
+  catalogById?: CatalogByIdSource;
   /**
    * A3 (ADR-0020) — OPTIONAL Tier-2 product-facts store. When present, each successful catalog re-fetch
    * ALSO upserts the fresh price/availability facts here (the POLL-path producer, D2 — the freshness win
@@ -331,8 +358,13 @@ function pinMismatch(manifest: CatalogManifest, now: CorpusPin): string | undefi
   );
 }
 
-/** A refusal this job authored itself: a static, PII-free sentence, reported as `reason`. */
-class CatalogRefusal extends Error {
+/**
+ * A refusal this job authored itself: a static, PII-free sentence, reported as `reason`. Exported so
+ * `catalog-ledger.ts`'s foreign-guard (readCorpusLedger) can raise the SAME type — a plain `Error` there
+ * would only surface as `errorClass` in the report, losing the "which id / which chunk" detail an operator
+ * needs (review round-1 FIX 2).
+ */
+export class CatalogRefusal extends Error {
   constructor(
     readonly outcome: CatalogIndexOutcome,
     message: string,
@@ -402,17 +434,23 @@ async function checkHalts(deps: CatalogIndexDeps, tenantId: string): Promise<"ha
  *   3. ONE `vector.upsert(ns, records)` call                 → all-or-nothing INSIDE the durable
  *      adapter, which runs the whole batch in one transaction (postgres-vector-store.ts:136, verified
  *      against pglite in state-postgres/test/postgres-vector-store.test.ts:135)
- *   4. read the corpus BACK and verify every record landed   → never report an unverified success
- *   5. `deleteById(stale)` for delisted products
- *   6. ONE `store.tx` writing the manifest + its audit record TOGETHER
+ *   4. `deleteById(stale)` for delisted products
+ *   5. ONE `store.tx` writing the manifest + the LEDGER (S3 §B) + its audit record TOGETHER
+ *
+ * S3 §B RETIRED STEP: there used to be a step 4 here — read the corpus BACK via `vector.query(ns,
+ * {text:""})` and verify every record landed. That enumerate is GONE (it silently truncated at 5000 rows
+ * on the brute-force store and THREW on the S1 pgvector store — the very bug this task closes). The
+ * durable adapter's `upsert` is already all-or-nothing in its own transaction, and the ledger written in
+ * step 5 (atomically with the manifest) IS the record of what is indexed; a rare upsert/ledger drift
+ * self-heals on the next `--reindex`.
  *
  * WHAT IS NOT ATOMIC, stated plainly: there is no transaction spanning the vector port and the
- * runtime-state port, so steps 3–6 are not one unit. The order is chosen so every interruption leaves a
+ * runtime-state port, so steps 3–5 are not one unit. The order is chosen so every interruption leaves a
  * SUPERSET of a correct corpus, never a hole:
- *   • died after 3, before 5 → the new records are all present, some delisted ones linger. The next run
- *     detects and deletes them (they are just stale ids).
- *   • died after 3, before 6 → the corpus is correct but its manifest is stale and no audit record
- *     exists. The next run notices `manifest.products !== corpus size`, rewrites the manifest and audits
+ *   • died after 3, before 4 → the new records are all present, some delisted ones linger. The next run
+ *     detects and deletes them (they are just stale ids per the ledger diff).
+ *   • died after 3, before 5 → the corpus is correct but its ledger/manifest are stale and no audit record
+ *     exists. The next run notices `manifest.products !== ledger.size`, rewrites the manifest and audits
  *     it WITHOUT re-embedding, and reports `manifest-repaired` — so an unaudited write cannot persist
  *     quietly (NN#5).
  * Mixed dimensions remain impossible throughout: a write happens only when the corpus is EMPTY, when the
@@ -493,66 +531,39 @@ async function indexOneTenant(
 
   const plan = planProducts(catalog.products);
 
-  // Enumerate the existing corpus. `k` is one MORE than the ceiling: hitting it means the namespace holds
-  // more than we could have written, so one query cannot prove what is in there and reconciling stale
-  // records would be guesswork (the `enumerateSubjectOrFail` discipline, widget-memory/src/erasure.ts).
+  // S3 §B — the corpus id→hash set comes from the LEDGER (RuntimeState KV), NOT a vector enumerate. The
+  // S2-parked ANN-unsafe vector-store enumerate (a text-modality query with a blank text) is gone: it silently truncated at 5000 on
+  // the brute-force store and THREW on the S1 pgvector store, so a >5000-SKU pgvector index could not be
+  // reconciled at all. `readCorpusLedger` asserts every id is a `product:` id, so the old foreign-guard is
+  // intrinsic — reconcile can only ever `deleteById` ids this job wrote.
   //
-  // S2/T4 FINDING (parked to S3, not fixed here — see S2 spec's "Promotion preconditions"): this
-  // `{text: ""}` enumerate is neither scale- nor ANN-safe. On the legacy brute-force store it silently
-  // caps at `MAX_SCAN_ROWS` (5000) — a corpus above that reconciles against a truncated view without
-  // erroring. On the S1 `VECTOR_ANN=true` pgvector store it THROWS (`PgVectorTextQueryUnsupported`: that
-  // adapter is vector-query-only, per `pgvector-store.ts`). So a >5000-SKU pgvector index must not be run
-  // through this job until S3 reworks this reconcile into something ANN-compatible (e.g. a paged/id-diff
-  // approach). This is why the S2 E2E (`serving-unlock-e2e.test.ts`) exercises the in-memory store, not
-  // pgvector.
-  const probe = maxProducts + 1;
-  const existing = await deps.vector.query(ns, { text: "", k: probe });
-  if (existing.length >= probe) {
-    throw new CatalogRefusal(
-      "failed",
-      `corpus holds at least ${probe} records — one query cannot enumerate it completely, so stale-record ` +
-        "reconciliation would be guesswork; clear it (pnpm catalog:clear --tenant <id>) and index again",
-    );
-  }
+  // FIX (review round 1) — `priorChunkKeys` is ALWAYS the real chunk-key set, fetched UNCONDITIONALLY, even
+  // on `--reindex`. It feeds `writeLedgerInTx`'s prune list, which is a DIFFERENT concern from the ledger
+  // CONTENT used for diffing below: if `--reindex` shrinks a 2-chunk ledger down to 1 chunk, the old
+  // `ledger:0001` chunk must still be pruned or it survives as an orphan — the NEXT normal run would then
+  // read it, treat its stale ids as still-live-but-removed, and report a false `removed` count for a
+  // catalog that never shrank. `--reindex` only resets the CONTENT used to compute new/changed/stale (an
+  // empty Map here, so everything re-embeds and `stale` stays empty per the migration-safety rule below) —
+  // it must never skip fetching the real prior chunk keys.
+  const priorChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
+  const ledger = opts.reindex ? new Map<string, string>() : await readCorpusLedger(deps.store, tenantId);
 
   const manifest = await deps.store.get<CatalogManifest>(ctx, MANIFEST_COLLECTION, MANIFEST_KEY);
-  if (!manifest && existing.length > 0 && !opts.reindex) {
-    // Records with no manifest: a previous run committed vectors and then failed before its manifest +
-    // audit. Their {model, dimension} provenance is unknowable, so extending them could mix vector
-    // spaces. Only an explicit operator reindex may rebuild.
-    throw new CatalogRefusal(
-      "failed",
-      `corpus has ${existing.length} record(s) but no manifest, so the model/dimension they were built with ` +
-        "is unknown — refusing to extend it; rebuild explicitly with --reindex",
-    );
-  }
 
-  // `--reindex` erases first, so nothing old survives to be mixed with the new pin.
-  const priorHashes = new Map<string, string>();
-  if (!opts.reindex) {
-    for (const m of existing) {
-      const h = (m.metadata as { contentHash?: unknown } | undefined)?.contentHash;
-      if (typeof h === "string") priorHashes.set(m.id, h);
-    }
-  }
   const wanted = new Set(plan.map((p) => p.recordId));
-  // Reconciliation only ever deletes records THIS JOB WROTE (`product:` ids). A record of any other shape
-  // in this namespace is not a delisted product — it is something we do not understand — and deleting data
-  // we did not write must never be a side effect of an index run. Refuse loudly instead.
-  const foreign = existing.map((m) => m.id).filter((id) => !id.startsWith("product:"));
-  if (foreign.length > 0) {
-    throw new CatalogRefusal(
-      "failed",
-      `${foreign.length} record(s) in this namespace were not written by this job (ids do not start with ` +
-        '"product:") — refusing to reconcile a corpus it does not own rather than deleting data it did not write',
-    );
-  }
-  const stale = opts.reindex ? [] : existing.map((m) => m.id).filter((id) => !wanted.has(id));
-  const toEmbed = plan.filter((p) => priorHashes.get(p.recordId) !== p.hash);
+  // NEW/CHANGED: a plan record whose ledger hash differs (or is absent) must be re-embedded. UNCHANGED: a
+  // ledger hash equal to the plan hash is skipped — preserving the content-hash "free re-run" optimization.
+  const toEmbed = plan.filter((p) => ledger.get(p.recordId) !== p.hash);
+  // STALE: ledger ids no longer in the plan (delisted). MIGRATION SAFETY: an empty ledger (first S3 run, or
+  // a corpus built pre-S3) means the prior set is UNKNOWN, so nothing is deleted — build the ledger from the
+  // plan and let a later `--reindex` prune legacy orphans (spec §B "Migration"). `--reindex` erased the
+  // namespace above, so its stale set is also empty.
+  const stale = opts.reindex || ledger.size === 0 ? [] : [...ledger.keys()].filter((id) => !wanted.has(id));
 
   if (toEmbed.length === 0 && stale.length === 0 && !opts.reindex) {
-    // Nothing to do — but only claim "unchanged" if the manifest actually describes this corpus.
-    if (manifest && manifest.products === existing.length) {
+    // Nothing to do. The ledger is authoritative and committed atomically with the manifest, so a manifest
+    // whose count matches the ledger size describes this corpus exactly.
+    if (manifest && manifest.purpose && manifest.products === ledger.size) {
       return {
         tenantId,
         outcome: "unchanged",
@@ -564,39 +575,31 @@ async function indexOneTenant(
         dimension: manifest.dimension,
       };
     }
-    if (!manifest) {
-      // Unreachable in practice (a manifest-less non-empty corpus already refused above, and an empty
-      // corpus with an empty catalog returned `not-configured`), but guessing a pin is never acceptable —
-      // an "unknown"/0 placeholder would be a fabricated provenance for real vectors.
-      throw new CatalogRefusal("failed", "no manifest to repair and no products to embed — nothing safe to record");
-    }
-    // A repair rewrites the COUNT, never the provenance: nothing was embedded, so the recorded
-    // {model, dimension, purpose} is carried forward verbatim. A manifest with no recorded purpose cannot
-    // be repaired into one — writing "document" here would be inventing the provenance the pin exists to
-    // protect — so it refuses and points at the one command that CAN establish it.
-    if (!manifest.purpose) {
+    // Manifest count drifted from the ledger (e.g. a crash between the corpus write and the manifest write
+    // in a pre-S3 record) — repair the COUNT without re-embedding, carrying provenance forward verbatim. A
+    // manifest with no recorded purpose cannot be repaired into one (that would invent provenance).
+    if (!manifest || !manifest.purpose) {
       throw new CatalogRefusal(
         "failed",
-        "the corpus manifest records no embedding purpose, so repairing it would mean inventing the " +
-          "vector space its records were built in — rebuild explicitly with --reindex",
+        "the corpus has no manifest purpose to carry forward and nothing to embed, so its vector space " +
+          "cannot be stated honestly — rebuild explicitly with --reindex",
       );
     }
     const repaired: CatalogManifest = {
       model: manifest.model,
       dimension: manifest.dimension,
       purpose: manifest.purpose,
-      products: existing.length,
+      products: ledger.size,
       at: now().toISOString(),
       ceiling: maxProducts,
     };
-    await writeManifestAndAudit(deps, tenantId, repaired, {
-      products: plan.length,
-      embedded: 0,
-      written: 0,
-      removed: 0,
-      reindex: false,
-      repaired: true,
-    });
+    await writeManifestAndAudit(
+      deps,
+      tenantId,
+      repaired,
+      { products: plan.length, embedded: 0, written: 0, removed: 0, reindex: false, repaired: true },
+      { entries: ledger, priorChunkKeys },
+    );
     return {
       tenantId,
       outcome: "manifest-repaired",
@@ -628,7 +631,7 @@ async function indexOneTenant(
     if (!pin) {
       // THE PIN CHECK, on the FIRST batch — so a model/dimension/purpose change costs one batch of spend,
       // not a whole catalog. An empty corpus has nothing to mix with, so it simply adopts the current pin.
-      if (manifest && existing.length > 0 && !opts.reindex) {
+      if (manifest && ledger.size > 0 && !opts.reindex) {
         const mismatch = pinMismatch(manifest, res);
         if (mismatch) {
           return {
@@ -688,19 +691,11 @@ async function indexOneTenant(
   if (opts.reindex) await deps.vector.deleteNamespace(ns);
   if (records.length > 0) await deps.vector.upsert(ns, records); // ONE call = one transaction (durable adapter)
 
-  // READ THE RESULT BACK. `kill-switch.ts`'s discipline: never report a write we have not observed.
-  const after = await deps.vector.query(ns, { text: "", k: probe });
-  const afterHashes = new Map(
-    after.map((m) => [m.id, (m.metadata as { contentHash?: unknown } | undefined)?.contentHash]),
-  );
-  const missing = records.filter((r) => afterHashes.get(r.id) !== (r.metadata as { contentHash: string }).contentHash);
-  if (missing.length > 0) {
-    throw new CatalogRefusal(
-      "failed",
-      `${missing.length} of ${records.length} record(s) did not read back after the write — the corpus is ` +
-        "unverified, so no manifest was recorded; re-run the index",
-    );
-  }
+  // NO READ-BACK ENUMERATE (S3 §B). The old text-modality read-back query is gone — it required the
+  // text-modality enumerate the S1 pgvector store rejects. `upsert` is all-or-nothing inside the durable
+  // adapter's single transaction (postgres-vector-store.ts), and the LEDGER we write below (atomically with
+  // the manifest + audit) is the record of what is indexed. A rare upsert/ledger drift self-heals on the
+  // next `--reindex` (which erases + rebuilds from scratch).
 
   if (stale.length > 0) await deps.vector.deleteById(ns, stale);
 
@@ -730,14 +725,23 @@ async function indexOneTenant(
     at: now().toISOString(),
     ceiling: maxProducts,
   };
-  await writeManifestAndAudit(deps, tenantId, written, {
-    products: plan.length,
-    embedded: toEmbed.length,
-    written: records.length,
-    removed: stale.length,
-    reindex: opts.reindex === true,
-    repaired: false,
-  });
+  // The new ledger reflects the WHOLE corpus (plan == wanted): unchanged records keep their hash, changed
+  // ones get the new hash, stale ones are dropped. On --reindex the corpus is exactly the plan too.
+  const newLedger = new Map(plan.map((p) => [p.recordId, p.hash]));
+  await writeManifestAndAudit(
+    deps,
+    tenantId,
+    written,
+    {
+      products: plan.length,
+      embedded: toEmbed.length,
+      written: records.length,
+      removed: stale.length,
+      reindex: opts.reindex === true,
+      repaired: false,
+    },
+    { entries: newLedger, priorChunkKeys },
+  );
 
   return {
     tenantId,
@@ -764,10 +768,14 @@ async function writeManifestAndAudit(
   tenantId: string,
   manifest: CatalogManifest,
   counts: { products: number; embedded: number; written: number; removed: number; reindex: boolean; repaired: boolean },
+  ledger: { entries: Map<string, string>; priorChunkKeys: string[] },
 ): Promise<void> {
   const at = manifest.at;
   await deps.store.tx({ tenantId }, async (t) => {
     await t.put(MANIFEST_COLLECTION, MANIFEST_KEY, manifest);
+    // S3 §B — the ledger commits ATOMICALLY with the manifest + audit (one tx), so the three can never
+    // disagree about what is indexed. Prunes any prior chunk key the new corpus no longer fills.
+    await writeLedgerInTx(t, chunkLedgerEntries(ledger.entries, at), ledger.priorChunkKeys);
     await t.audit(
       {
         actor: CATALOG_INDEX_ACTOR,
@@ -819,6 +827,194 @@ export async function runCatalogIndex(
   return reports;
 }
 
+/**
+ * S3 §C — refresh ONLY the named SKUs. Fetches them by id, re-embeds + upserts them, refreshes their
+ * ProductFacts + ledger entries, and `deleteById`s any that came back missing (delisted). Touches NO other
+ * corpus row and NEVER pages the whole catalog. Guards, in order: halt/cap, embed-capability, an existing
+ * manifest (no manifest ⇒ the corpus was never built ⇒ delegate to a full `runCatalogIndex`, never leave a
+ * one-product corpus), and the {model,dimension,purpose} pin. All writes go through the SAME
+ * `writeManifestAndAudit` (ledger+manifest+audit in one tx) the full path uses.
+ */
+export async function reconcileProducts(
+  deps: CatalogIndexDeps,
+  tenantId: string,
+  productIds: string[],
+  opts: { reason?: ReconcileReason } = {},
+): Promise<TenantIndexReport> {
+  const ns = catalogNamespace(tenantId);
+  const ctx = { tenantId };
+  const now = deps.now ?? (() => new Date());
+
+  const halted = await checkHalts(deps, tenantId);
+  if (halted) return { tenantId, outcome: halted };
+  if (!canEmbed(deps.model)) return { tenantId, outcome: "no-embed-capability" };
+
+  // FIX 3 (security C2, final review) — re-validate the GID shape HERE, at the consumer boundary, rather
+  // than trusting that whatever queued this batch already checked it (the producer does — productIdOf's
+  // `^gid://shopify/Product/\d+$` — but a future/malformed producer must not be able to feed an arbitrary
+  // string into `catalogRecordId` or `deps.catalogById`'s `nodes(ids:)` call). Malformed ids are simply
+  // dropped; well-formed ids in the same batch are still processed.
+  const validProductIds = productIds.filter((id) => PRODUCT_GID_RE.test(id));
+
+  const manifest = await deps.store.get<CatalogManifest>(ctx, MANIFEST_COLLECTION, MANIFEST_KEY);
+  // No manifest / no purpose / no by-id source / uninformative id list ⇒ do the safe whole-catalog reconcile.
+  if (!manifest || !manifest.purpose || !deps.catalogById || validProductIds.length === 0) {
+    const [report] = await runCatalogIndex(deps, [tenantId], {});
+    return report!;
+  }
+
+  const recordIds = validProductIds.map(catalogRecordId);
+  const requested = new Set(recordIds);
+
+  const fetched = await deps.catalogById(tenantId, validProductIds);
+  if (fetched === undefined) return { tenantId, outcome: "not-configured" };
+  const plan = planProducts(fetched); // reuses the empty-text/duplicate refusals
+
+  // A requested id that did NOT come back is delisted → prune it.
+  const returnedRecordIds = new Set(plan.map((p) => p.recordId));
+  const stale = [...requested].filter((id) => !returnedRecordIds.has(id));
+
+  const priorChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
+  const ledger = await readCorpusLedger(deps.store, tenantId);
+
+  // FIX 2 (final review) — the targeted path must not silently grow a corpus past its ceiling one webhook at
+  // a time (a `products/create` storm could otherwise push a tenant over `MAX_INDEXED_PRODUCTS` a SKU at a
+  // time, after which the hourly full backstop hits `ceiling-exceeded` and stops maintaining that tenant —
+  // #180's "a truncated corpus becomes a confident false 'we don't carry that'" rule). Compute what the
+  // ledger size WOULD BE after this reconcile (existing ledger + refreshed/new ids, minus pruned stale ids —
+  // the same arithmetic `newLedger` below performs) BEFORE any embed/upsert spend, and refuse loudly, same
+  // as the full path's ceiling check (indexOneTenant, above), if it would cross the ceiling.
+  const ceiling = manifest.ceiling ?? MAX_INDEXED_PRODUCTS;
+  const prospective = new Set(ledger.keys());
+  for (const p of plan) prospective.add(p.recordId);
+  for (const id of stale) prospective.delete(id);
+  if (prospective.size > ceiling) {
+    return {
+      tenantId,
+      outcome: "ceiling-exceeded",
+      products: prospective.size,
+      reason:
+        `targeted reconcile would grow the corpus to ${prospective.size} products, above this tenant's ` +
+        `ceiling of ${ceiling} — refusing to index part of it (a truncated corpus becomes a confident false ` +
+        "'we don't carry that'); the hourly full backstop will report the same refusal until the ceiling is raised",
+    };
+  }
+
+  // Only re-embed the ones whose content actually changed (content-hash optimization, same as the full path).
+  const toEmbed = plan.filter((p) => ledger.get(p.recordId) !== p.hash);
+
+  // ── embed only the changed set ──
+  const vectors = new Map<string, number[]>();
+  let pin: CorpusPin | undefined;
+  for (let i = 0; i < toEmbed.length; i += Math.max(1, Math.floor(DEFAULT_EMBED_BATCH))) {
+    const stop = await checkHalts(deps, tenantId);
+    if (stop) return { tenantId, outcome: stop };
+    const batch = toEmbed.slice(i, i + DEFAULT_EMBED_BATCH);
+    const req = { texts: batch.map((p) => p.text), purpose: CATALOG_CORPUS_PURPOSE, tenantId };
+    const res = await deps.model.embed(req);
+    requireEmbedAlignment(req, res);
+    if (!pin) {
+      const mismatch = pinMismatch(manifest, res);
+      if (mismatch) {
+        return { tenantId, outcome: "pin-mismatch", products: plan.length, embedded: req.texts.length, model: res.model, dimension: res.dimension, reason: mismatch };
+      }
+      pin = { model: res.model, dimension: res.dimension, purpose: res.purpose };
+    } else if (res.model !== pin.model || res.dimension !== pin.dimension || res.purpose !== pin.purpose) {
+      throw new CatalogRefusal("failed", `the embedder changed from ${describePin(pin)} to ${describePin(res)} mid-run — refusing to write a corpus of two vector spaces`);
+    }
+    batch.forEach((p, j) => vectors.set(p.recordId, res.vectors[j]!));
+  }
+
+  // ── write only the changed set ──
+  const byId = new Map(fetched.map((p) => [p.id, p]));
+  const records: VectorRecord[] = toEmbed.map((p) => {
+    const src = byId.get(p.productId);
+    return {
+      id: p.recordId,
+      vector: vectors.get(p.recordId)!,
+      metadata: { kind: "product", productId: p.productId, contentHash: p.hash, title: src?.title ?? "", ...(src?.variantId ? { variantId: src.variantId } : {}) },
+    };
+  });
+  if (records.length > 0) await deps.vector.upsert(ns, records);
+  if (stale.length > 0) await deps.vector.deleteById(ns, stale);
+
+  // Tier-2 money-facts for the refreshed subset (D2 poll-side, same as the full path). Fail-safe: the
+  // vector write is primary, a facts failure is alerted + swallowed.
+  if (deps.productFacts && fetched.length > 0) {
+    try {
+      await deps.productFacts.upsertMany(tenantId, productFactsFrom({ tenantId, brandName: "", products: fetched, policy: { returns: "", shipping: "" } }, now()));
+    } catch (e) {
+      console.error(`[catalog] ALERT product_facts_upsert_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
+    }
+  }
+
+  // New ledger = old ledger, plus the refreshed hashes, minus the pruned ids.
+  const newLedger = new Map(ledger);
+  for (const p of plan) newLedger.set(p.recordId, p.hash);
+  for (const id of stale) newLedger.delete(id);
+
+  const effectivePin: CorpusPin = pin ?? { model: manifest.model, dimension: manifest.dimension, purpose: manifest.purpose };
+  const written: CatalogManifest = {
+    model: effectivePin.model,
+    dimension: effectivePin.dimension,
+    purpose: effectivePin.purpose,
+    products: newLedger.size,
+    at: now().toISOString(),
+    ceiling: manifest.ceiling,
+  };
+  await writeManifestAndAudit(
+    deps,
+    tenantId,
+    written,
+    { products: plan.length, embedded: toEmbed.length, written: records.length, removed: stale.length, reindex: false, repaired: false },
+    { entries: newLedger, priorChunkKeys },
+  );
+
+  return { tenantId, outcome: "indexed", products: plan.length, embedded: toEmbed.length, written: records.length, removed: stale.length, model: written.model, dimension: written.dimension };
+}
+
+/**
+ * S3 §C — the reason-routed dispatch a webhook-driven reconcile takes. Lives HERE (not inlined per
+ * composition root) so the routing decision is unit-testable independent of Fastify/env wiring:
+ *
+ *   • `reason:"inventory"` with NO `productIds` ⇒ a REAL no-op — returns before touching `store`, `vector`
+ *     or `model` at all. Inventory freshness is covered by the poll backstop (`PRODUCT_FACTS_POLL`) + the
+ *     serve-time ceiling, not a proactive crawl (spec decision, S3 §C).
+ *   • `productIds` present AND `reason !== "full"` ⇒ the TARGETED `reconcileProducts` path.
+ *   • anything else (no opts, `reason:"full"`, or an inventory tick that somehow carried ids tagged
+ *     `"full"`) ⇒ the existing whole-catalog `runCatalogIndex` (the backstop path).
+ *
+ * Every consumer (the in-memory `subscribeCatalogReconcile`, the durable Pub/Sub push route) is meant to
+ * call this SAME function rather than re-implement the branch — one routing decision, not per-call-site
+ * copies that could drift.
+ */
+export async function reconcileByReason(
+  deps: CatalogIndexDeps,
+  tenantId: string,
+  opts?: { productIds?: string[]; reason?: ReconcileReason },
+): Promise<void> {
+  if (opts?.reason === "inventory" && !(opts.productIds && opts.productIds.length > 0)) return; // real no-op
+  if (opts?.productIds && opts.productIds.length > 0 && opts.reason !== "full") {
+    await reconcileProducts(deps, tenantId, opts.productIds, { ...(opts.reason ? { reason: opts.reason } : {}) });
+  } else {
+    await runCatalogIndex(deps, [tenantId], {});
+  }
+}
+
+/** Shopify wiring for the by-id source (composition root). Mirrors `shopifyCatalogSource`. */
+export function shopifyCatalogByIdSource(
+  secrets: SecretsPort,
+  fetchImpl: StorefrontByIdFetch = storefrontFetchByIds(globalThis.fetch),
+  domains: Record<string, string> = parseStoreDomains(),
+): CatalogByIdSource {
+  return async (tenantId, ids) => {
+    const creds = await resolveShopifyStore(tenantId, secrets, domains);
+    if (!creds) return undefined;
+    const data = await fetchImpl(creds, ids);
+    return mapStorefrontToContext(tenantId, data).products;
+  };
+}
+
 export interface CatalogClearReport {
   tenantId: string;
   /** Records that were in the corpus before the erase. */
@@ -848,8 +1044,12 @@ export async function runCatalogClear(
     throw new Error(`clear of ${tenantId}'s catalog corpus did not take effect — records are still readable`);
   }
 
+  // S3 §F — the ledger is per-tenant KV; erasing the corpus must also erase its ledger chunks (ADR-0015).
+  // Read the chunk keys before the tx (the tx handle has no `list`), delete them inside it.
+  const ledgerChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
   await deps.store.tx({ tenantId }, async (t) => {
     await t.delete(MANIFEST_COLLECTION, MANIFEST_KEY);
+    await deleteLedgerInTx(t, ledgerChunkKeys);
     await t.audit(
       {
         actor: "operator",

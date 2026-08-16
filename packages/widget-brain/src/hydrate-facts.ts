@@ -19,15 +19,18 @@ import type { Product, ProductFact } from "@palup/platform-ports";
 // the PRODUCT_FACTS_HYDRATION posture flag and, being a run-time behaviour change, is enabled only through
 // the eval gate → shadow → canary → human promotion (HITL §5) — never by this build. Inert until then.
 //
-// PROMOTION BLOCKER — READ BEFORE ENABLING (security review, A1b #252). This overlay reads only
-// `fact.price`/`fact.availableForSale` and IGNORES `fact.updatedAt`, so a well-formed but semantically
-// STALE fact would be quoted verbatim with no upper bound on age. ADR-0020 D2's fail-honest rule ("past a
-// hard staleness ceiling the agent says 'let me confirm current price/availability' rather than quote a
-// stale number") is DEFERRED and NOT implemented here. Enabling PRODUCT_FACTS_HYDRATION in ANY live stage
-// (shadow/canary/prod) is therefore blocked until D2 fail-honest lands — otherwise a stale fact silently
-// poisons a money/NN#1 fact. The promoter MUST record "D2 staleness ceiling implemented" as an explicit
-// pre-shadow acceptance criterion. Safe to merge now only because the feature is inert (flag OFF; even
-// flag-on the store is empty until the A3 producer lands).
+// D2 STALENESS CEILING — LANDED (S3 §D). The overlay honours a hard staleness ceiling: when `staleness`
+// is supplied, a fact older than `maxAgeMs` (or with no/invalid `updatedAt`) is NOT quoted — it renders
+// `priceConfirmed:false` and drops availability, so serving says "let me confirm current price" rather than
+// quote a stale number (money/NN#1 fail-honest). The serve path always supplies the ceiling when hydration
+// is on: `PRODUCT_FACTS_MAX_AGE_MS` (server.ts) defaults to 15 min and is always a number, so
+// `productFactsMaxAgeMs` is never undefined on the hydration path. The A1b security-review blocker
+// ("a stale fact would be quoted verbatim with no upper bound on age") is therefore CLOSED.
+//
+// STILL A §5 PROMOTION, NOT A FLIP. Enabling PRODUCT_FACTS_HYDRATION in any live stage remains a money/NN#1
+// human promotion (eval gate → shadow → canary → named-human approval, HITL §5) with the ≤15-min ceiling in
+// force as a recorded pre-shadow acceptance criterion. This code does NOT enable it (flag OFF; and even
+// flag-on the store is empty until the A3/S3 producers run). No S3 code flips the flag.
 
 /**
  * D2 (ADR-0020) — the hard STALENESS CEILING for hydration. When `staleness` is supplied, a fact whose
@@ -64,10 +67,12 @@ export function hydrateProductFacts(products: Product[], facts: ProductFact[], s
   return products.map((p) => {
     const fact = byId.get(p.id);
     if (!fact) return p;
-    // STALE: do not quote the fact's price or availability; mark the product so serving says "let me
-    // confirm" instead of quoting a stale number. The base catalog price is left in place but the
-    // priceConfirmed:false flag makes the renderer withhold it (money/NN#1 fail-honest).
-    if (isStale(fact)) return { ...p, priceConfirmed: false };
+    // STALE: do not quote the fact's price or availability. The base catalog price is left in place but
+    // the priceConfirmed:false flag makes the renderer withhold it (money/NN#1 fail-honest). Availability
+    // is DROPPED (set undefined), not left at the product's own last-known value: the fact's existence
+    // means an availability-affecting event fired for this product, so the pre-fact value can no longer be
+    // trusted either — "unknown" is honest, a stale "true"/"false" is not.
+    if (isStale(fact)) return { ...p, priceConfirmed: false, availableForSale: undefined };
     const next: Product = { ...p, price: fact.price };
     // Only an explicitly-stated availability overwrites; an absent fact value leaves the product's own.
     if (fact.availableForSale !== undefined) next.availableForSale = fact.availableForSale;

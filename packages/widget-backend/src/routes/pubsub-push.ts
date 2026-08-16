@@ -29,15 +29,17 @@ export interface PubSubPushDeps {
   /** The exact service-account email Pub/Sub is configured to push as. A verified token from ANY OTHER
    *  Google identity is refused — being Google-signed is necessary, not sufficient. */
   expectedServiceAccount: string;
-  /** Re-derive this tenant's current catalog + facts (runCatalogIndex for the one tenant). Never trusts the
-   *  message body beyond the tenantKey. */
-  reconcile: (tenantId: string) => Promise<void>;
+  /** Re-derive this tenant's current state. `opts.productIds` (S3 §C) targets a `reconcileProducts` refresh
+   *  of just those SKUs; absent/`reason:"full"` runs the whole-catalog `runCatalogIndex`. The tenantKey
+   *  attribute is trusted (Pub/Sub-set, per NN#3); `message.data` is only ever used to pick WHICH ids to
+   *  re-FETCH — the worker re-derives current content, never trusting the body for product CONTENT. */
+  reconcile: (tenantId: string, opts?: { productIds?: string[]; reason?: "product" | "inventory" | "full" }) => Promise<void>;
   /** Same per-IP limiter every public route uses. `false` ⇒ refuse (fail-closed). Optional. */
   checkRateLimit?: (ip: string) => Promise<boolean>;
 }
 
 interface PushEnvelope {
-  message?: { attributes?: Record<string, unknown> };
+  message?: { attributes?: Record<string, unknown>; data?: string };
 }
 
 /** Registers the OIDC-gated Pub/Sub push route. Ack semantics: a valid delivery that reconciles ⇒ 204; a
@@ -89,9 +91,25 @@ export function registerPubSubPushRoute(app: FastifyInstance, deps: PubSubPushDe
       return null;
     }
 
-    // 4. Reconcile. A failure returns 500 so Pub/Sub retries (and eventually dead-letters, server-side).
+    // 4. Decode `message.data` for TARGETING only (S3 §C) — which ids to re-fetch, never trusted for
+    // product CONTENT. A malformed/absent body is fail-safe: `opts` stays `undefined`, so `reconcile` takes
+    // its no-opts (full-catalog) path rather than silently doing nothing or acting on unparsed data.
+    let opts: { productIds?: string[]; reason?: "product" | "inventory" | "full" } | undefined;
     try {
-      await deps.reconcile(tenantId);
+      const raw = body?.message?.data;
+      if (typeof raw === "string" && raw.length > 0) {
+        const p = JSON.parse(Buffer.from(raw, "base64").toString("utf8")) as { productIds?: unknown; reason?: unknown };
+        const productIds = Array.isArray(p.productIds) ? p.productIds.filter((x): x is string => typeof x === "string") : undefined;
+        const reason = p.reason === "product" || p.reason === "inventory" || p.reason === "full" ? p.reason : undefined;
+        opts = { ...(productIds && productIds.length > 0 ? { productIds } : {}), ...(reason ? { reason } : {}) };
+      }
+    } catch {
+      opts = undefined; // fall back to a full reconcile
+    }
+
+    // 5. Reconcile. A failure returns 500 so Pub/Sub retries (and eventually dead-letters, server-side).
+    try {
+      await deps.reconcile(tenantId, opts);
     } catch (e) {
       console.error(`[pubsub-push] ALERT catalog_reconcile_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
       reply.code(500);

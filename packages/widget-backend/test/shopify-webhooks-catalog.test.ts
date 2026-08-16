@@ -1,0 +1,196 @@
+import { describe, it, expect, afterEach } from "vitest";
+import { createHmac } from "node:crypto";
+import Fastify from "fastify";
+import { InMemoryRuntimeStore, createInMemoryMerchantRegistry, createInMemoryVectorStore } from "@palup/platform-ports";
+import type { MerchantRegistryPort, QueueMessage, QueuePort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
+import { registerShopifyWebhookRoutes, WEBHOOK_ROUTES } from "../src/routes/shopify-webhooks.js";
+import { SHOPIFY_PRODUCT_GID_PREFIX } from "../src/catalog-webhook-queue.js";
+
+// S3 §C — the webhook route wires `productIdOf` into `handleCatalogChange` so a products/* delivery
+// carries the changed product's FULL Storefront GID (reason:"product" — fix round 2: this used to be the
+// bare numeric tail, which mis-keyed the corpus/ledger and could not be sent to `nodes(ids:)`; see
+// productIdOf's docstring), an inventory tick carries neither id nor crawl trigger (reason:"inventory" —
+// the Storefront delegate token cannot resolve an inventory_item_id to a product), and anything
+// unparseable falls back to reason:"full" (the safe whole-catalog backstop). This exercises the ROUTE
+// (registerShopifyWebhookRoutes directly, with an injected queue) rather than the full server, since
+// `buildServer` builds its own queue internally when CATALOG_WEBHOOKS is on and has no seam to intercept
+// `publish`.
+
+const SHOP = "acme-store.myshopify.com";
+const TENANT = "acme-store";
+const APP_SECRET = "app-client-secret-never-logged";
+const EMBED_KEY = "pk_acme_embed_key";
+
+function signBody(raw: string, secret = APP_SECRET): string {
+  return createHmac("sha256", secret).update(raw, "utf8").digest("base64");
+}
+
+let webhookSeq = 0;
+function nextWebhookId(): string {
+  webhookSeq += 1;
+  return `wh-catalog-${webhookSeq}`;
+}
+
+let published: QueueMessage[] = [];
+
+/** A minimal QueuePort whose `publish` just records the message — this file tests the ENQUEUE shape, not
+ *  delivery/dedup (that is `catalog-webhook-queue.test.ts`'s job). */
+function recordingQueue(): QueuePort {
+  return {
+    async publish(_topic, msg) {
+      published.push(msg);
+    },
+    subscribe() {
+      return { unsubscribe() {} };
+    },
+    deadLettered() {
+      return [];
+    },
+  };
+}
+
+interface Harness {
+  post: (path: string, topic: string, raw: string, opts?: { webhookId?: string; hmac?: string }) => Promise<{ statusCode: number; body: string }>;
+  store: RuntimeStatePort;
+  registry: MerchantRegistryPort;
+}
+
+async function harness(): Promise<Harness> {
+  const app = Fastify();
+  const store = new InMemoryRuntimeStore();
+  const registry = createInMemoryMerchantRegistry();
+  const vector: VectorPort = createInMemoryVectorStore();
+  await registry.create({ tenantId: TENANT, shopDomain: SHOP, embedKey: EMBED_KEY, region: "us" });
+
+  registerShopifyWebhookRoutes(app, {
+    store,
+    registry,
+    vector,
+    clientSecret: async () => APP_SECRET,
+    killCheck: async () => false,
+    now: () => Date.now(),
+    queue: recordingQueue(),
+  });
+  await app.ready();
+
+  const post = async (path: string, topic: string, raw: string, opts: { webhookId?: string; hmac?: string } = {}) => {
+    const res = await app.inject({
+      method: "POST",
+      url: path,
+      headers: {
+        "content-type": "application/json",
+        "x-shopify-topic": topic,
+        "x-shopify-api-version": "2026-07",
+        "x-shopify-webhook-id": opts.webhookId ?? nextWebhookId(),
+        "x-shopify-shop-domain": SHOP,
+        "x-shopify-hmac-sha256": opts.hmac ?? signBody(raw),
+      },
+      payload: raw,
+    });
+    return { statusCode: res.statusCode, body: res.body };
+  };
+
+  return { post, store, registry };
+}
+
+afterEach(() => {
+  published = [];
+});
+
+describe("S3 §C — handleCatalogChange enqueues productIds + reason", () => {
+  it("products/update enqueues a targeted reconcile with the FULL GID and reason:product", async () => {
+    const h = await harness();
+    // A realistic Shopify product body carries BOTH the numeric `id` and the precision-safe
+    // `admin_graphql_api_id` GID string — the GID is read first, and returned VERBATIM (fix round 2).
+    const res = await h.post(
+      WEBHOOK_ROUTES.productsUpdate,
+      "products/update",
+      JSON.stringify({ id: 7, admin_graphql_api_id: "gid://shopify/Product/7" }),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(published).toHaveLength(1);
+    expect(published[0]!.payload).toMatchObject({
+      reason: "product",
+      // The FULL "gid://…" string — this is the corpus/ledger key convention (`product:<GID>`) AND what
+      // `nodes(ids:)` requires; fix round 2 supersedes the earlier bare-numeric-id ruling.
+      productIds: ["gid://shopify/Product/7"],
+    });
+  });
+
+  it("products/create enqueues reason:product with the full GID", async () => {
+    const h = await harness();
+    await h.post(
+      WEBHOOK_ROUTES.productsCreate,
+      "products/create",
+      JSON.stringify({ id: 42, admin_graphql_api_id: "gid://shopify/Product/42" }),
+    );
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["gid://shopify/Product/42"] });
+  });
+
+  it("products/delete enqueues reason:product with the full GID (the worker deletes without a fetch)", async () => {
+    const h = await harness();
+    await h.post(
+      WEBHOOK_ROUTES.productsDelete,
+      "products/delete",
+      JSON.stringify({ id: 9, admin_graphql_api_id: "gid://shopify/Product/9" }),
+    );
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["gid://shopify/Product/9"] });
+  });
+
+  it("a realistic 13-digit id is read from admin_graphql_api_id, not the (differing) numeric `id` field", async () => {
+    // matchesPayloadShape requires `id` present for this topic, so a synthetic small `id` stands in for
+    // "some numeric id was present" on the wire; the GID is the field this function actually trusts.
+    const h = await harness();
+    await h.post(
+      WEBHOOK_ROUTES.productsUpdate,
+      "products/update",
+      JSON.stringify({ id: 1, admin_graphql_api_id: "gid://shopify/Product/8258451439839" }),
+    );
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["gid://shopify/Product/8258451439839"] });
+  });
+
+  it("an OVERSIZED (18-digit, beyond Number.MAX_SAFE_INTEGER) id is preserved EXACTLY via the GID string", async () => {
+    // This is the precision property fix round 1 exists for, still true under fix round 2's full-GID
+    // return: reading the numeric `id` field here would round this value (JSON.parse/JS number both lose
+    // precision beyond 2^53) and silently fall back to reason:"full" for any store whose product ids
+    // exceed that range. The GID is a STRING end to end, so no rounding occurs.
+    const h = await harness();
+    await h.post(
+      WEBHOOK_ROUTES.productsUpdate,
+      "products/update",
+      // A numeric `id` this large would already be rounded by JSON.parse; admin_graphql_api_id is a string
+      // and is unaffected — matchesPayloadShape only requires `id` present, so a synthetic small `id` here
+      // stands in for "some numeric id was present", while the GID carries the real, exact value.
+      JSON.stringify({ id: 1, admin_graphql_api_id: "gid://shopify/Product/788032119674292922" }),
+    );
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["gid://shopify/Product/788032119674292922"] });
+  });
+
+  it("falls back to a CONSTRUCTED GID from the numeric `id` when admin_graphql_api_id is absent", async () => {
+    const h = await harness();
+    await h.post(WEBHOOK_ROUTES.productsUpdate, "products/update", JSON.stringify({ id: 55 }));
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: [`${SHOPIFY_PRODUCT_GID_PREFIX}55`] });
+  });
+
+  it("inventory_levels/update enqueues reason:inventory with NO productIds (no per-event crawl)", async () => {
+    const h = await harness();
+    await h.post(WEBHOOK_ROUTES.inventoryLevelsUpdate, "inventory_levels/update", JSON.stringify({ inventory_item_id: 3 }));
+    expect(published[0]!.payload).toMatchObject({ reason: "inventory" });
+    expect((published[0]!.payload as { productIds?: unknown }).productIds).toBeUndefined();
+  });
+
+  it("an unparseable/refused product id falls back to reason:full with no productIds (safe backstop)", async () => {
+    const h = await harness();
+    // A GID string (not a bare numeric id) — matchesPayloadShape still accepts it (only requires `id`
+    // present), but productIdOf refuses to coerce it, so the reconcile falls back to a full crawl.
+    await h.post(WEBHOOK_ROUTES.productsUpdate, "products/update", JSON.stringify({ id: "gid://shopify/Product/7" }));
+    expect(published[0]!.payload).toMatchObject({ reason: "full" });
+    expect((published[0]!.payload as { productIds?: unknown }).productIds).toBeUndefined();
+  });
+
+  it("no product data crosses the port for a targeted reconcile beyond the GID", async () => {
+    const h = await harness();
+    await h.post(WEBHOOK_ROUTES.productsUpdate, "products/update", JSON.stringify({ id: 7 }));
+    expect(JSON.stringify(published[0])).not.toMatch(/price|title|variant|inventory_item/i);
+  });
+});

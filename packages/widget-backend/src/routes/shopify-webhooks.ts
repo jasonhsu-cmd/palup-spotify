@@ -4,7 +4,7 @@ import type { MerchantRecord, MerchantRegistryPort, QueuePort, RuntimeStatePort,
 import { buildShopifyShopperId } from "@palup/platform-ports";
 import { accountSubjectId, eraseSubject, listSubjects, retireSubject } from "@palup/widget-memory";
 import { clientIpKey } from "../rate-limit.js";
-import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage } from "../catalog-webhook-queue.js";
+import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage, type ReconcileReason } from "../catalog-webhook-queue.js";
 import {
   APP_UNINSTALLED_SHOP_SOURCE,
   CATALOG_TOPICS,
@@ -19,6 +19,7 @@ import {
   isValidShopDomain,
   matchesPayloadShape,
   parseWebhookBody,
+  productIdOf,
   singleHeader,
   verifyWebhookHmac,
 } from "../shopify-webhook-identity.js";
@@ -309,6 +310,11 @@ async function markHandled(deps: ShopifyWebhookDeps, tenantId: string, topic: st
  * reconciliation and — 48 hours later — `shop/redact`'s erasure. Deleting the row would strand all of it
  * in namespaces nothing can resolve.
  *
+ * FIX 5 (security C1 / #6, final review) — the same is true of the S3 catalog corpus namespace and its
+ * corpus-state ledger: neither is touched here, and NEITHER IS ERASED BY `shop/redact` EITHER (that
+ * handler's own `SHOP_REDACT_RESIDUAL` discloses this as a known, tracked gap — wiring it in is a separate
+ * security-reviewed follow-up, not something this handler papers over).
+ *
  * NO KILL-SWITCH GATE, deliberately. Every other action in this file is gated on NN#4 because it
  * destroys data. This one only makes a merchant INERT, which points the SAME WAY as a halt: refusing it
  * during a halt would leave an uninstalled merchant servable, which is strictly worse than performing it.
@@ -373,6 +379,21 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
  * once the halt clears), so there is nothing to record. No per-enqueue audit either: the enqueue is routine,
  * non-destructive and idempotent, and the RECONCILE it triggers writes its own manifest audit through
  * runCatalogIndex.
+ *
+ * S3 §C — the reconcile message carries the CHANGED product id(s) when the topic is precise, so a later
+ * worker (T5) can target just those SKUs instead of re-crawling the whole catalog. `productIds` holds the
+ * FULL Storefront/Admin GID string (`productIdOf`'s return — read from `admin_graphql_api_id`, the
+ * precision-safe GID field, first, and returned verbatim; fix round 2 — this used to be the bare numeric
+ * tail, which mis-keyed the corpus/ledger record id and could not be passed to `nodes(ids:)`). This
+ * matches BOTH the corpus record id convention (`product:<GID>`, catalog-index.ts) Task 2's ledger uses
+ * AND what the Storefront by-id fetch (`nodes(ids:)`, Task 4) requires — one id convention, used opaquely
+ * end to end, no reassembly needed at T5. `inventory_levels/update` carries an `inventory_item_id`, NOT a
+ * product id, and the
+ * Storefront delegate token cannot resolve it — so it enqueues `reason:"inventory"` with NO ids and
+ * triggers no per-event crawl (freshness for it comes from the hourly poll backstop + the serve-time
+ * ceiling, not this path). A `products/*` delivery whose id `productIdOf` refuses to validate falls back
+ * to `reason:"full"` (a safe whole-catalog reconcile) rather than guessing. The worker still NEVER trusts
+ * the body beyond these ids: it re-fetches the named products' CURRENT state.
  */
 async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic: string): Promise<Ack | { refused: Refusal }> {
   if (!deps.queue) return "unknown_shop"; // defensive; the route is only registered when a queue is wired
@@ -384,7 +405,21 @@ async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic:
   const tenantId = existing.tenantId;
   if (await deps.killCheck(tenantId)) return "halted_deferred";
   if (await alreadyHandled(deps, tenantId, topic, v.webhookId)) return "already_handled";
-  await deps.queue.publish(CATALOG_RECONCILE_TOPIC, catalogReconcileMessage(tenantId, topic, v.webhookId, deps.now()));
+  let productIds: string[] | undefined;
+  let reason: ReconcileReason = "full";
+  if (topic === "products/create" || topic === "products/update" || topic === "products/delete") {
+    const gid = productIdOf(v.body);
+    if (gid) {
+      productIds = [gid];
+      reason = "product";
+    }
+  } else if (topic === "inventory_levels/update") {
+    reason = "inventory";
+  }
+  await deps.queue.publish(
+    CATALOG_RECONCILE_TOPIC,
+    catalogReconcileMessage(tenantId, topic, v.webhookId, deps.now(), { ...(productIds ? { productIds } : {}), reason }),
+  );
   await markHandled(deps, tenantId, topic, v.webhookId);
   return "applied";
 }
@@ -437,6 +472,14 @@ const SHOP_REDACT_RESIDUAL: readonly string[] = [
   "memory_consent records — @palup/state-postgres exports no delete and the collection name is private to it",
   "session state and any other KV collection — RuntimeStatePort has no enumerate-collections operation, so they cannot be named exhaustively",
   "memory namespaces for subjects absent from the per-tenant subject index (subject-index.ts only records subjects whose facts were written through it)",
+  // FIX 5 (security C1 / #6, final review) — this handler does NOT call `runCatalogClear` (catalog-index.ts):
+  // that wiring, plus making `runCatalogClear` pgvector-safe (it currently text-enumerates via
+  // `vector.query({text:""})`, which THROWS on the S1 pgvector/VECTOR_ANN store), is a separate
+  // security-reviewed follow-up (tracked in the S3 spec's promotion preconditions). Disclosed here so the
+  // handler HONESTLY reports both as known, tracked residuals rather than implying `notErased` is exhaustive
+  // without them.
+  "the tenant's catalog corpus namespace (`<tenantId>::catalog` in the vector store — product embeddings) — pre-existing gap, not erased by this handler",
+  "the tenant's corpus-state ledger (S3 — the id→content-hash chunks + manifest this job's freshness reconcile reads/writes, MANIFEST_COLLECTION in RuntimeStatePort) — not erased by this handler",
   "anything held on Shopify's own side, and anything a merchant exported before uninstalling",
 ];
 
