@@ -984,16 +984,44 @@ This is the operator procedure for the per-tenant `CATALOG_RETRIEVAL` promotion 
 `docs/HITL-POLICY.md` §5's `CATALOG_RETRIEVAL` block states. This is a **named-human action** (jason.hsu)
 — nothing here is run by a build agent, and no step flips a flag on its own; each step is deliberate.
 
-1. **Produce the evidence, on real Vertex + real pgvector, at the tenant's scale.** Run
-   `pnpm eval:retrieval` and `pnpm shadow:retrieval` with `VECTOR_ANN=true` against a corpus representative
-   of the tenant (its real catalog, or a generated scale corpus). This writes one structured evidence
-   artifact — `reports/retrieval-promotion-evidence-<tenant>-<stamp>.json`
-   (`packages/widget-backend/src/retrieval-promotion-evidence.ts`) — recording the model, dimension, corpus
-   size, recall@k, no-wrong-product rate, and shadow violation counts (fabricated/stale/missing-product,
-   zero-tolerance).
-2. **Review the artifact.** The named owner reads the JSON before flipping anything — a passing exit code
+**Preconditions — verify ALL before starting (each is a real gate, not a nicety):**
+- [ ] **§3-rule-4 erasure decision resolved (Step 0 below).** Do not enable `CATALOG_WEBHOOKS` until it is.
+- [ ] **`VECTOR_ANN=true`** on the serving service — required for any corpus >5000 SKUs (the brute-force
+      store silently truncates at 5000); it selects the pgvector engine the corpus lives in.
+- [ ] **`PRODUCT_FACTS_HYDRATION=true`** + `PRODUCT_FACTS_MAX_AGE_MS` (default 900_000 = 15 min) — so a
+      retrieved product's price/availability is the fresh `ProductFactsPort` overlay and a stale fact renders
+      "current price needs confirming", never a wrong number.
+- [ ] **A fresh reindex first + ProductFacts populated for the tenant** — the shell serving path has no live
+      catalog, so a delisted product lingers until the corpus is reindexed, and a product with no fresh fact
+      renders priceless. Run Step 2 immediately before enabling.
+- [ ] **Do NOT co-enable `CART_LINE_ITEMS` with retrieval** (S3/S4-parked gap: the shell path builds
+      `products:[]`, so the cart block silently drops). Leave `CART_LINE_ITEMS` off for a retrieval-enabled tenant.
+
+0. **Resolve the §3-rule-4 statutory-erasure decision (OPEN — see HITL-POLICY §8).** As built, `shop/redact`
+   + `app/uninstalled` erase the catalog corpus **unconditionally** (design A); the alternative (B) is to
+   defer it under an armed kill like the memory/traffic erasure. This is a named-owner values call
+   (statutory-erasure-first vs a strict "no code path an operator can't stop" reading). Pick one and record
+   it in HITL-POLICY §8 **before** `CATALOG_WEBHOOKS` is enabled. No live exposure until then (dark).
+1. **Deploy / enable the infra (gcloud + env — owner applies).** Deploy the scheduled backstop
+   (`palup-catalog-index`, the runbook above), and set on the serving service `VECTOR_ANN=true`,
+   `CATALOG_WEBHOOKS=true`, `PRODUCT_FACTS_HYDRATION=true` (+ `PRODUCT_FACTS_MAX_AGE_MS` if not the 15-min
+   default), then redeploy `palup-widget-staging`. These flip NOTHING for shoppers on their own —
+   per-tenant serving still requires the two-gate `catalog:enable` in Step 5.
+2. **Build the tenant's corpus.** `pnpm catalog:index --reindex` for the tenant (or run the scheduled job
+   once) to embed its whole catalog into pgvector and rebuild the ledger, and populate `ProductFactsPort`.
+   The FIRST run embeds 100% of the catalog (one-time metered Vertex spend — no prior content-hashes to diff).
+3. **Produce the evidence, on real Vertex + real pgvector, at the tenant's scale.** With `VECTOR_ANN=true` +
+   `DATABASE_URL` set to the §5 Cloud SQL instance, and `RETRIEVAL_TENANT=<id>` (+ `RETRIEVAL_CORPUS_SIZE=<n>`
+   or `RETRIEVAL_CORPUS_FILE=<path>` for a scale/real corpus), run `pnpm eval:retrieval` and
+   `pnpm shadow:retrieval`. Each writes one structured artifact —
+   `reports/retrieval-promotion-evidence-<tenant>-<stamp>.json`
+   (`packages/widget-backend/src/retrieval-promotion-evidence.ts`) — recording model, dimension, corpus size,
+   recall@k, no-wrong-product rate, and shadow violation counts. **PASS bar:** `eval:retrieval` exits 0
+   (recall@k above floor + no wrong product) AND `shadow:retrieval` reports **zero** fabricated/stale/
+   missing-product violations. (Both CLIs require real Vertex creds — `GOOGLE_CLOUD_PROJECT` + ADC.)
+4. **Review the artifact.** The named owner reads the JSON before flipping anything — a passing exit code
    alone is not the bar; the retained artifact under `reports/` (gitignored operator evidence) is.
-3. **Flip the platform master once, then the tenant:**
+5. **Flip the platform master once, then the tenant:**
    ```bash
    pnpm catalog:enable --scope platform --on --reason "jason: platform master, <date>"
    pnpm catalog:enable --scope tenant:<id> --on --reason "jason: promoting after eval/shadow evidence reports/retrieval-promotion-evidence-<tenant>-<stamp>.json"
