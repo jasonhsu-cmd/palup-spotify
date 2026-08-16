@@ -221,11 +221,11 @@ describe("C3 ceiling — the job REFUSES an oversized catalog rather than indexi
 
     const reports = await runCatalogIndex(h, [h.tenantId]);
 
-    // readCorpusLedger throws a plain Error (not a CatalogRefusal), so only its CLASS surfaces in the
-    // report — same PII-free discipline as any other unexpected throw (never re-derive a `reason` from an
-    // error the job did not author itself).
+    // readCorpusLedger throws a CatalogRefusal (review round-1 FIX 2), so its message surfaces as `reason`
+    // — naming BOTH the offending id and the chunk it was found in, not just an opaque error class.
     expect(reports[0]!.outcome).toBe("failed");
-    expect(reports[0]!.errorClass).toBe("Error");
+    expect(reports[0]!.reason).toMatch(/someone-elses-record/);
+    expect(reports[0]!.reason).toContain(ledgerChunkKey(1));
     expect(await idsIn(h.vector, h.tenantId)).not.toContain("someone-elses-record"); // never reached the vector store at all
   });
 
