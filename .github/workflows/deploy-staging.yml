@@ -137,6 +137,13 @@ jobs:
           # Enabling it REQUIRES a pgvector-enabled DATABASE_URL and an indexed corpus; default-false keeps
           # the in-memory scan path. Serving a corpus >5000 SKUs requires it.
           VECTOR_ANN: ${{ vars.VECTOR_ANN || 'false' }}
+          # Cross-visit memory — the OPERATOR half of the double gate (widget-memory/flag.ts). INERT on its
+          # own: isMemoryEnabled() also requires the hardcoded MEMORY_ADR_ACCEPTED const, which only a HUMAN
+          # flips after ADR-0015's legal + security sign-offs (merge-gate.sh REFUSES a PR that sets it). Threaded
+          # here (default 'false') so that once that flip lands, memory is a one-var deploy flip and not silently
+          # reverted by the next merge-deploy. Default 'false' ⇒ enables NOTHING. Enabling ALSO requires
+          # WIDGET_AUTH_REQUIRED=true (server.ts assertMemoryAuthCoupling), which staging already sets.
+          MEMORY_ENABLED: ${{ vars.MEMORY_ENABLED || 'false' }}
           # D2 — the named fallback region/grounding mode for a tenant with NO pl_merchant row (staging's
           # `demo`). Registry merchants are served under their own row's values and ignore these entirely.
           # Defaulted here so the pair is never emitted empty, and so the value is VISIBLE rather than
@@ -176,6 +183,7 @@ jobs:
                       "SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}" "OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}" \
                       "SHOPPER_AUTH=${SHOPPER_AUTH}" "SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}" \
                       "CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}" "VECTOR_ANN=${VECTOR_ANN}" \
+                      "MEMORY_ENABLED=${MEMORY_ENABLED}" \
                       "SHOPIFY_APP_CLIENT_ID=${SHOPIFY_APP_CLIENT_ID:-}" \
                       "SHOPIFY_INSTALL_REDIRECT_URI=${SHOPIFY_INSTALL_REDIRECT_URI:-}" \
                       "SHOPIFY_INSTALL_REGION=${SHOPIFY_INSTALL_REGION:-}" \
@@ -238,6 +246,7 @@ jobs:
           ENVS="${ENVS}@SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}"
           ENVS="${ENVS}@CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}"
           ENVS="${ENVS}@VECTOR_ANN=${VECTOR_ANN}"
+          ENVS="${ENVS}@MEMORY_ENABLED=${MEMORY_ENABLED}"
           # S2 — pins what a future `pnpm catalog:index` run embeds with (createVertexAdapter reads both
           # envs; catalog-index.ts's OFFLINE job is the only consumer of the embed path today). CONFIG-ONLY
           # and dark: this serves no shopper by itself — CATALOG_RETRIEVAL / VECTOR_ANN stay unset/off, so
