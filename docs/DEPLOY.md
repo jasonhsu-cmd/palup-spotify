@@ -929,7 +929,11 @@ gcloud run jobs deploy palup-catalog-index \
   --command pnpm --args catalog:index \
   --set-cloudsql-instances palup-jason:us-central1:palup-staging \
   --set-secrets "DATABASE_URL=palup-staging-database-url:latest,PALUP_SECRETS=palup-secrets:latest" \
-  --set-env-vars '^@^VECTOR_ANN=true@SHOPIFY_STORES={"demo":"palup-skincare-jason.myshopify.com"}@PALUP_REQUIRE_DATABASE_URL=true@GOOGLE_CLOUD_PROJECT=palup-jason@GOOGLE_CLOUD_LOCATION=us-central1@PALUP_EMBED_MODEL=gemini-embedding-2@PALUP_EMBED_DIMENSION=1536'
+  --set-env-vars '^@^VECTOR_ANN=true@SHOPIFY_STORES={"demo":"palup-skincare-jason.myshopify.com"}@PALUP_REQUIRE_DATABASE_URL=true@GOOGLE_CLOUD_PROJECT=palup-jason@GOOGLE_CLOUD_LOCATION=global@PALUP_EMBED_MODEL=gemini-embedding-2@PALUP_EMBED_DIMENSION=1536'
+# GOOGLE_CLOUD_LOCATION=global is REQUIRED for gemini-embedding-2 — verified 2026-08-17 by probe: the model
+# 404s (NOT_FOUND) at us-central1 ("not available in the specified region") and resolves only at `global`,
+# which is also what the serving service uses (deploy-staging.yml). `--region us-central1` above is the
+# Cloud Run region and is unrelated to the Vertex endpoint.
 # TWO CORRECTIONS over the earlier draft of this command, both load-bearing:
 #   (1) VECTOR_ANN=true — WITHOUT it, createVectorStore (vector-factory.ts:28) writes to the NON-ANN
 #       PostgresVectorStore, a DIFFERENT table than the pgvector HNSW store the VECTOR_ANN serving path
