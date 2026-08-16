@@ -163,6 +163,10 @@ importers:
       google-auth-library:
         specifier: ^11.0.0
         version: 11.0.0
+    devDependencies:
+      testcontainers:
+        specifier: ^12.1.0
+        version: 12.1.0
 
   packages/widget-brain:
     dependencies:

@@ -1,5 +1,10 @@
 export { PostgresRuntimeStore } from "./postgres-runtime-store.js";
 export { PostgresVectorStore } from "./postgres-vector-store.js";
+// S3 — the pgvector-HNSW adapter (S1/A2, ADR-0020), exported so widget-backend's HEADLINE reconcile test
+// (catalog-index-pgvector-reconcile.test.ts) can run the catalog-index job against the REAL ANN store
+// without importing a vendor SQL detail — this is the same class `createVectorStore` selects internally
+// under `VECTOR_ANN`, just reachable directly for a test that needs to name the adapter.
+export { PgVectorStore, PgVectorTextQueryUnsupported } from "./pgvector-store.js";
 export { PostgresProductFactsStore } from "./postgres-product-facts-store.js";
 export { PostgresPresentmentPriceStore } from "./postgres-presentment-price-store.js";
 // B1 adapter. Exported so C1's OAuth routes can wire it; NOTHING imports it yet (see the file header).
