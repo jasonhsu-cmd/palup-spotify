@@ -52,6 +52,28 @@ const REQUIRED_ENV: Array<[name: string, why: string]> = [
   ["SHOPIFY_APP_CLIENT_ID", "C1 — the app's OAuth client id (not a secret; it ships in the URL)"],
   ["SHOPIFY_INSTALL_REDIRECT_URI", "C1 — must also be an allowed redirect URL on the Shopify app"],
   ["SHOPIFY_INSTALL_REGION", "C1 — required with NO default; NewMerchant.region may not be guessed"],
+  // ── Shopper-widget feature-posture flags. Every one is read by server.ts (or the vector factory) and
+  // ships dark via `|| 'false'`. Threaded here for the same reason as WIDGET_AUTH_REQUIRED/READBACK: unset,
+  // the code reading them is unreachable in staging, and an operator's Cloud Run flip would be reverted by
+  // the next merge-deploy (--set-env-vars REPLACES the whole set). Defaulting false means threading them
+  // enables NOTHING — it only makes each a one-var flip instead of manual `gcloud run services update`.
+  ["PRODUCT_CITATIONS", "reply-shaping: inline source citations in /chat answers (server.ts)"],
+  ["PRODUCT_CARDS", "reply-shaping: structured product cards in /chat answers (server.ts)"],
+  ["CART_LINE_ITEMS", "reply-shaping: cart line-items in /chat answers (server.ts)"],
+  ["PRODUCT_FACTS_HYDRATION", "money/NN#1: hydrate Tier-2 price/availability facts (server.ts); inert until retrieval + a producer populate facts"],
+  ["SERVER_GUARD_SIGNALS", "safety routing: catches injection/distress evasions the floor misses (server.ts)"],
+  ["OUTGOING_OFFER_CHECK", "money guard, additive over the always-on floor (server.ts)"],
+  // SHOPPER_AUTH has a hard coupling: server.ts FAILS TO BOOT if SHOPPER_AUTH=true while WIDGET_AUTH_REQUIRED
+  // is not (F4 startup precondition). Threading it does not create that hazard — it is the server's designed
+  // fail-fast — but an operator enabling it must set WIDGET_AUTH_REQUIRED=true in the same deploy.
+  ["SHOPPER_AUTH", "shopper identity gate (ADR-0017); only honored when WIDGET_AUTH_REQUIRED is also true (server.ts)"],
+  ["SUBSCRIPTION_SELFSERVE", "self-serve skip/pause commerce action; degrades to human-routed without SHOPPER_AUTH (ADR-0016 prereq, server.ts)"],
+  // CATALOG_WEBHOOKS is ALSO gated by the derived SHOPIFY_WEBHOOKS_ENABLED (app secret + merchant registry
+  // present), so this env alone is inert until the install config is complete — safe to default-false thread.
+  ["CATALOG_WEBHOOKS", "live catalog-freshness producer; additionally gated by SHOPIFY_WEBHOOKS_ENABLED (server.ts)"],
+  // VECTOR_ANN selects S1's pgvector HNSW store (vector-factory.ts). Enabling it REQUIRES a pgvector-enabled
+  // DATABASE_URL and an indexed corpus; default-false keeps the in-memory scan path. Serving >5000 SKUs needs it.
+  ["VECTOR_ANN", "retrieval backend: selects the pgvector HNSW store over the brute-force scan (vector-factory.ts)"],
 ];
 
 /** Cloud Run secret mounts. Each must resolve to a Secret Manager secret that already exists — a

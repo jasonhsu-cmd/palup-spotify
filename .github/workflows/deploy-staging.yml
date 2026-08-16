@@ -112,6 +112,31 @@ jobs:
           # provisioned under the `__shared__` scope of the palup-secrets blob (secret name
           # `MEMORY_ENCRYPTION_KEY__merchant-cred`); the flag alone is fail-closed without it.
           MERCHANT_CRED_SHARED_KEY_ENABLED: ${{ vars.MERCHANT_CRED_SHARED_KEY_ENABLED || 'false' }}
+          # ── Shopper-widget feature-posture flags. Every one is read by server.ts (or the vector factory)
+          # and ships dark via `|| 'false'`, mirroring WIDGET_AUTH_REQUIRED/READBACK exactly: threaded so the
+          # code reading them is reachable in staging AND so an operator's Cloud Run flip is not silently
+          # reverted by the next merge-deploy (--set-env-vars REPLACES the whole set). Default 'false' means
+          # THREADING ENABLES NOTHING — each becomes a one-var flip instead of a manual `gcloud` update.
+          # Reply-shaping + safety (pure booleans, no boot precondition):
+          PRODUCT_CITATIONS: ${{ vars.PRODUCT_CITATIONS || 'false' }}
+          PRODUCT_CARDS: ${{ vars.PRODUCT_CARDS || 'false' }}
+          CART_LINE_ITEMS: ${{ vars.CART_LINE_ITEMS || 'false' }}
+          PRODUCT_FACTS_HYDRATION: ${{ vars.PRODUCT_FACTS_HYDRATION || 'false' }}
+          SERVER_GUARD_SIGNALS: ${{ vars.SERVER_GUARD_SIGNALS || 'false' }}
+          OUTGOING_OFFER_CHECK: ${{ vars.OUTGOING_OFFER_CHECK || 'false' }}
+          # SHOPPER_AUTH has a hard coupling: server.ts REFUSES TO BOOT if this is true while
+          # WIDGET_AUTH_REQUIRED is not (F4 startup precondition). An operator enabling it must set
+          # WIDGET_AUTH_REQUIRED=true in the SAME deploy. SUBSCRIPTION_SELFSERVE degrades to human-routed
+          # (a warning, not a boot failure) without SHOPPER_AUTH (ADR-0016 prereq).
+          SHOPPER_AUTH: ${{ vars.SHOPPER_AUTH || 'false' }}
+          SUBSCRIPTION_SELFSERVE: ${{ vars.SUBSCRIPTION_SELFSERVE || 'false' }}
+          # CATALOG_WEBHOOKS is ALSO gated by the derived SHOPIFY_WEBHOOKS_ENABLED (app secret + merchant
+          # registry present), so this env alone stays inert until the install config is complete.
+          CATALOG_WEBHOOKS: ${{ vars.CATALOG_WEBHOOKS || 'false' }}
+          # VECTOR_ANN selects S1's pgvector HNSW store over the brute-force scan (vector-factory.ts).
+          # Enabling it REQUIRES a pgvector-enabled DATABASE_URL and an indexed corpus; default-false keeps
+          # the in-memory scan path. Serving a corpus >5000 SKUs requires it.
+          VECTOR_ANN: ${{ vars.VECTOR_ANN || 'false' }}
           # D2 — the named fallback region/grounding mode for a tenant with NO pl_merchant row (staging's
           # `demo`). Registry merchants are served under their own row's values and ignore these entirely.
           # Defaulted here so the pair is never emitted empty, and so the value is VISIBLE rather than
@@ -146,6 +171,11 @@ jobs:
                       "WIDGET_AUTH_REQUIRED=${WIDGET_AUTH_REQUIRED}" \
                       "MERCHANT_CRED_READBACK_ENABLED=${MERCHANT_CRED_READBACK_ENABLED}" \
                       "MERCHANT_CRED_SHARED_KEY_ENABLED=${MERCHANT_CRED_SHARED_KEY_ENABLED}" \
+                      "PRODUCT_CITATIONS=${PRODUCT_CITATIONS}" "PRODUCT_CARDS=${PRODUCT_CARDS}" \
+                      "CART_LINE_ITEMS=${CART_LINE_ITEMS}" "PRODUCT_FACTS_HYDRATION=${PRODUCT_FACTS_HYDRATION}" \
+                      "SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}" "OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}" \
+                      "SHOPPER_AUTH=${SHOPPER_AUTH}" "SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}" \
+                      "CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}" "VECTOR_ANN=${VECTOR_ANN}" \
                       "SHOPIFY_APP_CLIENT_ID=${SHOPIFY_APP_CLIENT_ID:-}" \
                       "SHOPIFY_INSTALL_REDIRECT_URI=${SHOPIFY_INSTALL_REDIRECT_URI:-}" \
                       "SHOPIFY_INSTALL_REGION=${SHOPIFY_INSTALL_REGION:-}" \
@@ -196,6 +226,18 @@ jobs:
           ENVS="${ENVS}@SHOPIFY_STORES={\"demo\":\"palup-skincare-jason.myshopify.com\"}"
           ENVS="${ENVS}@MERCHANT_REGION=${MERCHANT_REGION}"
           ENVS="${ENVS}@MERCHANT_GROUNDING_MODE=${MERCHANT_GROUNDING_MODE}"
+          # Shopper-widget feature-posture flags (all default 'false' — see the env: block above). Emitted
+          # unconditionally because each always has a value ('true'/'false'), so no empty-pair guard is needed.
+          ENVS="${ENVS}@PRODUCT_CITATIONS=${PRODUCT_CITATIONS}"
+          ENVS="${ENVS}@PRODUCT_CARDS=${PRODUCT_CARDS}"
+          ENVS="${ENVS}@CART_LINE_ITEMS=${CART_LINE_ITEMS}"
+          ENVS="${ENVS}@PRODUCT_FACTS_HYDRATION=${PRODUCT_FACTS_HYDRATION}"
+          ENVS="${ENVS}@SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}"
+          ENVS="${ENVS}@OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}"
+          ENVS="${ENVS}@SHOPPER_AUTH=${SHOPPER_AUTH}"
+          ENVS="${ENVS}@SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}"
+          ENVS="${ENVS}@CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}"
+          ENVS="${ENVS}@VECTOR_ANN=${VECTOR_ANN}"
           # S2 — pins what a future `pnpm catalog:index` run embeds with (createVertexAdapter reads both
           # envs; catalog-index.ts's OFFLINE job is the only consumer of the embed path today). CONFIG-ONLY
           # and dark: this serves no shopper by itself — CATALOG_RETRIEVAL / VECTOR_ANN stay unset/off, so
