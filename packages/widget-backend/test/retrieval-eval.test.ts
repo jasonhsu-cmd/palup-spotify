@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelPort, EmbedRequest, EmbedResponse } from "@palup/platform-ports";
-import { buildIndexedRetriever, gradeRetrieval, type RetrievalCase, type RetrievalProduct } from "../src/retrieval-eval.js";
+import { buildIndexedRetriever, gradeRetrieval, generateScaleCorpusAndCases, type RetrievalCase, type RetrievalProduct } from "../src/retrieval-eval.js";
 
 // CATALOG_RETRIEVAL eval — plumbing + grader, gate-tested WITHOUT creds. A deterministic bag-of-words embed
 // stands in for Vertex so we prove the harness plumbs the REAL index + retrieve paths (runCatalogIndex →
@@ -77,6 +77,38 @@ describe("CATALOG_RETRIEVAL eval — grader", () => {
     expect(gradeRetrieval({ id: "x", query: "q", relevantInTopK: ["mask", "oil"] }, hits).pass).toBe(false);
     expect(gradeRetrieval({ id: "x", query: "q", notInTopK: ["cream"] }, hits).pass).toBe(false);
     expect(gradeRetrieval({ id: "x", query: "q", notInTopK: ["lipbalm"] }, hits).pass).toBe(true);
+  });
+});
+
+describe("CATALOG_RETRIEVAL eval — scale corpus/cases have a REALISTIC hard negative", () => {
+  // Regression guard for the S4 §5 harness-validity fix. The prior cases used the SIBLING FRUIT
+  // (`notInTopK: [other fruit]`), which only ever excludes under the fake orthogonal embed: on real
+  // semantic embeddings "banana fruit" is genuinely closer to "apple fruit" than to gibberish filler,
+  // so the sibling ranks #2 and that assertion can NEVER pass — the gate was structurally broken.
+  // The corrected hard negative is a totally-unrelated hardware item (`sig-bolt`), which a good
+  // retriever excludes from top-k on BOTH real and fake embeddings. Here we prove, end-to-end through
+  // the real index+retrieve path with the fake embed, that: (a) the target fruit is top-1, and
+  // (b) `sig-bolt` never surfaces in top-k — i.e. every graded case passes.
+
+  it("each case's notInTopK is the unrelated hardware item, never the sibling fruit", () => {
+    const { cases } = generateScaleCorpusAndCases(10);
+    for (const c of cases) {
+      expect(c.notInTopK, `${c.id}`).toEqual(["sig-bolt"]);
+      expect(c.notInTopK).not.toContain("sig-apple");
+      expect(c.notInTopK).not.toContain("sig-banana");
+    }
+  });
+
+  it("target fruit ranks top-1 and the unrelated hardware item stays out of top-k (all cases grade pass)", async () => {
+    const { products, cases, _meta } = generateScaleCorpusAndCases(50);
+    const { retriever, tenantId } = await buildIndexedRetriever(products, new FakeEmbedModel(), "t-scale");
+    for (const c of cases) {
+      const { hits } = await retriever.retrieve({ tenantId, query: c.query, k: _meta.k });
+      const ids = hits.map((h) => h.productId);
+      expect(hits[0]?.productId, `case=${c.id} hits=${JSON.stringify(ids)}`).toBe(c.expectTop);
+      expect(ids, `case=${c.id} leaked hardware item`).not.toContain("sig-bolt");
+      expect(gradeRetrieval(c, hits).pass, `case=${c.id} fails=${gradeRetrieval(c, hits).fails.join("; ")}`).toBe(true);
+    }
   });
 });
 

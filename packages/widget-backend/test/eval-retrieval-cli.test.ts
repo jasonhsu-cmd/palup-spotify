@@ -87,7 +87,7 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("eval-retrieval CLI — VECTOR_ANN routing 
         expect(result.storeKind).toBe("postgres/ann");
 
         // 2. The retriever built over pgvector actually retrieves correctly at scale.
-        expect(result.corpusSize).toBe(202); // 2 signal products + 200 generated filler
+        expect(result.corpusSize).toBe(203); // 3 signal products + 200 generated filler
         expect(result.defaultK).toBe(5); // generateScaleCorpusAndCases's own `_meta.k`, not the CLI's own default of 3
         for (const r of result.rows) expect(r.pass, `case ${r.id} failed: ${r.fails.join("; ")}`).toBe(true);
 
@@ -97,7 +97,7 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("eval-retrieval CLI — VECTOR_ANN routing 
         expect(written.tenantId).toBe("acme-cli");
         expect(written.model).toBe("fake-embed-cli-bow-32");
         expect(written.dimension).toBe(DIMENSION);
-        expect(written.corpusSize).toBe(202);
+        expect(written.corpusSize).toBe(203);
         expect(written.recallAtK).toBe(1);
         expect(written.noWrongProduct).toBe(1);
         expect(written.vectorAnn).toBe(true);
