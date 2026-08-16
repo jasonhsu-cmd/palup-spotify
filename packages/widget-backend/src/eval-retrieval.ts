@@ -46,8 +46,10 @@ export interface RetrievalEvalCorpus {
 }
 
 export interface RunRetrievalEvalOptions {
-  /** Defaults to `process.env`; tests pass a synthetic env so a real `VECTOR_ANN=true` run can be proven
-   *  without mutating the process's own environment. */
+  /** Defaults to `process.env`; controls THIS module's own env reads (tenant, corpus knobs, VECTOR_ANN
+   *  routing). NOTE: `createRuntimeStore`/`createVectorStore` read `process.env` directly, so a pgvector
+   *  (`VECTOR_ANN=true`) run still requires the real `process.env` to be set — this option does not fully
+   *  isolate a run from the process environment. */
   env?: NodeJS.ProcessEnv;
   /** Defaults to `env.RETRIEVAL_TENANT ?? "eval-retrieval"`. */
   tenantId?: string;
