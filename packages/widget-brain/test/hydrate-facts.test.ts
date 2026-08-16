@@ -81,7 +81,9 @@ describe("A1b/D2 — the staleness ceiling (fail-honest on a stale money fact)",
     const out = hydrateProductFacts([p], [{ productId: "serum-vc", price: "$29", availableForSale: false, updatedAt: ago(7_200_000) }], ceiling);
     expect(out[0]!.priceConfirmed).toBe(false);
     expect(out[0]!.price).toBe("$34"); // the stale $29 is NOT quoted; base price retained but withheld by the flag
-    expect(out[0]!.availableForSale).toBe(true); // stale availability not applied either
+    // S3 §D fix: availability is DROPPED (undefined), not left at the product's own last-known value — a
+    // fact existing at all means an availability-affecting event fired, so the pre-fact value isn't trusted.
+    expect(out[0]!.availableForSale).toBeUndefined();
   });
 
   it("overlays a FRESH fact normally and leaves priceConfirmed unset", () => {
@@ -112,5 +114,24 @@ describe("A1b/D2 — the staleness ceiling (fail-honest on a stale money fact)",
     expect(atLimit[0]!.price).toBe("$29"); // not > maxAgeMs
     const justPast = hydrateProductFacts([prod({ price: "$34" })], [{ productId: "serum-vc", price: "$29", updatedAt: ago(3_600_001) }], ceiling);
     expect(justPast[0]!.priceConfirmed).toBe(false);
+  });
+});
+
+describe("S3 §D — 15-minute serve-time staleness ceiling (fail-honest)", () => {
+  const now = new Date("2026-08-16T12:00:00.000Z");
+  const CEILING_15_MIN = 900_000;
+  const ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
+  const prod = (over: Partial<Product> = {}): Product => ({ id: "serum-vc", title: "Vitamin C", description: "d", price: "$34", tags: [], availableForSale: true, ...over });
+
+  it("a fact 14 minutes old is still quoted", () => {
+    const out = hydrateProductFacts([prod()], [{ productId: "serum-vc", price: "$29", availableForSale: true, updatedAt: ago(14 * 60_000) }], { now, maxAgeMs: CEILING_15_MIN });
+    expect(out[0]!.price).toBe("$29");
+    expect(out[0]!.priceConfirmed).not.toBe(false);
+  });
+
+  it("a fact 16 minutes old is NOT quoted — priceConfirmed:false and availability dropped", () => {
+    const out = hydrateProductFacts([prod()], [{ productId: "serum-vc", price: "$29", availableForSale: true, updatedAt: ago(16 * 60_000) }], { now, maxAgeMs: CEILING_15_MIN });
+    expect(out[0]!.priceConfirmed).toBe(false);
+    expect(out[0]!.availableForSale).toBeUndefined();
   });
 });
