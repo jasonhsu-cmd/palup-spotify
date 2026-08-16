@@ -170,6 +170,14 @@ export const STOREFRONT_PAGE_SIZE = 250;
 export const MAX_CATALOG_PAGES = 4;
 
 /**
+ * The INDEX job's page ceiling — deep enough to page the whole `MAX_INDEXED_PRODUCTS` (50000 / 250 = 200
+ * pages). SEPARATE from `MAX_CATALOG_PAGES` (serving's per-turn cap, still 4): the offline index job pays
+ * ~200 sequential round-trips once, the /chat path never does. `getContext` keeps its 4-page cap so serving
+ * can never page 50k per turn.
+ */
+export const MAX_INDEX_CATALOG_PAGES = 200;
+
+/**
  * The catalog size this adapter supports: 4 pages × 250 = 1000 published products.
  *
  * Why 1000 and not more: the binding constraint is the PROMPT, not the network. widget-brain's

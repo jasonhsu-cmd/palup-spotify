@@ -152,20 +152,27 @@ function harness(products: Product[], embedOpts: Parameters<typeof fakeEmbedder>
 // ── the ceiling: hard-fail, never truncate ─────────────────────────────────────────────────────────
 
 describe("C3 ceiling — the job REFUSES an oversized catalog rather than indexing part of it", () => {
-  it("stays strictly below the vector adapter's own row-scan cap, which truncates by ID ORDER", () => {
-    // postgres-vector-store.ts caps every query() at MAX_SCAN_ROWS with `ORDER BY id LIMIT` — id order,
-    // NOT relevance — so beyond that cap records silently vanish from a query. Read the real constant out
-    // of the real file so this can never drift into an unsafe corpus size.
+  it("VECTOR_SCAN_ROWS_MIRRORED still mirrors the real vector-store scan cap (drift guard)", () => {
+    // postgres-vector-store.ts caps every non-ANN query() at MAX_SCAN_ROWS with `ORDER BY id LIMIT` — id
+    // order, NOT relevance — so beyond that cap records silently vanish from a query on the LEGACY
+    // brute-force store. Read the real constant out of the real file so this mirror can never drift.
+    //
+    // S2 RETIRED invariant: this describe block used to also assert `MAX_INDEXED_PRODUCTS < scanCap`.
+    // That invariant is SUPERSEDED, not loosened — `MAX_INDEXED_PRODUCTS` (50000) now EXCEEDS this cap by
+    // design, because the index ceiling is decoupled from the brute-force adapter's 5000-row scan limit.
+    // That coupling only ever applied to the non-`VECTOR_ANN` store; on the S1 pgvector (HNSW) path there
+    // is no id-ordered LIMIT scan, so serving a corpus above this cap is safe ONLY when `VECTOR_ANN=true`
+    // (see the ceiling comment on `MAX_INDEXED_PRODUCTS`, catalog-index.ts). This job does not read
+    // `VECTOR_ANN`; it only writes the corpus — the precondition is enforced on the serving side.
     const src = readFileSync(new URL("../../state-postgres/src/postgres-vector-store.ts", import.meta.url), "utf8");
     const scanCap = Number(/MAX_SCAN_ROWS = (\d+)/.exec(src)?.[1]);
     expect(scanCap).toBeGreaterThan(0);
     expect(VECTOR_SCAN_ROWS_MIRRORED).toBe(scanCap);
-    // +1 row of headroom is needed for the completeness probe, so the ceiling must be STRICTLY below.
-    expect(MAX_INDEXED_PRODUCTS).toBeLessThan(scanCap);
   });
 
-  it("is coherent with #180's fetch ceiling — never larger by accident", () => {
-    expect(MAX_INDEXED_PRODUCTS).toBe(MAX_CATALOG_PRODUCTS);
+  it("MAX_INDEXED_PRODUCTS is decoupled from serving's fetch ceiling (S2) — larger by design, not by accident", () => {
+    expect(MAX_INDEXED_PRODUCTS).toBe(50000);
+    expect(MAX_INDEXED_PRODUCTS).toBeGreaterThan(MAX_CATALOG_PRODUCTS);
   });
 
   it("a catalog OVER the ceiling writes NOTHING — no partial corpus, and the refusal is reported", async () => {

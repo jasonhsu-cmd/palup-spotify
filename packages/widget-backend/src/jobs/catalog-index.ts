@@ -30,6 +30,7 @@ import { createModelPort } from "../model.js";
 import {
   createShopifyGroundingAdapter,
   MAX_CATALOG_PRODUCTS,
+  MAX_INDEX_CATALOG_PAGES,
   STOREFRONT_PAGE_SIZE,
   storefrontFetch,
   type StorefrontFetch,
@@ -99,32 +100,30 @@ export function catalogRecordId(productId: string): string {
 }
 
 /**
- * THE CEILING — the largest catalog this job will index. Pinned to #180's FETCH ceiling
- * (`MAX_CATALOG_PRODUCTS`, 4 pages × 250) so the two can never drift apart, and crossing it makes the
- * job HARD-FAIL for that tenant rather than index part of the catalog.
+ * THE INDEX CEILING — the largest catalog this job will index. S2 raised it to the full ADR-0020 ~50k
+ * design ceiling: batch embedding (Task 5) makes it tractable, and the serving path no longer renders the
+ * whole catalog per turn (it retrieves top-K via getShell), so this is DECOUPLED from serving's own fetch
+ * ceiling (`MAX_CATALOG_PRODUCTS`, still 1000). Crossing it HARD-FAILS the tenant rather than indexing a
+ * part of it (the #180 truncation argument, unchanged).
  *
- * Why hard-fail rather than truncate — the #180 argument, which applies with MORE force on the write
- * side. A truncated corpus does not produce a smaller answer; once retrieval exists it produces a
- * CONFIDENT FALSE one ("we don't carry that") about a product the merchant does carry. And truncation
- * here would be doubly invisible: `PostgresVectorStore.query` already caps its scan at `MAX_SCAN_ROWS`
- * with `ORDER BY id LIMIT` — ID ORDER, NOT RELEVANCE (postgres-vector-store.ts:94) — so a corpus grown
- * past that cap silently loses whichever records sort late by id, with no error anywhere. A refusal, by
- * contrast, is the input every caller here is built for: the merchant keeps whatever complete corpus it
- * already had (or none), and an operator gets a named, actionable outcome.
- *
- * Why not larger: the binding constraint is upstream of this file. `composeSystemPrompt` renders EVERY
- * product of the GroundingContext into EVERY shopper turn with no count cap (#180's finding), so a
- * merchant above this size needs relevance retrieval, not a bigger index — and until retrieval exists,
- * indexing more products than the serving path can carry buys nothing. 1000 also leaves 5× headroom
- * under the 5000-row scan cap, so the corpus is always fully enumerable in one query.
+ * The brute-force `MAX_SCAN_ROWS` (5000) coupling no longer applies: serving a corpus this size requires
+ * `VECTOR_ANN=true` (the S1 pgvector HNSW store), whose query does not do an id-ordered LIMIT scan. On the
+ * legacy brute-force store a >5000 corpus WOULD silently truncate at query time — which is exactly why the
+ * VECTOR_ANN precondition is documented (S2 spec §D-backend) and must be true before a >5000-SKU store is
+ * served. This job does not read `VECTOR_ANN`; it only writes the corpus.
  */
-export const MAX_INDEXED_PRODUCTS = MAX_CATALOG_PRODUCTS;
+export const MAX_INDEXED_PRODUCTS = 50000;
 
 /**
  * `MAX_SCAN_ROWS` from `packages/state-postgres/src/postgres-vector-store.ts:94`, MIRRORED here because
- * that constant is module-private. It is not ours to change (different lane) and the truncation it
- * causes is silent, so `MAX_INDEXED_PRODUCTS` must stay strictly below it — a test reads the real
- * constant out of the real file and fails if this mirror or that relationship ever drifts.
+ * that constant is module-private. It is not ours to change (different lane).
+ *
+ * S2: the "`MAX_INDEXED_PRODUCTS` must stay below this" invariant is RETIRED — it only ever bounded the
+ * legacy brute-force store's silent id-ordered LIMIT truncation, and `MAX_INDEXED_PRODUCTS` (50000) now
+ * exceeds it by design. On the S1 pgvector (`VECTOR_ANN=true`) path there is no such scan cap, so serving
+ * a corpus above this size is safe ONLY when `VECTOR_ANN=true`; the non-ANN store must never be pointed at
+ * a corpus this large (see the ceiling comment above). The constant is kept because other call sites
+ * (tests, docs) still read it for that precondition, not to bound the index ceiling anymore.
  */
 export const VECTOR_SCAN_ROWS_MIRRORED = 5000;
 
@@ -871,10 +870,13 @@ export function tenantsToIndex(env: NodeJS.ProcessEnv = process.env): string[] {
  * catalog: indexing demo products as if they were a merchant's would be exactly the falsehood the
  * commerce-fixture marker exists to prevent.
  *
- * `createShopifyGroundingAdapter` + `storefrontFetch` are reused verbatim, so the corpus is built from
- * the SAME paginated, whole-catalog-or-nothing fetch the serving path uses (#180) — including its page
- * ceiling and its refusal to return a truncated catalog. The token never leaves the SecretsPort → header
- * path and is never logged (see storefrontFetch's egress log, which has no token field).
+ * `createShopifyGroundingAdapter` + `storefrontFetch` are reused verbatim (same pagination, whole-catalog-
+ * or-nothing behavior, and refusal semantics as the serving path, #180) — but the DEFAULT `fetchImpl` here
+ * is deep: `maxPages: MAX_INDEX_CATALOG_PAGES` (200), not serving's 4-page cap, so the index job can page
+ * the whole `MAX_INDEXED_PRODUCTS` (50000) ceiling. Serving's own `getContext` (model.ts) keeps its own
+ * `storefrontFetch()` default (4 pages / 1000 products) untouched — this default only applies here. The
+ * token never leaves the SecretsPort → header path and is never logged (see storefrontFetch's egress log,
+ * which has no token field).
  *
  * NOT wrapped in `createCachingGroundingPort` on purpose: an index job wants the CURRENT catalog, not the
  * serving path's cached/stale-while-error view, and it must see a fetch failure as a failure rather than
@@ -882,7 +884,7 @@ export function tenantsToIndex(env: NodeJS.ProcessEnv = process.env): string[] {
  */
 export function shopifyCatalogSource(
   secrets: SecretsPort,
-  fetchImpl: StorefrontFetch = storefrontFetch(),
+  fetchImpl: StorefrontFetch = storefrontFetch(globalThis.fetch, { maxPages: MAX_INDEX_CATALOG_PAGES }),
   domains: Record<string, string> = parseStoreDomains(),
 ): CatalogSource {
   return async (tenantId) => {

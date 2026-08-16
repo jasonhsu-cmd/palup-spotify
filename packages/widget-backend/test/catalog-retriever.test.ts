@@ -170,19 +170,24 @@ describe("E1 — createCatalogRetriever: the query side of the catalog corpus", 
     expect(CATALOG_RETRIEVAL_AGENT_TYPE).toBe("catalog-retrieval");
   });
 
-  it("k and the corpus both stay clear of the vector adapter's id-ORDER row-scan truncation", () => {
-    // postgres-vector-store.ts caps every query() at MAX_SCAN_ROWS with `ORDER BY id LIMIT` — ID ORDER,
-    // NOT RELEVANCE — so a corpus larger than that cap would silently lose whichever records sort late by
-    // id BEFORE anything is scored. Retrieval is the first code that actually RANKS this corpus, so the
-    // headroom matters here in a way it did not on the write side: read the real constant out of the real
-    // file, and pin that a full-size corpus is scanned WHOLE.
+  it("VECTOR_SCAN_ROWS_MIRRORED still mirrors the real vector-store scan cap (drift guard)", () => {
+    // postgres-vector-store.ts caps every non-ANN query() at MAX_SCAN_ROWS with `ORDER BY id LIMIT` — ID
+    // ORDER, NOT RELEVANCE — so a corpus larger than that cap would silently lose whichever records sort
+    // late by id BEFORE anything is scored, on the LEGACY brute-force store. Read the real constant out of
+    // the real file so this mirror can never drift.
+    //
+    // S2 RETIRED invariant: this test used to also assert `MAX_INDEXED_PRODUCTS < scanCap` ("the corpus is
+    // always scanned WHOLE"). That is SUPERSEDED, not loosened — `MAX_INDEXED_PRODUCTS` (50000) now EXCEEDS
+    // this cap by design, decoupled from the brute-force adapter's 5000-row scan limit. Serving a corpus
+    // above this cap is safe ONLY when `VECTOR_ANN=true` (S1 pgvector/HNSW, no id-ordered LIMIT scan); on
+    // the legacy brute-force store a >5000 corpus WOULD silently truncate at query time here, which is
+    // exactly why the VECTOR_ANN precondition is documented (S2 spec §D-backend) and must hold before a
+    // corpus this size is served. This retriever does not itself check `VECTOR_ANN` — the precondition is
+    // enforced by which vector store the composition root wires in.
     const src = readFileSync(new URL("../../state-postgres/src/postgres-vector-store.ts", import.meta.url), "utf8");
     const scanCap = Number(/MAX_SCAN_ROWS = (\d+)/.exec(src)?.[1]);
     expect(scanCap).toBe(VECTOR_SCAN_ROWS_MIRRORED);
-    // The largest corpus the index job will ever write is well under the scan cap (5x headroom at the
-    // values in force), so every record is scored on every query and the truncation never engages…
-    expect(MAX_INDEXED_PRODUCTS).toBeLessThan(scanCap);
-    // …and k is the slice taken AFTER ranking, orders of magnitude below either bound.
+    // k is the slice taken AFTER ranking, orders of magnitude below the index ceiling — unaffected by S2.
     expect(DEFAULT_CATALOG_RETRIEVAL_K).toBeLessThan(MAX_INDEXED_PRODUCTS);
   });
 });
