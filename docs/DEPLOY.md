@@ -978,6 +978,38 @@ registry — deferred to S4 (spec §H(2)). Until then, a newly-installed merchan
 does **NOT** enable serving. `CATALOG_RETRIEVAL` / `VECTOR_ANN` stay **§5 named-owner promotions** —
 nothing in this job's env or command flips them.
 
+## Per-tenant `CATALOG_RETRIEVAL` promotion (S4 §5 — HITL-POLICY §5 owner promotion bar)
+
+The operator procedure for the promotion bar `docs/HITL-POLICY.md` §5's `CATALOG_RETRIEVAL` block states.
+This is a **named-human action** (jason.hsu) — nothing here is run by a build agent, and no step flips a
+flag on its own; each step is deliberate.
+
+1. **Produce the evidence, on real Vertex + real pgvector, at the tenant's scale.** Run
+   `pnpm eval:retrieval` and `pnpm shadow:retrieval` with `VECTOR_ANN=true` against a corpus representative
+   of the tenant (its real catalog, or a generated scale corpus). This writes one structured evidence
+   artifact — `reports/retrieval-promotion-evidence-<tenant>-<stamp>.json`
+   (`packages/widget-backend/src/retrieval-promotion-evidence.ts`) — recording the model, dimension, corpus
+   size, recall@k, no-wrong-product rate, and shadow violation counts (fabricated/stale/missing-product,
+   zero-tolerance).
+2. **Review the artifact.** The named owner reads the JSON before flipping anything — a passing exit code
+   alone is not the bar; the retained artifact under `reports/` (gitignored operator evidence) is.
+3. **Flip the platform master once, then the tenant:**
+   ```bash
+   pnpm catalog:enable --scope platform --on --reason "jason: platform master, <date>"
+   pnpm catalog:enable --scope tenant:<id> --on --reason "jason: promoting after eval/shadow evidence reports/retrieval-promotion-evidence-<tenant>-<stamp>.json"
+   ```
+   Both writes are audited atomically (`catalog-retrieval-enablement.ts`); the CLI reads the resulting state
+   back and prints `effective=true` only once both the platform master and the tenant opt-in are on.
+4. **Rollback — two independent levers:**
+   - **Instant, retrieval-only:** `pnpm kill:arm --scope agent:catalog-retrieval` degrades EVERY
+     tenant's retrieval to the full-catalog path immediately, with no code change. This scope is
+     platform-wide-but-retrieval-only — `matchedKill` has no combined tenant+agent-type scope, so
+     `--scope tenant:<id>` is **not** a retrieval-only rollback for one merchant; it matches the same
+     tenant-scoped check the ordinary shopper kill uses and halts that tenant's serving entirely.
+   - **Un-enable one tenant (no kill involved):** `pnpm catalog:enable --scope tenant:<id> --off --reason "…"`
+     turns retrieval back off for just that tenant, leaving every other tenant and the rest of that
+     tenant's serving untouched.
+
 ## Local
 
 ```bash

@@ -111,3 +111,36 @@ the exact GA model-id confirmed AND a full reindex (the `gemini-embedding-001`/`
 embedding spaces are incompatible). Current source of truth for the pin:
 `docs/superpowers/specs/2026-08-15-s2-serving-unlock-design.md` §2 (D-embed) and §8 (Promotion
 preconditions).
+
+## Update / Amendment (2026-08-16, S4 §E) — the #295 canary-waiver's compensating controls are built
+
+PR #295 (open, unmerged) proposed waiving the canary stage of `CATALOG_RETRIEVAL`'s promotion on the
+strength of two compensating controls it assumed but that did not yet exist: per-tenant staged
+enablement and a retrieval-scoped Kill Switch. **S4 built both, closing that precondition:**
+
+- **Per-tenant staged enablement:** `packages/state-postgres/src/catalog-retrieval-enablement.ts`
+  (platform master + per-tenant opt-in, both default OFF, audited atomically) plus the
+  `pnpm catalog:enable --scope platform|tenant:<id> --on|--off` CLI
+  (`packages/widget-backend/src/jobs/catalog-enable.ts`). The process-global `CATALOG_RETRIEVAL` env
+  read this ADR's D2/D5 context implicitly assumed is **retired**.
+- **Retrieval-scoped Kill Switch:** `/chat` reads `agent:catalog-retrieval` alongside the shopper kill
+  (`matchedKill(..., { agentType: CATALOG_RETRIEVAL_AGENT_TYPE })`, `server.ts`) and the brain degrades
+  to the full-catalog path when it is armed (`brain.ts`), armed via
+  `pnpm kill:arm --scope agent:catalog-retrieval`.
+
+`CATALOG_RETRIEVAL` is now **promotable per-tenant** against the bar recorded in
+`docs/HITL-POLICY.md` §5's `CATALOG_RETRIEVAL` block (recorded real-Vertex `eval:retrieval` +
+`shadow:retrieval` evidence artifact + named-owner sign-off, audited at each flip); canary stays
+waived for this one flag only, per that block.
+
+This also corrects #295's stale "~1000-product ceiling" scope caveat: `MAX_INDEXED_PRODUCTS`
+(`catalog-index.ts`) is now **50000** (S1/S2 raised it), not 1000. `MAX_CATALOG_PRODUCTS`
+(`shopify-grounding.ts`) — the non-retrieval full-catalog-fetch cap — stays 1000. Serving a corpus
+above ~5000 SKUs requires `VECTOR_ANN=true` (the S1 pgvector-HNSW adapter; the brute-force store's
+`MAX_SCAN_ROWS=5000` silently truncates above that).
+
+**Recommendation: PR #295 should be closed as superseded** — this amendment and
+`docs/HITL-POLICY.md`'s corresponding block carry the corrected version against the controls actually
+built. Closing #295 is the named owner's action on merging the S4 PR, not a build agent's.
+
+Full detail: `docs/superpowers/specs/2026-08-16-s4-safe-promotion-design.md`.

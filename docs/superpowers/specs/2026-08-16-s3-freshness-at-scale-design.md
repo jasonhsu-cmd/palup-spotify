@@ -187,9 +187,12 @@ serving flag added by the deploy config.
 - No governance flag flipped by any S3 code (`CATALOG_RETRIEVAL`/`VECTOR_ANN`/`MEMORY_ADR_ACCEPTED`/
   `PRODUCT_FACTS_HYDRATION` all stay as-is). Enabling `CATALOG_WEBHOOKS` + the scheduler in staging is part of
   the owner's apply.
-- **#295 stays blocked** (needs S4's per-tenant flag + retrieval-scoped kill).
-- Erasure (ADR-0015): the ledger is per-tenant KV; `deleteNamespace`/tenant erasure must also drop the tenant
-  ledger record(s) — add to the erasure path + test.
+- **#295 — no longer blocked, now superseded.** S4 built the per-tenant flag + retrieval-scoped kill #295's
+  canary waiver needed; `docs/HITL-POLICY.md` §5 and `docs/adr/0020-durable-grounding-at-scale.md` carry the
+  corrected amendment. Recommend closing #295 (owner's action, on merging S4).
+- **DONE (S4 §F).** Erasure (ADR-0015): `runCatalogClear` now drops the tenant's ledger chunk record(s) (not
+  just the vector namespace) as part of the same clear, wired into `shop/redact` + `app/uninstalled`; see
+  the §H(3) note above for the open unconditional-vs-kill-gated question that remains.
 
 ## §G — Testing & CI
 
@@ -206,12 +209,16 @@ merchants aren't reconciled until the tenant-list-from-registry follow-up (S4).
 **Deferred from the FINAL-REVIEW pass (recorded here so the §5 owner sees them before enabling — not built in
 this pass; do not treat their absence as a gap in THIS work, they are explicitly out of scope for it):**
 
-(3) Before enabling the scheduled job / `CATALOG_WEBHOOKS` against real merchant data: wire catalog corpus +
-ledger erasure into `shop/redact` AND `app/uninstalled`, AND make `runCatalogClear` pgvector-safe (it
-currently text-enumerates via `vector.query({text:""})` which THROWS on the pgvector store — so `pnpm
-catalog:clear` cannot clear a `VECTOR_ANN` store today). Until this lands, `shop/redact`'s
-`SHOP_REDACT_RESIDUAL` honestly discloses the catalog corpus namespace and the corpus-state ledger as known,
-tracked residuals — that disclosure is not a substitute for the erasure wiring.
+(3) **DONE (S4 §F, T6/T8).** Catalog corpus + ledger erasure is now wired into both `shop/redact` AND
+`app/uninstalled` (`eraseCatalogCorpus`, `routes/shopify-webhooks.ts`), and `runCatalogClear`
+(`catalog-index.ts`) is pgvector-safe — it drives the delete off the ledger (never
+`vector.query({text:""})`, which still throws on the pgvector store), so `pnpm catalog:clear` now clears a
+`VECTOR_ANN` store too. `shop/redact`'s `SHOP_REDACT_RESIDUAL` no longer names the catalog corpus namespace
+or the corpus-state ledger — both are erased (best-effort, audited on failure) as part of the same
+handler. **Open, not settled here:** this erasure runs UNCONDITIONALLY (not gated on `deps.killCheck`),
+unlike the memory/traffic erasure in the same handlers, which defers while a kill is armed — a real §3/NN#4
+tension the named owner (jason.hsu) has not yet resolved; see `docs/HITL-POLICY.md` §8's open-decision
+note. Do not read the code's current choice as policy.
 
 (4) Before enabling BOTH the hourly backstop AND `CATALOG_WEBHOOKS`: add per-tenant concurrency control
 (an advisory lock, or a "skip stale-delete for ledger entries newer than the catalog-fetch timestamp" guard)
