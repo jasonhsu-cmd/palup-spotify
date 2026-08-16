@@ -88,12 +88,19 @@ export function generateScaleCorpusAndCases(n: number): { products: RetrievalPro
   const signal: RetrievalProduct[] = [
     { id: "sig-apple", title: "Crisp Apple", price: "$1", description: "crunchy sweet apple orchard fruit", tags: ["apple"] },
     { id: "sig-banana", title: "Ripe Banana", price: "$2", description: "soft yellow banana tropical fruit", tags: ["banana"] },
+    // A genuinely-unrelated hard negative. The prior design used the SIBLING FRUIT as each case's
+    // `notInTopK`, which is only excludable under a fake orthogonal embed: on REAL semantic embeddings
+    // "banana fruit" is closer to "apple fruit" than to 1500 gibberish fillers, so it legitimately ranks
+    // #2 and the sibling-fruit exclusion can NEVER pass. A hardware fastener shares no semantic space with
+    // fruit, so a good retriever excludes it from top-k on real AND fake embeddings — a meaningful,
+    // passable no-wrong-product assertion.
+    { id: "sig-bolt", title: "Stainless Steel Hex Bolt", price: "$3", description: "M8 zinc-plated hardware fastener for construction", tags: ["bolt", "hardware"] },
   ];
   return {
     products: [...signal, ...generateScaleCorpus(n)],
     cases: [
-      { id: "scale-apple", query: "crunchy sweet apple", expectTop: "sig-apple", notInTopK: ["sig-banana"] },
-      { id: "scale-banana", query: "soft tropical banana", expectTop: "sig-banana", notInTopK: ["sig-apple"] },
+      { id: "scale-apple", query: "crunchy sweet apple", expectTop: "sig-apple", notInTopK: ["sig-bolt"] },
+      { id: "scale-banana", query: "soft tropical banana", expectTop: "sig-banana", notInTopK: ["sig-bolt"] },
     ],
     // `_meta.k` — matches the fixture file's own `_meta.k` convention (cases/retrieval.json), which is what
     // eval-retrieval.ts's `resolveCorpus`/`defaultK` reads (NOT a bare top-level `k`).
