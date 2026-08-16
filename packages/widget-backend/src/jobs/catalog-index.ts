@@ -35,6 +35,7 @@ import {
   storefrontFetch,
   type StorefrontFetch,
 } from "../shopify-grounding.js";
+import { deleteLedgerInTx, listLedgerChunkKeys } from "./catalog-ledger.js";
 
 // C3 — the scheduled/operator-run CATALOG INDEX job: fetch a merchant's catalog, embed it through the
 // `model` port, and write one vector per product into the `vector` port under `${tenantId}::catalog`.
@@ -848,8 +849,12 @@ export async function runCatalogClear(
     throw new Error(`clear of ${tenantId}'s catalog corpus did not take effect — records are still readable`);
   }
 
+  // S3 §F — the ledger is per-tenant KV; erasing the corpus must also erase its ledger chunks (ADR-0015).
+  // Read the chunk keys before the tx (the tx handle has no `list`), delete them inside it.
+  const ledgerChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
   await deps.store.tx({ tenantId }, async (t) => {
     await t.delete(MANIFEST_COLLECTION, MANIFEST_KEY);
+    await deleteLedgerInTx(t, ledgerChunkKeys);
     await t.audit(
       {
         actor: "operator",
