@@ -75,6 +75,15 @@ export {
   type SetOptInOpts,
 } from "./autopromote-optin.js";
 export {
+  readPlatformEnabled as readCatalogRetrievalPlatformEnabled,
+  readTenantOptIn as readCatalogRetrievalTenantOptIn,
+  catalogRetrievalEnabledFor,
+  setPlatformEnabled as setCatalogRetrievalPlatformEnabled,
+  setTenantOptIn as setCatalogRetrievalTenantOptIn,
+  CATALOG_RETRIEVAL_PLATFORM_TENANT,
+  type SetEnablementOpts,
+} from "./catalog-retrieval-enablement.js";
+export {
   recordConsent,
   lookupConsent,
   type ConsentRecord,
