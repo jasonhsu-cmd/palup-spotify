@@ -1037,16 +1037,14 @@ export async function runCatalogClear(
   const at = (deps.now ?? (() => new Date()))().toISOString();
   const started = Date.now();
 
-  const before = await deps.vector.query(ns, { text: "", k: MAX_INDEXED_PRODUCTS + 1 });
-  await deps.vector.deleteNamespace(ns);
-  const after = await deps.vector.query(ns, { text: "", k: 1 });
-  if (after.length > 0) {
-    throw new Error(`clear of ${tenantId}'s catalog corpus did not take effect — records are still readable`);
-  }
-
-  // S3 §F — the ledger is per-tenant KV; erasing the corpus must also erase its ledger chunks (ADR-0015).
-  // Read the chunk keys before the tx (the tx handle has no `list`), delete them inside it.
+  // S4 §F — count via the LEDGER (RuntimeState KV), never a text-modality vector query (which THROWS on
+  // the S1 pgvector store). The ledger is the authoritative id set S3 keeps atomically with the manifest.
+  const beforeLedger = await readCorpusLedger(deps.store, tenantId);
+  const removed = beforeLedger.size;
   const ledgerChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
+
+  await deps.vector.deleteNamespace(ns);
+
   await deps.store.tx({ tenantId }, async (t) => {
     await t.delete(MANIFEST_COLLECTION, MANIFEST_KEY);
     await deleteLedgerInTx(t, ledgerChunkKeys);
@@ -1054,7 +1052,7 @@ export async function runCatalogClear(
       {
         actor: "operator",
         action: "catalog.clear",
-        input: { tenantId, removed: before.length },
+        input: { tenantId, removed },
         decision: "corpus_erased",
         // Honest about what "reverse" means here: re-indexing rebuilds from the merchant's CURRENT
         // catalog. It does not restore the exact vectors this clear removed.
@@ -1064,7 +1062,14 @@ export async function runCatalogClear(
     );
   });
 
-  return { tenantId, removed: before.length, confirmed: true, elapsedMs: Date.now() - started };
+  // CONFIRM via the ledger read-back (the vector store exposes no portable count). The corpus id set is
+  // erased iff no ledger chunk survives; deleteNamespace erased the vectors those ids named.
+  const afterKeys = await listLedgerChunkKeys(deps.store, tenantId);
+  if (afterKeys.length > 0) {
+    throw new Error(`clear of ${tenantId}'s catalog corpus did not take effect — ledger chunks remain (${afterKeys.length})`);
+  }
+
+  return { tenantId, removed, confirmed: true, elapsedMs: Date.now() - started };
 }
 
 /**
