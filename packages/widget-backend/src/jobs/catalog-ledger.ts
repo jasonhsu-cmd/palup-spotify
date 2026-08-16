@@ -88,13 +88,20 @@ export async function readCorpusLedgerTimestamps(store: RuntimeStatePort, tenant
 }
 
 /** Split a `recordId → contentHash` map into persisted chunks. Ids are SORTED so the chunking is stable
- *  across runs (a given id lands in the same chunk unless the corpus size crosses a boundary). `writtenAtMs`
- *  is S4 §F: when given, every id in the chunk gets that `writtenAt`; omitted (2-arg call), the chunk shape
- *  is byte-identical to pre-S4 (no `writtenAt` key at all). */
+ *  across runs (a given id lands in the same chunk unless the corpus size crosses a boundary).
+ *
+ *  `writtenAt` is S4 §F (fix-round-1: PER-ID, not a single uniform value) — when given, an id present in the
+ *  map gets that id's value; an id absent from the map (or the whole param omitted, the 2-arg call) gets no
+ *  `writtenAt` key emitted for it, so the 2-arg call's chunk shape is byte-identical to pre-S4. A single
+ *  uniform timestamp for the WHOLE entries map was tried and reverted — it stamped every carried-forward,
+ *  untouched id with the commit time too, which turned `writtenAt` into "record last rewritten" instead of
+ *  "content last created/changed" and let one unrelated commit permanently shield an unrelated, genuinely
+ *  stale id from the next full reconcile's stale-set (S4·T7 fix-round-1). Callers must compute the per-id
+ *  map themselves (new/changed ids → commit time; unchanged/carried-forward ids → their PRIOR `writtenAt`). */
 export function chunkLedgerEntries(
   entries: Map<string, string>,
   at: string,
-  writtenAtMs?: number,
+  writtenAt?: Map<string, number>,
   chunkSize: number = LEDGER_CHUNK_SIZE,
 ): CorpusLedgerChunk[] {
   const size = Math.max(1, Math.floor(chunkSize));
@@ -106,9 +113,10 @@ export function chunkLedgerEntries(
     const w: Record<string, number> = Object.create(null);
     for (const id of slice) {
       e[id] = entries.get(id)!;
-      if (writtenAtMs !== undefined) w[id] = writtenAtMs;
+      const wv = writtenAt?.get(id);
+      if (wv !== undefined) w[id] = wv;
     }
-    chunks.push({ version: 1, at, entries: e, ...(writtenAtMs !== undefined ? { writtenAt: w } : {}) });
+    chunks.push({ version: 1, at, entries: e, ...(writtenAt !== undefined ? { writtenAt: w } : {}) });
   }
   return chunks;
 }
