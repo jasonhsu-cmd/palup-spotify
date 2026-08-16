@@ -354,6 +354,21 @@ export function customerIdOf(body: Record<string, unknown>): string | undefined 
   return undefined;
 }
 
+/**
+ * S3 §C — the top-level product id from a `products/*` webhook body as a BARE DECIMAL STRING, or
+ * `undefined`. Shopify's product webhooks carry `"id": <number>` (e.g. `788032119674292922`). Same
+ * numeric discipline as `customerIdOf`: a non-negative safe integer or an all-digits string only —
+ * everything else refuses, so a hostile value can never be interpolated into a corpus record id or a
+ * Storefront GID. `matchesPayloadShape` has already required `id` present for these topics; this
+ * validates it.
+ */
+export function productIdOf(body: Record<string, unknown>): string | undefined {
+  const id = body.id;
+  if (typeof id === "number") return Number.isSafeInteger(id) && id >= 0 ? String(id) : undefined;
+  if (typeof id === "string" && /^\d+$/.test(id)) return id;
+  return undefined;
+}
+
 /** The `data_request.id` as a bare decimal string ([W2]: `"data_request": { "id": 9999 }`), or
  *  `undefined`. Same numeric discipline as `customerIdOf`, and for the same reason: it becomes a KV key. */
 export function dataRequestIdOf(body: Record<string, unknown>): string | undefined {
