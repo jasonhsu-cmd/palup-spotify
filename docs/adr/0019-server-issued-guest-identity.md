@@ -1,6 +1,15 @@
 # ADR-0019: Server-issued guest identity (signed guest token) — security-cleared + owner-accepted (Revision 2); ONE gate left (legal)
 
-> ## Security gate CLEARED, owner re-accepted. ONE human gate remains (legal). Nothing built.
+> ## Security gate CLEARED, owner re-accepted. ONE human gate remains (legal). Tasks 1–9 BUILT (2026-08-17); task 10 (carry-over) NOT built.
+>
+> **UPDATE 2026-08-17 (reconciliation).** The "Nothing built" language throughout this file is STALE. Tasks
+> 1–9 shipped per-task to `main`: #224 (task 1, token port), #227 (task 3, `POST /widget/guest`), #228
+> (tasks 4+9, verified-token subject + drop client-`anonId`), #230 (task 5, revocation). **Task 10 — the
+> B12(b) Art-9 carry-over — is NOT built** (`mergeGuestIntoAccount` has no production caller) and stays gated
+> on the legal question below (R2-2, Q19). `MEMORY_ADR_ACCEPTED` remains `false`. Open question for the
+> owner + `security-reviewer` to resolve: confirm that tasks 1–9's build was authorized under this ADR's
+> "tasks 1–9 cleared to build" clearance and that each shipped under its own §4.4 review — the header having
+> read "Nothing built" while the code shipped is the drift this update closes.
 >
 > **CURRENT STATE (read this first).** Revision 2 (at the bottom of this file) is:
 > - **security-cleared** — three `security-reviewer` passes: BLOCK (6 findings) → BLOCK (B1) → **PASS on
@@ -15,7 +24,8 @@
 >
 > **Tasks 1–9 of Revision 2's list are cleared to build; task 10 (the carry-over) is gated only on that
 > legal sign-off.** Every task's eventual CODE gets its own §4.4 review, the named build-time conditions
-> bind, and a named human still merges the governance-touching PRs. Nothing is built; `MEMORY_ADR_ACCEPTED`
+> bind, and a named human still merges the governance-touching PRs. **Tasks 1–9 are now BUILT (2026-08-17,
+> see the update at the top); task 10 is not.** `MEMORY_ADR_ACCEPTED`
 > is `false`.
 >
 > The historical record of all three reviews follows — kept so the trail draft → block → correction →
