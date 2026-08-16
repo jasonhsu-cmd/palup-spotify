@@ -202,3 +202,19 @@ merge-gate steps unchanged; the pgvector step now also covers the ANN-safe recon
 Unchanged from S2 §8, plus: (1) run the scheduler backstop (or a manual `pnpm catalog:index --reindex`) to
 build a fresh ledger + corpus before enabling serving; (2) the `SHOPIFY_STORES` blind-spot means self-install
 merchants aren't reconciled until the tenant-list-from-registry follow-up (S4).
+
+**Deferred from the FINAL-REVIEW pass (recorded here so the §5 owner sees them before enabling — not built in
+this pass; do not treat their absence as a gap in THIS work, they are explicitly out of scope for it):**
+
+(3) Before enabling the scheduled job / `CATALOG_WEBHOOKS` against real merchant data: wire catalog corpus +
+ledger erasure into `shop/redact` AND `app/uninstalled`, AND make `runCatalogClear` pgvector-safe (it
+currently text-enumerates via `vector.query({text:""})` which THROWS on the pgvector store — so `pnpm
+catalog:clear` cannot clear a `VECTOR_ANN` store today). Until this lands, `shop/redact`'s
+`SHOP_REDACT_RESIDUAL` honestly discloses the catalog corpus namespace and the corpus-state ledger as known,
+tracked residuals — that disclosure is not a substitute for the erasure wiring.
+
+(4) Before enabling BOTH the hourly backstop AND `CATALOG_WEBHOOKS`: add per-tenant concurrency control
+(an advisory lock, or a "skip stale-delete for ledger entries newer than the catalog-fetch timestamp" guard)
+— otherwise the hourly full reconcile can delete a product a concurrent webhook just created. This is
+bounded and self-heals on the next run (money-safe via the 15-min serve-time ceiling, §D), but it is a real
+gap once both freshness paths are live simultaneously.

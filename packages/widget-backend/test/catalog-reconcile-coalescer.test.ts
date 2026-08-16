@@ -78,6 +78,26 @@ describe("S3 §C — per-tenant coalesce/debounce", () => {
     }
   });
 
+  it("unrefs its per-window timer (final review #5) so a pending window can never hold the process open", () => {
+    const reconcile = vi.fn(async () => {});
+    const c = createReconcileCoalescer(reconcile, { windowMs: 50 });
+    let capturedTimer: NodeJS.Timeout | undefined;
+    const realSetTimeout = global.setTimeout;
+    const spy = vi.spyOn(global, "setTimeout").mockImplementation(((cb: () => void, ms?: number) => {
+      capturedTimer = realSetTimeout(cb, ms);
+      return capturedTimer;
+    }) as typeof global.setTimeout);
+    try {
+      c.enqueue("acme", { productIds: ["gid://shopify/Product/1"], reason: "product" });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(capturedTimer).toBeDefined();
+    // A real Node Timeout: `hasRef()` reports false only once `.unref()` has actually been called on it.
+    expect(capturedTimer!.hasRef()).toBe(false);
+    clearTimeout(capturedTimer);
+  });
+
   it("isolates a reconcile failure for one tenant from another tenant's pending flush", async () => {
     const reconcile = vi.fn(async (tenantId: string) => {
       if (tenantId === "bad") throw new Error("boom");

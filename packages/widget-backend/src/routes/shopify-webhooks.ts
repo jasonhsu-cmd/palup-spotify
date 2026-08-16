@@ -310,6 +310,11 @@ async function markHandled(deps: ShopifyWebhookDeps, tenantId: string, topic: st
  * reconciliation and — 48 hours later — `shop/redact`'s erasure. Deleting the row would strand all of it
  * in namespaces nothing can resolve.
  *
+ * FIX 5 (security C1 / #6, final review) — the same is true of the S3 catalog corpus namespace and its
+ * corpus-state ledger: neither is touched here, and NEITHER IS ERASED BY `shop/redact` EITHER (that
+ * handler's own `SHOP_REDACT_RESIDUAL` discloses this as a known, tracked gap — wiring it in is a separate
+ * security-reviewed follow-up, not something this handler papers over).
+ *
  * NO KILL-SWITCH GATE, deliberately. Every other action in this file is gated on NN#4 because it
  * destroys data. This one only makes a merchant INERT, which points the SAME WAY as a halt: refusing it
  * during a halt would leave an uninstalled merchant servable, which is strictly worse than performing it.
@@ -467,6 +472,14 @@ const SHOP_REDACT_RESIDUAL: readonly string[] = [
   "memory_consent records — @palup/state-postgres exports no delete and the collection name is private to it",
   "session state and any other KV collection — RuntimeStatePort has no enumerate-collections operation, so they cannot be named exhaustively",
   "memory namespaces for subjects absent from the per-tenant subject index (subject-index.ts only records subjects whose facts were written through it)",
+  // FIX 5 (security C1 / #6, final review) — this handler does NOT call `runCatalogClear` (catalog-index.ts):
+  // that wiring, plus making `runCatalogClear` pgvector-safe (it currently text-enumerates via
+  // `vector.query({text:""})`, which THROWS on the S1 pgvector/VECTOR_ANN store), is a separate
+  // security-reviewed follow-up (tracked in the S3 spec's promotion preconditions). Disclosed here so the
+  // handler HONESTLY reports both as known, tracked residuals rather than implying `notErased` is exhaustive
+  // without them.
+  "the tenant's catalog corpus namespace (`<tenantId>::catalog` in the vector store — product embeddings) — pre-existing gap, not erased by this handler",
+  "the tenant's corpus-state ledger (S3 — the id→content-hash chunks + manifest this job's freshness reconcile reads/writes, MANIFEST_COLLECTION in RuntimeStatePort) — not erased by this handler",
   "anything held on Shopify's own side, and anything a merchant exported before uninstalling",
 ];
 

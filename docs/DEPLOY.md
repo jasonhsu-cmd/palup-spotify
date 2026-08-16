@@ -922,11 +922,11 @@ subsequent hourly runs, which embed only products whose content hash changed sin
 > hand; no `gcloud`/`terraform` command is executed by a build agent in this repo.
 
 ```bash
-# 1. Create the job. `--command pnpm --args index` overrides the image CMD ["pnpm","backend"] to run the
-#    catalog index CLI (packages/widget-backend/src/jobs/catalog-index.ts) for every SHOPIFY_STORES tenant.
+# 1. Create the job. `--command pnpm --args catalog:index` overrides the image CMD ["pnpm","backend"] to run
+#    the catalog index CLI (packages/widget-backend/src/jobs/catalog-index.ts) for every SHOPIFY_STORES tenant.
 gcloud run jobs deploy palup-catalog-index \
   --source . --region us-central1 --project palup-jason \
-  --command pnpm --args index \
+  --command pnpm --args catalog:index \
   --set-cloudsql-instances palup-jason:us-central1:palup-staging \
   --set-secrets "DATABASE_URL=palup-staging-database-url:latest,PALUP_SECRETS=palup-secrets:latest" \
   --set-env-vars "^@^SHOPIFY_STORES=demo=palup-skincare-jason.myshopify.com@PALUP_REQUIRE_DATABASE_URL=true@GOOGLE_CLOUD_PROJECT=palup-jason@GOOGLE_CLOUD_LOCATION=us-central1@PALUP_MODEL=<pinned-model-id>"
