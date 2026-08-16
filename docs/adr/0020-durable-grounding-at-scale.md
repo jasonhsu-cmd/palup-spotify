@@ -103,12 +103,21 @@ Follow-on decisions taken while sequencing the A/B/C build; they refine (and in 
 ## Update / Amendment (2026-08-16)
 
 D3's decision text above (`gemini-embedding-2`) is left as originally decided — ADR history is immutable.
-**As of the S2 build-verify (2026-08-16), the actual embedding pin is `gemini-embedding-001`@1536**
+**As of the S2 build-verify (2026-08-16), the actual embedding pin was `gemini-embedding-001`@1536**
 (GA-confirmed on Vertex, MRL-truncated to 1536, same `vector(1536)` schema): `gemini-embedding-2` did go
 GA (2026-04-22), but its exact GA model-id on Vertex was not confirmable at build time (Vertex docs showed
 only `gemini-embedding-2-preview`). Adopting `gemini-embedding-2` later is a human/§5 step requiring BOTH
 the exact GA model-id confirmed AND a full reindex (the `gemini-embedding-001`/`gemini-embedding-2`
-embedding spaces are incompatible). Current source of truth for the pin:
+embedding spaces are incompatible).
+**RESOLVED 2026-08-17 — the pin now realigns with D3's original decision: `gemini-embedding-2`@1536.** The
+stable GA id `gemini-embedding-2` is confirmed live on Vertex (Google Cloud Vertex AI model page + GA
+announcements, verified 2026-08-17), and `output_dimensionality=1536` is a Google-recommended MRL size
+(768/1536/3072), so it stays on the `vector(1536)` HNSW path. The "full reindex" precondition is moot
+here because staging has **no corpus indexed yet** — this switch happens before the first index, so there
+is no incompatible-space migration to pay. Owner-directed model change (jason, §3); staging pin updated in
+`.github/workflows/deploy-staging.yml` and the `catalog:index` job command (DEPLOY.md §5). Efficiency
+follow-up: `gemini-embedding-2` is not yet in `vertex-adapter.ts` `EMBED_MAX_BATCH`, so it embeds 1
+text/request until its documented per-request cap is verified and added. Current source of truth for the pin:
 `docs/superpowers/specs/2026-08-15-s2-serving-unlock-design.md` §2 (D-embed) and §8 (Promotion
 preconditions).
 
