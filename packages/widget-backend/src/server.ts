@@ -70,6 +70,7 @@ import {
 } from "./routes/shopify-install.js";
 import { registerShopifyWebhookRoutes, WEBHOOK_ROUTES } from "./routes/shopify-webhooks.js";
 import { subscribeCatalogReconcile, type ReconcileReason } from "./catalog-webhook-queue.js";
+import { createReconcileCoalescer, CATALOG_RECONCILE_COALESCE_MS_DEFAULT } from "./catalog-reconcile-coalescer.js";
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
 import { reconcileByReason, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
@@ -1118,11 +1119,22 @@ export async function buildServer(opts?: {
           topicName: () => PUBSUB_TOPIC!,
         });
       } else {
+        // S3 §C (T6) — the in-memory path is the SYNCHRONOUS one (a webhook blocks on its reconcile), so a
+        // bulk edit firing N webhooks would otherwise fan out to N sequential re-indexes. Route it through
+        // the per-tenant coalescer: N deliveries in one CATALOG_RECONCILE_COALESCE_MS window collapse into
+        // ONE reconcile with the merged/deduped id set (see catalog-reconcile-coalescer.ts for the
+        // full-subsumes-targeted and over-cap-spills-to-full rules). The durable Pub/Sub push route above is
+        // NOT wrapped — it reconciles per delivery already targeted (S3·T5); cross-delivery coalescing there
+        // is an operational/S4 concern.
+        const COALESCE_MS = posInt("CATALOG_RECONCILE_COALESCE_MS", CATALOG_RECONCILE_COALESCE_MS_DEFAULT);
+        const coalescer = createReconcileCoalescer((tenantId, o) => reconcile(tenantId, o), { windowMs: COALESCE_MS });
         catalogQueue = createInMemoryQueue({});
-        subscribeCatalogReconcile(catalogQueue, reconcile);
+        subscribeCatalogReconcile(catalogQueue, async (tenantId, o) => {
+          coalescer.enqueue(tenantId, { ...(o?.productIds ? { productIds: o.productIds } : {}), reason: o?.reason ?? "full" });
+        });
         console.warn(
-          "[config] CATALOG_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): delivery is SYNCHRONOUS, so a " +
-            "webhook blocks on a full re-index. Set PUBSUB_CATALOG_TOPIC + PUBSUB_PUSH_SERVICE_ACCOUNT + " +
+          "[config] CATALOG_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): deliveries COALESCE per " +
+            `tenant over ${COALESCE_MS}ms then reconcile once. Set PUBSUB_CATALOG_TOPIC + PUBSUB_PUSH_SERVICE_ACCOUNT + ` +
             "PUBSUB_PUSH_AUDIENCE for the durable async path before any real deployment.",
         );
       }
