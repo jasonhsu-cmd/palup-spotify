@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { InMemoryRuntimeStore, type ModelPort, type ModelRequest, type ModelResponse } from "@palup/platform-ports";
 import { MockModelAdapter } from "@palup/widget-brain";
+import { setCatalogRetrievalPlatformEnabled, setCatalogRetrievalTenantOptIn } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
 import { MANIFEST_COLLECTION, MANIFEST_KEY } from "../src/jobs/catalog-index.js";
 
@@ -32,7 +33,7 @@ import { MANIFEST_COLLECTION, MANIFEST_KEY } from "../src/jobs/catalog-index.js"
 // model actually received, a manifest read the retriever alone performs — and each one is paired with a
 // flag-off probe proving the observation was the flag's doing.
 
-const WAVE4_ENV = ["CATALOG_RETRIEVAL", "CATALOG_RETRIEVAL_K", "PRODUCT_CITATIONS", "PRODUCT_CARDS", "CART_LINE_ITEMS", "PRODUCT_FACTS_HYDRATION", "OUTGOING_OFFER_CHECK"];
+const WAVE4_ENV = ["CATALOG_RETRIEVAL_K", "PRODUCT_CITATIONS", "PRODUCT_CARDS", "CART_LINE_ITEMS", "PRODUCT_FACTS_HYDRATION", "OUTGOING_OFFER_CHECK"];
 afterEach(() => {
   WAVE4_ENV.forEach((k) => delete process.env[k]);
   vi.restoreAllMocks();
@@ -275,6 +276,11 @@ describe("E4 — CART_LINE_ITEMS is read, and it must open BOTH gates", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// S4 §B — CATALOG_RETRIEVAL is no longer a process-global env flag; the retriever is built
+// UNCONDITIONALLY and enablement is resolved PER TENANT, PER TURN from the two-gate registry
+// (state-postgres/catalog-retrieval-enablement.ts) on the SAME store `buildServer` was given. These
+// tests now arm that registry for the "demo" tenant (RUNTIME_TENANT, which `ask()`'s tokenless request
+// resolves to) instead of setting the retired `process.env.CATALOG_RETRIEVAL`.
 describe("E1 — CATALOG_RETRIEVAL composes the retriever that nothing constructed", () => {
   /** Wraps a store so we can see whether the retriever's manifest read ever happened. */
   function manifestSpy() {
@@ -307,24 +313,27 @@ describe("E1 — CATALOG_RETRIEVAL composes the retriever that nothing construct
     }
   });
 
-  it("THE WIRING: with the flag ON the retriever runs and reads the corpus manifest", async () => {
-    process.env.CATALOG_RETRIEVAL = "true";
+  it("THE WIRING: with the tenant enabled (both KV gates on) the retriever runs and reads the corpus manifest", async () => {
     const { reads, store } = manifestSpy();
+    await setCatalogRetrievalPlatformEnabled(store, true, { reason: "test" });
+    await setCatalogRetrievalTenantOptIn(store, "demo", true, { reason: "test" });
     const app = await buildServer({ store, modelPort: new SpyModel() });
     try {
       const res = await ask(app);
       // No corpus is indexed in this test, so retrieval REFUSES and the brain falls back to the full
       // catalog — a worse prompt, never a wrong answer (catalog-retriever.ts). The shopper is still served.
       expect(res.statusCode).toBe(200);
-      expect(reads.length, "the flag is on but no manifest read happened — the retriever is still unconstructed").toBeGreaterThan(0);
+      expect(reads.length, "the tenant is enabled but no manifest read happened — the retriever is still unconstructed").toBeGreaterThan(0);
     } finally {
       await app.close();
     }
   });
 
   it("an unindexed tenant degrades to the full catalog rather than failing the turn", async () => {
-    process.env.CATALOG_RETRIEVAL = "true";
-    const app = await buildServer({ store: new InMemoryRuntimeStore(), modelPort: new SpyModel() });
+    const store = new InMemoryRuntimeStore();
+    await setCatalogRetrievalPlatformEnabled(store, true, { reason: "test" });
+    await setCatalogRetrievalTenantOptIn(store, "demo", true, { reason: "test" });
+    const app = await buildServer({ store, modelPort: new SpyModel() });
     try {
       const res = await ask(app);
       expect(res.statusCode).toBe(200);
