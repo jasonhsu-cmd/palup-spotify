@@ -12,7 +12,9 @@ describe("catalogReconcileMessage", () => {
       id: "wh-123",
       type: "catalog.products/update",
       tenantKey: "acme",
-      payload: { tenantId: "acme", topic: "products/update", at: new Date(1_700_000_000_000).toISOString() },
+      // S3 §C — a message with no `extra` carries no productIds and defaults to reason:"full" (the
+      // whole-catalog backstop path), so an old-shape decode/consumer still sees a safe reconcile.
+      payload: { tenantId: "acme", topic: "products/update", at: new Date(1_700_000_000_000).toISOString(), reason: "full" },
     });
     // no product data crosses the port
     expect(JSON.stringify(m)).not.toMatch(/price|title|variant|inventory_item/i);
@@ -22,6 +24,30 @@ describe("catalogReconcileMessage", () => {
     const m = catalogReconcileMessage("acme", "inventory_levels/update", undefined, 42);
     expect(m.id).toBe("acme:inventory_levels/update:42");
     expect(m.tenantKey).toBe("acme");
+  });
+});
+
+describe("S3 §C — reconcile message carries changed product ids + a reason", () => {
+  it("carries productIds and reason:product for a product topic", () => {
+    const msg = catalogReconcileMessage("acme", "products/update", "wh-1", 1000, {
+      productIds: ["gid://shopify/Product/7"],
+      reason: "product",
+    });
+    expect(msg.payload).toMatchObject({
+      tenantId: "acme",
+      topic: "products/update",
+      productIds: ["gid://shopify/Product/7"],
+      reason: "product",
+    });
+    expect(msg.tenantKey).toBe("acme");
+    expect(msg.id).toBe("wh-1");
+  });
+
+  it("defaults to reason:full with no productIds when nothing is passed (the backstop path)", () => {
+    const msg = catalogReconcileMessage("acme", "products/create", undefined, 2000);
+    expect(msg.payload).toMatchObject({ tenantId: "acme", reason: "full" });
+    expect((msg.payload as { productIds?: unknown }).productIds).toBeUndefined();
+    expect(msg.id).toBe("acme:products/create:2000");
   });
 });
 

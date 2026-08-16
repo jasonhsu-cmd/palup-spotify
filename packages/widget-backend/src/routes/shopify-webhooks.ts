@@ -4,7 +4,7 @@ import type { MerchantRecord, MerchantRegistryPort, QueuePort, RuntimeStatePort,
 import { buildShopifyShopperId } from "@palup/platform-ports";
 import { accountSubjectId, eraseSubject, listSubjects, retireSubject } from "@palup/widget-memory";
 import { clientIpKey } from "../rate-limit.js";
-import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage } from "../catalog-webhook-queue.js";
+import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage, SHOPIFY_PRODUCT_GID_PREFIX, type ReconcileReason } from "../catalog-webhook-queue.js";
 import {
   APP_UNINSTALLED_SHOP_SOURCE,
   CATALOG_TOPICS,
@@ -19,6 +19,7 @@ import {
   isValidShopDomain,
   matchesPayloadShape,
   parseWebhookBody,
+  productIdOf,
   singleHeader,
   verifyWebhookHmac,
 } from "../shopify-webhook-identity.js";
@@ -373,6 +374,16 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
  * once the halt clears), so there is nothing to record. No per-enqueue audit either: the enqueue is routine,
  * non-destructive and idempotent, and the RECONCILE it triggers writes its own manifest audit through
  * runCatalogIndex.
+ *
+ * S3 §C — the reconcile message carries the CHANGED product id(s) when the topic is precise, so a later
+ * worker (T5) can target just those SKUs instead of re-crawling the whole catalog. `products/*` bodies
+ * carry the numeric id; corpus record ids use the Storefront GID, so it is built here from `productIdOf`'s
+ * validated numeric string. `inventory_levels/update` carries an `inventory_item_id`, NOT a product id,
+ * and the Storefront delegate token cannot resolve it — so it enqueues `reason:"inventory"` with NO ids
+ * and triggers no per-event crawl (freshness for it comes from the hourly poll backstop + the serve-time
+ * ceiling, not this path). A `products/*` delivery whose id `productIdOf` refuses to validate falls back
+ * to `reason:"full"` (a safe whole-catalog reconcile) rather than guessing. The worker still NEVER trusts
+ * the body beyond these ids: it re-fetches the named products' CURRENT state.
  */
 async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic: string): Promise<Ack | { refused: Refusal }> {
   if (!deps.queue) return "unknown_shop"; // defensive; the route is only registered when a queue is wired
@@ -384,7 +395,21 @@ async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic:
   const tenantId = existing.tenantId;
   if (await deps.killCheck(tenantId)) return "halted_deferred";
   if (await alreadyHandled(deps, tenantId, topic, v.webhookId)) return "already_handled";
-  await deps.queue.publish(CATALOG_RECONCILE_TOPIC, catalogReconcileMessage(tenantId, topic, v.webhookId, deps.now()));
+  let productIds: string[] | undefined;
+  let reason: ReconcileReason = "full";
+  if (topic === "products/create" || topic === "products/update" || topic === "products/delete") {
+    const numeric = productIdOf(v.body);
+    if (numeric) {
+      productIds = [`${SHOPIFY_PRODUCT_GID_PREFIX}${numeric}`];
+      reason = "product";
+    }
+  } else if (topic === "inventory_levels/update") {
+    reason = "inventory";
+  }
+  await deps.queue.publish(
+    CATALOG_RECONCILE_TOPIC,
+    catalogReconcileMessage(tenantId, topic, v.webhookId, deps.now(), { ...(productIds ? { productIds } : {}), reason }),
+  );
   await markHandled(deps, tenantId, topic, v.webhookId);
   return "applied";
 }
