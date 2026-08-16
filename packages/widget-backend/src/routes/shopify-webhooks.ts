@@ -377,10 +377,13 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
  *
  * S3 §C — the reconcile message carries the CHANGED product id(s) when the topic is precise, so a later
  * worker (T5) can target just those SKUs instead of re-crawling the whole catalog. `productIds` holds the
- * BARE NUMERIC id string (`productIdOf`'s return — read from `admin_graphql_api_id`, the precision-safe
- * GID field, first), matching the corpus record id convention (`product:<id>`) Task 2's ledger uses; it
- * is NOT the full `"gid://…"` form — T5 builds that back from the numeric id where it needs one for the
- * Storefront API. `inventory_levels/update` carries an `inventory_item_id`, NOT a product id, and the
+ * FULL Storefront/Admin GID string (`productIdOf`'s return — read from `admin_graphql_api_id`, the
+ * precision-safe GID field, first, and returned verbatim; fix round 2 — this used to be the bare numeric
+ * tail, which mis-keyed the corpus/ledger record id and could not be passed to `nodes(ids:)`). This
+ * matches BOTH the corpus record id convention (`product:<GID>`, catalog-index.ts) Task 2's ledger uses
+ * AND what the Storefront by-id fetch (`nodes(ids:)`, Task 4) requires — one id convention, used opaquely
+ * end to end, no reassembly needed at T5. `inventory_levels/update` carries an `inventory_item_id`, NOT a
+ * product id, and the
  * Storefront delegate token cannot resolve it — so it enqueues `reason:"inventory"` with NO ids and
  * triggers no per-event crawl (freshness for it comes from the hourly poll backstop + the serve-time
  * ceiling, not this path). A `products/*` delivery whose id `productIdOf` refuses to validate falls back
@@ -400,9 +403,9 @@ async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic:
   let productIds: string[] | undefined;
   let reason: ReconcileReason = "full";
   if (topic === "products/create" || topic === "products/update" || topic === "products/delete") {
-    const numeric = productIdOf(v.body);
-    if (numeric) {
-      productIds = [numeric];
+    const gid = productIdOf(v.body);
+    if (gid) {
+      productIds = [gid];
       reason = "product";
     }
   } else if (topic === "inventory_levels/update") {

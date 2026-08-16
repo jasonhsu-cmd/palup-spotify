@@ -48,6 +48,7 @@ describe("S3 §C — reconcileProducts touches ONLY the changed set", () => {
     const vector = createInMemoryVectorStore();
     const model = fakeModel();
     await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B, C]) }, ["acme"]);
+    const before = await readCorpusLedger(store, "acme");
 
     const upsertSpy = vi.spyOn(vector, "upsert");
     const Bx = P("gid://shopify/Product/2", "beta-updated", "$12");
@@ -62,8 +63,13 @@ describe("S3 §C — reconcileProducts touches ONLY the changed set", () => {
     expect(r.embedded).toBe(1);
     const upsertedIds = upsertSpy.mock.calls.flatMap(([, recs]) => recs.map((x) => x.id));
     expect(upsertedIds).toEqual([catalogRecordId(B.id)]);
-    // Ledger still has all three; B's hash changed.
-    expect((await readCorpusLedger(store, "acme")).size).toBe(3);
+    // Ledger still has all three entries; B's hash actually CHANGED, A's and C's did NOT (untouched by a
+    // reconcile that only named B).
+    const after = await readCorpusLedger(store, "acme");
+    expect(after.size).toBe(3);
+    expect(after.get(catalogRecordId(B.id))).not.toBe(before.get(catalogRecordId(B.id)));
+    expect(after.get(catalogRecordId(A.id))).toBe(before.get(catalogRecordId(A.id)));
+    expect(after.get(catalogRecordId(C.id))).toBe(before.get(catalogRecordId(C.id)));
     // ProductFacts refreshed for B only.
     expect((await facts.getMany("acme", [B.id]))[0]!.price).toBe("$12");
     expect(await facts.getMany("acme", [A.id])).toEqual([]);

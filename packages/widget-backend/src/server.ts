@@ -72,7 +72,7 @@ import { registerShopifyWebhookRoutes, WEBHOOK_ROUTES } from "./routes/shopify-w
 import { subscribeCatalogReconcile, type ReconcileReason } from "./catalog-webhook-queue.js";
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
-import { reconcileProducts, runCatalogIndex, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
+import { reconcileByReason, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
 // multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
@@ -1067,19 +1067,13 @@ export async function buildServer(opts?: {
       catalogById: shopifyCatalogByIdSource(secrets),
       productFacts: factsStore,
     };
-    // S3 §C — route by reason: named product ids ⇒ the TARGETED reconcile (fetch+embed+upsert+ledger for
-    // just those SKUs, S3·T5); a bare "inventory" tick is a NO-OP here — inventory freshness is covered by
-    // the hourly poll backstop (PRODUCT_FACTS_POLL) + the serve-time ceiling, not a proactive crawl (spec
-    // decision, S3 §C); "full"/absent (the backstop path, or an inventory message with no by-id target) runs
-    // the existing whole-catalog `runCatalogIndex`.
-    const reconcile = async (tenantId: string, o?: { productIds?: string[]; reason?: ReconcileReason }) => {
-      if (o?.reason === "inventory" && !(o.productIds && o.productIds.length > 0)) return; // no-op: no fetch, no embed, no vector write
-      if (o?.productIds && o.productIds.length > 0 && o.reason !== "full") {
-        await reconcileProducts(reconcileDeps, tenantId, o.productIds, { ...(o.reason ? { reason: o.reason } : {}) });
-      } else {
-        await runCatalogIndex(reconcileDeps, [tenantId], {});
-      }
-    };
+    // S3 §C — `reconcileByReason` (catalog-index.ts) owns the routing: named product ids ⇒ the TARGETED
+    // reconcile (fetch+embed+upsert+ledger for just those SKUs, S3·T5); a bare "inventory" tick is a NO-OP
+    // — inventory freshness is covered by the hourly poll backstop (PRODUCT_FACTS_POLL) + the serve-time
+    // ceiling, not a proactive crawl (spec decision, S3 §C); "full"/absent (the backstop path, or an
+    // inventory message with no by-id target) runs the existing whole-catalog `runCatalogIndex`. Kept as a
+    // named export (not inlined here) so the routing decision is unit-testable on its own.
+    const reconcile = (tenantId: string, o?: { productIds?: string[]; reason?: ReconcileReason }) => reconcileByReason(reconcileDeps, tenantId, o);
 
     // CONSUME side — the durable OIDC-verified push route. Registered whenever Pub/Sub push is configured,
     // INDEPENDENT of CATALOG_WEBHOOKS (the P4 decoupling). With CATALOG_WEBHOOKS off nothing publishes, so the
