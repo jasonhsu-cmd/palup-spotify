@@ -1008,7 +1008,7 @@ export function createBrain(
     pageContext?: string,
     // E1 — set ONLY by the clean sales-path call site, and only with the shopper's own turn. Absent
     // everywhere else, which is what keeps every other call site byte-identical.
-    retrieval?: { query: string; flags: string[] },
+    retrieval?: { query: string; flags: string[]; enabled: boolean },
     // E2 — the per-turn citation map to FILL IN, set ONLY by the same clean sales-path call site. Absent
     // everywhere else (support fallback, proactive exit-intent, the classifier), so no other prompt in
     // this file gains a tag. Independent of `retrieval`: the candidate set is whatever the CATALOG block
@@ -1024,7 +1024,7 @@ export function createBrain(
     let ctx: GroundingContext | undefined;
     let retrieved: Product[] | undefined;
     let corpusTotal: number | undefined;
-    if (catalogRetrievalEnabled && catalogRetriever && grounding && retrieval && retrieval.query.trim() !== "") {
+    if (retrieval?.enabled && catalogRetriever && grounding && retrieval.query.trim() !== "") {
       const built = await retrieveViaShell(catalogRetriever, tenantId, retrieval.query, retrieval.flags);
       ({ ctx, rendered: retrieved, corpusTotal } = built);
     } else {
@@ -1104,6 +1104,12 @@ export function createBrain(
       const shopperVerified = signals.shopperId !== undefined;
       const text = message.toLowerCase();
       const flags: string[] = [];
+      // S4 §B/§C — retrieval is per-turn. `signals.catalogRetrievalEnabled` (registry) enables it; an armed
+      // `agent:catalog-retrieval` kill (`signals.catalogRetrievalKilled`) DEGRADES it to full-catalog for
+      // this turn (retrieval-only rollback, not a turn halt). Record the degrade for the audit log.
+      const catalogRetrievalWanted = signals.catalogRetrievalEnabled ?? catalogRetrievalEnabled;
+      const catalogRetrievalOn = catalogRetrievalWanted && !signals.catalogRetrievalKilled;
+      if (catalogRetrievalWanted && signals.catalogRetrievalKilled) flags.push("retrieval:killed");
 
       // The client-replayed transcript is fenced in groundedMessages (see there and history-fence.ts).
       // Computed here as well, purely so a DROP IS OBSERVABLE: an operator reading the audit record must
@@ -1740,7 +1746,7 @@ export function createBrain(
           systemExtra + PITCH_PLAYBOOK[pitch],
           history,
           signals.pageContext,
-          { query: message, flags },
+          { query: message, flags, enabled: catalogRetrievalOn },
           citations,
           // E4 — the ONLY call site that passes cart line items, for the same reason E1's retrieval query
           // is passed only here: every guardrail rung above has already declined to return, so no

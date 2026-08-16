@@ -10,7 +10,7 @@ export const PGVECTOR_AVAILABLE = process.env.PGVECTOR_TESTCONTAINER !== "off";
 // single shared container across multiple `it`s (e.g. pgvector-store.contract.test.ts's
 // beforeAll/afterAll) should go through this, so the readiness fix can't be duplicated —
 // and drift — into an unguarded inline boot again.
-export async function startPgvectorContainer(): Promise<{ sql: Sql; stop: () => Promise<void> }> {
+export async function startPgvectorContainer(): Promise<{ sql: Sql; url: string; stop: () => Promise<void> }> {
   const container: StartedTestContainer = await new GenericContainer("pgvector/pgvector:pg16")
     .withEnvironment({ POSTGRES_PASSWORD: "test", POSTGRES_DB: "palup" })
     .withExposedPorts(5432)
@@ -33,7 +33,11 @@ export async function startPgvectorContainer(): Promise<{ sql: Sql; stop: () => 
     await (sql as unknown as { pool: { end(): Promise<void> } }).pool.end().catch(() => {});
     await container.stop();
   };
-  return { sql, stop };
+  // `url` is exposed alongside `sql` so a test exercising DATABASE_URL-driven composition roots
+  // (`createRuntimeStore`/`createVectorStore`, state-postgres/src/factory.ts + vector-factory.ts, which
+  // build their OWN pool from `process.env.DATABASE_URL` when no `sql` is threaded in) can point a real
+  // env var at this container instead of only ever passing `sql` directly.
+  return { sql, url, stop };
 }
 
 export async function withPgvector(fn: (sql: Sql) => Promise<void>): Promise<void> {

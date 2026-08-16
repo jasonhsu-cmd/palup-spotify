@@ -25,6 +25,9 @@ export interface CorpusLedgerChunk {
   at: string;
   /** recordId (`product:<gid>`) → contentHash. */
   entries: Record<string, string>;
+  /** S4 §F — recordId → writtenAt (unix ms). OPTIONAL: absent on pre-S4 chunks (⇒ treated as 0, never
+   *  spuriously protected by the concurrency guard). A --reindex rewrites every chunk in the new shape. */
+  writtenAt?: Record<string, number>;
 }
 
 /** Deterministic chunk key: `ledger:0000`, `ledger:0001`, … (zero-padded so lexical order == numeric). */
@@ -72,11 +75,33 @@ export async function readCorpusLedger(store: RuntimeStatePort, tenantId: string
   return out;
 }
 
+/** S4 §F — recordId → writtenAt (unix ms). An id in a chunk with no `writtenAt` map (pre-S4) reads as 0,
+ *  so the concurrency guard never protects it. Never touches the vector store. */
+export async function readCorpusLedgerTimestamps(store: RuntimeStatePort, tenantId: string): Promise<Map<string, number>> {
+  const rows = await store.list<CorpusLedgerChunk>({ tenantId }, MANIFEST_COLLECTION);
+  const out = new Map<string, number>();
+  for (const { key, value } of rows) {
+    if (!key.startsWith(LEDGER_KEY_PREFIX)) continue;
+    for (const id of Object.keys(value?.entries ?? {})) out.set(id, value?.writtenAt?.[id] ?? 0);
+  }
+  return out;
+}
+
 /** Split a `recordId → contentHash` map into persisted chunks. Ids are SORTED so the chunking is stable
- *  across runs (a given id lands in the same chunk unless the corpus size crosses a boundary). */
+ *  across runs (a given id lands in the same chunk unless the corpus size crosses a boundary).
+ *
+ *  `writtenAt` is S4 §F (fix-round-1: PER-ID, not a single uniform value) — when given, an id present in the
+ *  map gets that id's value; an id absent from the map (or the whole param omitted, the 2-arg call) gets no
+ *  `writtenAt` key emitted for it, so the 2-arg call's chunk shape is byte-identical to pre-S4. A single
+ *  uniform timestamp for the WHOLE entries map was tried and reverted — it stamped every carried-forward,
+ *  untouched id with the commit time too, which turned `writtenAt` into "record last rewritten" instead of
+ *  "content last created/changed" and let one unrelated commit permanently shield an unrelated, genuinely
+ *  stale id from the next full reconcile's stale-set (S4·T7 fix-round-1). Callers must compute the per-id
+ *  map themselves (new/changed ids → commit time; unchanged/carried-forward ids → their PRIOR `writtenAt`). */
 export function chunkLedgerEntries(
   entries: Map<string, string>,
   at: string,
+  writtenAt?: Map<string, number>,
   chunkSize: number = LEDGER_CHUNK_SIZE,
 ): CorpusLedgerChunk[] {
   const size = Math.max(1, Math.floor(chunkSize));
@@ -85,8 +110,13 @@ export function chunkLedgerEntries(
   for (let i = 0; i < ids.length; i += size) {
     const slice = ids.slice(i, i + size);
     const e: Record<string, string> = Object.create(null);
-    for (const id of slice) e[id] = entries.get(id)!;
-    chunks.push({ version: 1, at, entries: e });
+    const w: Record<string, number> = Object.create(null);
+    for (const id of slice) {
+      e[id] = entries.get(id)!;
+      const wv = writtenAt?.get(id);
+      if (wv !== undefined) w[id] = wv;
+    }
+    chunks.push({ version: 1, at, entries: e, ...(writtenAt !== undefined ? { writtenAt: w } : {}) });
   }
   return chunks;
 }

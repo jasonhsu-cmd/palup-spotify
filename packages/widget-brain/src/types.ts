@@ -385,6 +385,20 @@ export interface Signals {
    */
   atCap?: boolean;
   /**
+   * S4 §B — per-TURN CATALOG_RETRIEVAL enablement for THIS tenant, resolved server-side from the
+   * two-gate registry (state-postgres/catalog-retrieval-enablement.ts) via deriveServingSignals — never
+   * client-set, exactly like `kill`/`atCap`. Absent ⇒ the brain falls back to the constructor
+   * `catalogRetrievalEnabled` default (which serving now passes as `false`), so retrieval is dark until a
+   * tenant is enabled. This REPLACES the retired process-global `process.env.CATALOG_RETRIEVAL`.
+   */
+  catalogRetrievalEnabled?: boolean;
+  /**
+   * S4 §C — an `agent:catalog-retrieval` operator kill is armed for this turn (server-resolved via
+   * matchedKill; precedence global>tenant>agent). DISTINCT from `kill`: this degrades retrieval to the
+   * full-catalog getContext path (a retrieval-only rollback), it does NOT halt the turn. Never client-set.
+   */
+  catalogRetrievalKilled?: boolean;
+  /**
    * The product/page the shopper is currently viewing (a short label from the embedding storefront), for
    * grounding the conversation to what they're looking at (§4 Contextual). UNTRUSTED merchant-page content
    * — sanitized (HTML stripped, newlines collapsed, the === fence defanged, capped) and fenced as DATA,
