@@ -113,8 +113,7 @@ async function main(): Promise<void> {
     cmd = parseCatalogEnableArgv(process.argv.slice(2));
   } catch (e) {
     console.error(`[catalog-enable] ${(e as Error).message}\n\n${CATALOG_ENABLE_USAGE}`);
-    process.exit(2);
-    return;
+    return exit(2);
   }
   try {
     const { store, kind } = await resolveStore();
@@ -125,11 +124,25 @@ async function main(): Promise<void> {
     if (report.scope !== "platform" && report.effective) {
       console.log("[catalog-enable] retrieval is now EFFECTIVE for this tenant (HITL-POLICY §5 promotion — ensure recorded eval+shadow evidence + named sign-off).");
     }
-    process.exit(0);
+    return exit(0);
   } catch (e) {
     console.error(`[catalog-enable] FAILED: ${(e as Error).message}`);
-    process.exit(1);
+    return exit(1);
   }
+}
+
+/** Flush stdout, then exit. `createRuntimeStore` opens a `pg.Pool` with no close hook, which would keep
+ * this process alive for the pool's idle timeout — and worse, on a non-TTY pipe (this is the audited
+ * promotion tool run in deploy pipelines as `| tee promotion.log`), Node can truncate buffered stdout on
+ * `process.exit` before the write lands, losing the confirmation line that IS the recorded evidence.
+ * Mirrors kill-switch.ts's `exit()` verbatim. */
+function exit(code: number): Promise<never> {
+  return new Promise<never>((resolve) => {
+    process.stdout.write("", () => {
+      process.exit(code);
+      resolve(undefined as never);
+    });
+  });
 }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
