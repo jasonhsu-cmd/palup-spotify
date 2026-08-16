@@ -613,7 +613,8 @@ async function indexOneTenant(
       tenantId,
       repaired,
       { products: plan.length, embedded: 0, written: 0, removed: 0, reindex: false, repaired: true },
-      { entries: ledger, priorChunkKeys },
+      // Nothing changed (that's how this branch was reached) — every id's `writtenAt` is preserved verbatim.
+      { entries: ledger, priorChunkKeys, writtenAt: ledgerWrittenAt },
     );
     return {
       tenantId,
@@ -748,6 +749,10 @@ async function indexOneTenant(
     at: now().toISOString(),
     ceiling: maxProducts,
   };
+  // S4 §F (fix-round-1) — per-id, not uniform: new/changed ids (incl. --reindex, where `ledger` is empty so
+  // every plan id reads as "new") get this commit's time; unchanged/carried-forward-protected ids keep their
+  // prior `writtenAt`.
+  const newWrittenAt = nextWrittenAt(newLedger, ledger, ledgerWrittenAt, new Date(written.at).getTime());
   await writeManifestAndAudit(
     deps,
     tenantId,
@@ -760,7 +765,7 @@ async function indexOneTenant(
       reindex: opts.reindex === true,
       repaired: false,
     },
-    { entries: newLedger, priorChunkKeys },
+    { entries: newLedger, priorChunkKeys, writtenAt: newWrittenAt },
   );
 
   return {
@@ -776,6 +781,31 @@ async function indexOneTenant(
 }
 
 /**
+ * S4 §F (fix-round-1) — per-id `writtenAt` for the ledger this commit writes. An id NEW this commit (absent
+ * from `priorHash`) or whose content CHANGED (`priorHash.get(id) !== newHash`) gets `atMs` (this commit's
+ * time). Every OTHER id — unchanged, or carried forward untouched (e.g. a concurrency-protected id whose
+ * hash is copied over as-is) — PRESERVES its prior `writtenAt` (0 if never recorded, S4's back-compat
+ * default). This is what makes `writtenAt` mean "content last created/changed" rather than "record last
+ * rewritten": restamping EVERY id with one uniform commit time (the reverted first attempt) let an unrelated
+ * commit — one that only touched a DIFFERENT id — permanently shield an untouched, genuinely-deleted product
+ * from the next full reconcile's stale-set, since its `writtenAt` kept getting reset to "now" by commits that
+ * never actually changed it.
+ */
+function nextWrittenAt(
+  newHashes: Map<string, string>,
+  priorHash: Map<string, string>,
+  priorWrittenAt: Map<string, number>,
+  atMs: number,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [id, hash] of newHashes) {
+    const changed = priorHash.get(id) !== hash;
+    out.set(id, changed ? atMs : priorWrittenAt.get(id) ?? 0);
+  }
+  return out;
+}
+
+/**
  * Manifest + audit in ONE transaction (NN#5 "atomically where the ports allow"). The audit's
  * `reversalPath` names `pnpm catalog:clear`, a CLI in THIS package that an operator can actually run
  * against the deployment that exists — `deploy-staging.yml` deploys only `palup-widget-staging` and no
@@ -788,17 +818,17 @@ async function writeManifestAndAudit(
   tenantId: string,
   manifest: CatalogManifest,
   counts: { products: number; embedded: number; written: number; removed: number; reindex: boolean; repaired: boolean },
-  ledger: { entries: Map<string, string>; priorChunkKeys: string[] },
+  ledger: { entries: Map<string, string>; priorChunkKeys: string[]; writtenAt: Map<string, number> },
 ): Promise<void> {
   const at = manifest.at;
   await deps.store.tx({ tenantId }, async (t) => {
     await t.put(MANIFEST_COLLECTION, MANIFEST_KEY, manifest);
     // S3 §B — the ledger commits ATOMICALLY with the manifest + audit (one tx), so the three can never
     // disagree about what is indexed. Prunes any prior chunk key the new corpus no longer fills.
-    // S4 §F — every id this tx writes gets `writtenAt = commit time` (uniform rule): correct for the
-    // concurrency guard because these entries are all older than the NEXT run's `fetchStartedAt`, while a
-    // genuinely concurrent webhook write lands with its own later timestamp.
-    await writeLedgerInTx(t, chunkLedgerEntries(ledger.entries, at, new Date(at).getTime()), ledger.priorChunkKeys);
+    // S4 §F (fix-round-1) — `ledger.writtenAt` is a PER-ID map the caller computed (`nextWrittenAt`): only
+    // ids new/changed THIS commit get `at`; every other id preserves its prior `writtenAt`. See
+    // `chunkLedgerEntries`'s doc comment for why a uniform per-commit stamp was wrong.
+    await writeLedgerInTx(t, chunkLedgerEntries(ledger.entries, at, ledger.writtenAt), ledger.priorChunkKeys);
     await t.audit(
       {
         actor: CATALOG_INDEX_ACTOR,
@@ -899,6 +929,11 @@ export async function reconcileProducts(
 
   const priorChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
   const ledger = await readCorpusLedger(deps.store, tenantId);
+  // S4 §F (fix-round-1) — the targeted path stamps `writtenAt` too (it commits through the SAME
+  // `writeManifestAndAudit`, so the concurrency guard must see its writes as "just happened"). Only ids
+  // this reconcile actually touches get a fresh stamp; every other tracked id (untouched by this webhook)
+  // preserves its prior value.
+  const ledgerWrittenAt = await readCorpusLedgerTimestamps(deps.store, tenantId);
 
   // FIX 2 (final review) — the targeted path must not silently grow a corpus past its ceiling one webhook at
   // a time (a `products/create` storm could otherwise push a tenant over `MAX_INDEXED_PRODUCTS` a SKU at a
@@ -985,12 +1020,16 @@ export async function reconcileProducts(
     at: now().toISOString(),
     ceiling: manifest.ceiling,
   };
+  // S4 §F (fix-round-1) — same per-id rule as the full path: only the refreshed/new ids (`plan`, i.e. the
+  // ones actually re-embedded-or-confirmed by THIS reconcile) get `now`; every other id this reconcile
+  // didn't touch preserves its prior `writtenAt`.
+  const newWrittenAt = nextWrittenAt(newLedger, ledger, ledgerWrittenAt, new Date(written.at).getTime());
   await writeManifestAndAudit(
     deps,
     tenantId,
     written,
     { products: plan.length, embedded: toEmbed.length, written: records.length, removed: stale.length, reindex: false, repaired: false },
-    { entries: newLedger, priorChunkKeys },
+    { entries: newLedger, priorChunkKeys, writtenAt: newWrittenAt },
   );
 
   return { tenantId, outcome: "indexed", products: plan.length, embedded: toEmbed.length, written: records.length, removed: stale.length, model: written.model, dimension: written.dimension };

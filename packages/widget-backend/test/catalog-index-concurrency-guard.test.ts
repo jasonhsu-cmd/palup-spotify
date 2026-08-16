@@ -9,8 +9,16 @@ import {
   type ModelPort,
   type Product,
 } from "@palup/platform-ports";
-import { runCatalogIndex, catalogNamespace, MANIFEST_COLLECTION, type CatalogSource } from "../src/jobs/catalog-index.js";
-import { readCorpusLedger, ledgerChunkKey } from "../src/jobs/catalog-ledger.js";
+import {
+  runCatalogIndex,
+  reconcileProducts,
+  catalogNamespace,
+  catalogRecordId,
+  MANIFEST_COLLECTION,
+  type CatalogSource,
+  type CatalogByIdSource,
+} from "../src/jobs/catalog-index.js";
+import { readCorpusLedger, readCorpusLedgerTimestamps, ledgerChunkKey } from "../src/jobs/catalog-ledger.js";
 
 const DIMENSION = 8;
 function fakeModel(): ModelPort {
@@ -71,5 +79,52 @@ describe("catalog-index — fetch-timestamp concurrency guard (S4 §F)", () => {
     const ledger = await readCorpusLedger(store, "acme");
     expect([...ledger.keys()]).not.toContain("product:gid://shopify/Product/7");
     expect(report!.removed).toBe(1);
+  });
+
+  it("fix-round-1 (reviewer-reproduced 🔴): an UNRELATED commit must not reset a bystander id's writtenAt — " +
+    "otherwise a later full reconcile can never prune it, even once genuinely delisted", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+
+    // Seed products 0,1,2 at t=1000 — real ledger, real writtenAt=1000 for all three.
+    const seed: CatalogSource = async (t) => ({ tenantId: t, brandName: "B", products: products([0, 1, 2]), policy: { returns: "", shipping: "" } });
+    await runCatalogIndex({ store, vector, model, catalog: seed, now: () => new Date(1_000) }, ["acme"], {});
+
+    // An UNRELATED targeted reconcile (webhook: products/create for a brand-new SKU 3) commits at t=6_000.
+    // It touches ONLY product 3 — 0,1,2 are carried into the new ledger unchanged.
+    const catalogById: CatalogByIdSource = async () => products([3]);
+    const anyCatalog: CatalogSource = async (t) => ({ tenantId: t, brandName: "B", products: products([0, 1, 2]), policy: { returns: "", shipping: "" } });
+    const r3 = await reconcileProducts(
+      { store, vector, model, catalog: anyCatalog, catalogById, now: () => new Date(6_000) },
+      "acme",
+      ["gid://shopify/Product/3"],
+      {},
+    );
+    expect(r3.outcome).toBe("indexed");
+
+    // THE BUG (round-1): a uniform per-commit restamp would reset 0,1,2's writtenAt to 6_000 here too.
+    // THE FIX: only product 3 (new this commit) gets 6_000; 0,1,2 (untouched) keep their prior 1_000.
+    const tsAfterUnrelatedCommit = await readCorpusLedgerTimestamps(store, "acme");
+    expect(tsAfterUnrelatedCommit.get(catalogRecordId("gid://shopify/Product/0"))).toBe(1_000);
+    expect(tsAfterUnrelatedCommit.get(catalogRecordId("gid://shopify/Product/1"))).toBe(1_000);
+    expect(tsAfterUnrelatedCommit.get(catalogRecordId("gid://shopify/Product/2"))).toBe(1_000);
+    expect(tsAfterUnrelatedCommit.get(catalogRecordId("gid://shopify/Product/3"))).toBe(6_000);
+
+    // A full reconcile now runs with fetchStartedAt=5_000 (BEFORE the unrelated commit's 6_000, exactly the
+    // reviewer's repro ordering). Its fetch legitimately omits product 0 (the merchant genuinely deleted it)
+    // and never saw product 3 either (a full crawl that predates that webhook, same as guard test 1).
+    const afterDeleteCatalog: CatalogSource = async (t) => ({ tenantId: t, brandName: "B", products: products([1, 2]), policy: { returns: "", shipping: "" } });
+    const [report] = await runCatalogIndex({ store, vector, model, catalog: afterDeleteCatalog, now: () => new Date(5_000) }, ["acme"], {});
+
+    // Product 0 is genuinely stale (writtenAt=1_000 <= fetchStartedAt=5_000, UNCHANGED by the unrelated
+    // commit) and MUST be pruned — this is the round-1 regression: with the uniform restamp, 0's writtenAt
+    // had been bumped to 6_000 by the unrelated commit, so it read as "protected" and was NEVER deleted.
+    expect(report!.removed).toBe(1);
+    const ledgerAfter = await readCorpusLedger(store, "acme");
+    expect([...ledgerAfter.keys()]).not.toContain(catalogRecordId("gid://shopify/Product/0"));
+    // Product 3 (genuinely concurrently-created, writtenAt=6_000 > this run's fetchStartedAt=5_000) is still
+    // correctly protected — the fix does not disable real concurrency protection, only the false positive.
+    expect([...ledgerAfter.keys()]).toContain(catalogRecordId("gid://shopify/Product/3"));
   });
 });
