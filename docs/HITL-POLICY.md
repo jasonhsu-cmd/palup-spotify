@@ -190,6 +190,12 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > warning naming every on-flag (`server.ts` / `wave4-composition.test.ts`); the Kill Switch at the flip
 > scope (now retrieval-scoped, above); the in-prompt partial-catalog rule (never infer "we don't carry
 > that" from mere absence); the standing eval floor; per-tenant instant reversibility.
+> **Correction:** the boot warning above no longer covers `CATALOG_RETRIEVAL` — S4 retired the
+> `wave4On`/env-flag reading for it (see the "RETIRED" note above), so its enablement posture is now
+> visible via the Audit Log (`catalog_retrieval.tenant_optin.enable`/`.disable` on every `catalog:enable`
+> flip), the `pnpm catalog:enable` CLI's read-back (`effective=…`), and the per-turn `retrieval:applied` /
+> `retrieval:killed` signals, **not** the boot warning. The boot warning is unchanged and still non-waivable
+> for every OTHER Wave-4 flag in this section.
 > ---
 
 > **Product citations (`PRODUCT_CITATIONS` flag) — NOT yet flipped, no owner assigned (E2).**

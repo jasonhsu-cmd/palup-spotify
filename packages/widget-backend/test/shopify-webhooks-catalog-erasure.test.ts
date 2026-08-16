@@ -24,8 +24,10 @@ import { listLedgerChunkKeys } from "../src/jobs/catalog-ledger.js";
 // S4 §F — the wiring that closes the SHOP_REDACT_RESIDUAL / app-uninstalled-non-destructive gap: both
 // `shop/redact` and `app/uninstalled` now call `runCatalogClear` (pgvector-safe, S4 Task 6) so a shop's
 // catalog corpus namespace + its corpus-state ledger are ACTUALLY erased, not merely disclosed as
-// un-erased residuals. Both calls are UNCONDITIONAL — never gated on `killCheck` — per the controller
-// ruling: NN#4's Kill Switch halts AGENT AUTONOMY, not a merchant's/law's own erasure request.
+// un-erased residuals. Both calls are UNCONDITIONAL — never gated on `killCheck` — per this build's
+// working rationale that NN#4's Kill Switch halts AGENT AUTONOMY, not a merchant's/law's own erasure
+// request. That reading is NOT yet settled policy — it is an OPEN owner decision, `docs/HITL-POLICY.md`
+// §8 — this test asserts the built (interim) behavior, not a ruling.
 
 const SHOP = "acme-store.myshopify.com";
 const TENANT = "acme-store";

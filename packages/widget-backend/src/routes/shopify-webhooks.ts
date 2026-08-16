@@ -486,10 +486,17 @@ async function eraseIndexedSubjects(deps: ShopifyWebhookDeps, tenantId: string):
  * (`readCorpusLedger`'s foreign-guard), and the vector delete itself can fail.
  *
  * UNCONDITIONAL, NOT KILL-GATED — a deliberate departure from every OTHER destructive action in this
- * file. NN#4's Kill Switch halts AGENT AUTONOMY (a run-time agent acting on its own initiative); it does
- * not — and must not — halt a merchant's or a law's OWN request to erase that merchant's data. Gating this
- * on `killCheck` would leave a shop's catalog corpus un-erased for as long as an unrelated kill stayed
- * armed, which is strictly worse for ADR-0015 and the underlying statutory obligation than running it.
+ * file. The rationale this implementation was built on: NN#4's Kill Switch halts AGENT AUTONOMY (a
+ * run-time agent acting on its own initiative); it does not — and must not — halt a merchant's or a law's
+ * OWN request to erase that merchant's data. Gating this on `killCheck` would leave a shop's catalog
+ * corpus un-erased for as long as an unrelated kill stayed armed, which is strictly worse for ADR-0015
+ * and the underlying statutory obligation than running it.
+ *
+ * NOTE: that reading is NOT settled policy. `docs/HITL-POLICY.md` §8 records this as an OPEN DECISION for
+ * the named owner (jason.hsu@framy.co) — whether §3 rule 4's "the Kill Switch must always work" means
+ * "halts all writes this handler makes" (defer, like the memory/traffic-log erasure one section up) or
+ * "halts agent autonomy, not a compelled statutory act" (the behavior below). Treat the above as the
+ * rationale for the interim built behavior, not as a ruling.
  *
  * BEST-EFFORT + AUDITED, never a 500: a `runCatalogClear` failure is caught here so it can never burn
  * Shopify's webhook retries or fail the compliance/uninstall handler. A caught failure writes its OWN
@@ -525,7 +532,10 @@ async function eraseCatalogCorpus(deps: ShopifyWebhookDeps, tenantId: string, to
               "failure); the webhook still acknowledges 200 (per [W1]/[W2]) so Shopify's retries are not burned " +
               "over a residual this record already discloses",
           },
-          reversalPath: `pnpm exec tsx packages/widget-backend/src/jobs/catalog-index.ts clear --tenant ${tenantId} (re-run by hand once the underlying fault is fixed, or wait for the next delivery/retry)`,
+          // NOT "wait for the next delivery/retry": `markHandled` dedups this webhook id, and `shop/redact`
+          // is a terminal Shopify webhook (no retry follows a 200). The real recovery is running the CLI
+          // clear by hand once the underlying fault is fixed — name that, not a retry that will not come.
+          reversalPath: `pnpm catalog:clear --tenant ${tenantId} (run by hand once the underlying fault is fixed — this delivery is deduped/terminal and will not retry)`,
         },
       );
     } catch {

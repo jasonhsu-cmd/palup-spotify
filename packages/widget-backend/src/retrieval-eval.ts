@@ -76,6 +76,31 @@ export function generateScaleCorpus(n: number): RetrievalProduct[] {
   return out;
 }
 
+/**
+ * S4 §5 fix-round — pairs `generateScaleCorpus`'s bulk filler with a SMALL number of hand-authored,
+ * token-discriminable "signal" products + cases, mirroring the pattern `retrieval-promotion-evidence.test.ts`
+ * already proved out on real pgvector. `generateScaleCorpus` alone has no cases: its ids/descriptions are
+ * synthetic filler with no ground truth to grade against. This is the default corpus the `eval:retrieval`
+ * CLI uses when `RETRIEVAL_CORPUS_SIZE` is set (operator §5 run at scale) — a real tenant catalog + cases
+ * file (`RETRIEVAL_CORPUS_FILE`) is the alternative the runbook documents.
+ */
+export function generateScaleCorpusAndCases(n: number): { products: RetrievalProduct[]; cases: RetrievalCase[]; _meta: { k: number } } {
+  const signal: RetrievalProduct[] = [
+    { id: "sig-apple", title: "Crisp Apple", price: "$1", description: "crunchy sweet apple orchard fruit", tags: ["apple"] },
+    { id: "sig-banana", title: "Ripe Banana", price: "$2", description: "soft yellow banana tropical fruit", tags: ["banana"] },
+  ];
+  return {
+    products: [...signal, ...generateScaleCorpus(n)],
+    cases: [
+      { id: "scale-apple", query: "crunchy sweet apple", expectTop: "sig-apple", notInTopK: ["sig-banana"] },
+      { id: "scale-banana", query: "soft tropical banana", expectTop: "sig-banana", notInTopK: ["sig-apple"] },
+    ],
+    // `_meta.k` — matches the fixture file's own `_meta.k` convention (cases/retrieval.json), which is what
+    // eval-retrieval.ts's `resolveCorpus`/`defaultK` reads (NOT a bare top-level `k`).
+    _meta: { k: 5 },
+  };
+}
+
 /** Deterministic grade of one query's retrieved top-k against the case's expectations. */
 export function gradeRetrieval(c: RetrievalCase, hits: RetrievedProduct[]): { pass: boolean; fails: string[] } {
   const ids = hits.map((h) => h.productId);

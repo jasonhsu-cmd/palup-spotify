@@ -9,6 +9,7 @@
     "@palup/widget-brain": "workspace:*",
     "@palup/widget-backend": "workspace:*",
     "@palup/model-vertex": "workspace:*",
+    "@palup/state-postgres": "workspace:*",
     "@palup/judge": "workspace:*"
   }
 }

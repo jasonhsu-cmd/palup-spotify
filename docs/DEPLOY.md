@@ -980,9 +980,9 @@ nothing in this job's env or command flips them.
 
 ## Per-tenant `CATALOG_RETRIEVAL` promotion (S4 §5 — HITL-POLICY §5 owner promotion bar)
 
-The operator procedure for the promotion bar `docs/HITL-POLICY.md` §5's `CATALOG_RETRIEVAL` block states.
-This is a **named-human action** (jason.hsu) — nothing here is run by a build agent, and no step flips a
-flag on its own; each step is deliberate.
+This is the operator procedure for the per-tenant `CATALOG_RETRIEVAL` promotion bar that
+`docs/HITL-POLICY.md` §5's `CATALOG_RETRIEVAL` block states. This is a **named-human action** (jason.hsu)
+— nothing here is run by a build agent, and no step flips a flag on its own; each step is deliberate.
 
 1. **Produce the evidence, on real Vertex + real pgvector, at the tenant's scale.** Run
    `pnpm eval:retrieval` and `pnpm shadow:retrieval` with `VECTOR_ANN=true` against a corpus representative
@@ -1000,6 +1000,8 @@ flag on its own; each step is deliberate.
    ```
    Both writes are audited atomically (`catalog-retrieval-enablement.ts`); the CLI reads the resulting state
    back and prints `effective=true` only once both the platform master and the tenant opt-in are on.
+   **`--reason` is written verbatim to the immutable Audit Log — never put a secret, token, or credential
+   in it.**
 4. **Rollback — two independent levers:**
    - **Instant, retrieval-only:** `pnpm kill:arm --scope agent:catalog-retrieval` degrades EVERY
      tenant's retrieval to the full-catalog path immediately, with no code change. This scope is
