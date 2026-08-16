@@ -376,10 +376,20 @@ export class VertexModelAdapter implements ModelPort {
 
     const withTimeout = async <T>(p: Promise<T>): Promise<T> => {
       if (cfg.timeoutMs === undefined) return p;
-      return await Promise.race([
-        p,
-        new Promise<T>((_r, rej) => setTimeout(() => rej(new Error("vertex: embed request timed out")), cfg.timeoutMs)),
-      ]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          p,
+          new Promise<T>((_r, rej) => {
+            timer = setTimeout(() => rej(new Error("vertex: embed request timed out")), cfg.timeoutMs);
+          }),
+        ]);
+      } finally {
+        // Cleared on EITHER outcome (the provider call winning OR the timeout firing): a 50k-item run at
+        // concurrency 4 would otherwise leave one pending timer alive per chunk for the life of the
+        // process, even on the fast path where the timeout never fires.
+        clearTimeout(timer);
+      }
     };
 
     const runChunk = async (ci: number): Promise<void> => {
@@ -422,16 +432,26 @@ export class VertexModelAdapter implements ModelPort {
 
     // Reassemble in order + enforce a single dimension across chunks (a provider could in principle answer
     // two chunks of the same request with two different dimensions; that is exactly as invalid here as it
-    // was in the old within-chunk check, just now across chunks instead of within one).
+    // was in the old within-chunk check, just now across chunks instead of within one). Re-derives the
+    // GLOBAL index (chunk offset + within-chunk position) so this throws the EXACT pre-S2 message —
+    // reusing the offset each chunk was built from (`chunks[ci].offset`), not a re-count.
     const vectors: number[][] = [];
     let dimension = 0;
     let inputTokens = 0;
     let tokensKnown = true;
-    for (const c of perChunk) {
-      for (const v of c.values) {
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const { offset } = chunks[ci]!;
+      const c = perChunk[ci]!;
+      for (let j = 0; j < c.values.length; j++) {
+        const v = c.values[j]!;
+        const index = offset + j;
         if (dimension === 0) dimension = v.length;
-        else if (v.length !== dimension)
-          throw new Error(`vertex: mixed dimensions across chunks (${v.length} vs ${dimension})`);
+        else if (v.length !== dimension) {
+          throw new Error(
+            `vertex: the text at index ${index} came back with ${v.length} components but this ` +
+              `batch's dimension is ${dimension} — mixed dimensions in one corpus rank as garbage`,
+          );
+        }
         vectors.push(v);
       }
       if (c.tokens === undefined) tokensKnown = false;

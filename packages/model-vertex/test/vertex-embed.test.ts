@@ -160,7 +160,11 @@ describe("VertexModelAdapter.embed — chunking to the provider's per-request ca
     const drifting: EmbedContentFn = async (req) => ({
       embeddings: req.contents.map(() => ({ values: new Array(++n === 1 ? 8 : 4).fill(0.5) })),
     });
-    await expect(adapterWith(drifting, 1).embed!({ texts: ["a", "b"], purpose: "document" })).rejects.toThrow(/dimension/i);
+    // Pinned to the EXACT pre-S2 message text (not just /dimension/i) so the string cannot silently drift:
+    // chunk 0 ("a", global index 0) sets dimension=8; chunk 1 ("b", global index 1) comes back at 4.
+    await expect(adapterWith(drifting, 1).embed!({ texts: ["a", "b"], purpose: "document" })).rejects.toThrow(
+      "vertex: the text at index 1 came back with 4 components but this batch's dimension is 8 — mixed dimensions in one corpus rank as garbage",
+    );
   });
 
   it("rejects a non-finite component (via the port's own requireEmbedAlignment)", async () => {
