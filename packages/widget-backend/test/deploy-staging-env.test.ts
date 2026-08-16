@@ -74,6 +74,12 @@ const REQUIRED_ENV: Array<[name: string, why: string]> = [
   // VECTOR_ANN selects S1's pgvector HNSW store (vector-factory.ts). Enabling it REQUIRES a pgvector-enabled
   // DATABASE_URL and an indexed corpus; default-false keeps the in-memory scan path. Serving >5000 SKUs needs it.
   ["VECTOR_ANN", "retrieval backend: selects the pgvector HNSW store over the brute-force scan (vector-factory.ts)"],
+  // MEMORY_ENABLED is the OPERATOR half of cross-visit memory's double gate. It is INERT on its own:
+  // isMemoryEnabled() = (MEMORY_ENABLED === "true" && MEMORY_ADR_ACCEPTED), and MEMORY_ADR_ACCEPTED is a
+  // hardcoded const that only a human flips after the ADR-0015 legal/security sign-offs (widget-memory/flag.ts).
+  // Threaded here (default 'false') so that, once that human flip lands, memory is a one-var deploy flip and an
+  // operator's Cloud Run setting is not silently reverted by the next merge-deploy. Default-false enables NOTHING.
+  ["MEMORY_ENABLED", "operator half of memory's double gate; INERT until the MEMORY_ADR_ACCEPTED const is also true (widget-memory/flag.ts)"],
 ];
 
 /** Cloud Run secret mounts. Each must resolve to a Secret Manager secret that already exists — a
