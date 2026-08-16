@@ -57,6 +57,13 @@ source, higher ceilings + batched embeddings, targeted freshness, and scale-grad
 Each sub-project gets its own implementation plan (writing-plans) and its own PR(s). **This document fully
 specs S1**; S2–S4 are outlined in §6 and will be spec'd when S1 lands.
 
+> **Build-verify update (2026-08-16):** the `gemini-embedding-2`@1536 pin named for S2 above (and in §6)
+> did not clear build-verify — GA is confirmed (2026-04-22) but the exact GA model-id on Vertex was not
+> (only `gemini-embedding-2-preview` was listed). S2 shipped pinned to **`gemini-embedding-001`@1536**
+> instead (GA-confirmed, MRL-truncated, same `vector(1536)` schema); adopting `gemini-embedding-2` later
+> needs the exact GA id confirmed AND a full reindex (incompatible embedding spaces). Current source of
+> truth: `docs/superpowers/specs/2026-08-15-s2-serving-unlock-design.md` §2/§8.
+
 ---
 
 ## 4. S1 — pgvector-HNSW adapter (detailed spec)
