@@ -4,9 +4,15 @@
 > dependency-aware roadmap. Target milestone: **a first real US-Shopify design-partner merchant serving real
 > shoppers from their live storefront**, sales-first. Everything past that is Phase 2+.
 >
-> **Current state (one line):** a single-tenant *staging* demo page (`packages/widget/public/index.html`) on
-> real Gemini + real (demo-store) Shopify grounding, with every money/identity/retrieval posture flag-OFF,
-> the control-plane deployed nowhere, and commerce on fixtures. Nothing here is a single flag flip.
+> **Refreshed 2026-08-16** against merged `main` (HEAD `11bc5d4`): the Phase-1 widget/install/read-back chain
+> (#287–#292) and the *entire* Phase-2 catalog-retrieval-at-scale stack (S1–S4, #297–#304) have since merged —
+> all **dark / flag-gated**. Statuses, merge-state, and citations below were re-verified against code this pass.
+>
+> **Current state (one line):** the shopper-serving stack — embeddable widget, OAuth install, per-tenant
+> storefront read-back, and catalog-retrieval-at-scale — is now **merged to `main` but ships dark / flag-gated**;
+> there is still **no production deployment** (staging only), the **control-plane is deployed nowhere**,
+> `packages/agent-runtime` **does not exist yet** (design + ADR-0005 only), and commerce runs on fixtures.
+> Enabling any of it is a human-gated config/infra step, not a single flag flip.
 
 ## Legend (owner type)
 
@@ -25,21 +31,23 @@ A design-partner pilot can *defer* billing (invoice manually), EU/GDPR-export (U
 
 1. **[INFRA] Register the Shopify app** — `shopify app deploy` from a Partners account; the app is not
    registered/listed today (`shopify.app.toml:12-14` exists but was never deployed). *Gates everything below.*
-2. **[BUILD] Finish install → embed-key → storefront-token** — the OAuth install records the install and
-   custodies a delegate token, but no route hands the merchant an embed key and serving reads the storefront
-   token from `SecretsPort`, not the C1 delegate credential, so an OAuth-installed merchant gets fixtures
-   (`routes/shopify-install.ts:453,479`; `merchant-store.ts:54-78`). Close that loop so a self-installed
-   merchant grounds on THEIR catalog.
-3. **[BUILD] The embeddable widget — code complete on `feat/embeddable-widget`, not yet merged to `main`.**
+2. **[INFRA/config] Turn on install → storefront read-back in prod** — the loop is **code-complete and merged
+   to `main`** (#288 `f08cf6d`, ships dark): the OAuth install custodies a per-tenant delegate token, and serving
+   reads it via `resolveStorefrontCredential` (`packages/widget-brain/src/model.ts:61`) when
+   `MERCHANT_CRED_READBACK_ENABLED` is set (process-global env, default **OFF** in code — `server.ts:320`). The
+   staging deploy wires the flag through (`deploy-staging.yml:108`, defaulting to `false`); whether it is actually
+   ON in staging is a GitHub repo var, **not repo-verifiable here**. Remaining work is **config/infra**: set the
+   flag in a prod deployment so an OAuth-installed merchant grounds on THEIR catalog instead of fixtures.
+3. **[BUILD-done · INFRA-remaining] The embeddable widget — merged to `main` (dark / flag-gated).**
    The theme app extension (`extensions/palup-widget/`), the loader (`packages/widget/src/loader-entry.ts`),
-   and the backend routes (`GET /embed/loader.js`, `GET /embed/panel` — `packages/widget-backend/src/
-   routes/embed.ts`) are built and tested on that branch. What remains once it merges is [INFRA]:
+   and the `/embed/*` backend routes merged across #287 (`67fa7f5`), #289 hardening (`4c95814`), #291 self-serve
+   custody (`178429b`), and #292 shop-specific webhooks (`b6307a8`). What remains is [INFRA]:
    `shopify app deploy` (item 1) registers the extension; separately, a human must hand-edit the
    `REPLACE_WITH_APP_HOST` placeholder in `app-embed.liquid` + `shopify.app.toml` to the real app host —
    no build-time substitution exists for it (verified: nothing in the repo's scripts, CI, or package.json
    touches that string). See `docs/DEPLOY.md` *Embedding the widget on a storefront* for the full path and
    the storefront-token caveat (a self-installed merchant still gets fixtures, not their own catalog, until
-   item 2 closes).
+   item 2's flag is set in prod).
 4. **[INFRA] A production deployment** — no prod workflow or service exists; staging-only
    (`docs/DEPLOY.md:3`; `.github/workflows/`). Stand up a prod Cloud Run service + deploy path, with
    `WIDGET_AUTH_REQUIRED=true` (staging already enforces it via smoke — `server.ts:285`).
@@ -55,9 +63,9 @@ A design-partner pilot can *defer* billing (invoice manually), EU/GDPR-export (U
 | # | Item | Owner | Status (audit) | Blocks on |
 |---|------|-------|----------------|-----------|
 | 1 | Register Shopify app (`shopify app deploy`) | INFRA | pending — `shopify.app.toml:12-14` | — |
-| 2 | Install→embed-key handoff + storefront-token custody | BUILD | in_progress — `shopify-install.ts:453,479` | 1 |
-| 3 | Serve merchant's own catalog (D2 fix) | BUILD | pending — `merchant-store.ts:54-78` | 2 |
-| 4 | Embeddable widget (theme app extension + loader + `/embed/*` routes) | BUILD | **done (code, on `feat/embeddable-widget`, unmerged)** — `extensions/palup-widget/`, `packages/widget-backend/src/routes/embed.ts`; live traffic still gated on 1 | 1 |
+| 2 | Install→storefront-token read-back custody | BUILD→INFRA(config) | **merged (dark)** — #288 `f08cf6d`; `model.ts:61` / `server.ts:320`; remaining = set `MERCHANT_CRED_READBACK_ENABLED` in prod | 1 |
+| 3 | Serve merchant's own catalog (D2 fix) | BUILD→INFRA(config) | **merged (dark)** — same read-back path (#288); on once item 2's flag is set | 2 |
+| 4 | Embeddable widget (theme app extension + loader + `/embed/*` routes) | BUILD | **done — merged to `main` (dark)** — #287/#289/#291/#292; `extensions/palup-widget/`, `packages/widget-backend/src/routes/embed.ts`; live traffic still gated on 1 | 1 |
 | 5 | Prod Cloud Run service + deploy workflow | INFRA | pending — `docs/DEPLOY.md:3` | — |
 | 6 | `WIDGET_AUTH_REQUIRED=true` in prod | INFRA(config) | in_progress — `server.ts:285` | 5 |
 | 7 | Human take-over: honest escalation copy OR a real producer | BUILD/BIZ | pending — `brain.ts:1100` | 5 |
@@ -66,28 +74,30 @@ Phase-1 exit: a design-partner merchant installs the app, the widget mounts on t
 shoppers get grounded, guardrailed, sales-first answers on real Gemini — with support/commerce actions
 honestly escalated. Manual invoicing; no memory; US-only.
 
-**Remaining human steps for the embed (2026-08-10):** (a) merge `feat/embeddable-widget` to `main`, then
-`shopify app deploy` from a Partners account — registers the app + the `palup-widget` extension; separately,
-a human must hand-edit the `REPLACE_WITH_APP_HOST` placeholder (`extensions/palup-widget/blocks/
-app-embed.liquid:12`, `shopify.app.toml:25`) to the real host before that deploy is meaningful — nothing in
+**Remaining human steps for the embed (2026-08-16):** the branch has **merged to `main`** (dark), so what's
+left is (a) `shopify app deploy` from a Partners account — registers the app + the `palup-widget` extension;
+separately, a human must hand-edit the `REPLACE_WITH_APP_HOST` placeholder (`extensions/palup-widget/blocks/
+app-embed.liquid`, `shopify.app.toml`) to the real host before that deploy is meaningful — nothing in
 the repo substitutes it automatically (verified: no script, CI step, or pnpm task touches that string);
 (b) standing up a production host (#5 above) so a real host value exists to set. Full detail:
 `docs/DEPLOY.md` *Embedding the widget on a storefront*.
 
 ## Phase 2 — quality, freshness, scale (mostly already built, gated behind promotion)
 
-This is the ADR-0020 work already done this session — eval gates 4/4, full-corpus + eliciting shadow all 0
-violations. What remains is the human promotion path (canary → approve) per `docs/ADR-0020-PROMOTION-PLAN.md`.
+This is the ADR-0020 catalog-retrieval-at-scale work — now **entirely merged to `main`, all dark**: S1 pgvector
+engine #297 (`85e6d24`) → S2 serving-unlock #299 (`cb44919`) → S3 freshness #302 (`fe6a2c4`) → S4 safe-promotion
+#303 (`b9f6450`), plus the §5 promotion runbook #304 (`11bc5d4`). What remains is the human **per-tenant**
+promotion path (canary → approve) per `docs/DEPLOY.md` §5 and `docs/ADR-0020-PROMOTION-PLAN.md`.
 
 | Item | Owner | Status | Note |
 |------|-------|--------|------|
-| Promote `CATALOG_RETRIEVAL` (E1) | BIZ(approve)+INFRA | in_progress | eval 10/10; needed once a merchant catalog >~1000 SKUs — `server.ts:512` |
+| Enable per-tenant catalog retrieval (two-gate: platform master + per-tenant opt-in, both default OFF) | BIZ(approve)+INFRA | **merged (dark)** | the global `CATALOG_RETRIEVAL` env was **RETIRED** (S4 §B); enablement is now `pnpm catalog:enable` — `catalog-retrieval-enablement.ts:31-34`, read `server.ts:2129-2133`. Needed once a catalog exceeds the 1000-SKU serving fetch (`MAX_CATALOG_PRODUCTS`=1000) |
 | Enable `CATALOG_WEBHOOKS` producer (A3) + `terraform apply` (P3 alert, P4) | INFRA | in_progress | P4 route smoke-verified; env + apply are human — `server.ts:946` |
 | Promote `PRODUCT_FACTS_HYDRATION` (A1b, money/NN#1) | BIZ(approve) | in_progress | inert until retrieval + a producer populate facts — `server.ts:527` |
 | Promote `SERVER_GUARD_SIGNALS` (safety routing) | BIZ(approve) | in_progress | eliciting: catches injection/distress evasions the floor misses; SUP-06 money-safe |
 | Promote `OUTGOING_OFFER_CHECK` (money guard) | BIZ(approve) | in_progress | additive over the always-on floor |
-| pgvector-HNSW ANN adapter (replace brute-force scan) | BUILD | in_progress | scale, not launch — `docs/adr/0020...md D3` |
-| `catalog-index` scheduler (Cloud Run Job/cron) | INFRA | in_progress | today CLI-only — `jobs/catalog-index.ts` |
+| pgvector-HNSW ANN adapter (replace brute-force scan) | BUILD | **merged (dark)** | S1 #297 `85e6d24`; `VECTOR_ANN` default off (`vector-factory.ts:28`). Scale, not launch — a corpus >5000 SKUs *requires* it; indexing ceiling `MAX_INDEXED_PRODUCTS`=50000 |
+| `catalog-index` scheduler (Cloud Run Job + Cloud Scheduler) | INFRA | **built; deploy is the owner's** | hourly freshness backstop (S3 §E); runbook `docs/DEPLOY.md` *Scheduled catalog-index backstop* (`palup-catalog-index`) — job `jobs/catalog-index.ts` |
 
 Each promotion is: eval ✅ → shadow ✅ (done) → **canary on the pilot merchant** → your approval. The pilot IS
 the canary population.
@@ -99,7 +109,7 @@ the canary population.
 | Live commerce adapter (orders/refunds/subscriptions) | BUILD | pending — `model.ts:60-70` | unblocks real support/commerce actions |
 | Shopify Billing API + pricing model | BUILD+BIZ | pending — none in `packages/` | to charge merchants (vs manual invoicing) |
 | Shopper identity: App Proxy (0017) / CAA OAuth (0018) / guest (0019) | BUILD(built)+INFRA | in_progress | per-shop provisioning + security re-review — `server.ts:696,794,1111` |
-| GDPR: `customers/data_request` export + full erasure | BUILD+LEGAL | pending — `shopify-webhooks.ts:670-728` | required before an EU merchant |
+| GDPR: `customers/data_request` EXPORT (erasure now DONE) | BUILD+LEGAL | export **pending** — no export path exists anywhere in the repo (`shopify-webhooks.ts:65`); catalog corpus+ledger **erasure** on `shop/redact` + `app/uninstalled` is **DONE** (S4 §F, `95ec8fd`; owner chose DECISION A, HITL §8) | required before an EU merchant |
 | Cross-visit memory go-live | BIZ/LEGAL | in_progress (inert) | `MEMORY_ADR_ACCEPTED` false + §A legal gate all OPEN — `widget-memory/src/flag.ts:12` |
 | Merchant/admin consoles | BUILD | pending | operator CLI is the only config path today — `CLAUDE.md §6` |
 | Multi-merchant self-serve onboarding (beyond manual) | BUILD | in_progress — `merchant-store.ts:54-78` | scale beyond hand-provisioned pilots |
@@ -107,15 +117,17 @@ the canary population.
 ## Track S — self-improve to production (parallel; NOT on the launch critical path)
 
 The full propose→gate→shadow→canary→approve→promote→monitor pipeline is built, tested, fail-closed, and
-governance-correct — but runs only as a library/CLI/local capability. To make it *operable* in production:
+governance-correct — but runs only as a library/CLI/local capability. There is also **no shared
+`packages/agent-runtime` yet** — it does not exist (design + ADR-0005 only; `README.md:12` "design + scaffold"),
+which is the foundational gap under everything in this track. To make it *operable* in production:
 
 | Item | Owner | Status | Note |
 |------|-------|--------|------|
-| **Deploy the control-plane as its own service** | INFRA | in_progress — `control-plane/src/server.ts:443` (binds 127.0.0.1; Dockerfile CMD `pnpm backend`) | **the single biggest self-improve blocker** — every approve/promote/monitor/Approval-Center surface is unreachable |
-| Live-quality measurement (real signal, not operator-attested) | BUILD | pending — `champion-promoter.ts:216-251` | monitor/rollback react to a reported signal today |
-| Verify the cross-family (Claude) gating judge live | INFRA(keys)+BUILD | in_progress — `judge/src/anthropic-api.ts:3` | UNVERIFIED-LIVE; CI dormant |
+| **Deploy the control-plane as its own service** | INFRA | DEPLOYED-NOWHERE — `control-plane/src/server.ts:443` (binds `127.0.0.1`; container CMD is widget-backend, `Dockerfile:15` `pnpm backend`) | **the single biggest self-improve blocker** — every approve/promote/monitor/Approval-Center surface is unreachable |
+| Live-quality measurement (real signal, not operator-attested) | BUILD | pending — `control-plane/src/champion-promoter.ts:216-228` | monitor/rollback react to a **REPORTED/attested** signal today, not a measured one (the caller supplies `observed`) |
+| Verify the cross-family (Claude) gating judge live | INFRA(keys)+BUILD | in_progress — `judge/src/anthropic-api.ts:3` | **UNVERIFIED-LIVE** until run with a key present; CI dormant |
 | Wire the eval/shadow gates into CI (currently manual) | BUILD | in_progress — `.github/workflows/eval-quality.yml` | so gates run automatically |
-| ADR-0014 auto-optimize enablement | BIZ/LEGAL | pending — ADR still Proposed, reviewers BLOCK, baseline ~0.55 < floor | keep dormant until the quality baseline clears the floor |
+| ADR-0014 auto-optimize enablement | BIZ/LEGAL | pending — orchestrator built+merged but **DORMANT and deployed nowhere**; ADR still Proposed, reviewers BLOCK, baseline ~0.55 < floor | human-only enablement; keep dormant until the quality baseline clears the floor |
 
 Governance guardrail (all phases): prod is human-promoted; the control-plane deploy and any auto-optimize
 enablement are governance-touching (§3) and stay human-owned. Nothing here auto-ships to shoppers.
@@ -125,17 +137,17 @@ enablement are governance-touching (§3) and stay human-owned. Nothing here auto
 ## Critical bottleneck + recommended first move
 
 **The launch critical path bottleneck is the storefront-embed chain (Phase 1, #1→2→3→4)** — it is the only
-thing that gets the agent onto a real store, and it is mostly [BUILD] gated by one [INFRA] step (registering
-the app). The self-improve control-plane deploy is high-value but *parallel* — it does not gate a first
-merchant launch.
+thing that gets the agent onto a real store. As of 2026-08-16 the [BUILD] for #2/#3/#4 has **merged to `main`
+(dark)**, so the bottleneck is now the remaining **[INFRA]/config** steps: register the app, stand up prod, and
+flip the read-back flag. The self-improve control-plane deploy is high-value but *parallel* — it does not gate a
+first merchant launch.
 
-**Recommended first work item:** the **embeddable widget (Phase 1 #4)** — it is pure [BUILD], has no
-dependency except the app registration decision, converts the existing demo page into a real `w.js` loader +
-snippet, and is the visible proof a merchant can mount the agent. Design it first (embed mechanism: iframe vs
-shadow-DOM inline script; the embed-key flow), then build test-first. **Status update (2026-08-10): code
-done on `feat/embeddable-widget` (unmerged)** — see Phase 1 #4 above; once merged, only the [INFRA] step
-(`shopify app deploy` + hand-setting the real host) remains.
+**Recommended first work item:** now that the embed + read-back are merged (dark), the first move is the
+[INFRA] chain, not more [BUILD] — **register the Shopify app** (item 1, human), stand up a **prod host**
+(items 5/6), and set **`MERCHANT_CRED_READBACK_ENABLED`** in prod (item 2) so a self-installed merchant grounds
+on their own catalog. **Status update (2026-08-16): the embed is merged to `main` (dark)** — see Phase 1 #4
+above; only the [INFRA] step (`shopify app deploy` + hand-setting the real host) and the read-back flag remain.
 
-Sequence to a pilot: **decide pilot scope (5) → register the app (1, human) → build the install/token chain
-(2,3) + the embed (4) in parallel → stand up prod (5,6) → soft-launch to the design partner → the pilot
-becomes the canary for Phase-2 promotions.**
+Sequence to a pilot (the install/token chain (2,3) and the embed (4) are now **merged, dark**): **decide pilot
+scope (5) → register the app (1, human) → stand up prod (5,6) and set the read-back flag (2) → soft-launch to
+the design partner → the pilot becomes the canary for Phase-2 promotions.**
