@@ -186,8 +186,11 @@ export const MAX_INDEX_CATALOG_PAGES = 200;
  * widget-brain/src or widget-backend/src). At the per-product bounds this adapter enforces, 1000 products
  * is already a six-figure-character system prompt on every turn — the cost/latency ceiling arrives before
  * this one does. A merchant above 1000 SKUs does not need a bigger fetch; they need relevance retrieval
- * (fetch → index → retrieve top-K), which is a separate work item. Raising this number without that work
- * would quietly move the failure from "loud" to "unaffordable".
+ * (fetch → index → retrieve top-K) — S2 (`docs/superpowers/specs/2026-08-15-s2-serving-unlock-design.md`)
+ * built exactly that path (`catalog-index.ts`'s offline index job + `catalog-retriever.ts` + `brain.ts`'s
+ * `retrieveViaShell`), behind `catalogRetrievalEnabled` (dark; enabling it to serve is a separate,
+ * still-open HITL §5 promotion). This constant stays the SERVING fetch's cap either way: raising it
+ * without retrieval would quietly move the failure from "loud" to "unaffordable".
  */
 export const MAX_CATALOG_PRODUCTS = STOREFRONT_PAGE_SIZE * MAX_CATALOG_PAGES;
 

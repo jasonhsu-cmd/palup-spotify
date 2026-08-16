@@ -32,10 +32,12 @@ import {
 // SHOPPER_AUTH, which are equally governed and equally env-read in that same composition root.
 //
 // WHAT IT DOES. Given a shopper's turn, it embeds that turn as a QUERY through the `model` port, scores
-// it against the tenant's own catalog corpus through the `vector` port, and returns PRODUCT IDS. It never
-// returns text: the corpus deliberately stores ids only ("a relevance index over product IDS, not a
-// second copy of the catalog" — catalog-index.ts), so a stale price is physically unquotable from it.
-// Resolving those ids back to LIVE catalog entries is the brain's job, against the live GroundingContext.
+// it against the tenant's own catalog corpus through the `vector` port, and returns each hit's PRODUCT ID
+// plus the corpus's own render `metadata` (title/variantId, S2) and the corpus's total product count
+// (`corpusProductCount`, for the "N of M" line). It never returns price or description: the corpus
+// deliberately stores no such text ("a relevance index over product IDS, not a second copy of the
+// catalog" — catalog-index.ts), so a stale price is physically unquotable from it — that overlay comes
+// from the live `ProductFactsPort`, by id, at serve time (brain.ts's `retrieveViaShell`).
 //
 // WHAT IT REFUSES. Every refusal below has the same shape: rather than rank against a corpus it cannot
 // trust, it THROWS, and the brain falls back to the full catalog (a worse prompt, never a wrong answer).

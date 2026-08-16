@@ -638,10 +638,10 @@ const EXIT_INTENT_PROMPT =
  * THE NUMBER OF CANDIDATES retrieval puts in the prompt, and the argument for it.
  *
  * The constraint it answers: `systemPrompt` renders EVERY product of the GroundingContext into EVERY
- * turn with no count cap — #180's finding, and the reason #190 capped the INDEX at 1000 products
- * (`MAX_INDEXED_PRODUCTS`) rather than let the serving path try to carry more. Retrieval is the fix for
- * the serving side, so k has to be small enough that a 1000-product merchant's prompt stops depending on
- * catalog size at all.
+ * turn with no count cap — #180's finding, and the reason #190 originally capped the INDEX at 1000
+ * products rather than let the serving path try to carry more. S2 decoupled that: `MAX_INDEXED_PRODUCTS`
+ * is now 50000 and serving retrieves top-K instead of rendering the whole corpus, so k has to be small
+ * enough that a merchant's prompt stops depending on catalog size at all, at any ceiling.
  *
  * Why 12 specifically, in the two directions that bound it:
  *  • BIG ENOUGH. The widest single honest answer this catalog shape produces names a handful of items —
@@ -657,10 +657,12 @@ const EXIT_INTENT_PROMPT =
  * and the eval gate, which is the promotion step, not this PR. It is a starting point chosen from the
  * two bounds above and overridable per deployment.
  *
- * Interaction with the vector store's own limits: a corpus is at most `MAX_INDEXED_PRODUCTS` (1000)
- * records and `PostgresVectorStore.query` scans up to `MAX_SCAN_ROWS` (5000, in ID ORDER) before ranking
- * — so the whole corpus is always scanned and that truncation never engages, and k is the slice taken
- * afterwards. Pinned against the real constants in widget-backend's catalog-retriever.test.ts.
+ * Interaction with the vector store's own limits: a corpus is at most `MAX_INDEXED_PRODUCTS` (50000)
+ * records. The legacy brute-force `PostgresVectorStore.query` path scans up to `MAX_SCAN_ROWS` (5000, in
+ * ID ORDER) before ranking, so a corpus above 5000 on that store silently truncates before k is ever
+ * applied — serving a corpus that large requires `VECTOR_ANN=true` (S1's pgvector HNSW store), which does
+ * not do an id-ordered scan; avoiding exactly that truncation is what `VECTOR_ANN` is for (S2 spec
+ * §D-backend / §6). Pinned against the real constants in widget-backend's catalog-retriever.test.ts.
  */
 export const DEFAULT_CATALOG_RETRIEVAL_K = 12;
 

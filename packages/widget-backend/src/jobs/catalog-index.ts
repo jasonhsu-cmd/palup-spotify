@@ -496,6 +496,15 @@ async function indexOneTenant(
   // Enumerate the existing corpus. `k` is one MORE than the ceiling: hitting it means the namespace holds
   // more than we could have written, so one query cannot prove what is in there and reconciling stale
   // records would be guesswork (the `enumerateSubjectOrFail` discipline, widget-memory/src/erasure.ts).
+  //
+  // S2/T4 FINDING (parked to S3, not fixed here — see S2 spec's "Promotion preconditions"): this
+  // `{text: ""}` enumerate is neither scale- nor ANN-safe. On the legacy brute-force store it silently
+  // caps at `MAX_SCAN_ROWS` (5000) — a corpus above that reconciles against a truncated view without
+  // erroring. On the S1 `VECTOR_ANN=true` pgvector store it THROWS (`PgVectorTextQueryUnsupported`: that
+  // adapter is vector-query-only, per `pgvector-store.ts`). So a >5000-SKU pgvector index must not be run
+  // through this job until S3 reworks this reconcile into something ANN-compatible (e.g. a paged/id-diff
+  // approach). This is why the S2 E2E (`serving-unlock-e2e.test.ts`) exercises the in-memory store, not
+  // pgvector.
   const probe = maxProducts + 1;
   const existing = await deps.vector.query(ns, { text: "", k: probe });
   if (existing.length >= probe) {
@@ -655,10 +664,14 @@ async function indexOneTenant(
   const byId = new Map(catalog.products.map((p) => [p.id, p]));
   const records: VectorRecord[] = toEmbed.map((p) => {
     const src = byId.get(p.productId);
-    // `title` is guaranteed non-empty by planProducts (a product with no indexable text already refused
-    // the whole catalog upstream), so `src?.title` is defensive, not expected to trigger. `variantId` is
-    // OPTIONAL on `Product` (grounding-port.ts) — absent when the source reports no purchasable variant —
-    // and is carried only when present so the metadata never stores a literal `undefined`.
+    // Only the COMBINED embed text (title+tags+description) is guaranteed non-empty by planProducts (a
+    // product where all three are empty already refused the whole catalog upstream) — `title` ALONE can
+    // still be empty (e.g. an untitled product with only tags/description). Such a row gets `title: ""` in
+    // metadata here, on purpose, rather than being dropped at index time: the drop happens at RENDER time
+    // instead, where `retrieveViaShell` (brain.ts) treats a hit with no render title as unusable and skips
+    // it rather than render a blank card. `variantId` is OPTIONAL on `Product` (grounding-port.ts) — absent
+    // when the source reports no purchasable variant — and is carried only when present so the metadata
+    // never stores a literal `undefined`.
     return {
       id: p.recordId,
       vector: vectors.get(p.recordId)!,
