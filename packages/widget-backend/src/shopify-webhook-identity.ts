@@ -361,10 +361,8 @@ export function customerIdOf(body: Record<string, unknown>): string | undefined 
  * PRECISION. Shopify's product webhook body carries the id in TWO fields: the numeric `id` (a JSON
  * number, so it is already lossy for a large id — `JSON.parse`/the JS number type both round any integer
  * beyond `Number.MAX_SAFE_INTEGER` before this function ever sees it) and `admin_graphql_api_id`, a GID
- * STRING `"gid://shopify/Product/<id>"` — a string is never subject to float64 rounding. Per the
- * reviewer's finding: `admin_graphql_api_id` has been present in webhook payloads since 2019-07-01
- * (unverified by me against a primary source this session — stated here as the reviewer's claim, not an
- * independently confirmed fact). So the GID string is read FIRST, as the precision-safe source; the
+ * STRING `"gid://shopify/Product/<id>"` — a string is never subject to float64 rounding. The GID string
+ * is therefore read FIRST, as the precision-safe source; the
  * numeric `id` field is a LAST-RESORT FALLBACK only, for a body that somehow lacks the GID, and it keeps
  * the exact same safe-integer refusal `customerIdOf` uses (never silently rounds a value that has already
  * lost precision).
