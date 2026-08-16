@@ -111,6 +111,15 @@ export function catalogRecordId(productId: string): string {
 }
 
 /**
+ * FIX 3 (security C2, final review) — the SAME shape `shopify-webhook-identity.ts`'s `productIdOf` validates
+ * at the producer. Re-declared (not imported) so this consumer-side check does not depend on the producer
+ * ever having validated correctly — defense-in-depth at the `reconcileProducts` boundary: a malformed or
+ * future producer must not be able to feed an arbitrary string into a record key or a GraphQL `nodes(ids:)`
+ * id.
+ */
+export const PRODUCT_GID_RE = /^gid:\/\/shopify\/Product\/\d+$/;
+
+/**
  * THE INDEX CEILING — the largest catalog this job will index. S2 raised it to the full ADR-0020 ~50k
  * design ceiling: batch embedding (Task 5) makes it tractable, and the serving path no longer renders the
  * whole catalog per turn (it retrieves top-K via getShell), so this is DECOUPLED from serving's own fetch
@@ -840,17 +849,24 @@ export async function reconcileProducts(
   if (halted) return { tenantId, outcome: halted };
   if (!canEmbed(deps.model)) return { tenantId, outcome: "no-embed-capability" };
 
+  // FIX 3 (security C2, final review) — re-validate the GID shape HERE, at the consumer boundary, rather
+  // than trusting that whatever queued this batch already checked it (the producer does — productIdOf's
+  // `^gid://shopify/Product/\d+$` — but a future/malformed producer must not be able to feed an arbitrary
+  // string into `catalogRecordId` or `deps.catalogById`'s `nodes(ids:)` call). Malformed ids are simply
+  // dropped; well-formed ids in the same batch are still processed.
+  const validProductIds = productIds.filter((id) => PRODUCT_GID_RE.test(id));
+
   const manifest = await deps.store.get<CatalogManifest>(ctx, MANIFEST_COLLECTION, MANIFEST_KEY);
   // No manifest / no purpose / no by-id source / uninformative id list ⇒ do the safe whole-catalog reconcile.
-  if (!manifest || !manifest.purpose || !deps.catalogById || productIds.length === 0) {
+  if (!manifest || !manifest.purpose || !deps.catalogById || validProductIds.length === 0) {
     const [report] = await runCatalogIndex(deps, [tenantId], {});
     return report!;
   }
 
-  const recordIds = productIds.map(catalogRecordId);
+  const recordIds = validProductIds.map(catalogRecordId);
   const requested = new Set(recordIds);
 
-  const fetched = await deps.catalogById(tenantId, productIds);
+  const fetched = await deps.catalogById(tenantId, validProductIds);
   if (fetched === undefined) return { tenantId, outcome: "not-configured" };
   const plan = planProducts(fetched); // reuses the empty-text/duplicate refusals
 
@@ -860,6 +876,29 @@ export async function reconcileProducts(
 
   const priorChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
   const ledger = await readCorpusLedger(deps.store, tenantId);
+
+  // FIX 2 (final review) — the targeted path must not silently grow a corpus past its ceiling one webhook at
+  // a time (a `products/create` storm could otherwise push a tenant over `MAX_INDEXED_PRODUCTS` a SKU at a
+  // time, after which the hourly full backstop hits `ceiling-exceeded` and stops maintaining that tenant —
+  // #180's "a truncated corpus becomes a confident false 'we don't carry that'" rule). Compute what the
+  // ledger size WOULD BE after this reconcile (existing ledger + refreshed/new ids, minus pruned stale ids —
+  // the same arithmetic `newLedger` below performs) BEFORE any embed/upsert spend, and refuse loudly, same
+  // as the full path's ceiling check (indexOneTenant, above), if it would cross the ceiling.
+  const ceiling = manifest.ceiling ?? MAX_INDEXED_PRODUCTS;
+  const prospective = new Set(ledger.keys());
+  for (const p of plan) prospective.add(p.recordId);
+  for (const id of stale) prospective.delete(id);
+  if (prospective.size > ceiling) {
+    return {
+      tenantId,
+      outcome: "ceiling-exceeded",
+      products: prospective.size,
+      reason:
+        `targeted reconcile would grow the corpus to ${prospective.size} products, above this tenant's ` +
+        `ceiling of ${ceiling} — refusing to index part of it (a truncated corpus becomes a confident false ` +
+        "'we don't carry that'); the hourly full backstop will report the same refusal until the ceiling is raised",
+    };
+  }
 
   // Only re-embed the ones whose content actually changed (content-hash optimization, same as the full path).
   const toEmbed = plan.filter((p) => ledger.get(p.recordId) !== p.hash);

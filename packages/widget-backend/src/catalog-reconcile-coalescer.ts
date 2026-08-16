@@ -63,7 +63,10 @@ export function createReconcileCoalescer(
       if (req.reason === "product") for (const id of req.productIds ?? []) p.ids.add(id);
       // reason === "inventory" contributes nothing to the fetch set and does not force a full reconcile.
       if (p.ids.size > maxIds) p.forceFull = true;
-      if (!p.timer) p.timer = setTimeout(() => void runFlush(tenantId), windowMs);
+      // FIX 4 (final review, #5) — `unref()` so a pending coalesce window can never hold the event loop
+      // open by itself; a graceful shutdown's `onClose` hook (server.ts) calls `flush()` explicitly, which
+      // is the actual drain path, not this timer surviving to fire.
+      if (!p.timer) p.timer = setTimeout(() => void runFlush(tenantId), windowMs).unref();
     },
     async flush(tenantId) {
       if (tenantId) {

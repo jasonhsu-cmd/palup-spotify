@@ -1137,6 +1137,13 @@ export async function buildServer(opts?: {
         subscribeCatalogReconcile(catalogQueue, async (tenantId, o) => {
           coalescer.enqueue(tenantId, { ...(o?.productIds ? { productIds: o.productIds } : {}), reason: o?.reason ?? "full" });
         });
+        // FIX 4 (final review, #5) — drain any still-pending coalesce window on shutdown, so a deploy/restart
+        // landing mid-window does not silently lose the targeted ids it was about to reconcile. The
+        // per-window timer is `unref()`d (catalog-reconcile-coalescer.ts) so it never holds the process
+        // open by itself; this hook is the actual drain path on a graceful `app.close()`.
+        app.addHook("onClose", async () => {
+          await coalescer.flush();
+        });
         console.warn(
           "[config] CATALOG_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): deliveries COALESCE per " +
             `tenant over ${COALESCE_MS}ms then reconcile once. Set PUBSUB_CATALOG_TOPIC + PUBSUB_PUSH_SERVICE_ACCOUNT + ` +

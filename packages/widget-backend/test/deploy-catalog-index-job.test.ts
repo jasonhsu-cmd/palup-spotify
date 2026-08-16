@@ -13,7 +13,7 @@ const md = readFileSync(DEPLOY, "utf8");
 
 const REQUIRED_LINES: Array<[fragment: string, why: string]> = [
   ["gcloud run jobs deploy palup-catalog-index", "the Cloud Run Job that runs the backstop reconcile"],
-  ["--command pnpm --args index", "overrides the image CMD to run the catalog index CLI"],
+  ["--command pnpm --args catalog:index", "overrides the image CMD to run the catalog index CLI"],
   ["--set-cloudsql-instances palup-jason:us-central1:palup-staging", "the same Cloud SQL the backend uses (else a per-process store that dies)"],
   ["DATABASE_URL=palup-staging-database-url:latest", "the durable store secret"],
   ["gcloud iam service-accounts create palup-catalog-index-invoker", "the least-privilege invoker SA"],

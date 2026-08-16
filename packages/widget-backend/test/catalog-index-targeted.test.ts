@@ -105,4 +105,74 @@ describe("S3 §C — reconcileProducts touches ONLY the changed set", () => {
     expect(r.products).toBe(3); // the whole catalog, not just B
     expect(catalogById).not.toHaveBeenCalled();
   });
+
+  it("FIX 2 (final review) — a targeted reconcile that would push the corpus past the ceiling refuses, and upserts nothing", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+    // Build a 2-product corpus at a ceiling of 2 (manifest.ceiling === 2, S3's `newLedger`-arithmetic mirror).
+    await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B]) }, ["acme"], { maxProducts: 2 });
+
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    // A products/create webhook for a brand-new SKU — the targeted path's `catalogById` returns it.
+    const catalogById: CatalogByIdSource = async () => [C];
+    const r = await reconcileProducts({ store, vector, model, catalog: fullCatalog([A, B]), catalogById }, "acme", [C.id], { reason: "product" });
+
+    expect(r.outcome).toBe("ceiling-exceeded");
+    expect(upsertSpy).not.toHaveBeenCalled();
+    const ledger = await readCorpusLedger(store, "acme");
+    expect(ledger.size).toBe(2); // unchanged — C was never written
+    expect(ledger.has(catalogRecordId(C.id))).toBe(false);
+  });
+
+  it("FIX 3 (security C2, final review) — drops a malformed product id at the reconcile boundary; a well-formed id in the same batch still processes", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+    await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B, C]) }, ["acme"]);
+
+    const upsertSpy = vi.spyOn(vector, "upsert");
+    const Bx = P(B.id, "beta-updated", "$12");
+    const catalogById = vi.fn(async (_t: string, ids: string[]) => {
+      // The malformed id must never reach the by-id source — only the well-formed GID is asked for.
+      expect(ids).toEqual([B.id]);
+      return [Bx];
+    });
+    const malformed = "not-a-gid; drop table products;--";
+
+    const r = await reconcileProducts(
+      { store, vector, model, catalog: fullCatalog([A, Bx, C]), catalogById },
+      "acme",
+      [malformed, B.id],
+      { reason: "product" },
+    );
+
+    expect(r.outcome).toBe("indexed");
+    const upsertedIds = upsertSpy.mock.calls.flatMap(([, recs]) => recs.map((x) => x.id));
+    expect(upsertedIds).toEqual([catalogRecordId(B.id)]);
+    // The malformed id built no record key — the ledger names only real products.
+    const ledger = await readCorpusLedger(store, "acme");
+    expect(ledger.has(catalogRecordId(malformed))).toBe(false);
+  });
+
+  it("FIX 3 (security C2, final review) — a batch of ONLY malformed ids falls back to the safe whole-catalog reconcile", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+    await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B, C]) }, ["acme"]);
+    const catalogById = vi.fn(async () => [B]);
+
+    const r = await reconcileProducts(
+      { store, vector, model, catalog: fullCatalog([A, B, C]), catalogById },
+      "acme",
+      ["not-a-gid", "also-not-a-gid"],
+      { reason: "product" },
+    );
+
+    // The fallback runs the SAFE whole-catalog path; nothing actually changed since the initial index, so
+    // it reports "unchanged" rather than "indexed" — the point is that it fell back at all, not the outcome.
+    expect(r.outcome).toBe("unchanged");
+    expect(r.products).toBe(3); // the whole catalog — never a partial reconcile off garbage ids
+    expect(catalogById).not.toHaveBeenCalled();
+  });
 });
