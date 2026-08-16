@@ -32,7 +32,7 @@ import {
   createInMemoryQueue,
 } from "@palup/platform-ports";
 import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -583,7 +583,10 @@ export async function buildServer(opts?: {
   // that it was green having executed neither, which is why this wiring waited for it.
   //
   // Turning any of these ON in a real environment remains a human promotion decision (HITL-POLICY §5).
-  const CATALOG_RETRIEVAL = process.env.CATALOG_RETRIEVAL === "true";
+  // S4 §B — the process-global CATALOG_RETRIEVAL env flag is RETIRED (was here). Enablement is now a
+  // PER-TENANT, per-turn decision resolved from the two-gate registry (catalogRetrievalEnabledFor,
+  // below in the /chat handler) — see catalog-retrieval-enablement.ts. `CATALOG_RETRIEVAL_K` is still a
+  // deploy-time knob (how many candidates to ask for), unrelated to whether retrieval runs at all.
   const CATALOG_RETRIEVAL_K = posInt("CATALOG_RETRIEVAL_K", DEFAULT_CATALOG_RETRIEVAL_K);
   const PRODUCT_CITATIONS = process.env.PRODUCT_CITATIONS === "true";
   const PRODUCT_CARDS = process.env.PRODUCT_CARDS === "true";
@@ -616,18 +619,17 @@ export async function buildServer(opts?: {
   if (PRODUCT_CARDS && !PRODUCT_CITATIONS) {
     console.warn("[config] PRODUCT_CARDS=true has no effect without PRODUCT_CITATIONS=true (E3 attaches cards to the product ids E2 cites) — no cards will be served.");
   }
-  // E1 — the query side of the catalog corpus, constructed ONLY when the flag is on, so a deployment that
-  // never enables retrieval reads no manifest and spends nothing. Metered under its OWN agentType,
-  // distinct from the turn's RUNTIME_AGENT_TYPE: this is per-shopper-turn EMBEDDING spend while the turn
-  // itself is generation, and a cost review must be able to tell them apart (ADR-0013, and the explicit
-  // requirement in catalog-retriever.ts's COST + AUDIT note that the composition root must do this).
-  const catalogRetriever = CATALOG_RETRIEVAL
-    ? createCatalogRetriever({
-        store,
-        vector: vectorPort,
-        model: createMeteringModelPort(activeModelPort, telemetry, { agentType: CATALOG_RETRIEVAL_AGENT_TYPE }),
-      })
-    : undefined;
+  // S4 §B — the retriever is constructed UNCONDITIONALLY (the env gate is retired). It reads no manifest
+  // and spends nothing until a turn actually retrieves, which only happens when the per-tenant registry
+  // enables it (resolved per-request below). Metered under its OWN agentType, distinct from the turn's
+  // RUNTIME_AGENT_TYPE: this is per-shopper-turn EMBEDDING spend while the turn itself is generation, and
+  // a cost review must be able to tell them apart (ADR-0013, and the explicit requirement in
+  // catalog-retriever.ts's COST + AUDIT note that the composition root must do this).
+  const catalogRetriever = createCatalogRetriever({
+    store,
+    vector: vectorPort,
+    model: createMeteringModelPort(activeModelPort, telemetry, { agentType: CATALOG_RETRIEVAL_AGENT_TYPE }),
+  });
   // T1 phase 2 — the guard classifier's model port, metered under its OWN agentType so its per-turn
   // classification spend is distinguishable from generation/embedding (ADR-0013). Constructed ONLY when
   // SERVER_GUARD_SIGNALS is on, so a deployment that never enables it spends nothing.
@@ -658,7 +660,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ CATALOG_RETRIEVAL, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK })
+  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -689,9 +691,12 @@ export async function buildServer(opts?: {
         // wiring bug of the exact kind this call site just had. Wiring them is a separate decision under
         // their own ADR — not this change's to make.
         /* dispositionStyle */ false, /* dispositionBehavioral */ false, /* dispositionClassifier */ false,
-        // Positions 11–16 — Wave 4. `catalogRetriever` is `undefined` unless CATALOG_RETRIEVAL is set, so
-        // the retrieval rung has nothing to call and falls back to the full catalog exactly as before.
-        catalogRetriever, CATALOG_RETRIEVAL, CATALOG_RETRIEVAL_K, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS,
+        // Positions 11–16 — Wave 4. `catalogRetriever` is now built unconditionally (S4 §B); position 12
+        // (`catalogRetrievalEnabled`) is the constructor DEFAULT only — it is always `false` here because
+        // enablement is now a PER-TURN, per-tenant signal (`signals.catalogRetrievalEnabled`, resolved
+        // per-request below from the two-gate registry) that the brain reads at decide()-time, not a
+        // construction-time boolean baked into this cached brain.
+        catalogRetriever, /* catalogRetrievalEnabled */ false, CATALOG_RETRIEVAL_K, PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS,
         // Position 17 — T1 SERVER_GUARD_SIGNALS. The brain consults signals.serverSafetyClass/serverInjection
         // (populated per-turn below when this is on) alongside its keyword floor, most-conservative-wins.
         SERVER_GUARD_SIGNALS,
@@ -2115,6 +2120,9 @@ export async function buildServer(opts?: {
       // Deliberately a separate registry from `kill`: a kill halts and hands off, while at cap the shopper
       // must keep being served. See state-postgres/src/cost-cap-registry.ts.
       const costCap = await matchedCostCap(store, { tenantId });
+      // S4 §B — per-tenant CATALOG_RETRIEVAL, resolved from the two-gate registry on the SAME shared store,
+      // so a `pnpm catalog:enable` flip propagates to every serving instance. Default OFF for everyone.
+      const catalogRetrievalEnabled = await catalogRetrievalEnabledFor(store, tenantId);
       // PR-11a (ADR-0015 T12; ADR-0019 task 4) — look up this subject's server-recorded memory-consent
       // BEFORE deriving signals, keyed on `memorySubject` — the SAME server-derived subject
       // deriveServingSignals now uses (the verified x-guest-token's anonId or the shopper's acct: id, NOT
@@ -2275,6 +2283,7 @@ export async function buildServer(opts?: {
         tenantId,
         kill: Boolean(kill),
         atCap: Boolean(costCap),
+        catalogRetrievalEnabled,
         // T1 — server-authored guard signals (undefined ⇒ deriveServingSignals omits the keys, so the
         // flag-off path stays byte-identical). `safetyClass` is undefined when the classifier said "none".
         serverSafetyClass: guardSignals?.safetyClass,

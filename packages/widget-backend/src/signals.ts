@@ -86,6 +86,11 @@ export interface ServingSignalContext {
    * merchant's agent, and a merchant's storefront must not be able to either.
    */
   atCap?: boolean;
+  /**
+   * S4 §B — whether CATALOG_RETRIEVAL is enabled for this tenant this turn (from the two-gate registry,
+   * server-side via `catalogRetrievalEnabledFor`). NEVER client-set (rebuilt here, like kill/atCap).
+   */
+  catalogRetrievalEnabled?: boolean;
   /** Merchant/geo jurisdiction (server config). */
   region: NonNullable<Signals["region"]>;
   /** Merchant "discuss competitors" mode (merchant policy). */
@@ -209,6 +214,10 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // Same shape and same trust rule as `kill` directly above: omitted unless the SERVER says so, so a
     // client-supplied `atCap` in the request body is ignored exactly like a client-supplied `kill`.
     atCap: ctx.atCap ? true : undefined,
+    // S4 §B — SPREAD, so the key is ABSENT (not present-and-undefined) whenever the tenant is not
+    // enabled — same discipline as `cartItems` above, byte-identical to pre-S4 for every tenant while
+    // both KV gates default OFF.
+    ...(ctx.catalogRetrievalEnabled ? { catalogRetrievalEnabled: true } : {}),
     // Quiet-hours clock is SERVER-derived (ctx), never the client's r.localHour. Only a valid 0–23
     // integer is honored; anything else ⇒ omitted ⇒ quiet-hours suppression simply does not apply.
     localHour:
