@@ -2114,19 +2114,24 @@ export async function buildServer(opts?: {
       //   • proactivityLevel — an autonomy lever ⇒ omitted so the brain uses the merchant policy default.
       //   • openIssues / safetyLatched — sourced ONLY from persisted session state, never client-injected.
       //   • kill — armed state comes from the operator registry (server); the shopper can neither arm nor bypass it.
-      const kill = await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE });
-      // §8a inv 14 basic-mode-at-cap — read alongside the kill check, from the SAME shared store, so a cap
-      // set by the control plane (where spend is actually measured) propagates to every serving instance.
-      // Deliberately a separate registry from `kill`: a kill halts and hands off, while at cap the shopper
-      // must keep being served. See state-postgres/src/cost-cap-registry.ts.
-      const costCap = await matchedCostCap(store, { tenantId });
+      // These four reads are independent (no read depends on another's result) and hit the SAME shared
+      // store, so they are fired concurrently rather than paid sequentially every turn (incl. dark
+      // tenants where retrieval is off). Values and downstream use are unchanged — only the await shape.
+      // §8a inv 14 basic-mode-at-cap: a cap set by the control plane (where spend is actually measured)
+      // propagates to every serving instance. Deliberately a separate registry from `kill`: a kill halts
+      // and hands off, while at cap the shopper must keep being served. See
+      // state-postgres/src/cost-cap-registry.ts.
       // S4 §B — per-tenant CATALOG_RETRIEVAL, resolved from the two-gate registry on the SAME shared store,
       // so a `pnpm catalog:enable` flip propagates to every serving instance. Default OFF for everyone.
-      const catalogRetrievalEnabled = await catalogRetrievalEnabledFor(store, tenantId);
       // S4 §C — the retrieval-scoped kill, read alongside the shopper kill. `CATALOG_RETRIEVAL_AGENT_TYPE`
       // ("catalog-retrieval") is the SAME agentType the retriever meters under (server.ts retriever above).
       // matchedKill handles precedence global>tenant>agent. This DEGRADES retrieval; it does not halt.
-      const retrievalKill = await matchedKill(store, { tenantId, agentType: CATALOG_RETRIEVAL_AGENT_TYPE });
+      const [kill, costCap, catalogRetrievalEnabled, retrievalKill] = await Promise.all([
+        matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE }),
+        matchedCostCap(store, { tenantId }),
+        catalogRetrievalEnabledFor(store, tenantId),
+        matchedKill(store, { tenantId, agentType: CATALOG_RETRIEVAL_AGENT_TYPE }),
+      ]);
       // PR-11a (ADR-0015 T12; ADR-0019 task 4) — look up this subject's server-recorded memory-consent
       // BEFORE deriving signals, keyed on `memorySubject` — the SAME server-derived subject
       // deriveServingSignals now uses (the verified x-guest-token's anonId or the shopper's acct: id, NOT

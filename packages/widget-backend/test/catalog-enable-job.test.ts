@@ -22,7 +22,9 @@ describe("catalog-enable — argv parsing", () => {
     expect(() => parseCatalogEnableArgv(["--on"])).toThrow(CatalogEnableArgsError);
   });
   it("refuses an unparseable scope", () => {
-    expect(() => parseCatalogEnableArgv(["--scope", "everyone", "--on"])).toThrow(/global|tenant:/);
+    // catalog-enable's scope grammar is `platform|tenant:<id>` — NOT kill-switch/cost-cap's `global|tenant:ID`.
+    // This regex was copied from that sibling grammar; assert the one this CLI actually parses/throws.
+    expect(() => parseCatalogEnableArgv(["--scope", "everyone", "--on"])).toThrow(/platform or tenant:/);
   });
   it("refuses when neither --on nor --off is given, and when both are", () => {
     expect(() => parseCatalogEnableArgv(["--scope", "platform"])).toThrow(CatalogEnableArgsError);

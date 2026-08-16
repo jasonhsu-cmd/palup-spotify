@@ -159,6 +159,21 @@ registry for the scheduled job (still an S4-or-later ops item, documented, not b
   atomic-with-manifest properties S3 established. Test: simulate the interleaving (webhook writes entry X after
   the job's fetch snapshot; the job's reconcile does NOT delete X) + the pre-S4-entry back-compat.
 
+**Residual windows (recorded, not fixed here — same accepted class as S3's):** the `writtenAt`/
+`fetchStartedAt` guard above is bounded and self-healing, not airtight. Two known residual windows:
+  (a) **Cross-process clock skew.** `fetchStartedAt` (the backstop job's clock) and `writtenAt` (the
+  webhook worker's clock) are read from different processes/instances. If their clocks skew by more than
+  the fetch→commit gap, the guard's `writtenAt > fetchStartedAt` comparison can be wrong in either
+  direction, re-opening the delete race it exists to close for that one entry.
+  (b) **Ledger-commit-between-read-and-tx-commit.** If a webhook's ledger write lands in the window
+  between the backstop job's ledger read and its own transaction commit, that webhook's ledger entry is
+  clobbered (overwritten) by the job's commit — but the VECTOR the webhook indexed survives (the job's tx
+  only replaces the ledger row for entries it saw as stale, per the S3·T7 per-id `writtenAt` fix); the next
+  reconcile pass re-embeds that product from a stale ledger view and self-heals.
+Both windows are bounded (closed by the next reconcile pass, not indefinitely) and self-healing (no
+permanently wrong state, only a transient re-embed or a narrowly-missed protection) — the same class of
+residual S3 already accepted for its own concurrency guards, not a new risk category.
+
 ## §G — Testing & governance
 
 ATDD; `env -u GOOGLE_CLOUD_PROJECT`; mock + pgvector-testcontainer; NO real Vertex in CI (fake embed;

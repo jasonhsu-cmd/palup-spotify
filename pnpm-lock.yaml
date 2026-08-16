@@ -71,6 +71,9 @@ importers:
       '@palup/platform-ports':
         specifier: workspace:*
         version: link:../platform-ports
+      '@palup/state-postgres':
+        specifier: workspace:*
+        version: link:../state-postgres
       '@palup/widget-backend':
         specifier: workspace:*
         version: link:../widget-backend

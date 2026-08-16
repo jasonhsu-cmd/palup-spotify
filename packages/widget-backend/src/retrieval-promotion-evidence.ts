@@ -12,12 +12,21 @@ export interface RetrievalPromotionEvidence {
   model: string;
   dimension: number;
   corpusSize: number;
-  /** Fraction 0..1 of eval cases whose relevant product appeared in top-k (recall@k). */
-  recallAtK: number;
-  /** Fraction 0..1 of eval cases with NO clearly-irrelevant product in top-k. */
-  noWrongProduct: number;
-  /** Shadow violation counts when narrowing the catalog (zero-tolerance safety bars). */
-  shadow: { fabricated: number; stale: number; missingProduct: number };
+  /** Fraction 0..1 of eval cases whose relevant product appeared in top-k (recall@k). `null` when this
+   *  artifact was written by a run that does not measure recall (`pnpm shadow:retrieval` — see its own
+   *  artifact for this tenant's `pnpm eval:retrieval` evidence instead). */
+  recallAtK: number | null;
+  /** Fraction 0..1 of eval cases with NO clearly-irrelevant product in top-k. Same `null` convention as
+   *  `recallAtK`. */
+  noWrongProduct: number | null;
+  /** Shadow violation counts when narrowing the catalog (zero-tolerance safety bars). `null` when this
+   *  artifact was written by `pnpm eval:retrieval` (which does not run the shadow harness) — see the
+   *  companion `pnpm shadow:retrieval` artifact for this tenant's shadow result. When present, it is only
+   *  ever `{0,0,0}`: today's shadow harness (`runShadow`/`safetyRegression`) does not categorize a
+   *  violation into fabricated/stale/missing-product — it reports a single pass/fail per case — so an
+   *  evidence artifact is written ONLY on the zero-violation (passing) run, where the all-zero split is
+   *  trivially true regardless of category. A run with violations exits nonzero and writes no artifact. */
+  shadow: { fabricated: number; stale: number; missingProduct: number } | null;
   vectorAnn: boolean;
   /** ISO-8601 timestamp the evidence was produced. */
   at: string;
