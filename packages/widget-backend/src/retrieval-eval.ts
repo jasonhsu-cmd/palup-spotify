@@ -56,6 +56,26 @@ export async function buildIndexedRetriever(
   return { retriever: createCatalogRetriever({ store, vector, model }), tenantId };
 }
 
+/**
+ * S4 §D — a scale-representative synthetic corpus for the promotion eval/shadow run. `n` products with
+ * unique ids and enough token variety that a top-k retriever has real work to do. Used by the operator
+ * runbook (pnpm eval:retrieval at the tenant's scale) and by the pgvector wiring test. A real tenant
+ * catalog can be used instead — this is the deterministic default.
+ */
+export function generateScaleCorpus(n: number): RetrievalProduct[] {
+  const out: RetrievalProduct[] = [];
+  for (let i = 0; i < n; i++) {
+    out.push({
+      id: `gen-${i}`,
+      title: `Product ${i}`,
+      price: `$${(i % 100) + 1}`,
+      description: `synthetic product ${i} in category ${i % 20} with feature ${i % 7}`,
+      tags: [`cat-${i % 20}`, `feat-${i % 7}`],
+    });
+  }
+  return out;
+}
+
 /** Deterministic grade of one query's retrieved top-k against the case's expectations. */
 export function gradeRetrieval(c: RetrievalCase, hits: RetrievedProduct[]): { pass: boolean; fails: string[] } {
   const ids = hits.map((h) => h.productId);

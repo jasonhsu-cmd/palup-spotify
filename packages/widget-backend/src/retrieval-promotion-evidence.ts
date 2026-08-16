@@ -1,0 +1,33 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+// S4 §D — the STRUCTURED, retained record the HITL-POLICY §5 per-tenant promotion requires: a recorded
+// eval+shadow result on a scale-representative corpus, NOT just stdout + an exit code. The operator's
+// real-Vertex-at-scale run (DEPLOY.md runbook) emits one of these before enabling a tenant; the pgvector
+// testcontainer test emits the same shape on the fake-embed path to prove the wiring in CI.
+
+export interface RetrievalPromotionEvidence {
+  tenantId: string;
+  /** Embedding model id the run used (e.g. the Vertex model, or "fake-embed-…" in CI). */
+  model: string;
+  dimension: number;
+  corpusSize: number;
+  /** Fraction 0..1 of eval cases whose relevant product appeared in top-k (recall@k). */
+  recallAtK: number;
+  /** Fraction 0..1 of eval cases with NO clearly-irrelevant product in top-k. */
+  noWrongProduct: number;
+  /** Shadow violation counts when narrowing the catalog (zero-tolerance safety bars). */
+  shadow: { fabricated: number; stale: number; missingProduct: number };
+  vectorAnn: boolean;
+  /** ISO-8601 timestamp the evidence was produced. */
+  at: string;
+}
+
+/** Write the evidence to `reports/retrieval-promotion-evidence-<tenant>-<stamp>.json`; returns the path. */
+export function writeRetrievalEvidence(ev: RetrievalPromotionEvidence, dir = "reports"): string {
+  mkdirSync(dir, { recursive: true });
+  const stamp = ev.at.replace(/[:.]/g, "-");
+  const path = join(dir, `retrieval-promotion-evidence-${ev.tenantId}-${stamp}.json`);
+  writeFileSync(path, JSON.stringify(ev, null, 2));
+  return path;
+}
