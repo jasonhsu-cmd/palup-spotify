@@ -15,7 +15,29 @@ and production behaviour is byte-identical to before the program.
 missing), or **ACCEPT** (a residual risk that must be consciously signed off rather than fixed). An item
 being "in a PR" is *not* met — merged and verified is met.
 
-_Last updated: 2026-08-06. Update the status column in the same PR that closes an item._
+_Last updated: 2026-08-17. Update the status column in the same PR that closes an item._
+
+_**2026-08-17 — RECONCILIATION: the code caught up to the docs; the residual rows below did NOT.**_
+_**What shipped.** ADR-0019 tasks 1–9 (server-issued signed guest identity) are **BUILT and merged to `main`**,
+per-task: #224 (task 1, the token port `guest-token-identity.ts`), #227 (task 3, `POST /widget/guest`
+mint/renew — `server.ts:1305`), #228 (tasks 4+9, derive the guest subject from the VERIFIED token and DROP
+the client-`anonId` fallback — `signals.ts:240-247`), #230 (task 5, revocation — `isGuestRevoked`,
+`server.ts:760`). Consequence: the raw client-`anonId` bearer path the residual rows below describe **no longer
+exists in the recall/write code** — with no verified guest or shopper token, `memorySubject` is `undefined`,
+so there is no recall and no write._
+_**What did NOT ship (correctly).** Task 10 — the B12(b) guest→account carry-over — is **still UNBUILT**:
+`mergeGuestIntoAccount` has no production caller, and it remains gated on the LEGAL question (R2-2 Art-9,
+counsel Q19). `MEMORY_ADR_ACCEPTED` is still `false`._
+_**What this means for a signer — READ BEFORE SIGNING.** The rows below (C1, C8, C9, C10, C14, B12(b), F1)
+were written against the pre-ADR-0019 client-`anonId` posture and are now **stale in mechanism**. In
+particular, C1's 2026-08-04 named-owner decision that ACCEPTED the bearer-`anonId` and REJECTED a server-issued
+credential was **superseded** by ADR-0019 (owner re-accepted 2026-08-06) and by the build above. These rows
+have **NOT** been re-judged here — correcting them is a security + legal + owner task, not a build-agent edit —
+so **they must be re-evaluated against the shipped code before any A4 security sign-off or A7 flip.** This
+banner records the drift; it closes no row and grants no sign-off. (Prepared by a build agent, 2026-08-17;
+needs owner + `security-reviewer` confirmation. NOTE for that review: confirm ADR-0019's own legal gate — the
+R2-2 Art-9 / counsel-Q19 question — was recorded before tasks 1–9 shipped, since ADR-0019's header still reads
+"Nothing built".)_
 
 _**2026-08-06 — §B is now 11 MET of 12.** B4 (retention sweep scheduled daily via Cloud Scheduler, with a
 dedicated least-privilege invoker), B5 (`AUDIT_HMAC_SECRET` provisioned, granted and verified mounted on the
@@ -57,8 +79,9 @@ fails the **F1** attack test by construction. The 2026-08-04 rationale rejected 
 **theft resistance** — correctly, as far as that goes, since the credential shares storage with the id — but
 the property that matters is **claim verification**, i.e. whether the server can establish the id belongs to
 its caller at all. ADR-0019 would **narrow C8 and C10**, mostly close **C1**, and unblock
-**B12(b)**; **C14 stays deferred**. ADR-0019 is **security-cleared + owner-accepted but UNBUILT and gated on
-LEGAL only, so nothing below is closed** — and
+**B12(b)**; **C14 stays deferred**. ADR-0019 is **security-cleared + owner-accepted; tasks 1–9 SHIPPED
+2026-08-17 (see the reconciliation banner near the top), only task 10 (carry-over) remains UNBUILT + gated on
+LEGAL. No row below is auto-closed by that build** — and
 its review found that two of its claimed closures were overstated: **C8 and C10 are NARROWED, not closed**
 (a caller cannot *name* another subject but can still *present* one it holds), and **C9 is not moot** because
 the carry-over is itself an unaudited cross-subject read. A signer accepting C1/C8/C9/C10 today should know a
@@ -116,7 +139,8 @@ writing — silence is not acceptance.
 > wording was corrected by the security review.
 >
 > **The rows below still describe TODAY'S behaviour and are what a signer is accepting right now** —
-> ADR-0019 is **security-cleared + owner-accepted but unbuilt and gated on legal only**, and no decision
+> ADR-0019 is **security-cleared + owner-accepted; tasks 1–9 SHIPPED 2026-08-17 (reconciliation banner up
+> top), task 10 (carry-over) unbuilt + legal-gated**, and no decision
 > closes a row anyway: each of
 > C1/C8/C9/C10 changes only when the code does. It corrects one thing recorded in C1
 > itself: C1 rejected "binding the id to a server-issued credential" by judging it on **theft resistance**,

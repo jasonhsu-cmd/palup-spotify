@@ -28,9 +28,11 @@
   an earlier version of this bullet said it would "close C8, C10, moot C9" — C8/C10 are narrowed rather than
   closed (a caller cannot NAME another subject but can still PRESENT one it holds), and C9 is NOT mooted
   because the carry-over is itself an unaudited cross-subject read.**
-  **Nothing is closed: ADR-0019 is security-cleared + owner-accepted but UNBUILT and gated on LEGAL only
-  (R2-2 Art-9, counsel Q19)**, so the rows in
-  `MEMORY-GO-LIVE-CHECKLIST.md` still record today's behaviour, and **C14 stays deferred**. It must still
+  **Nothing is closed by ADR-0019 yet: it is security-cleared + owner-accepted; tasks 1–9 SHIPPED
+  2026-08-17 (#224/#227/#228/#230 — see `MEMORY-GO-LIVE-CHECKLIST.md` reconciliation banner), but task 10
+  (the carry-over) remains UNBUILT and gated on LEGAL (R2-2 Art-9, counsel Q19)**, so the residual rows in
+  `MEMORY-GO-LIVE-CHECKLIST.md` — written against the pre-ADR-0019 client-`anonId` posture — must be
+  re-evaluated against the shipped code before any sign-off, and **C14 stays deferred**. It must still
   land BEFORE `MEMORY_ADR_ACCEPTED` is flipped: no fact has ever been written, so the switch is free now and
   unfixable-without-trusting-the-client afterwards — which makes resolving the block time-sensitive rather
   than optional.
