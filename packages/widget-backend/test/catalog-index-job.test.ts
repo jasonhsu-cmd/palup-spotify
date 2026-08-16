@@ -40,6 +40,7 @@ import {
   type CatalogManifest,
   type CatalogSource,
 } from "../src/jobs/catalog-index.js";
+import { ledgerChunkKey } from "../src/jobs/catalog-ledger.js";
 
 // C3 — the scheduled/operator-run catalog INDEX job.
 //
@@ -204,31 +205,35 @@ describe("C3 ceiling — the job REFUSES an oversized catalog rather than indexi
     expect(await idsIn(vector, "acme-co")).toEqual(before); // untouched
   });
 
-  it("refuses to reconcile a namespace holding records it did not write (never deletes foreign data)", async () => {
+  it("refuses to reconcile a LEDGER holding an id it did not write (never deletes foreign data)", async () => {
+    // S3 §B: the foreign-guard moved from a re-derived check over enumerated vector ids to being
+    // INTRINSIC to `readCorpusLedger` (catalog-ledger.ts) — the ledger only ever holds `product:` ids
+    // this job wrote, so a corrupted chunk (never something reconcile itself could produce) is what now
+    // stands in for "a namespace holding records it did not write". Seeding the VECTOR store directly (the
+    // old way) would no longer be caught: reconcile never reads the vector store to discover ids.
     const h = harness([product(1)]);
     await runCatalogIndex(h, [h.tenantId]);
-    await h.vector.upsert(catalogNamespace(h.tenantId), [{ id: "someone-elses-record", vector: [1, 0, 0, 0] }]);
+    await h.store.put({ tenantId: h.tenantId }, MANIFEST_COLLECTION, ledgerChunkKey(1), {
+      version: 1,
+      at: new Date().toISOString(),
+      entries: { "someone-elses-record": "hash" },
+    });
 
     const reports = await runCatalogIndex(h, [h.tenantId]);
 
+    // readCorpusLedger throws a plain Error (not a CatalogRefusal), so only its CLASS surfaces in the
+    // report — same PII-free discipline as any other unexpected throw (never re-derive a `reason` from an
+    // error the job did not author itself).
     expect(reports[0]!.outcome).toBe("failed");
-    expect(reports[0]!.reason).toMatch(/not written by this job/i);
-    expect(await idsIn(h.vector, h.tenantId)).toContain("someone-elses-record"); // untouched
+    expect(reports[0]!.errorClass).toBe("Error");
+    expect(await idsIn(h.vector, h.tenantId)).not.toContain("someone-elses-record"); // never reached the vector store at all
   });
 
-  it("refuses when the existing corpus cannot be ENUMERATED completely (no blind reconcile)", async () => {
-    const h = harness([product(1)]);
-    // Pre-seed more records than the ceiling allows: one query can no longer prove what is in there, so
-    // stale-record reconciliation would be guesswork.
-    await h.vector.upsert(
-      catalogNamespace(h.tenantId),
-      Array.from({ length: 6 }, (_, i) => ({ id: catalogRecordId(`x${i}`), vector: [1, 0, 0, 0], metadata: {} })),
-    );
-    const reports = await runCatalogIndex(h, [h.tenantId], { maxProducts: 5 });
-    expect(reports[0]!.outcome).toBe("failed");
-    expect(reports[0]!.reason).toMatch(/enumerat/i);
-    expect(h.embedCalls).toHaveLength(0);
-  });
+  // S3 §B RETIRED: "refuses when the existing corpus cannot be ENUMERATED completely" no longer applies.
+  // That refusal existed only because one `vector.query(ns, {text:"", k: probe})` call could not prove
+  // it had seen every record above a cap. The ledger is read via `RuntimeStatePort.list`, which has no such
+  // cap — enumerating the ledger IS reading the whole authoritative set, at any corpus size. This is not a
+  // loosened guarantee: it is the reconcile becoming ANN-safe (S2's parked bug, closed by this task).
 });
 
 // ── idempotency ────────────────────────────────────────────────────────────────────────────────────
@@ -576,13 +581,25 @@ describe("C3 atomicity — a mid-catalog failure leaves the corpus fully OLD, ne
     expect(upserts).toEqual([7]);
   });
 
-  it("reports an unverified write instead of claiming success (read-back discipline)", async () => {
+  it("S3 §B: no longer reads the corpus back after upsert — the durable adapter's own transaction is trusted", async () => {
+    // The old "read the corpus back and verify" step required a text-modality `vector.query(ns, {text:""})`
+    // enumerate — exactly the call that THROWS on the S1 pgvector store. It is retired: `upsert` is
+    // all-or-nothing inside the durable adapter's own transaction, and the ledger (committed atomically
+    // with the manifest) is now the record of what is indexed. This asserts BOTH halves of that: no query
+    // of any kind is issued after the write, and the run is reported `indexed` on nothing more than the
+    // upsert call succeeding.
     const h = harness([product(1)]);
-    const lying: VectorPort = { ...h.vector, upsert: async () => {} }; // accepts, stores nothing
-    const reports = await runCatalogIndex({ ...h, vector: lying }, [h.tenantId]);
-    expect(reports[0]!.outcome).toBe("failed");
-    expect(reports[0]!.reason).toMatch(/read back|unverified/i);
-    expect(await manifestOf(h.store, h.tenantId)).toBeNull(); // no manifest for a corpus we cannot see
+    let queried = false;
+    const noReadBack: VectorPort = {
+      ...h.vector,
+      query: async (ns, q) => {
+        queried = true;
+        return h.vector.query(ns, q);
+      },
+    };
+    const reports = await runCatalogIndex({ ...h, vector: noReadBack }, [h.tenantId]);
+    expect(reports[0]!.outcome).toBe("indexed");
+    expect(queried).toBe(false);
   });
 });
 

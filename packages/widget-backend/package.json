@@ -13,5 +13,8 @@
     "esbuild": "^0.21.5",
     "fastify": "^5.0.0",
     "google-auth-library": "^11.0.0"
+  },
+  "devDependencies": {
+    "testcontainers": "^12.1.0"
   }
 }
