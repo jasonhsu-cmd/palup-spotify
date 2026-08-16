@@ -150,6 +150,21 @@ export interface VertexEmbedResponse {
  *  chunking / alignment / usage / fail-closed logic below is unit-tested with NO cloud creds. */
 export type EmbedContentFn = (req: VertexEmbedRequest) => Promise<VertexEmbedResponse>;
 
+/**
+ * Marks a `validateChunk` failure as DETERMINISTIC — a dimension-pin violation, a provider that ignored
+ * `outputDimensionality`, a truncation flag, or a short/long response. Retrying the identical request
+ * against the identical (already-returned) provider response cannot change any of these outcomes, so a
+ * retry only spends another BILLED provider call for no chance of success. `runChunk`'s retry loop
+ * re-throws this immediately, consuming none of `maxRetries` — retries stay reserved for transport/timeout
+ * failures (the provider call itself failing or timing out), where a retry can plausibly succeed.
+ */
+class NonRetryableValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonRetryableValidationError";
+  }
+}
+
 export interface VertexEmbedConfig {
   /** Embedding model id. Reported on `EmbedResponse.model`, so it is also the price-table key. */
   model: string;
@@ -411,6 +426,11 @@ export class VertexModelAdapter implements ModelPort {
           perChunk[ci] = this.validateChunk(offset, texts, res, cfg.outputDimensionality); // throws on any anomaly
           return;
         } catch (e) {
+          // A validation failure is DETERMINISTIC (wrong dimension, truncation flag, short/long response):
+          // the provider already answered and answered wrong, so retrying spends another billed call with
+          // no chance of a different outcome. Re-throw immediately, without consuming a retry — only
+          // transport/timeout errors (below) get the backoff loop.
+          if (e instanceof NonRetryableValidationError) throw e;
           lastErr = e;
           if (attempt < maxRetries) await new Promise((r) => setTimeout(r, Math.min(2000, 100 * 2 ** attempt))); // backoff
         }
@@ -477,7 +497,9 @@ export class VertexModelAdapter implements ModelPort {
    * Validate ONE chunk's response against what was sent, returning its vectors + (if known) its token
    * count. Extracted from the pre-S2 sequential loop verbatim (same error messages, same checks) so that
    * bounded-concurrency callers and any future caller share one validator instead of two copies drifting.
-   * Throws on any anomaly — a throw here is what makes a chunk "fail" for `runChunk`'s retry loop above.
+   * Throws `NonRetryableValidationError` on any anomaly — every anomaly here is DETERMINISTIC given the
+   * response already received, so `runChunk`'s retry loop re-throws it immediately instead of spending
+   * another billed provider call on a retry that cannot succeed.
    */
   private validateChunk(
     offset: number,
@@ -487,7 +509,7 @@ export class VertexModelAdapter implements ModelPort {
   ): { values: number[][]; tokens: number | undefined } {
     const got = res.embeddings ?? [];
     if (got.length !== chunk.length) {
-      throw new Error(
+      throw new NonRetryableValidationError(
         `vertex: embed chunk at offset ${offset} sent ${chunk.length} text(s) and got ${got.length} ` +
           "vector(s) back — rejecting the whole batch (which text lost its vector is not recoverable, " +
           "and a hole in a corpus looks like data)",
@@ -507,7 +529,7 @@ export class VertexModelAdapter implements ModelPort {
       // text. `autoTruncate:false` should already have turned that into a provider error; this is the
       // belt to that braces, for a provider that ignores the flag. Never the text itself in the message.
       if (e.statistics?.truncated === true) {
-        throw new Error(
+        throw new NonRetryableValidationError(
           `vertex: the provider reports the text at index ${index} was TRUNCATED before embedding — ` +
             "rejecting the batch rather than storing a vector built from part of the text",
         );
@@ -515,7 +537,7 @@ export class VertexModelAdapter implements ModelPort {
 
       const v = e.values;
       if (!Array.isArray(v) || v.length === 0) {
-        throw new Error(
+        throw new NonRetryableValidationError(
           `vertex: no embedding values returned for the text at index ${index} — rejecting the whole ` +
             "batch rather than returning an empty vector",
         );
@@ -526,13 +548,13 @@ export class VertexModelAdapter implements ModelPort {
         // A provider that silently ignored `outputDimensionality` must not have its vectors pinned
         // under the dimension we ASKED for: the caller persists this number with the corpus.
         if (outputDimensionality !== undefined && dimension !== outputDimensionality) {
-          throw new Error(
+          throw new NonRetryableValidationError(
             `vertex: asked for ${outputDimensionality} dimensions but the provider returned ` +
               `${dimension} — refusing to pin a corpus to a dimension that was not honored`,
           );
         }
       } else if (v.length !== dimension) {
-        throw new Error(
+        throw new NonRetryableValidationError(
           `vertex: the text at index ${index} came back with ${v.length} components but this ` +
             `batch's dimension is ${dimension} — mixed dimensions in one corpus rank as garbage`,
         );

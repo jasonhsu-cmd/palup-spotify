@@ -56,6 +56,7 @@ When `catalogRetrievalEnabled` (`:847`) AND a retriever + query are present:
 ## 7. Review decisions (settled 2026-08-16, owner jason.hsu)
 1. **`getShell` port method + `GroundingShell{brandName,policy}` shape — confirmed.**
 2. **`MAX_INDEXED_PRODUCTS = 50000`** (the full ADR-0020 design ceiling) — batch embedding makes it tractable; the durable "scales" target, not a first-cut cap.
+3. **Owner ruling (jason.hsu, 2026-08-16):** on the retrieval serving path a product with no fresh `ProductFact` renders NO price (fail-honest); the §B money-facts eval gate (`MF-missing-1`, `MF-xtenant-1`) was updated to expect this stricter behavior. This strengthens NN#1; it is an expected-behavior update, not an eval-floor/threshold weakening.
 
 ## 8. Promotion preconditions (settled during build)
 
@@ -70,3 +71,7 @@ None of these flip a flag; they are conditions that must hold **before** a human
 4. **Reindex to a fresh corpus before enabling.** The shell path (`GroundingPort.getShell`) fetches no live catalog — brand/policy only — so a delisted product's corpus row is pruned **only on reindex** (`deleteById` during a `pnpm catalog:index` run), never per-turn. A tenant must be reindexed against its current catalog immediately before enabling retrieval, or a stale/delisted product can still be served from an old corpus.
 
 5. **`VECTOR_ANN=true` is required for any corpus above 5000 products** (see §2 D-backend and §6): the brute-force store's `MAX_SCAN_ROWS` (5000) silently truncates above that size. `VECTOR_ANN` is an independent operator selection from `CATALOG_RETRIEVAL` and must be confirmed true for a given tenant before that tenant's corpus is allowed to exceed 5000 SKUs in serving.
+
+6. **`CART_LINE_ITEMS` is incompatible with the `CATALOG_RETRIEVAL` shell render path and MUST NOT be co-enabled until S3/S4.** Reason: the shell path builds `ctx` with `products:[]`, so `renderCartBlock` resolves zero cart items and the cart block silently drops — with no audit flag. The audit-flag + cart-via-corpus resolution is S3/S4 work. This is a HARD co-enablement gate.
+
+**Note (revisit in S3 freshness work):** `getShell` has no cache (deliberate passthrough), so on the flag-ON path a Shopify outage drops that turn to a brandless generic prompt, where flag-OFF `getContext` would serve last-known-good; flag-ON is per-turn more fragile than flag-OFF.

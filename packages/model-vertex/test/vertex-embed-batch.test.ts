@@ -105,4 +105,37 @@ describe("vertex embedBatch — timeout, retry, bounded concurrency", () => {
     // mutation-testing this case before finalizing (see task-5-report.md).
     expect(t.calls()).toBe(3);
   });
+
+  it("does NOT retry a deterministic validateChunk failure (wrong dimension) — provider called exactly once, batch still rejects", async () => {
+    // The provider call itself SUCCEEDS every time (no transport/timeout error) but always answers with the
+    // WRONG dimension (asked for 1536, returns 3) — a validateChunk anomaly, not a transport failure. If
+    // this were still retried like a transient error, `t.calls()` would be `maxRetries+1` (4) for this
+    // single-chunk batch, exactly as the transport-failure test above asserts for a REAL transient error.
+    // Confirmed this assertion would FAIL under the pre-fix behaviour (validation errors funneled through
+    // the same catch-and-retry path as transport errors): `t.calls()` would read 4, not 1.
+    let calls = 0;
+    const wrongDimensionCall = async (req: { contents: string[] }) => {
+      calls++;
+      return { embeddings: req.contents.map(() => ({ values: [0.1, 0.2, 0.3], statistics: { tokenCount: 3 } })) };
+    };
+    const a = new VertexModelAdapter(
+      async () => ({ text: "x" }),
+      { model: "gemini-3.5-flash" },
+      {
+        call: wrongDimensionCall,
+        cfg: {
+          model: "gemini-embedding-2",
+          taskTypes: { document: "RETRIEVAL_DOCUMENT", query: "RETRIEVAL_QUERY" },
+          maxBatch: 1,
+          outputDimensionality: 1536,
+          concurrency: 1,
+          maxRetries: 3,
+        },
+      },
+    );
+    await expect(a.embed({ texts: ["a"], purpose: "document", tenantId: "t1" })).rejects.toThrow(
+      /asked for 1536 dimensions but the provider returned 3/,
+    );
+    expect(calls).toBe(1); // NOT maxRetries+1 (4) — a deterministic validation failure is not retried
+  });
 });
