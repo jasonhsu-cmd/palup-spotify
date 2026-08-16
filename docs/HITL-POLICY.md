@@ -107,7 +107,10 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > **Its inertness is now a DEFAULT, not a structural impossibility — this changed, and the change is a
 > reduction in friction that a reviewer must know about.** `widget-backend/src/server.ts` now reads
 > `CATALOG_RETRIEVAL` and constructs the retriever when it is set, so **setting an env var is sufficient
-> to enable this; no code change is required any more.** Why that was done rather than avoided: §5's own
+> to enable this; no code change is required any more.** *(S4 correction, below: this env-read path is
+> now RETIRED — enablement moved to the per-tenant registry the "OWNER PROMOTION DECISION" note describes;
+> this paragraph is left as the historical record of why the wiring decision was made, not the current
+> mechanism.)* Why that was done rather than avoided: §5's own
 > pipeline requires **shadow (0%) and canary (1–5%)**, which route a fraction of *real traffic* through
 > the candidate — impossible while no code path could build a flag-on brain. Withholding the wire did not
 > add a gate, it made these gates unreachable. The compensating control is that the posture can never be
@@ -120,6 +123,74 @@ same shape; only the "who approves" differs. When a case is ambiguous, treat it 
 > recall/latency number in this repo is real — the fakes say nothing about semantic retrieval), and the
 > fact that a narrowed catalog is a **partial** one, mitigated in-prompt by a rule forbidding "we don't
 > carry that" from mere absence but not eliminated.
+>
+> ---
+> **OWNER PROMOTION DECISION — `CATALOG_RETRIEVAL` (PROPOSED; S4 supersedes PR #295 — the named owner
+> records this by merging the S4 PR).** Named owner: **jason.hsu@framy.co**. The merge commit is the
+> dated record of the decision; the Audit Log entry `catalog_retrieval.tenant_optin.enable`/`.disable`
+> written by `setTenantOptIn` at each per-tenant flip is the operational record.
+>
+> **This supersedes PR #295** (`docs(governance): PROPOSED owner reclassification of CATALOG_RETRIEVAL
+> promotion bar`, opened 2026-08-14, unmerged). #295's canary waiver assumed two compensating controls
+> that did not exist at draft time, and its "~1000-product ceiling" scope caveat is now stale (the index
+> ceiling is 50000, not 1000 — see below). This paragraph carries the corrected amendment against the
+> controls S4 actually built. **Recommendation: close #295 as superseded.** (A build agent does not close
+> PRs — the named owner does that on merging S4.)
+>
+> *The two compensating controls #295's canary waiver assumed now EXIST:*
+> 1. **Per-tenant staged enablement** — `packages/state-postgres/src/catalog-retrieval-enablement.ts`: a
+>    two-gate registry, a platform master (`catalog_retrieval`/`platform`, under the reserved
+>    `__system__` tenant) AND a per-tenant opt-in (`catalog_retrieval`/`optin`), **both default OFF**;
+>    `catalogRetrievalEnabledFor(store, tenantId)` requires both. Set via the audited
+>    `pnpm catalog:enable --scope platform|tenant:<id> --on|--off [--reason "…"]` CLI
+>    (`packages/widget-backend/src/jobs/catalog-enable.ts`), which writes + audits atomically in one
+>    `store.tx` and reads the resulting state back, so "enabled" is a confirmed observation, not an
+>    assumption. The process-global `process.env.CATALOG_RETRIEVAL` boot flag described earlier in this
+>    section is **RETIRED** — `server.ts` no longer reads it; enablement is server-sourced from this
+>    registry only, never from a client/agent field.
+> 2. **A retrieval-scoped Kill Switch** — `/chat` reads an `agent:catalog-retrieval`-scoped kill alongside
+>    the shopper kill (`matchedKill(store, { tenantId, agentType: CATALOG_RETRIEVAL_AGENT_TYPE })`,
+>    `server.ts`), which the brain honors as `catalogRetrievalOn = catalogRetrievalWanted &&
+>    !signals.catalogRetrievalKilled` (`widget-brain/src/brain.ts`) — an armed kill DEGRADES that tenant's
+>    turn to the full-catalog path (not an outage), flagged `retrieval:killed`. Armed via the existing
+>    `pnpm kill:arm --scope agent:catalog-retrieval` — **platform-wide, retrieval only** (every tenant
+>    degrades, nothing else halts); `matchedKill` has no *combined* tenant+agent-type scope, so
+>    `--scope tenant:<id>` is NOT a retrieval-only lever — `matchedKill` matches it against the shopper
+>    kill too (`server.ts`'s `kill` check, same tenantId), halting that tenant's serving entirely. No new
+>    kill mechanism — the existing Kill Switch registry now also has an `agent:catalog-retrieval` reach.
+>
+> *Fixed: the stale "~1000-product ceiling" scope caveat.* `MAX_INDEXED_PRODUCTS` (the INDEX ceiling,
+> `catalog-index.ts`) is now **50000** — S1/S2 raised it from the original 1000. What stays at 1000 is
+> `MAX_CATALOG_PRODUCTS` (`shopify-grounding.ts`), the SERVING **full-catalog-fetch** cap used on the
+> non-retrieval render path. Serving a corpus **above ~5000 SKUs requires `VECTOR_ANN=true`** (the S1
+> pgvector-HNSW adapter) — the brute-force vector store's scan cap (`MAX_SCAN_ROWS=5000`) silently
+> truncates above that size. `VECTOR_ANN` is an operator selection independent of `CATALOG_RETRIEVAL` and
+> must be confirmed true before a tenant's corpus is allowed to exceed 5000 SKUs in serving.
+>
+> *Per-tenant promotion bar (ALL required, before a tenant's opt-in is flipped on):*
+> 1. A recorded, **real-Vertex** `pnpm eval:retrieval` pass (recall@k + no-wrong-product) on a corpus
+>    representative of the tenant's catalog.
+> 2. A recorded `pnpm shadow:retrieval` pass (zero fabricated / stale / missing-product violations).
+> 3. Both captured as **one structured evidence artifact** —
+>    `reports/retrieval-promotion-evidence-<tenant>-<stamp>.json`, written by `writeRetrievalEvidence`
+>    (`packages/widget-backend/src/retrieval-promotion-evidence.ts`) — not just a passing exit code.
+>    `reports/` is gitignored operator evidence; each artifact is retained as the §5 promotion record for
+>    that tenant (see `docs/DEPLOY.md`'s per-tenant runbook).
+> 4. **Named-owner sign-off**, recorded via the `--reason` on the `catalog:enable --scope tenant:<id> --on`
+>    invocation and the Audit Log entry that write commits atomically.
+>
+> *Canary stays WAIVED for this feature* (unchanged from #295's proposal) — the compensating controls
+> above give the rollback safety a 1–5% canary provides: enablement is per-tenant (staged, one merchant
+> at a time, never global) and the retrieval-scoped Kill Switch halts it instantly at that exact scope. A
+> live canary stays RECOMMENDED where a merchant's traffic allows, but is not a blocker for this feature.
+> This waiver is **scoped to `CATALOG_RETRIEVAL` alone** — every other Wave-4 flag keeps the full
+> `eval → shadow → canary → approve` promotion.
+>
+> *Non-waivable protections that remain in force, untouched by this decision:* the un-silenceable boot
+> warning naming every on-flag (`server.ts` / `wave4-composition.test.ts`); the Kill Switch at the flip
+> scope (now retrieval-scoped, above); the in-prompt partial-catalog rule (never infer "we don't carry
+> that" from mere absence); the standing eval floor; per-tenant instant reversibility.
+> ---
 
 > **Product citations (`PRODUCT_CITATIONS` flag) — NOT yet flipped, no owner assigned (E2).**
 > `packages/widget-brain` can prefix each rendered CATALOG line with a per-turn citation tag
@@ -283,4 +354,20 @@ What a human is genuinely needed for is different, and narrower:
 but it is a policy decision with legal consequences and it needs the named owner's sign-off — and
 should have counsel's eye on the 30-day figure and on point 1's exposure. Until then, treat the
 webhook handlers' current behaviour as the interim position, not as policy.
+
+> **OPEN DECISION (S4 §F, flagged for the named owner, NOT settled here):** the tenant's catalog
+> corpus + corpus-state ledger erasure (`eraseCatalogCorpus` / `runCatalogClear`, wired into both
+> `shop/redact` and `app/uninstalled`) was built to run **UNCONDITIONALLY, never kill-gated** — unlike
+> the memory-namespace + traffic-log erasure in the same handlers, which one section up defers while a
+> kill is armed (NN#4). The implementation's own rationale: NN#4 halts *agent autonomy*, not a merchant's
+> (or the law's) own erasure request, so gating catalog erasure on an unrelated armed kill would leave a
+> shop's catalog corpus un-erased for as long as the halt stays armed — arguably worse for this section's
+> statutory obligation than running it. That is a real tension with §3 rule 4 ("the Kill Switch must
+> always work... never add a code path an operator cannot stop") that this policy has not resolved: is
+> "always work" read as "halts all writes this handler makes" (→ defer catalog erasure too, matching the
+> memory/traffic pattern) or as "halts agent autonomy, not a compelled statutory act" (→ the built
+> behavior is correct)? **This is not decided as policy by this document — it needs the named owner
+> (jason.hsu@framy.co) to pick one reading and either affirm the built unconditional behavior or route it
+> to defer-under-kill like its neighbor.** See `docs/superpowers/specs/2026-08-16-s3-freshness-at-scale-design.md`
+> §H(3)/§F and `docs/adr/0020-durable-grounding-at-scale.md` for the implementation detail.
 
