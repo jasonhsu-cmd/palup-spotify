@@ -251,16 +251,20 @@ jobs:
           # envs; catalog-index.ts's OFFLINE job is the only consumer of the embed path today). CONFIG-ONLY
           # and dark: this serves no shopper by itself — CATALOG_RETRIEVAL / VECTOR_ANN stay unset/off, so
           # /chat's serving path (getShell, decoupled from the index job) is untouched.
-          # PIN, build-verified 2026-08-16: gemini-embedding-001 @ 1536 (via output_dimensionality/MRL) —
-          # gemini-embedding-001 is GA on Vertex with a confirmed exact model-id. 1536 (not the model's
-          # native 3072) is chosen so this stays on S1's vector(1536) HNSW path (pgvector-store.ts,
-          # VECTOR_INDEX_DIM_CAP=2000) rather than the halfvec(3072) path. NOTE: gemini-embedding-2 went GA
-          # 2026-04-22 (Gemini API + Gemini Enterprise Agent Platform), but its exact GA model-id on Vertex
-          # is still not confirmable — the live model page lists only `gemini-embedding-2-preview`, no
-          # stable/GA id — so it is deferred, not pinned. Moving to it later is a human/§5 step requiring
-          # BOTH the exact GA id being confirmed AND a FULL reindex: 001 and 2 embedding spaces are
-          # incompatible per Google, so an in-place model swap on an existing corpus is not safe.
-          ENVS="${ENVS}@PALUP_EMBED_MODEL=gemini-embedding-001"
+          # PIN, re-verified 2026-08-17: gemini-embedding-2 @ 1536 (via output_dimensionality/MRL). This is
+          # ADR-0020 D3's ORIGINALLY DECIDED model — the S2 build (2026-08-16) diverged to gemini-embedding-001
+          # ONLY because gemini-embedding-2's exact GA model-id on Vertex was not yet confirmable (the page
+          # then listed only `gemini-embedding-2-preview`). As of 2026-08-17 the stable GA id `gemini-embedding-2`
+          # IS live on Vertex (Google Cloud Vertex AI model page + GA announcements), so the pin realigns with
+          # the spec. 1536 (not the model's native 3072) via output_dimensionality/MRL keeps this on S1's
+          # vector(1536) HNSW path (pgvector-store.ts, VECTOR_INDEX_DIM_CAP=2000); Google lists 768/1536/3072 as
+          # the recommended MRL truncation sizes, so 1536 is supported. SAFE TO ADOPT NOW: staging has NO corpus
+          # indexed yet, so there is no incompatible-space reindex to pay (001↔2 spaces differ) — this is the
+          # cheapest moment to switch. EFFICIENCY FOLLOW-UP: gemini-embedding-2 is absent from
+          # vertex-adapter.ts's EMBED_MAX_BATCH map, so maxBatchForEmbedModel falls back to 1 text/request
+          # (correct, just slow). Do NOT guess a higher cap — verify gemini-embedding-2's documented
+          # per-request text limit, then add it to the map or set PALUP_EMBED_MAX_BATCH.
+          ENVS="${ENVS}@PALUP_EMBED_MODEL=gemini-embedding-2"
           ENVS="${ENVS}@PALUP_EMBED_DIMENSION=1536"
 
           # C1 — all-or-nothing. A partial set is a CONFIGURATION MISTAKE, and the runtime's correct

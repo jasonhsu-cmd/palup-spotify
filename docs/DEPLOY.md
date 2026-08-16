@@ -929,7 +929,14 @@ gcloud run jobs deploy palup-catalog-index \
   --command pnpm --args catalog:index \
   --set-cloudsql-instances palup-jason:us-central1:palup-staging \
   --set-secrets "DATABASE_URL=palup-staging-database-url:latest,PALUP_SECRETS=palup-secrets:latest" \
-  --set-env-vars "^@^SHOPIFY_STORES=demo=palup-skincare-jason.myshopify.com@PALUP_REQUIRE_DATABASE_URL=true@GOOGLE_CLOUD_PROJECT=palup-jason@GOOGLE_CLOUD_LOCATION=us-central1@PALUP_MODEL=<pinned-model-id>"
+  --set-env-vars '^@^VECTOR_ANN=true@SHOPIFY_STORES={"demo":"palup-skincare-jason.myshopify.com"}@PALUP_REQUIRE_DATABASE_URL=true@GOOGLE_CLOUD_PROJECT=palup-jason@GOOGLE_CLOUD_LOCATION=us-central1@PALUP_EMBED_MODEL=gemini-embedding-2@PALUP_EMBED_DIMENSION=1536'
+# TWO CORRECTIONS over the earlier draft of this command, both load-bearing:
+#   (1) VECTOR_ANN=true — WITHOUT it, createVectorStore (vector-factory.ts:28) writes to the NON-ANN
+#       PostgresVectorStore, a DIFFERENT table than the pgvector HNSW store the VECTOR_ANN serving path
+#       reads. Index and serve MUST use the same store, so the job needs VECTOR_ANN=true too.
+#   (2) SHOPIFY_STORES is parsed as JSON (merchant-store.ts:22 parseStoreDomains) — it must be
+#       {"demo":"…"}, not demo=…, or tenantsToIndex() finds no tenant and the job no-ops.
+# The embed model/dimension MUST match the serving pin (deploy-staging.yml): gemini-embedding-2 @ 1536.
 # NOTE: no serving-side flag is set here — the job WRITES the corpus, it does not serve it (see the
 # "Enabling note" below). Add PRODUCT_FACTS_POLL=true only when the Tier-2 poll producer is intended (§5).
 
