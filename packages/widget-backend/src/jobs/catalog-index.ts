@@ -934,6 +934,34 @@ export async function reconcileProducts(
   return { tenantId, outcome: "indexed", products: plan.length, embedded: toEmbed.length, written: records.length, removed: stale.length, model: written.model, dimension: written.dimension };
 }
 
+/**
+ * S3 §C — the reason-routed dispatch a webhook-driven reconcile takes. Lives HERE (not inlined per
+ * composition root) so the routing decision is unit-testable independent of Fastify/env wiring:
+ *
+ *   • `reason:"inventory"` with NO `productIds` ⇒ a REAL no-op — returns before touching `store`, `vector`
+ *     or `model` at all. Inventory freshness is covered by the poll backstop (`PRODUCT_FACTS_POLL`) + the
+ *     serve-time ceiling, not a proactive crawl (spec decision, S3 §C).
+ *   • `productIds` present AND `reason !== "full"` ⇒ the TARGETED `reconcileProducts` path.
+ *   • anything else (no opts, `reason:"full"`, or an inventory tick that somehow carried ids tagged
+ *     `"full"`) ⇒ the existing whole-catalog `runCatalogIndex` (the backstop path).
+ *
+ * Every consumer (the in-memory `subscribeCatalogReconcile`, the durable Pub/Sub push route) is meant to
+ * call this SAME function rather than re-implement the branch — one routing decision, not per-call-site
+ * copies that could drift.
+ */
+export async function reconcileByReason(
+  deps: CatalogIndexDeps,
+  tenantId: string,
+  opts?: { productIds?: string[]; reason?: ReconcileReason },
+): Promise<void> {
+  if (opts?.reason === "inventory" && !(opts.productIds && opts.productIds.length > 0)) return; // real no-op
+  if (opts?.productIds && opts.productIds.length > 0 && opts.reason !== "full") {
+    await reconcileProducts(deps, tenantId, opts.productIds, { ...(opts.reason ? { reason: opts.reason } : {}) });
+  } else {
+    await runCatalogIndex(deps, [tenantId], {});
+  }
+}
+
 /** Shopify wiring for the by-id source (composition root). Mirrors `shopifyCatalogSource`. */
 export function shopifyCatalogByIdSource(
   secrets: SecretsPort,

@@ -69,6 +69,25 @@ describe("subscribeCatalogReconcile", () => {
     expect(seen).toEqual([]);
   });
 
+  it("passes productIds + reason through UNTOUCHED to reconcile (S3 §C fix round 1, coverage gap)", async () => {
+    const q = createInMemoryQueue({});
+    const seen: Array<[string, { productIds?: string[]; reason?: string } | undefined]> = [];
+    subscribeCatalogReconcile(q, async (t, o) => { seen.push([t, o]); });
+    await q.publish(
+      CATALOG_RECONCILE_TOPIC,
+      catalogReconcileMessage("acme", "products/update", "w-gid", 1, { productIds: ["gid://shopify/Product/7"], reason: "product" }),
+    );
+    expect(seen).toEqual([["acme", { productIds: ["gid://shopify/Product/7"], reason: "product" }]]);
+  });
+
+  it("an inventory tick with no productIds passes reason:inventory through with productIds omitted", async () => {
+    const q = createInMemoryQueue({});
+    const seen: Array<[string, { productIds?: string[]; reason?: string } | undefined]> = [];
+    subscribeCatalogReconcile(q, async (t, o) => { seen.push([t, o]); });
+    await q.publish(CATALOG_RECONCILE_TOPIC, catalogReconcileMessage("acme", "inventory_levels/update", "w-inv", 1, { reason: "inventory" }));
+    expect(seen).toEqual([["acme", { reason: "inventory" }]]);
+  });
+
   it("dedups a retried delivery within the group (same id delivered once)", async () => {
     const q = createInMemoryQueue({});
     let calls = 0;
