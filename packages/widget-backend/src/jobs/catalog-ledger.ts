@@ -1,5 +1,5 @@
 import type { RuntimeStatePort, RuntimeStateTx } from "@palup/platform-ports";
-import { MANIFEST_COLLECTION } from "./catalog-index.js";
+import { CatalogRefusal, MANIFEST_COLLECTION } from "./catalog-index.js";
 
 // S3 §B — the AUTHORITATIVE per-tenant id→contentHash ledger for a catalog corpus, in RuntimeState KV.
 //
@@ -46,6 +46,12 @@ export async function listLedgerChunkKeys(store: RuntimeStatePort, tenantId: str
  * FOREIGN-GUARD IS INTRINSIC: the ledger only ever holds `product:*` ids this job wrote, so it asserts
  * that here — a non-product id in the ledger is corruption, not a delisted product, and reconcile must
  * refuse it rather than ever `deleteById` something it did not write (the `:542-549` guard, preserved).
+ *
+ * Throws `CatalogRefusal` (not a plain `Error`, review round-1 FIX 2) naming the offending id AND the
+ * chunk key it was found in, so the id/chunk detail actually reaches the operator: `runCatalogIndex`
+ * surfaces a `CatalogRefusal`'s message as `reason` on the report, but a plain `Error` there is reduced to
+ * `errorClass` only — an operator debugging ledger corruption needs to know WHICH id and chunk, not just
+ * that something threw.
  */
 export async function readCorpusLedger(store: RuntimeStatePort, tenantId: string): Promise<Map<string, string>> {
   const rows = await store.list<CorpusLedgerChunk>({ tenantId }, MANIFEST_COLLECTION);
@@ -54,9 +60,10 @@ export async function readCorpusLedger(store: RuntimeStatePort, tenantId: string
     if (!key.startsWith(LEDGER_KEY_PREFIX)) continue; // skip the manifest key
     for (const [id, hash] of Object.entries(value?.entries ?? {})) {
       if (!id.startsWith("product:")) {
-        throw new Error(
-          `corpus ledger for ${tenantId} contains a non-product id ${id} — refusing to reconcile a ledger ` +
-            "it does not own (it must only ever hold product: ids this job wrote)",
+        throw new CatalogRefusal(
+          "failed",
+          `corpus ledger for ${tenantId} contains a non-product id "${id}" in chunk "${key}" — refusing to ` +
+            "reconcile a ledger it does not own (it must only ever hold product: ids this job wrote)",
         );
       }
       out.set(id, hash);

@@ -13,7 +13,7 @@ import {
   type VectorPort,
 } from "@palup/platform-ports";
 import { runCatalogIndex, catalogNamespace, catalogRecordId, type CatalogSource } from "../src/jobs/catalog-index.js";
-import { readCorpusLedger } from "../src/jobs/catalog-ledger.js";
+import { LEDGER_CHUNK_SIZE, listLedgerChunkKeys, readCorpusLedger } from "../src/jobs/catalog-ledger.js";
 
 function fakeModel(dimension = 4, model = "fake-embed-4d"): ModelPort {
   return {
@@ -99,6 +99,33 @@ describe("S3 §B — reconcile diffs the ledger (new/changed/stale), never enume
     const textQueries = querySpy.mock.calls.filter(([, q]) => typeof q.text === "string");
     expect(textQueries).toEqual([]);
   });
+
+  it("FIX 1 (review round-1): --reindex prunes orphan ledger chunks, not just the diff content", async () => {
+    // Repro: index enough products for >=2 ledger chunks, --reindex down to a size that needs only 1
+    // chunk. The buggy code skipped fetching the REAL prior chunk keys on --reindex (`opts.reindex ? [] :
+    // ...`), so writeLedgerInTx's prune list was empty and the old second chunk (`ledger:0001`) survived
+    // with its stale ids — which the VERY NEXT normal reconcile would then read, treat as delisted, and
+    // report a false `removed` count for a catalog that never shrank.
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+    const catalogOfSize = (n: number): CatalogSource =>
+      catalogOf(Array.from({ length: n }, (_, i) => product(`gid://shopify/Product/${i}`, `p${i}`)));
+
+    // LEDGER_CHUNK_SIZE (10_000) + 2_000 spans 2 chunks.
+    await runCatalogIndex({ store, vector, model, catalog: catalogOfSize(LEDGER_CHUNK_SIZE + 2_000) }, ["acme"], {});
+    expect(await listLedgerChunkKeys(store, "acme")).toHaveLength(2);
+
+    // --reindex down to a size that fits in ONE chunk.
+    await runCatalogIndex({ store, vector, model, catalog: catalogOfSize(3_000) }, ["acme"], { reindex: true });
+    expect(await listLedgerChunkKeys(store, "acme")).toHaveLength(1); // no orphan ledger:0001 chunk
+    expect((await readCorpusLedger(store, "acme")).size).toBe(3_000); // not inflated by a leftover chunk
+
+    // The VERY NEXT normal reconcile (same 3,000-product catalog, no --reindex) must see NO false stale.
+    const [r] = await runCatalogIndex({ store, vector, model, catalog: catalogOfSize(3_000) }, ["acme"], {});
+    expect(r!.outcome).toBe("unchanged");
+    expect(r!.removed ?? 0).toBe(0);
+  }, 30_000);
 
   it('GREP-GUARD: indexOneTenant/writeManifestAndAudit contain no `query(...{ text: "" })` enumerate', () => {
     const src = readFileSync(fileURLToPath(new URL("../src/jobs/catalog-index.ts", import.meta.url)), "utf8");

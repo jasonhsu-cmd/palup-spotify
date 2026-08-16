@@ -338,8 +338,13 @@ function pinMismatch(manifest: CatalogManifest, now: CorpusPin): string | undefi
   );
 }
 
-/** A refusal this job authored itself: a static, PII-free sentence, reported as `reason`. */
-class CatalogRefusal extends Error {
+/**
+ * A refusal this job authored itself: a static, PII-free sentence, reported as `reason`. Exported so
+ * `catalog-ledger.ts`'s foreign-guard (readCorpusLedger) can raise the SAME type — a plain `Error` there
+ * would only surface as `errorClass` in the report, losing the "which id / which chunk" detail an operator
+ * needs (review round-1 FIX 2).
+ */
+export class CatalogRefusal extends Error {
   constructor(
     readonly outcome: CatalogIndexOutcome,
     message: string,
@@ -511,7 +516,16 @@ async function indexOneTenant(
   // the brute-force store and THREW on the S1 pgvector store, so a >5000-SKU pgvector index could not be
   // reconciled at all. `readCorpusLedger` asserts every id is a `product:` id, so the old foreign-guard is
   // intrinsic — reconcile can only ever `deleteById` ids this job wrote.
-  const priorChunkKeys = opts.reindex ? [] : await listLedgerChunkKeys(deps.store, tenantId);
+  //
+  // FIX (review round 1) — `priorChunkKeys` is ALWAYS the real chunk-key set, fetched UNCONDITIONALLY, even
+  // on `--reindex`. It feeds `writeLedgerInTx`'s prune list, which is a DIFFERENT concern from the ledger
+  // CONTENT used for diffing below: if `--reindex` shrinks a 2-chunk ledger down to 1 chunk, the old
+  // `ledger:0001` chunk must still be pruned or it survives as an orphan — the NEXT normal run would then
+  // read it, treat its stale ids as still-live-but-removed, and report a false `removed` count for a
+  // catalog that never shrank. `--reindex` only resets the CONTENT used to compute new/changed/stale (an
+  // empty Map here, so everything re-embeds and `stale` stays empty per the migration-safety rule below) —
+  // it must never skip fetching the real prior chunk keys.
+  const priorChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
   const ledger = opts.reindex ? new Map<string, string>() : await readCorpusLedger(deps.store, tenantId);
 
   const manifest = await deps.store.get<CatalogManifest>(ctx, MANIFEST_COLLECTION, MANIFEST_KEY);
