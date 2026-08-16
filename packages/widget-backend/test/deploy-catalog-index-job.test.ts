@@ -27,13 +27,28 @@ describe("S3 §E — DEPLOY.md carries the catalog-index backstop job runbook", 
     expect(md).toContain(fragment);
   });
 
-  it("the catalog-index job section adds NO serving flag", () => {
+  it("the catalog-index job section adds NO serving-ENABLEMENT flag", () => {
+    // The job WRITES the corpus; it must not carry a flag that ENABLES per-tenant serving. NOTE: VECTOR_ANN
+    // is deliberately NOT in this list — it is STORE SELECTION, not serving enablement (vector-factory.ts:28
+    // picks PgVectorStore vs the non-ANN PostgresVectorStore from it). The writer MUST select the SAME store
+    // the ANN serving path reads, so the ANN job REQUIRES VECTOR_ANN=true (asserted positively below).
+    // Per-tenant serving stays gated on `catalog:enable`, never on anything in this job.
     const start = md.indexOf("gcloud run jobs deploy palup-catalog-index");
     expect(start).toBeGreaterThan(-1);
-    const section = md.slice(start, start + 1600);
-    for (const flag of ["CATALOG_RETRIEVAL", "VECTOR_ANN", "PRODUCT_FACTS_HYDRATION", "MEMORY_ADR_ACCEPTED"]) {
+    const section = md.slice(start, start + 1800);
+    for (const flag of ["CATALOG_RETRIEVAL", "PRODUCT_FACTS_HYDRATION", "MEMORY_ADR_ACCEPTED"]) {
       expect(section).not.toContain(flag);
     }
+  });
+
+  it("the ANN job selects the pgvector store (VECTOR_ANN=true) and passes SHOPIFY_STORES as JSON", () => {
+    // Regression lock for the two bugs the earlier command had: without VECTOR_ANN=true it indexed into the
+    // NON-ANN store (a different table than serving reads), and a non-JSON SHOPIFY_STORES made
+    // parseStoreDomains (merchant-store.ts:22) find no tenant → the job no-ops.
+    const start = md.indexOf("gcloud run jobs deploy palup-catalog-index");
+    const section = md.slice(start, start + 1800);
+    expect(section).toContain("VECTOR_ANN=true");
+    expect(section).toContain('SHOPIFY_STORES={"demo":"palup-skincare-jason.myshopify.com"}');
   });
 
   it("runs hourly (a 5-field cron whose minute is fixed and hour is a wildcard)", () => {
