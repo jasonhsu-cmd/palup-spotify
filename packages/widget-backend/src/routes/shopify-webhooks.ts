@@ -5,6 +5,7 @@ import { buildShopifyShopperId } from "@palup/platform-ports";
 import { accountSubjectId, eraseSubject, listSubjects, retireSubject } from "@palup/widget-memory";
 import { clientIpKey } from "../rate-limit.js";
 import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage, type ReconcileReason } from "../catalog-webhook-queue.js";
+import { runCatalogClear } from "../jobs/catalog-index.js";
 import {
   APP_UNINSTALLED_SHOP_SOURCE,
   CATALOG_TOPICS,
@@ -310,16 +311,20 @@ async function markHandled(deps: ShopifyWebhookDeps, tenantId: string, topic: st
  * reconciliation and — 48 hours later — `shop/redact`'s erasure. Deleting the row would strand all of it
  * in namespaces nothing can resolve.
  *
- * FIX 5 (security C1 / #6, final review) — the same is true of the S3 catalog corpus namespace and its
- * corpus-state ledger: neither is touched here, and NEITHER IS ERASED BY `shop/redact` EITHER (that
- * handler's own `SHOP_REDACT_RESIDUAL` discloses this as a known, tracked gap — wiring it in is a separate
- * security-reviewed follow-up, not something this handler papers over).
+ * FIX 5 (security C1 / #6, final review; S4 §F closes it) — the same S3 catalog corpus namespace + its
+ * corpus-state ledger ARE now erased here, unconditionally (`eraseCatalogCorpus`, see its own doc for the
+ * NN#4 rationale), so an uninstalled merchant genuinely stops being groundable rather than just inert. It
+ * is data minimization: the corpus is no longer needed once a merchant can no longer be served. `shop/redact`
+ * (48h later) erases it too, idempotently (a second `runCatalogClear` on an already-empty ledger is a no-op).
  *
- * NO KILL-SWITCH GATE, deliberately. Every other action in this file is gated on NN#4 because it
- * destroys data. This one only makes a merchant INERT, which points the SAME WAY as a halt: refusing it
- * during a halt would leave an uninstalled merchant servable, which is strictly worse than performing it.
- * There is no code path here an operator cannot stop, because there is nothing running to stop — the
- * effect is a single reversible status write, and `MERCHANT_CLI` reverses it.
+ * NO KILL-SWITCH GATE on the status write, deliberately. Every OTHER destructive action in this file is
+ * gated on NN#4. This status write only makes a merchant INERT, which points the SAME WAY as a halt:
+ * refusing it during a halt would leave an uninstalled merchant servable, which is strictly worse than
+ * performing it. There is no code path here an operator cannot stop for THIS write, because there is
+ * nothing running to stop — the effect is a single reversible status write, and `MERCHANT_CLI` reverses it.
+ * The catalog-corpus erasure just below is ALSO not kill-gated, but for the different, statutory reason
+ * `eraseCatalogCorpus` documents — not because it is non-destructive (it is), but because NN#4 does not
+ * reach a merchant's own erasure request.
  *
  * REPLAY, both directions, because they are different problems:
  *   • A replayed old delivery can never RESURRECT a revoked merchant: this handler only ever writes
@@ -356,14 +361,24 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
       actor: "system:shopify-webhook",
       action: "merchant.uninstalled",
       input: { tenantId, shopDomain, topic: UNINSTALL_TOPIC, shopSource: "header" },
-      decision: { status: "uninstalled", previousStatus: existing.status, effect: "every registry lookup is now default-inert" },
+      decision: {
+        status: "uninstalled",
+        previousStatus: existing.status,
+        effect: "every registry lookup is now default-inert",
+        // Audit-first (header note): the actual erase runs below, unconditionally. A failure there is
+        // caught and separately audited by `eraseCatalogCorpus` rather than corrected here.
+        erased: ["the tenant's catalog corpus namespace + its corpus-state ledger (best-effort — see catalog.clear_failed if it did not take)"],
+      },
       reversalPath:
         `${MERCHANT_CLI} status --tenant ${tenantId} --status active ` +
         `(restores servability; the row, embedKey and createdAt were never deleted. ` +
-        `A genuine re-install through /shopify/callback reactivates it the same way.)`,
+        `A genuine re-install through /shopify/callback reactivates it the same way. The catalog corpus is ` +
+        `NOT restored by this — re-installing and letting the index job run rebuilds it from the CURRENT catalog.)`,
     },
   );
   await deps.registry.setStatus(tenantId, "uninstalled", { reason });
+  // S4 §F — unconditional (see `eraseCatalogCorpus`'s doc for why this is not gated on `deps.killCheck`).
+  await eraseCatalogCorpus(deps, tenantId, UNINSTALL_TOPIC, "catalog.clear_failed");
   await markHandled(deps, tenantId, UNINSTALL_TOPIC, v.webhookId);
   return "applied";
 }
@@ -464,6 +479,63 @@ async function eraseIndexedSubjects(deps: ShopifyWebhookDeps, tenantId: string):
   return { erased, failed };
 }
 
+/**
+ * S4 §F — best-effort catalog corpus + corpus-state ledger erasure (ADR-0015), shared by `shop/redact`
+ * and `app/uninstalled`. `runCatalogClear` is pgvector-safe (S4 Task 6 — ledger-based, no text-modality
+ * vector query) but can still throw: a corrupt/foreign ledger id raises `CatalogRefusal`
+ * (`readCorpusLedger`'s foreign-guard), and the vector delete itself can fail.
+ *
+ * UNCONDITIONAL, NOT KILL-GATED — a deliberate departure from every OTHER destructive action in this
+ * file. NN#4's Kill Switch halts AGENT AUTONOMY (a run-time agent acting on its own initiative); it does
+ * not — and must not — halt a merchant's or a law's OWN request to erase that merchant's data. Gating this
+ * on `killCheck` would leave a shop's catalog corpus un-erased for as long as an unrelated kill stayed
+ * armed, which is strictly worse for ADR-0015 and the underlying statutory obligation than running it.
+ *
+ * BEST-EFFORT + AUDITED, never a 500: a `runCatalogClear` failure is caught here so it can never burn
+ * Shopify's webhook retries or fail the compliance/uninstall handler. A caught failure writes its OWN
+ * audit entry naming the residual/failure — it never claims the corpus is gone when it is not. Success
+ * writes NO extra audit row: the caller's own audit entry (written before this runs, per the file's
+ * audit-first convention) is where the erasure is disclosed as `erased`, not `notErased`.
+ *
+ * PII-FREE, like every other audit row here: only tenantId + the caught error's message (a `CatalogRefusal`
+ * or `Error` message never contains customer data — it names a corpus record id / chunk key at worst).
+ */
+async function eraseCatalogCorpus(deps: ShopifyWebhookDeps, tenantId: string, topic: string, action: string): Promise<void> {
+  try {
+    await runCatalogClear({ store: deps.store, vector: deps.vector, now: () => new Date(deps.now()) }, tenantId);
+  } catch (e) {
+    const message = (e as Error).message;
+    console.error(`[${topic}] catalog corpus clear failed tenant=${tenantId}: ${message}`);
+    try {
+      await deps.store.audit(
+        { tenantId },
+        {
+          actor: "system:shopify-webhook",
+          action,
+          input: { tenantId, topic },
+          decision: {
+            complete: false,
+            erased: [],
+            notErased: [
+              `the tenant's catalog corpus namespace (\`${tenantId}::catalog\` in the vector store) — runCatalogClear failed: ${message}`,
+              "the tenant's corpus-state ledger — not erased due to the same failure",
+            ],
+            reason:
+              "runCatalogClear threw (e.g. a CatalogRefusal on a corrupt/foreign ledger id, or a vector store " +
+              "failure); the webhook still acknowledges 200 (per [W1]/[W2]) so Shopify's retries are not burned " +
+              "over a residual this record already discloses",
+          },
+          reversalPath: `pnpm exec tsx packages/widget-backend/src/jobs/catalog-index.ts clear --tenant ${tenantId} (re-run by hand once the underlying fault is fixed, or wait for the next delivery/retry)`,
+        },
+      );
+    } catch {
+      // The audit write itself failed too. `console.error` above is the only remaining trace; letting
+      // this throw would 500 a statutory webhook over a SECONDARY failure, which is worse than a residual
+      // that is merely under-disclosed for one delivery — the next delivery/retry re-attempts both.
+    }
+  }
+}
+
 /** What `shop/redact` provably cannot reach, named in the audit record so no operator reads a 200 as
  *  "this shop is gone from our systems". Each entry states WHY, because a reason is what makes the gap
  *  actionable rather than just disclosed. */
@@ -472,14 +544,6 @@ const SHOP_REDACT_RESIDUAL: readonly string[] = [
   "memory_consent records — @palup/state-postgres exports no delete and the collection name is private to it",
   "session state and any other KV collection — RuntimeStatePort has no enumerate-collections operation, so they cannot be named exhaustively",
   "memory namespaces for subjects absent from the per-tenant subject index (subject-index.ts only records subjects whose facts were written through it)",
-  // FIX 5 (security C1 / #6, final review) — this handler does NOT call `runCatalogClear` (catalog-index.ts):
-  // that wiring, plus making `runCatalogClear` pgvector-safe (it currently text-enumerates via
-  // `vector.query({text:""})`, which THROWS on the S1 pgvector/VECTOR_ANN store), is a separate
-  // security-reviewed follow-up (tracked in the S3 spec's promotion preconditions). Disclosed here so the
-  // handler HONESTLY reports both as known, tracked residuals rather than implying `notErased` is exhaustive
-  // without them.
-  "the tenant's catalog corpus namespace (`<tenantId>::catalog` in the vector store — product embeddings) — pre-existing gap, not erased by this handler",
-  "the tenant's corpus-state ledger (S3 — the id→content-hash chunks + manifest this job's freshness reconcile reads/writes, MANIFEST_COLLECTION in RuntimeStatePort) — not erased by this handler",
   "anything held on Shopify's own side, and anything a merchant exported before uninstalling",
 ];
 
@@ -494,12 +558,18 @@ const CUSTOMER_REDACT_RESIDUAL: readonly string[] = [
 /**
  * `shop/redact` — [W2]: "erase data for that store from your database", 48 hours after the uninstall.
  *
- * KILL-SWITCH GATED (NN#4), unlike `app/uninstalled`, because this one DESTROYS DATA. When a halt is
- * armed the erasure does not run — but the OBLIGATION IS NOT LOST: it is audited as deferred with a due
+ * KILL-SWITCH GATED (NN#4) for the memory-namespace + traffic-log erasure below, because those are
+ * AGENT-AUTONOMY-adjacent (the same machinery a run-time agent's own writes populate). When a halt is
+ * armed that erasure does not run — but the OBLIGATION IS NOT LOST: it is audited as deferred with a due
  * date and the merchant is still made inert, and the response is still 200 so Shopify's retries are not
  * burned (see the header note on why a 500 is the worse failure). Completing a deferred erasure is a
  * human action, which is the correct place for it: an erasure an operator deliberately halted must not
  * resume itself.
+ *
+ * S4 §F — the CATALOG CORPUS + LEDGER erasure is the one exception, in BOTH branches below, and
+ * deliberately NOT gated on `deps.killCheck`: see `eraseCatalogCorpus`'s doc. This is a merchant's own
+ * statutory erasure request, not agent autonomy, so an unrelated kill must not leave the catalog corpus
+ * sitting un-erased for as long as the halt stays armed.
  */
 async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<Ack | { refused: Refusal }> {
   const shopDomain = bodyShopDomain(v.body); // HMAC-COVERED, never the header
@@ -518,17 +588,30 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
         actor: "system:shopify-webhook",
         action: "shop.redact_deferred",
         input: { tenantId, shopDomain, topic: "shop/redact" },
-        decision: { erased: [], complete: false, deferred: true, reason: "a kill switch is armed for this tenant/agent/globally — a halted erasure must not resume itself", dueBy },
+        decision: {
+          // The memory/traffic erasure is deferred, but the catalog corpus is NOT (S4 §F — see
+          // `eraseCatalogCorpus`'s doc): this array names ONLY what actually ran before this audit
+          // commits, per the file's audit-first convention.
+          erased: ["the tenant's catalog corpus namespace + its corpus-state ledger (best-effort — see catalog.clear_failed if it did not take; unaffected by the halt below, NN#4 does not gate this)"],
+          complete: false,
+          deferred: true,
+          reason: "a kill switch is armed for this tenant/agent/globally — memory + traffic erasure must not resume itself while halted",
+          dueBy,
+        },
         reversalPath:
-          `NOT REVERSIBLE ONCE RUN — this records a PENDING erasure, nothing was deleted. To complete it: ` +
-          `disarm the halt (pnpm kill:disarm --scope tenant:${tenantId}), then re-deliver this webhook from ` +
-          `the Shopify admin, or run the erasure by hand. To abandon it: no action — but Shopify's 30-day ` +
-          `window (due ${dueBy}) then lapses unmet.`,
+          `NOT REVERSIBLE ONCE RUN — this records a PENDING memory/traffic erasure, nothing there was ` +
+          `deleted (the catalog corpus was, unconditionally). To complete the rest: disarm the halt ` +
+          `(pnpm kill:disarm --scope tenant:${tenantId}), then re-deliver this webhook from the Shopify ` +
+          `admin, or run the erasure by hand. To abandon it: no action — but Shopify's 30-day window (due ` +
+          `${dueBy}) then lapses unmet.`,
       },
     );
     // The merchant is still made inert even while halted: that is the fail-closed direction, and
     // `app/uninstalled` (which is not kill-gated) would have done it 48 hours earlier anyway.
     if (existing.status !== "uninstalled") await deps.registry.setStatus(tenantId, "uninstalled", { reason: "shop/redact webhook (erasure deferred by an armed kill switch)" });
+    // S4 §F — unconditional even here: a kill halts the memory/traffic erasure above, never the tenant's
+    // OWN catalog-erasure request (`eraseCatalogCorpus`'s doc).
+    await eraseCatalogCorpus(deps, tenantId, "shop/redact", "catalog.clear_failed");
     await markHandled(deps, tenantId, "shop/redact", v.webhookId);
     return "halted_deferred";
   }
@@ -544,7 +627,12 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
         // `complete: false` is asserted by test, so a future change that starts claiming completeness has
         // to defeat a test rather than quietly ship an overclaim.
         complete: false,
-        erased: ["merchant status → uninstalled (inert)", "every memory namespace named by the per-tenant subject index", "the per-tenant traffic log (message + reply text)"],
+        erased: [
+          "merchant status → uninstalled (inert)",
+          "every memory namespace named by the per-tenant subject index",
+          "the per-tenant traffic log (message + reply text)",
+          "the tenant's catalog corpus namespace + its corpus-state ledger (best-effort — see catalog.clear_failed if it did not take)",
+        ],
         notErased: SHOP_REDACT_RESIDUAL,
       },
       reversalPath:
@@ -576,6 +664,9 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
   } catch {
     /* counted only in the log; the audit row above already refuses to claim completeness */
   }
+  // S4 §F — unconditional (see `eraseCatalogCorpus`'s doc); a failure is caught and separately audited,
+  // never a 500 for this statutory webhook.
+  await eraseCatalogCorpus(deps, tenantId, "shop/redact", "catalog.clear_failed");
   await markHandled(deps, tenantId, "shop/redact", v.webhookId);
   return "applied";
 }
