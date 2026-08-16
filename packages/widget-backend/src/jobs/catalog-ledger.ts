@@ -25,6 +25,9 @@ export interface CorpusLedgerChunk {
   at: string;
   /** recordId (`product:<gid>`) → contentHash. */
   entries: Record<string, string>;
+  /** S4 §F — recordId → writtenAt (unix ms). OPTIONAL: absent on pre-S4 chunks (⇒ treated as 0, never
+   *  spuriously protected by the concurrency guard). A --reindex rewrites every chunk in the new shape. */
+  writtenAt?: Record<string, number>;
 }
 
 /** Deterministic chunk key: `ledger:0000`, `ledger:0001`, … (zero-padded so lexical order == numeric). */
@@ -72,11 +75,26 @@ export async function readCorpusLedger(store: RuntimeStatePort, tenantId: string
   return out;
 }
 
+/** S4 §F — recordId → writtenAt (unix ms). An id in a chunk with no `writtenAt` map (pre-S4) reads as 0,
+ *  so the concurrency guard never protects it. Never touches the vector store. */
+export async function readCorpusLedgerTimestamps(store: RuntimeStatePort, tenantId: string): Promise<Map<string, number>> {
+  const rows = await store.list<CorpusLedgerChunk>({ tenantId }, MANIFEST_COLLECTION);
+  const out = new Map<string, number>();
+  for (const { key, value } of rows) {
+    if (!key.startsWith(LEDGER_KEY_PREFIX)) continue;
+    for (const id of Object.keys(value?.entries ?? {})) out.set(id, value?.writtenAt?.[id] ?? 0);
+  }
+  return out;
+}
+
 /** Split a `recordId → contentHash` map into persisted chunks. Ids are SORTED so the chunking is stable
- *  across runs (a given id lands in the same chunk unless the corpus size crosses a boundary). */
+ *  across runs (a given id lands in the same chunk unless the corpus size crosses a boundary). `writtenAtMs`
+ *  is S4 §F: when given, every id in the chunk gets that `writtenAt`; omitted (2-arg call), the chunk shape
+ *  is byte-identical to pre-S4 (no `writtenAt` key at all). */
 export function chunkLedgerEntries(
   entries: Map<string, string>,
   at: string,
+  writtenAtMs?: number,
   chunkSize: number = LEDGER_CHUNK_SIZE,
 ): CorpusLedgerChunk[] {
   const size = Math.max(1, Math.floor(chunkSize));
@@ -85,8 +103,12 @@ export function chunkLedgerEntries(
   for (let i = 0; i < ids.length; i += size) {
     const slice = ids.slice(i, i + size);
     const e: Record<string, string> = Object.create(null);
-    for (const id of slice) e[id] = entries.get(id)!;
-    chunks.push({ version: 1, at, entries: e });
+    const w: Record<string, number> = Object.create(null);
+    for (const id of slice) {
+      e[id] = entries.get(id)!;
+      if (writtenAtMs !== undefined) w[id] = writtenAtMs;
+    }
+    chunks.push({ version: 1, at, entries: e, ...(writtenAtMs !== undefined ? { writtenAt: w } : {}) });
   }
   return chunks;
 }

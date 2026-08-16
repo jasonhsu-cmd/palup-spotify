@@ -44,6 +44,7 @@ import {
   deleteLedgerInTx,
   listLedgerChunkKeys,
   readCorpusLedger,
+  readCorpusLedgerTimestamps,
   writeLedgerInTx,
 } from "./catalog-ledger.js";
 
@@ -476,6 +477,9 @@ async function indexOneTenant(
   // tenant must see `halted`, which is the louder and more actionable fact.
   if (!canEmbed(deps.model)) return { tenantId, outcome: "no-embed-capability" };
 
+  // S4 §F — the snapshot instant for the concurrency guard below: recorded BEFORE the fetch, so any ledger
+  // write a webhook commits DURING or AFTER this fetch is provably later than what this run saw.
+  const fetchStartedAt = now().getTime();
   const catalog = await deps.catalog(tenantId);
   if (!catalog || catalog.products.length === 0) return { tenantId, outcome: "not-configured" };
 
@@ -547,6 +551,9 @@ async function indexOneTenant(
   // it must never skip fetching the real prior chunk keys.
   const priorChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
   const ledger = opts.reindex ? new Map<string, string>() : await readCorpusLedger(deps.store, tenantId);
+  // S4 §F — only needed for the non-reindex diff below; a --reindex erases the namespace and rebuilds from
+  // scratch, so there is no prior ledger to protect anything in.
+  const ledgerWrittenAt = opts.reindex ? new Map<string, number>() : await readCorpusLedgerTimestamps(deps.store, tenantId);
 
   const manifest = await deps.store.get<CatalogManifest>(ctx, MANIFEST_COLLECTION, MANIFEST_KEY);
 
@@ -558,7 +565,15 @@ async function indexOneTenant(
   // a corpus built pre-S3) means the prior set is UNKNOWN, so nothing is deleted — build the ledger from the
   // plan and let a later `--reindex` prune legacy orphans (spec §B "Migration"). `--reindex` erased the
   // namespace above, so its stale set is also empty.
-  const stale = opts.reindex || ledger.size === 0 ? [] : [...ledger.keys()].filter((id) => !wanted.has(id));
+  //
+  // S4 §F — a ledger id absent from this fetch's plan is normally stale (delisted). But an id a CONCURRENT
+  // webhook wrote AFTER this job's fetch snapshot (`writtenAt > fetchStartedAt`) is NOT delisted — it is a
+  // just-created product the fetch simply predates. Exclude it from the delete set AND carry it forward, so
+  // the hourly backstop never deletes a product a webhook created mid-run. Pre-S4 entries read writtenAt=0,
+  // so they are never spuriously protected.
+  const staleCandidates = opts.reindex || ledger.size === 0 ? [] : [...ledger.keys()].filter((id) => !wanted.has(id));
+  const protectedIds = staleCandidates.filter((id) => (ledgerWrittenAt.get(id) ?? 0) > fetchStartedAt);
+  const stale = staleCandidates.filter((id) => (ledgerWrittenAt.get(id) ?? 0) <= fetchStartedAt);
 
   if (toEmbed.length === 0 && stale.length === 0 && !opts.reindex) {
     // Nothing to do. The ledger is authoritative and committed atomically with the manifest, so a manifest
@@ -716,7 +731,15 @@ async function indexOneTenant(
     );
   }
 
-  const finalCount = opts.reindex ? records.length : wanted.size;
+  // The new ledger reflects the WHOLE corpus (plan == wanted): unchanged records keep their hash, changed
+  // ones get the new hash, stale ones are dropped. On --reindex the corpus is exactly the plan too.
+  const newLedger = new Map(plan.map((p) => [p.recordId, p.hash]));
+  // S4 §F — carry the concurrently-written ids forward (with their prior hash) so the hourly backstop never
+  // deletes a product a webhook created mid-run; the NEXT run's fetch will see it in the plan and reconcile
+  // it normally once its own writtenAt has aged past that run's fetchStartedAt.
+  for (const id of protectedIds) newLedger.set(id, ledger.get(id)!);
+
+  const finalCount = opts.reindex ? records.length : newLedger.size;
   const written: CatalogManifest = {
     model: effectivePin.model,
     dimension: effectivePin.dimension,
@@ -725,9 +748,6 @@ async function indexOneTenant(
     at: now().toISOString(),
     ceiling: maxProducts,
   };
-  // The new ledger reflects the WHOLE corpus (plan == wanted): unchanged records keep their hash, changed
-  // ones get the new hash, stale ones are dropped. On --reindex the corpus is exactly the plan too.
-  const newLedger = new Map(plan.map((p) => [p.recordId, p.hash]));
   await writeManifestAndAudit(
     deps,
     tenantId,
@@ -775,7 +795,10 @@ async function writeManifestAndAudit(
     await t.put(MANIFEST_COLLECTION, MANIFEST_KEY, manifest);
     // S3 §B — the ledger commits ATOMICALLY with the manifest + audit (one tx), so the three can never
     // disagree about what is indexed. Prunes any prior chunk key the new corpus no longer fills.
-    await writeLedgerInTx(t, chunkLedgerEntries(ledger.entries, at), ledger.priorChunkKeys);
+    // S4 §F — every id this tx writes gets `writtenAt = commit time` (uniform rule): correct for the
+    // concurrency guard because these entries are all older than the NEXT run's `fetchStartedAt`, while a
+    // genuinely concurrent webhook write lands with its own later timestamp.
+    await writeLedgerInTx(t, chunkLedgerEntries(ledger.entries, at, new Date(at).getTime()), ledger.priorChunkKeys);
     await t.audit(
       {
         actor: CATALOG_INDEX_ACTOR,
