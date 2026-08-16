@@ -29,12 +29,16 @@ import { parseStoreDomains, resolveShopifyStore } from "../merchant-store.js";
 import { createModelPort } from "../model.js";
 import {
   createShopifyGroundingAdapter,
+  mapStorefrontToContext,
   MAX_CATALOG_PRODUCTS,
   MAX_INDEX_CATALOG_PAGES,
   STOREFRONT_PAGE_SIZE,
   storefrontFetch,
+  storefrontFetchByIds,
+  type StorefrontByIdFetch,
   type StorefrontFetch,
 } from "../shopify-grounding.js";
+import type { ReconcileReason } from "../catalog-webhook-queue.js";
 import {
   chunkLedgerEntries,
   deleteLedgerInTx,
@@ -230,12 +234,19 @@ export interface TenantIndexReport {
 /** Resolve one tenant's catalog, or `undefined` when the tenant has no configured store. */
 export type CatalogSource = (tenantId: string) => Promise<GroundingContext | undefined>;
 
+/** Resolve ONLY the named products (by corpus GID), or `undefined` when the tenant has no store. Missing/
+ *  delisted ids simply do not appear in the returned array (the caller treats those as deletions). */
+export type CatalogByIdSource = (tenantId: string, ids: string[]) => Promise<Product[] | undefined>;
+
 export interface CatalogIndexDeps {
   store: RuntimeStatePort;
   vector: VectorPort;
   /** Whatever adapter this deployment composed. `embed` is OPTIONAL — see `canEmbed` below. */
   model: ModelPort;
   catalog: CatalogSource;
+  /** S3 §C — by-id source for the TARGETED reconcile path (webhook-driven). Absent ⇒ reconcileProducts can
+   *  only fall back to the full `catalog` crawl. */
+  catalogById?: CatalogByIdSource;
   /**
    * A3 (ADR-0020) — OPTIONAL Tier-2 product-facts store. When present, each successful catalog re-fetch
    * ALSO upserts the fresh price/availability facts here (the POLL-path producer, D2 — the freshness win
@@ -805,6 +816,136 @@ export async function runCatalogIndex(
     }
   }
   return reports;
+}
+
+/**
+ * S3 §C — refresh ONLY the named SKUs. Fetches them by id, re-embeds + upserts them, refreshes their
+ * ProductFacts + ledger entries, and `deleteById`s any that came back missing (delisted). Touches NO other
+ * corpus row and NEVER pages the whole catalog. Guards, in order: halt/cap, embed-capability, an existing
+ * manifest (no manifest ⇒ the corpus was never built ⇒ delegate to a full `runCatalogIndex`, never leave a
+ * one-product corpus), and the {model,dimension,purpose} pin. All writes go through the SAME
+ * `writeManifestAndAudit` (ledger+manifest+audit in one tx) the full path uses.
+ */
+export async function reconcileProducts(
+  deps: CatalogIndexDeps,
+  tenantId: string,
+  productIds: string[],
+  opts: { reason?: ReconcileReason } = {},
+): Promise<TenantIndexReport> {
+  const ns = catalogNamespace(tenantId);
+  const ctx = { tenantId };
+  const now = deps.now ?? (() => new Date());
+
+  const halted = await checkHalts(deps, tenantId);
+  if (halted) return { tenantId, outcome: halted };
+  if (!canEmbed(deps.model)) return { tenantId, outcome: "no-embed-capability" };
+
+  const manifest = await deps.store.get<CatalogManifest>(ctx, MANIFEST_COLLECTION, MANIFEST_KEY);
+  // No manifest / no purpose / no by-id source / uninformative id list ⇒ do the safe whole-catalog reconcile.
+  if (!manifest || !manifest.purpose || !deps.catalogById || productIds.length === 0) {
+    const [report] = await runCatalogIndex(deps, [tenantId], {});
+    return report!;
+  }
+
+  const recordIds = productIds.map(catalogRecordId);
+  const requested = new Set(recordIds);
+
+  const fetched = await deps.catalogById(tenantId, productIds);
+  if (fetched === undefined) return { tenantId, outcome: "not-configured" };
+  const plan = planProducts(fetched); // reuses the empty-text/duplicate refusals
+
+  // A requested id that did NOT come back is delisted → prune it.
+  const returnedRecordIds = new Set(plan.map((p) => p.recordId));
+  const stale = [...requested].filter((id) => !returnedRecordIds.has(id));
+
+  const priorChunkKeys = await listLedgerChunkKeys(deps.store, tenantId);
+  const ledger = await readCorpusLedger(deps.store, tenantId);
+
+  // Only re-embed the ones whose content actually changed (content-hash optimization, same as the full path).
+  const toEmbed = plan.filter((p) => ledger.get(p.recordId) !== p.hash);
+
+  // ── embed only the changed set ──
+  const vectors = new Map<string, number[]>();
+  let pin: CorpusPin | undefined;
+  for (let i = 0; i < toEmbed.length; i += Math.max(1, Math.floor(DEFAULT_EMBED_BATCH))) {
+    const stop = await checkHalts(deps, tenantId);
+    if (stop) return { tenantId, outcome: stop };
+    const batch = toEmbed.slice(i, i + DEFAULT_EMBED_BATCH);
+    const req = { texts: batch.map((p) => p.text), purpose: CATALOG_CORPUS_PURPOSE, tenantId };
+    const res = await deps.model.embed(req);
+    requireEmbedAlignment(req, res);
+    if (!pin) {
+      const mismatch = pinMismatch(manifest, res);
+      if (mismatch) {
+        return { tenantId, outcome: "pin-mismatch", products: plan.length, embedded: req.texts.length, model: res.model, dimension: res.dimension, reason: mismatch };
+      }
+      pin = { model: res.model, dimension: res.dimension, purpose: res.purpose };
+    } else if (res.model !== pin.model || res.dimension !== pin.dimension || res.purpose !== pin.purpose) {
+      throw new CatalogRefusal("failed", `the embedder changed from ${describePin(pin)} to ${describePin(res)} mid-run — refusing to write a corpus of two vector spaces`);
+    }
+    batch.forEach((p, j) => vectors.set(p.recordId, res.vectors[j]!));
+  }
+
+  // ── write only the changed set ──
+  const byId = new Map(fetched.map((p) => [p.id, p]));
+  const records: VectorRecord[] = toEmbed.map((p) => {
+    const src = byId.get(p.productId);
+    return {
+      id: p.recordId,
+      vector: vectors.get(p.recordId)!,
+      metadata: { kind: "product", productId: p.productId, contentHash: p.hash, title: src?.title ?? "", ...(src?.variantId ? { variantId: src.variantId } : {}) },
+    };
+  });
+  if (records.length > 0) await deps.vector.upsert(ns, records);
+  if (stale.length > 0) await deps.vector.deleteById(ns, stale);
+
+  // Tier-2 money-facts for the refreshed subset (D2 poll-side, same as the full path). Fail-safe: the
+  // vector write is primary, a facts failure is alerted + swallowed.
+  if (deps.productFacts && fetched.length > 0) {
+    try {
+      await deps.productFacts.upsertMany(tenantId, productFactsFrom({ tenantId, brandName: "", products: fetched, policy: { returns: "", shipping: "" } }, now()));
+    } catch (e) {
+      console.error(`[catalog] ALERT product_facts_upsert_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
+    }
+  }
+
+  // New ledger = old ledger, plus the refreshed hashes, minus the pruned ids.
+  const newLedger = new Map(ledger);
+  for (const p of plan) newLedger.set(p.recordId, p.hash);
+  for (const id of stale) newLedger.delete(id);
+
+  const effectivePin: CorpusPin = pin ?? { model: manifest.model, dimension: manifest.dimension, purpose: manifest.purpose };
+  const written: CatalogManifest = {
+    model: effectivePin.model,
+    dimension: effectivePin.dimension,
+    purpose: effectivePin.purpose,
+    products: newLedger.size,
+    at: now().toISOString(),
+    ceiling: manifest.ceiling,
+  };
+  await writeManifestAndAudit(
+    deps,
+    tenantId,
+    written,
+    { products: plan.length, embedded: toEmbed.length, written: records.length, removed: stale.length, reindex: false, repaired: false },
+    { entries: newLedger, priorChunkKeys },
+  );
+
+  return { tenantId, outcome: "indexed", products: plan.length, embedded: toEmbed.length, written: records.length, removed: stale.length, model: written.model, dimension: written.dimension };
+}
+
+/** Shopify wiring for the by-id source (composition root). Mirrors `shopifyCatalogSource`. */
+export function shopifyCatalogByIdSource(
+  secrets: SecretsPort,
+  fetchImpl: StorefrontByIdFetch = storefrontFetchByIds(globalThis.fetch),
+  domains: Record<string, string> = parseStoreDomains(),
+): CatalogByIdSource {
+  return async (tenantId, ids) => {
+    const creds = await resolveShopifyStore(tenantId, secrets, domains);
+    if (!creds) return undefined;
+    const data = await fetchImpl(creds, ids);
+    return mapStorefrontToContext(tenantId, data).products;
+  };
 }
 
 export interface CatalogClearReport {
