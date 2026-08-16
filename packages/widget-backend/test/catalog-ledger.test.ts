@@ -104,4 +104,30 @@ describe("erasure — runCatalogClear drops the tenant ledger chunks (ADR-0015)"
     expect(await listLedgerChunkKeys(store, "acme")).toEqual([]);
     expect(await store.get({ tenantId: "acme" }, MANIFEST_COLLECTION, MANIFEST_KEY)).toBeNull();
   });
+
+  it("removes ALL chunks when the ledger spans multiple chunks (not just chunk 0)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const ns = catalogNamespace("acme");
+    await vector.upsert(ns, [{ id: catalogRecordId("gid://shopify/Product/1"), vector: [1, 0, 0, 0] }]);
+    await store.put({ tenantId: "acme" }, MANIFEST_COLLECTION, MANIFEST_KEY, {
+      model: "fake-embed-4d",
+      dimension: 4,
+      purpose: "document",
+      products: 1,
+      at: AT,
+      ceiling: 50000,
+    });
+    const entries = ledgerOf(LEDGER_CHUNK_SIZE + 3);
+    await store.tx({ tenantId: "acme" }, async (t) => {
+      await writeLedgerInTx(t, chunkLedgerEntries(entries, AT), []);
+    });
+    expect(await listLedgerChunkKeys(store, "acme")).toEqual([ledgerChunkKey(0), ledgerChunkKey(1)]);
+
+    const report = await runCatalogClear({ store, vector }, "acme");
+
+    expect(report.confirmed).toBe(true);
+    expect(await listLedgerChunkKeys(store, "acme")).toEqual([]);
+    expect((await readCorpusLedger(store, "acme")).size).toBe(0);
+  });
 });
