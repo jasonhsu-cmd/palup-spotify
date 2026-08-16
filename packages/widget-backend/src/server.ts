@@ -2123,6 +2123,10 @@ export async function buildServer(opts?: {
       // S4 §B — per-tenant CATALOG_RETRIEVAL, resolved from the two-gate registry on the SAME shared store,
       // so a `pnpm catalog:enable` flip propagates to every serving instance. Default OFF for everyone.
       const catalogRetrievalEnabled = await catalogRetrievalEnabledFor(store, tenantId);
+      // S4 §C — the retrieval-scoped kill, read alongside the shopper kill. `CATALOG_RETRIEVAL_AGENT_TYPE`
+      // ("catalog-retrieval") is the SAME agentType the retriever meters under (server.ts retriever above).
+      // matchedKill handles precedence global>tenant>agent. This DEGRADES retrieval; it does not halt.
+      const retrievalKill = await matchedKill(store, { tenantId, agentType: CATALOG_RETRIEVAL_AGENT_TYPE });
       // PR-11a (ADR-0015 T12; ADR-0019 task 4) — look up this subject's server-recorded memory-consent
       // BEFORE deriving signals, keyed on `memorySubject` — the SAME server-derived subject
       // deriveServingSignals now uses (the verified x-guest-token's anonId or the shopper's acct: id, NOT
@@ -2284,6 +2288,7 @@ export async function buildServer(opts?: {
         kill: Boolean(kill),
         atCap: Boolean(costCap),
         catalogRetrievalEnabled,
+        catalogRetrievalKilled: Boolean(retrievalKill),
         // T1 — server-authored guard signals (undefined ⇒ deriveServingSignals omits the keys, so the
         // flag-off path stays byte-identical). `safetyClass` is undefined when the classifier said "none".
         serverSafetyClass: guardSignals?.safetyClass,
