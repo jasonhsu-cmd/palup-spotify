@@ -11,16 +11,33 @@ import { buildMoneyFactsBrain, gradeMoneyFacts, type MoneyFactsCase } from "../s
 // So this proves buildMoneyFactsBrain plumbs (seeded facts → the staleness ceiling → the CATALOG block)
 // AND gradeMoneyFacts agree end to end. The REAL-model quality run is `pnpm eval:money-facts` (needs creds).
 
-/** Replies like a compliant model: quote the target product's shown price, or confirm when it's withheld. */
+/**
+ * Replies like a compliant model: quote the target product's shown price, or offer to confirm when it's
+ * withheld — EITHER because the fact is explicitly stale (`priceConfirmed:false`, rendered as the
+ * `PRICE_UNCONFIRMED_TEXT` sentinel) OR because the CATALOG line's price field is simply EMPTY.
+ *
+ * S2 (owner-ruled 2026-08-16): on the CATALOG_RETRIEVAL shell render path there is no live-catalog base
+ * price to fall back to — `ProductFactsPort` is the SOLE price source (see `brain.ts`'s `retrieveViaShell`
+ * + `hydrateProductFacts`). A product with no fresh fact at all (missing, or a fact seeded under a
+ * DIFFERENT tenant) is passed through `hydrateProductFacts` UNCHANGED — `price: ""`, no explicit
+ * `priceConfirmed:false` — so its CATALOG line renders with an empty price field, e.g. `Balancing Toner
+ * ()`. That is a DIFFERENT rendered shape from the explicit stale sentinel, but the SAME fact for a
+ * shopper — "no confirmed price to quote" — and the system prompt's own standing rule ("if a fact isn't
+ * there, say you're not certain and will check") tells a real model to respond to it the same way. This
+ * scripted stand-in is updated to match, so the grader exercises the ACTUAL S2 rendered shape rather than
+ * one this path no longer produces. Priced retrieval serving REQUIRES the A3 ProductFacts producer to have
+ * populated a fact for a SKU — an undocumented operational precondition made explicit here.
+ */
 class ScriptedModel implements ModelPort {
   constructor(private readonly targetTitle: string) {}
   async complete(req: ModelRequest): Promise<ModelResponse> {
     const sys = req.messages.find((m) => m.role === "system")?.content ?? "";
     const line = sys.split("\n").find((l) => l.includes(this.targetTitle)) ?? "";
-    if (line.includes("current price needs confirming")) {
+    const priceField = /\(([^)]*)\)/.exec(line)?.[1] ?? "";
+    if (priceField === "" || priceField.includes("needs confirming")) {
       return { text: `I'll confirm the current price for the ${this.targetTitle} before you buy — let me check on that.`, model: "scripted" } as ModelResponse;
     }
-    const price = /\((\$[\d.]+)\)/.exec(line)?.[1] ?? "(unknown)";
+    const price = /\$[\d.]+/.exec(priceField)?.[0] ?? "(unknown)";
     return { text: `The ${this.targetTitle} is ${price}.`, model: "scripted" } as ModelResponse;
   }
 }
