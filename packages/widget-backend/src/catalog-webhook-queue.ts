@@ -63,14 +63,23 @@ export function catalogReconcileMessage(
 }
 
 /**
- * Subscribe the reconcile worker. On each message it extracts the tenantId from the (server-authored)
- * payload and calls `reconcile(tenantId)` — the composition root supplies that as a runCatalogIndex call
- * for the one tenant. A malformed/absent tenantId is skipped (never reconciles a blank/all-tenant scope).
- * A thrown reconcile is retried by the QueuePort up to its cap, then dead-lettered — never lost silently.
+ * Subscribe the reconcile worker. On each message it extracts the tenantId (and, S3 §C, the changed
+ * `productIds`/`reason`) from the (server-authored) payload and calls `reconcile(tenantId, opts)` — the
+ * composition root routes that to a TARGETED `reconcileProducts` when ids are present, or the full
+ * `runCatalogIndex` otherwise. A malformed/absent tenantId is skipped (never reconciles a blank/all-tenant
+ * scope). A thrown reconcile is retried by the QueuePort up to its cap, then dead-lettered — never lost
+ * silently.
  */
-export function subscribeCatalogReconcile(queue: QueuePort, reconcile: (tenantId: string) => Promise<void>): QueueSubscription {
+export function subscribeCatalogReconcile(
+  queue: QueuePort,
+  reconcile: (tenantId: string, opts?: { productIds?: string[]; reason?: ReconcileReason }) => Promise<void>,
+): QueueSubscription {
   return queue.subscribe(CATALOG_RECONCILE_TOPIC, CATALOG_RECONCILE_GROUP, async (msg) => {
-    const tenantId = (msg.payload as { tenantId?: unknown } | undefined)?.tenantId;
-    if (typeof tenantId === "string" && tenantId.trim()) await reconcile(tenantId);
+    const payload = msg.payload as { tenantId?: unknown; productIds?: unknown; reason?: unknown } | undefined;
+    const tenantId = payload?.tenantId;
+    if (typeof tenantId !== "string" || !tenantId.trim()) return;
+    const productIds = Array.isArray(payload?.productIds) ? payload!.productIds.filter((x): x is string => typeof x === "string") : undefined;
+    const reason = payload?.reason === "product" || payload?.reason === "inventory" || payload?.reason === "full" ? payload.reason : undefined;
+    await reconcile(tenantId, { ...(productIds && productIds.length > 0 ? { productIds } : {}), ...(reason ? { reason } : {}) });
   });
 }
