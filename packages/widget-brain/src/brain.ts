@@ -1104,10 +1104,12 @@ export function createBrain(
       const shopperVerified = signals.shopperId !== undefined;
       const text = message.toLowerCase();
       const flags: string[] = [];
-      // S4 §B — retrieval is a PER-TURN decision. `signals.catalogRetrievalEnabled` (server-resolved from
-      // the two-gate registry) wins; absent ⇒ the constructor default (serving now passes false). This is
-      // what retired the process-global CATALOG_RETRIEVAL flag.
-      const catalogRetrievalOn = signals.catalogRetrievalEnabled ?? catalogRetrievalEnabled;
+      // S4 §B/§C — retrieval is per-turn. `signals.catalogRetrievalEnabled` (registry) enables it; an armed
+      // `agent:catalog-retrieval` kill (`signals.catalogRetrievalKilled`) DEGRADES it to full-catalog for
+      // this turn (retrieval-only rollback, not a turn halt). Record the degrade for the audit log.
+      const catalogRetrievalWanted = signals.catalogRetrievalEnabled ?? catalogRetrievalEnabled;
+      const catalogRetrievalOn = catalogRetrievalWanted && !signals.catalogRetrievalKilled;
+      if (catalogRetrievalWanted && signals.catalogRetrievalKilled) flags.push("retrieval:killed");
 
       // The client-replayed transcript is fenced in groundedMessages (see there and history-fence.ts).
       // Computed here as well, purely so a DROP IS OBSERVABLE: an operator reading the audit record must

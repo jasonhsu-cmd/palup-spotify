@@ -91,6 +91,8 @@ export interface ServingSignalContext {
    * server-side via `catalogRetrievalEnabledFor`). NEVER client-set (rebuilt here, like kill/atCap).
    */
   catalogRetrievalEnabled?: boolean;
+  /** S4 §C — an `agent:catalog-retrieval` kill is armed for this tenant/agent/globally (matchedKill). */
+  catalogRetrievalKilled?: boolean;
   /** Merchant/geo jurisdiction (server config). */
   region: NonNullable<Signals["region"]>;
   /** Merchant "discuss competitors" mode (merchant policy). */
@@ -218,6 +220,9 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // enabled — same discipline as `cartItems` above, byte-identical to pre-S4 for every tenant while
     // both KV gates default OFF.
     ...(ctx.catalogRetrievalEnabled ? { catalogRetrievalEnabled: true } : {}),
+    // S4 §C — same spread discipline: ABSENT (not present-and-false) whenever no kill is armed, so
+    // flag-off/no-kill goldens stay byte-identical.
+    ...(ctx.catalogRetrievalKilled ? { catalogRetrievalKilled: true } : {}),
     // Quiet-hours clock is SERVER-derived (ctx), never the client's r.localHour. Only a valid 0–23
     // integer is honored; anything else ⇒ omitted ⇒ quiet-hours suppression simply does not apply.
     localHour:
