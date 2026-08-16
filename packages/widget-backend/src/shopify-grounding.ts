@@ -433,6 +433,66 @@ export function storefrontShellFetch(
   };
 }
 
+/** By-id product fetch. `nodes(ids:)` returns the products for the given GIDs; a missing/delisted id (or a
+ *  non-Product node) resolves to `null` and is dropped. The inline fragment requests the SAME fields as the
+ *  page query so `mapStorefrontToContext` maps the result identically. */
+export const STOREFRONT_NODES_QUERY = `query PalUpGroundingByIds($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on Product { id title description tags availableForSale priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } } }
+  }
+}`;
+
+export type StorefrontByIdFetch = (creds: ShopifyStoreCreds, ids: string[]) => Promise<StorefrontData>;
+
+/**
+ * S3 §C — fetch ONLY the named products by Storefront GID, so a webhook can refresh exactly the SKUs that
+ * changed instead of paging the whole catalog. Returns the same `StorefrontData` shape the pagination path
+ * does (`{ products: { nodes } }`) so it flows through `mapStorefrontToContext` unchanged. Same host guard +
+ * private-token header + per-request timeout as `storefrontFetch`; the token never leaves this path and is
+ * never logged.
+ */
+export function storefrontFetchByIds(
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  opts: { version?: string; timeoutMs?: number; log?: (info: StorefrontEgressLog) => void } = {},
+): StorefrontByIdFetch {
+  const version = opts.version ?? STOREFRONT_API_VERSION;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PAGE_TIMEOUT_MS;
+  const log = opts.log ?? ((info: StorefrontEgressLog) => console.log("[grounding.shopify] " + JSON.stringify(info)));
+  return async (creds, ids) => {
+    if (ids.length === 0) return { products: { nodes: [] } };
+    if (!SHOP_HOST.test(creds.shopDomain)) {
+      throw new Error("refusing Shopify fetch: shopDomain is not a *.myshopify.com host"); // never leak the token
+    }
+    const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
+    const start = Date.now();
+    let status = 0;
+    let ok = false;
+    let nodeCount: number | undefined;
+    try {
+      const res = await fetchFn(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Shopify-Storefront-Private-Token": creds.accessToken },
+        body: JSON.stringify({ query: STOREFRONT_NODES_QUERY, variables: { ids } }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      status = res.status;
+      ok = res.ok;
+      if (!res.ok) throw new Error("Shopify Storefront API request failed"); // static; caching wrapper degrades
+      const json = (await res.json()) as { data?: { nodes?: (StorefrontProductNode | null)[] }; errors?: Array<{ message?: string }> };
+      if (Array.isArray(json.errors) && json.errors.length) throw new Error("Shopify Storefront GraphQL error");
+      const nodes = (json.data?.nodes ?? []).filter((n): n is StorefrontProductNode => n != null && typeof n.id === "string");
+      nodeCount = nodes.length;
+      return { products: { nodes } };
+    } finally {
+      try {
+        log({ host: creds.shopDomain, status, ok, ms: Date.now() - start, page: 0, nodes: nodeCount });
+      } catch {
+        /* ignore logging errors */
+      }
+    }
+  };
+}
+
 /** GroundingPort backed by a merchant's Shopify store. `fetchImpl` defaults to the live Storefront call. */
 export function createShopifyGroundingAdapter(
   creds: ShopifyStoreCreds,
