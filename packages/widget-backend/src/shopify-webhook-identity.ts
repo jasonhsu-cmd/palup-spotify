@@ -355,14 +355,36 @@ export function customerIdOf(body: Record<string, unknown>): string | undefined 
 }
 
 /**
- * S3 §C — the top-level product id from a `products/*` webhook body as a BARE DECIMAL STRING, or
- * `undefined`. Shopify's product webhooks carry `"id": <number>` (e.g. `788032119674292922`). Same
- * numeric discipline as `customerIdOf`: a non-negative safe integer or an all-digits string only —
- * everything else refuses, so a hostile value can never be interpolated into a corpus record id or a
- * Storefront GID. `matchesPayloadShape` has already required `id` present for these topics; this
- * validates it.
+ * S3 §C, fix round 1 — the top-level product id from a `products/*` webhook body as a BARE DECIMAL
+ * STRING, or `undefined`.
+ *
+ * PRECISION. Shopify's product webhook body carries the id in TWO fields: the numeric `id` (a JSON
+ * number, so it is already lossy for a large id — `JSON.parse`/the JS number type both round any integer
+ * beyond `Number.MAX_SAFE_INTEGER` before this function ever sees it) and `admin_graphql_api_id`, a GID
+ * STRING `"gid://shopify/Product/<id>"` — a string is never subject to float64 rounding. Per the
+ * reviewer's finding: `admin_graphql_api_id` has been present in webhook payloads since 2019-07-01
+ * (unverified by me against a primary source this session — stated here as the reviewer's claim, not an
+ * independently confirmed fact). So the GID string is read FIRST, as the precision-safe source; the
+ * numeric `id` field is a LAST-RESORT FALLBACK only, for a body that somehow lacks the GID, and it keeps
+ * the exact same safe-integer refusal `customerIdOf` uses (never silently rounds a value that has already
+ * lost precision).
+ *
+ * The returned value is the bare numeric id as a STRING (e.g. `"8258451439839"`), never the full
+ * `"gid://…"` form — this is the convention Task 2's ledger uses (`product:<id>`); the caller builds the
+ * Storefront GID itself when one is needed (`SHOPIFY_PRODUCT_GID_PREFIX` in catalog-webhook-queue.ts).
+ *
+ * Same refuse-rather-than-coerce discipline as `customerIdOf`/`dataRequestIdOf` throughout: a value that
+ * does not exactly match the expected shape yields `undefined`, never a guess.
  */
 export function productIdOf(body: Record<string, unknown>): string | undefined {
+  const gid = body.admin_graphql_api_id;
+  if (typeof gid === "string") {
+    const m = /\/Product\/(\d+)$/.exec(gid);
+    if (m) return m[1];
+  }
+  // Fallback only — no GID present. Same safe-integer discipline as customerIdOf: a numeric id beyond
+  // Number.MAX_SAFE_INTEGER has already lost precision by the time it is a JS number, so it is refused
+  // rather than silently rounded.
   const id = body.id;
   if (typeof id === "number") return Number.isSafeInteger(id) && id >= 0 ? String(id) : undefined;
   if (typeof id === "string" && /^\d+$/.test(id)) return id;

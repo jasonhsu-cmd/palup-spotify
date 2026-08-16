@@ -4,7 +4,7 @@ import type { MerchantRecord, MerchantRegistryPort, QueuePort, RuntimeStatePort,
 import { buildShopifyShopperId } from "@palup/platform-ports";
 import { accountSubjectId, eraseSubject, listSubjects, retireSubject } from "@palup/widget-memory";
 import { clientIpKey } from "../rate-limit.js";
-import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage, SHOPIFY_PRODUCT_GID_PREFIX, type ReconcileReason } from "../catalog-webhook-queue.js";
+import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage, type ReconcileReason } from "../catalog-webhook-queue.js";
 import {
   APP_UNINSTALLED_SHOP_SOURCE,
   CATALOG_TOPICS,
@@ -376,11 +376,13 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
  * runCatalogIndex.
  *
  * S3 §C — the reconcile message carries the CHANGED product id(s) when the topic is precise, so a later
- * worker (T5) can target just those SKUs instead of re-crawling the whole catalog. `products/*` bodies
- * carry the numeric id; corpus record ids use the Storefront GID, so it is built here from `productIdOf`'s
- * validated numeric string. `inventory_levels/update` carries an `inventory_item_id`, NOT a product id,
- * and the Storefront delegate token cannot resolve it — so it enqueues `reason:"inventory"` with NO ids
- * and triggers no per-event crawl (freshness for it comes from the hourly poll backstop + the serve-time
+ * worker (T5) can target just those SKUs instead of re-crawling the whole catalog. `productIds` holds the
+ * BARE NUMERIC id string (`productIdOf`'s return — read from `admin_graphql_api_id`, the precision-safe
+ * GID field, first), matching the corpus record id convention (`product:<id>`) Task 2's ledger uses; it
+ * is NOT the full `"gid://…"` form — T5 builds that back from the numeric id where it needs one for the
+ * Storefront API. `inventory_levels/update` carries an `inventory_item_id`, NOT a product id, and the
+ * Storefront delegate token cannot resolve it — so it enqueues `reason:"inventory"` with NO ids and
+ * triggers no per-event crawl (freshness for it comes from the hourly poll backstop + the serve-time
  * ceiling, not this path). A `products/*` delivery whose id `productIdOf` refuses to validate falls back
  * to `reason:"full"` (a safe whole-catalog reconcile) rather than guessing. The worker still NEVER trusts
  * the body beyond these ids: it re-fetches the named products' CURRENT state.
@@ -400,7 +402,7 @@ async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic:
   if (topic === "products/create" || topic === "products/update" || topic === "products/delete") {
     const numeric = productIdOf(v.body);
     if (numeric) {
-      productIds = [`${SHOPIFY_PRODUCT_GID_PREFIX}${numeric}`];
+      productIds = [numeric];
       reason = "product";
     }
   } else if (topic === "inventory_levels/update") {

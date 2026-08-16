@@ -97,25 +97,76 @@ afterEach(() => {
 describe("S3 §C — handleCatalogChange enqueues productIds + reason", () => {
   it("products/update enqueues a targeted reconcile with the GID and reason:product", async () => {
     const h = await harness();
-    const res = await h.post(WEBHOOK_ROUTES.productsUpdate, "products/update", JSON.stringify({ id: 7 }));
+    // A realistic Shopify product body carries BOTH the numeric `id` and the precision-safe
+    // `admin_graphql_api_id` GID string — the GID is read first (fix round 1).
+    const res = await h.post(
+      WEBHOOK_ROUTES.productsUpdate,
+      "products/update",
+      JSON.stringify({ id: 7, admin_graphql_api_id: "gid://shopify/Product/7" }),
+    );
     expect(res.statusCode).toBe(200);
     expect(published).toHaveLength(1);
     expect(published[0]!.payload).toMatchObject({
       reason: "product",
-      productIds: ["gid://shopify/Product/7"],
+      // Bare numeric-id STRING (the corpus `product:<id>` convention) — NOT the "gid://…" form; T5 builds
+      // a GID back from this when it needs one for the Storefront API.
+      productIds: ["7"],
     });
   });
 
-  it("products/create enqueues reason:product with the GID", async () => {
+  it("products/create enqueues reason:product with the id", async () => {
     const h = await harness();
-    await h.post(WEBHOOK_ROUTES.productsCreate, "products/create", JSON.stringify({ id: 42 }));
-    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["gid://shopify/Product/42"] });
+    await h.post(
+      WEBHOOK_ROUTES.productsCreate,
+      "products/create",
+      JSON.stringify({ id: 42, admin_graphql_api_id: "gid://shopify/Product/42" }),
+    );
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["42"] });
   });
 
-  it("products/delete enqueues reason:product with the GID (the worker deletes without a fetch)", async () => {
+  it("products/delete enqueues reason:product with the id (the worker deletes without a fetch)", async () => {
     const h = await harness();
-    await h.post(WEBHOOK_ROUTES.productsDelete, "products/delete", JSON.stringify({ id: 9 }));
-    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["gid://shopify/Product/9"] });
+    await h.post(
+      WEBHOOK_ROUTES.productsDelete,
+      "products/delete",
+      JSON.stringify({ id: 9, admin_graphql_api_id: "gid://shopify/Product/9" }),
+    );
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["9"] });
+  });
+
+  it("a realistic 13-digit id is read from admin_graphql_api_id, not the (differing) numeric `id` field", async () => {
+    // matchesPayloadShape requires `id` present for this topic, so a synthetic small `id` stands in for
+    // "some numeric id was present" on the wire; the GID is the field this function actually trusts.
+    const h = await harness();
+    await h.post(
+      WEBHOOK_ROUTES.productsUpdate,
+      "products/update",
+      JSON.stringify({ id: 1, admin_graphql_api_id: "gid://shopify/Product/8258451439839" }),
+    );
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["8258451439839"] });
+  });
+
+  it("an OVERSIZED (18-digit, beyond Number.MAX_SAFE_INTEGER) id is preserved EXACTLY via the GID string", async () => {
+    // This is the precision property fix round 1 exists for: reading the numeric `id` field here would
+    // round this value (JSON.parse/JS number both lose precision beyond 2^53) and silently fall back to
+    // reason:"full" for any store whose product ids exceed that range. The GID is a STRING end to end, so
+    // no rounding occurs.
+    const h = await harness();
+    await h.post(
+      WEBHOOK_ROUTES.productsUpdate,
+      "products/update",
+      // A numeric `id` this large would already be rounded by JSON.parse; admin_graphql_api_id is a string
+      // and is unaffected — matchesPayloadShape only requires `id` present, so a synthetic small `id` here
+      // stands in for "some numeric id was present", while the GID carries the real, exact value.
+      JSON.stringify({ id: 1, admin_graphql_api_id: "gid://shopify/Product/788032119674292922" }),
+    );
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["788032119674292922"] });
+  });
+
+  it("falls back to the numeric `id` when admin_graphql_api_id is absent", async () => {
+    const h = await harness();
+    await h.post(WEBHOOK_ROUTES.productsUpdate, "products/update", JSON.stringify({ id: 55 }));
+    expect(published[0]!.payload).toMatchObject({ reason: "product", productIds: ["55"] });
   });
 
   it("inventory_levels/update enqueues reason:inventory with NO productIds (no per-event crawl)", async () => {
