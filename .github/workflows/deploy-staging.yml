@@ -58,10 +58,13 @@ jobs:
         # `demo-embed-key -> demo` registry whenever this was unset/malformed; that fallback fails OPEN
         # (every merchant collapses onto the fallback tenant — see resolveEmbedKeys in
         # packages/widget-backend/src/server.ts), so with PALUP_REQUIRE_DATABASE_URL=true the service now
-        # REFUSES TO BOOT unless the registry is declared. Staging genuinely serves the demo tenant, so it
-        # declares exactly that — the same value the built-in fallback used, now an explicit operator
-        # choice. Same JSON-in-env pattern as SHOPIFY_STORES above (no '@' in the value). Adding a real
-        # merchant means adding its publishable key here: {"demo-embed-key":"demo","<key>":"<tenant>"}.
+        # REFUSES TO BOOT unless the registry is declared. Staging serves the OAuth-installed tenant
+        # `palup-skincare-jason` (consolidated 2026-08-17 — it holds the registry row + catalog webhooks +
+        # custodied credential; see the ENVS block below), so `demo-embed-key` maps to it. The publishable
+        # embed key stays `demo-embed-key` (the widget snippet is unchanged); only the tenant it resolves to
+        # moved off the retired `demo` config tenant. Same JSON-in-env pattern as SHOPIFY_STORES above (no
+        # '@' in the value). Adding a merchant means adding its publishable key here:
+        # {"demo-embed-key":"palup-skincare-jason","<key>":"<tenant>"}.
         #
         # ── D3 — WHY THIS STEP IS NOW A SHELL SCRIPT INSTEAD OF ONE LONG INLINE FLAG ──────────────────
         # Track B added env vars that were documented in docs/DEPLOY.md and passed to NOTHING, so the code
