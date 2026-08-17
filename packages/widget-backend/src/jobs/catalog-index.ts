@@ -54,11 +54,11 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 // READ THIS FIRST — TWO THINGS ABOUT THIS JOB ARE TRUE AND UNCOMFORTABLE.
 //
-// 1. NOTHING READS THIS CORPUS IN ANY ENVIRONMENT TODAY — but the path now EXISTS. E1 built the reader
-//    (`createCatalogRetriever`, ../catalog-retriever.ts) and `server.ts` now composes it when
-//    `CATALOG_RETRIEVAL=true`. That flag is unset everywhere, so a written corpus still changes no
-//    shopper-visible behaviour; what changed is that enabling it is now possible to shadow and canary at
-//    all, which is what the eval gate, shadow, canary and named-human approval actually require
+// 1. THIS CORPUS IS READ ON THE LIVE PATH for any tenant with catalog retrieval enabled. E1 built the reader
+//    (`createCatalogRetriever`, ../catalog-retriever.ts) and `server.ts` composes it PER TURN when
+//    `catalogRetrievalEnabledFor(tenant)` is true (the process-global `CATALOG_RETRIEVAL` env was RETIRED in
+//    S4). A written corpus changes shopper-visible behaviour only for enabled tenants; enabling one is the
+//    governed shadow → canary → named-human promotion the eval gate and HITL §5 require
 //    (CLAUDE.md §3.2, HITL-POLICY §5). (Updated by E1, then by the Wave 4 composition change; before E1
 //    no reader existed at all.)
 //
@@ -1363,10 +1363,10 @@ async function main(): Promise<void> {
       );
     }
     console.log(
-      "[catalog] NOTE: nothing reads this corpus on a live path by default. The retriever exists (E1) and " +
-        "the server composes it when CATALOG_RETRIEVAL is set, but that flag is off by default — enabling it " +
-        "is a governed human promotion step (eval gate → shadow → canary → named-human approval, HITL-POLICY §5), " +
-        "not a routine deploy toggle.",
+      "[catalog] NOTE: this corpus is served only to tenants with catalog retrieval enabled. The retriever " +
+        "exists (E1) and the server composes it per turn when catalogRetrievalEnabledFor(tenant) is true (the " +
+        "process-global CATALOG_RETRIEVAL env was retired in S4). Enabling a tenant is a governed promotion " +
+        "(eval gate → shadow → canary → named-human approval, HITL-POLICY §5; pnpm catalog:enable), not a deploy toggle.",
     );
   } catch (e) {
     console.error(`[catalog] FAILED: ${(e as Error).message}`);

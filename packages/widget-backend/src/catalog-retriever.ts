@@ -19,8 +19,10 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 // READ THIS FIRST — WHAT THIS IS AND IS NOT WIRED TO.
 //
-// This module IS composed now, by `server.ts`, but ONLY when `CATALOG_RETRIEVAL=true`; with the flag unset
-// (every environment today) nothing here is constructed and no manifest is ever read.
+// This module IS composed by `server.ts` per shopper turn when catalog retrieval is enabled for the tenant
+// via the two-gate registry (platform master + per-tenant opt-in — `catalog-retrieval-enablement.ts`,
+// `catalogRetrievalEnabledFor`). The process-global `CATALOG_RETRIEVAL` env was RETIRED in S4; enablement is
+// a per-tenant HITL §5 promotion (`pnpm catalog:enable`), on for at least one staging tenant today.
 //
 // An earlier version of this header said "COMPOSED BY NOBODY TODAY … leaving the composition step out is
 // deliberate: a flag alone cannot turn this on." That was true and it was the wrong trade. Enabling a
