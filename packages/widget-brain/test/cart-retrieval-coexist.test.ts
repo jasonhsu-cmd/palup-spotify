@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { GroundingPort, ModelPort, Product } from "@palup/platform-ports";
+import { createCachingGroundingPort, InMemoryRuntimeStore } from "@palup/platform-ports";
 import { createBrain } from "../src/index.js";
 import type { CatalogRetrieverPort, Signals } from "../src/types.js";
 
@@ -141,6 +142,29 @@ describe("CART_LINE_ITEMS x CATALOG_RETRIEVAL coexistence", () => {
     });
     const brain = createBrain(
       model, grounding, undefined, undefined, undefined, undefined,
+      false, false, false, false,
+      fakeRetriever(), true, 12,
+      false, false, true, false,
+    );
+    const signals: Signals = { tenantId: "t1", cart: "has_items", cartItems: [{ productId: "p-serum", quantity: 1 }] };
+    const decision = await brain.decide(signals, ASK);
+    expect(system()).not.toContain("=== SHOPPER CART");
+    expect(decision.flags).toContain("cart:byid_unavailable");
+    expect(decision.reply.length).toBeGreaterThan(0);
+  });
+
+  it("through the PRODUCTION caching wrapper, a fetch failure STILL fires cart:byid_unavailable (not a silent drop)", async () => {
+    // In production the brain receives the caching-WRAPPED port (widget-backend/src/model.ts), not the raw
+    // adapter. A wrapper that swallowed the by-id failure to `[]` would drop the cart block with NO flag —
+    // the exact silent degrade the security review caught. This pins that the wrapped path propagates the
+    // failure so the brain's cart:byid_unavailable audit flag fires on a real Shopify outage.
+    const { model, system } = capturingModel();
+    const inner = shellOnlyGroundingWithByIds(async () => {
+      throw new Error("by-id lookup unavailable");
+    });
+    const wrapped = createCachingGroundingPort(inner, new InMemoryRuntimeStore(), { ttlSeconds: 60 });
+    const brain = createBrain(
+      model, wrapped, undefined, undefined, undefined, undefined,
       false, false, false, false,
       fakeRetriever(), true, 12,
       false, false, true, false,
