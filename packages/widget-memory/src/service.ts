@@ -829,7 +829,24 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         }
       }
     } else {
-      matches = await deps.vector.query(namespace, { text: "", k: RECALL_LIMIT });
+      // LIVE BUG FIX (found by an E2E staging smoke test, 2026-08-18): this fallback list-all previously
+      // called `deps.vector.query(namespace, { text: "", k: RECALL_LIMIT })` — the pre-PR3 "list
+      // everything" idiom (an empty-text query ties every record at score 0, returned in stable id
+      // order). That is a TEXT-modality query, and `PgVectorStore` (VECTOR_ANN on) is vector-query-ONLY —
+      // it throws `PgVectorTextQueryUnsupported` unconditionally whenever `query.vector` is absent,
+      // regardless of whether the namespace has any rows at all. Every shopper starts in exactly the
+      // state this branch serves (no manifest yet ⇒ `useSemantic` false), so on pgvector this threw on
+      // literally every first recall — the shopper got a `model_error` fallback reply.
+      //
+      // `VectorPort.list` (added PR1) is the pgvector-safe equivalent: a plain namespace keyset scan
+      // every adapter — including an ANN one whose `query` cannot serve a rankless "give me everything"
+      // request — can do unconditionally. A single bounded page at `RECALL_LIMIT` reproduces the OLD
+      // call's set + order exactly: `list` returns ascending-id order, and the old `query({text:""})`
+      // call ties every record at score 0 then breaks ties by id ascending (`scoreRecord`/the in-memory
+      // adapter's sort) — byte-identical order, same cap. Deliberately NOT the exhaustive
+      // `enumerateFloor` page-walk: the OLD call was itself a single unpaginated `k: RECALL_LIMIT`
+      // fetch, never a multi-page enumerate, so matching it is a single bounded `list`, not exhaustion.
+      matches = await deps.vector.list(namespace, { limit: RECALL_LIMIT });
     }
 
     const facts: RecalledFact[] = [];

@@ -122,3 +122,113 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("recall() semantic top-K + floor over a REA
     60_000,
   );
 });
+
+// LIVE BUG REPRO (found by an E2E staging smoke test, 2026-08-18): every `/chat` recall turn on the
+// pgvector ANN store threw `PgVectorTextQueryUnsupported` for a shopper with NO manifest yet (a brand
+// new shopper — the state EVERY shopper starts in) — the `recall()` FALLBACK branch (taken when
+// `useSemantic` is false: no manifest / no queryVector / pin mismatch) called
+// `deps.vector.query(namespace, { text: "", k: RECALL_LIMIT })`, the pre-PR3 "list everything" idiom.
+// `PgVectorStore.query` is vector-query-ONLY (no lexical modality — pgvector has no Jaccard) and throws
+// unconditionally when `query.vector` is absent, regardless of whether the namespace has any rows at
+// all. PR3's own tests never caught this: the in-memory store tolerates the empty-text list-all, and
+// `service-pgvector-recall.test.ts`/this file's own describe above always seed a manifest FIRST (so they
+// take the semantic path, never the fallback, on a real pgvector store).
+describe.skipIf(!PGVECTOR_AVAILABLE)("recall() fallback list-all is pgvector-safe (LIVE bug repro — the no-manifest-recall-on-pgvector proof)", () => {
+  let sql: Sql;
+  let stop: () => Promise<void>;
+
+  beforeAll(async () => {
+    ({ sql, stop } = await startPgvectorContainer());
+    await new PgVectorStore(sql, { dimension: DIMENSION }).migrate();
+  }, 120_000);
+
+  afterAll(async () => {
+    await stop?.();
+  }, 120_000);
+
+  it(
+    "a brand-new shopper — empty namespace, no manifest yet — recall(ctx, {queryVector, pin}) returns [] and does NOT throw PgVectorTextQueryUnsupported",
+    async () => {
+      await sql.query("TRUNCATE vp_ann");
+      const vector = new PgVectorStore(sql, { dimension: DIMENSION });
+      const runtimeStore = new InMemoryRuntimeStore();
+      const tenantId = "acme-pgv-fallback-empty-1";
+      const anonId = "guest-pgv-fallback-empty-1";
+      const ctx: MemoryCtx = { tenantId, anonId, region: "us", consent1: "in", consent2: "in" };
+
+      const service = createMemoryService({
+        vector,
+        audit: runtimeStore,
+        distiller: { async distill() { return []; } },
+        enabled: true,
+      });
+
+      // No `remember()` call ever happened for this subject — zero rows in vp_ann, no manifest for the
+      // tenant. `queryVector`/`pin` are supplied (the exact live call shape) but, with no manifest to
+      // check the pin against, `useSemantic` is false — this must fall through to a pgvector-safe
+      // list-all, NOT the old `query({text:""})` idiom (which threw unconditionally on `PgVectorStore`,
+      // independent of whether the namespace had any rows).
+      const recalled = await service.recall(ctx, { queryVector: [1, 0, 0, 0], pin: { model: "table-embed", dimension: DIMENSION } });
+      expect(recalled).toEqual([]);
+    },
+    60_000,
+  );
+
+  it(
+    "a brand-new shopper — empty namespace — recall(ctx) with NO options at all also returns [] and does NOT throw",
+    async () => {
+      await sql.query("TRUNCATE vp_ann");
+      const vector = new PgVectorStore(sql, { dimension: DIMENSION });
+      const runtimeStore = new InMemoryRuntimeStore();
+      const tenantId = "acme-pgv-fallback-empty-2";
+      const anonId = "guest-pgv-fallback-empty-2";
+      const ctx: MemoryCtx = { tenantId, anonId, region: "us", consent1: "in", consent2: "in" };
+
+      const service = createMemoryService({
+        vector,
+        audit: runtimeStore,
+        distiller: { async distill() { return []; } },
+        enabled: true,
+      });
+
+      const recalled = await service.recall(ctx);
+      expect(recalled).toEqual([]);
+    },
+    60_000,
+  );
+
+  it(
+    "a populated namespace (facts already upserted with real/placeholder vectors) but NO queryVector/pin this turn -> fallback list-all returns every fact, unranked, without throwing",
+    async () => {
+      await sql.query("TRUNCATE vp_ann");
+      const vector = new PgVectorStore(sql, { dimension: DIMENSION });
+      const runtimeStore = new InMemoryRuntimeStore();
+      const tenantId = "acme-pgv-fallback-populated";
+      const anonId = "guest-pgv-fallback-populated";
+      const ctx: MemoryCtx = { tenantId, anonId, region: "us", consent1: "in", consent2: "in" };
+
+      const model = tableEmbedModel({ [DOCUMENT_TEXT]: DOCUMENT_VECTOR });
+      const service = createMemoryService({
+        vector,
+        audit: runtimeStore,
+        distiller: distillerReturning(DOCUMENT_TEXT, ALLERGY_TEXT),
+        model,
+        enabled: true,
+        secrets: keyedSecrets(tenantId), // the allergy write must not be refused for lack of a key
+      });
+
+      const written = await service.remember(ctx, { message: "m", reply: "r" });
+      expect(written.written).toContain("ordinary");
+      expect(written.written).toContain("special");
+
+      // No queryVector supplied this turn -> `useSemantic` is false regardless of the manifest that DOES
+      // now exist -> the fallback list-all must run, and on a real pgvector store must not throw.
+      const recalled = await service.recall(ctx);
+      const texts = recalled.map((f) => f.text);
+      expect(texts).toContain(DOCUMENT_TEXT);
+      expect(texts).toContain(ALLERGY_TEXT);
+      expect(recalled).toHaveLength(2);
+    },
+    60_000,
+  );
+});

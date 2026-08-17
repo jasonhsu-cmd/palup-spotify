@@ -63,11 +63,21 @@ describe("ADR-0019 Task 5 — invariant 8: a REVOKED aid verifies as anonymous (
     await seedFact(vector, LIVE_AID);
     await revokeGuest(store, { tenantId: TENANT, anonId: REVOKED_AID }); // the effect forget-me will have
 
+    // Tracks BOTH vector-port read ops `recall()` might take: `query` (the semantic-ranked path, or the
+    // pre-pgvector-fix fallback) and `list` (the pgvector-safe fallback list-all this package's memory
+    // service uses today — see widget-memory/src/service.ts `recall`'s fallback branch). This test's
+    // MEMORY_SEMANTIC_RECALL is off (not armed), so the LIVE control below exercises the fallback, i.e.
+    // `list` — spying on `query` alone would no longer observe it and falsely look like invariant 8 broke.
     const queried: string[] = [];
     const origQuery = vector.query.bind(vector);
     vi.spyOn(vector, "query").mockImplementation(async (ns: string, q: never) => {
       queried.push(ns);
       return origQuery(ns, q);
+    });
+    const origList = vector.list.bind(vector);
+    vi.spyOn(vector, "list").mockImplementation(async (ns: string, opts: never) => {
+      queried.push(ns);
+      return origList(ns, opts);
     });
     const modelCalls: ModelRequest[] = [];
     const modelPort: ModelPort = { async complete(req: ModelRequest) { modelCalls.push(req); return { text: "ok", model: "spy" }; } };
@@ -79,10 +89,10 @@ describe("ADR-0019 Task 5 — invariant 8: a REVOKED aid verifies as anonymous (
       expect(queried, "a revoked aid's namespace was queried — invariant 8 broken").not.toContain(subjectNamespace(TENANT, REVOKED_AID));
       expect(modelCalls.flatMap((c) => c.messages.map((m) => m.content)).join(" ")).not.toContain("tree nuts");
 
-      // CONTROL — a LIVE aid with the SAME seeded fact: the subject IS derived, so its namespace IS queried.
+      // CONTROL — a LIVE aid with the SAME seeded fact: the subject IS derived, so its namespace IS read.
       // Proves the negative above is real revocation, not "recall never runs in this test".
       await chat(app, guestTokenHeader(GUEST_SECRET, TENANT, LIVE_AID), "s-live");
-      expect(queried, "a live aid's namespace was not queried — recall is broken and the test proves nothing").toContain(subjectNamespace(TENANT, LIVE_AID));
+      expect(queried, "a live aid's namespace was not read — recall is broken and the test proves nothing").toContain(subjectNamespace(TENANT, LIVE_AID));
     } finally {
       await app.close();
     }
