@@ -39,3 +39,10 @@ export type { ErasureDeps, SubjectRef } from "./erasure.js";
 
 export { mergeGuestIntoAccount } from "./merge.js";
 export type { MergeDeps, MergeCtx } from "./merge.js";
+
+// semantic-memory-v1 PR2 (write path), T3 — the per-tenant memory-corpus embed pin, mirroring the
+// catalog corpus's own manifest. Same inertness contract: reading/writing it is only ever reached from
+// inside `remember()`, itself gated on MEMORY_SEMANTIC_RECALL (T9, default off) on top of the flag.ts
+// double gate.
+export { MEMORY_MANIFEST_COLLECTION, MEMORY_MANIFEST_KEY, readMemoryManifest, writeMemoryManifest, memoryPinMismatch } from "./manifest.js";
+export type { MemoryManifest } from "./manifest.js";

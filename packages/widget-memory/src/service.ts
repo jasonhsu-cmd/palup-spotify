@@ -1,6 +1,14 @@
-import { randomUUID } from "node:crypto";
-import type { RuntimeStatePort, VectorPort, VectorRecord, ModelPort, CryptoPort, SecretsPort } from "@palup/platform-ports";
-import { createAesGcmCrypto, createEnvSecrets } from "@palup/platform-ports";
+import { randomUUID, createHmac } from "node:crypto";
+import type {
+  RuntimeStatePort,
+  VectorPort,
+  VectorRecord,
+  ModelPort,
+  CryptoPort,
+  SecretsPort,
+  EmbedRequest,
+} from "@palup/platform-ports";
+import { createAesGcmCrypto, createEnvSecrets, canEmbed, requireEmbedInputs, requireEmbedAlignment } from "@palup/platform-ports";
 import { isMemoryEnabled } from "./flag.js";
 import { subjectNamespace } from "./identity.js";
 import { decideMemoryWrite } from "./consent.js";
@@ -11,7 +19,136 @@ import type { Disposition } from "./disposition.js";
 import { buildMemoryAudit, subjectRef } from "./audit.js";
 import { ttlForClass, RENEW_MIN_GAP_MS } from "./retention.js";
 import { recordSubject } from "./subject-index.js";
+import { readMemoryManifest, writeMemoryManifest, memoryPinMismatch, type MemoryManifest } from "./manifest.js";
 import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact, FactMetadata } from "./types.js";
+
+// semantic-memory-v1, PR2 (write path) — T4 (embed ordinary / NEVER embed special / stamp `.vector`) and
+// T5 (write-time dedup), both gated on the NEW, separately-reviewed MEMORY_SEMANTIC_RECALL flag (T9,
+// default OFF — see `MemoryServiceDeps.semanticRecall`'s own doc comment for the gating discipline).
+// Deliberately NOT folded into flag.ts's ADR-0015 double gate: that gate governs whether memory exists at
+// all; this one governs whether an EXISTING memory write also carries a semantic vector. See this
+// package's chat-memory-semantic-flag-off.test.ts for the standing proof that flag.ts's own source never
+// references this name.
+
+/**
+ * Cosine-similarity floor above which an ORDINARY candidate collapses into an EXISTING record (T5:
+ * re-stamp its retention window) instead of inserting a second row for what is very likely the same
+ * underlying preference, restated. Overridable via `MEMORY_DEDUP_THRESHOLD` (parsed as a float).
+ *
+ * 0.95 IS A STARTING DEFAULT, NOT A TUNED VALUE — chosen the same way `DEFAULT_CATALOG_RETRIEVAL_K`
+ * (widget-brain/src/brain.ts) was: a bound picked from first principles (near-paraphrase preferences
+ * embed very close to 1.0; genuinely distinct preferences embed far below it — see this package's own
+ * service-dedup.test.ts fixture, 0.9998 vs 0.0), not measured against real embeddings. Nothing in this
+ * repo has measured false-merge (over-collapsing two genuinely distinct preferences into one row, quietly
+ * losing a signal) or false-split (never collapsing true paraphrases) rates on real embeddings — that is
+ * the eval gate's job (a promotion decision), not this PR's. SECURITY/FAIRNESS-ADJACENT: a threshold set
+ * too low silently drops a shopper's own distinct, consented fact by merging it away; flagged for the
+ * reviewer as eval-gated, not yet a measured guarantee.
+ */
+function dedupThreshold(): number {
+  const raw = process.env.MEMORY_DEDUP_THRESHOLD;
+  const n = raw !== undefined ? Number(raw) : NaN;
+  return Number.isFinite(n) ? n : 0.95;
+}
+
+/**
+ * The embed dimension a fresh deployment is configured for — read once per call, never cached across
+ * calls (an operator changing this env var must take effect on the next write, not require a restart-
+ * detecting cache invalidation). Used ONLY as the special-category placeholder's fallback dimension when
+ * no manifest pin exists yet for this tenant (T4's "placeholder dimension edge" — a special-ONLY subject
+ * with no ordinary write yet to have pinned one). Defaults to 1536 — the same value
+ * `docs/design/*`/state-postgres's pgvector store default assumes and the value this PR's own pgvector-
+ * container proof (`service-pgvector-recall.test.ts`) builds its store with, so an unconfigured deployment
+ * and its pgvector corpus agree on a dimension by default.
+ */
+function configuredEmbedDimension(): number {
+  const raw = process.env.PALUP_EMBED_DIMENSION;
+  const n = raw !== undefined ? Number(raw) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : 1536;
+}
+
+/**
+ * A Box-Muller Gaussian sample — dependency-free, no provider/vendor RNG (ADR-0001 has no bearing here,
+ * but the discipline of "no external dependency for something this small" matches the rest of this repo).
+ */
+function randomGaussian(): number {
+  let u = 0;
+  let w = 0;
+  while (u === 0) u = Math.random();
+  while (w === 0) w = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * w);
+}
+
+/**
+ * A RANDOM UNIT vector of the given dimension — THE PLACEHOLDER for a special-category fact's `.vector`
+ * (T4's governance-critical rule: special-category plaintext is NEVER embedded, so this is deliberately
+ * NOT derived from the fact's content in any way). Explicitly NOT a zero vector: pgvector's `<=>` cosine
+ * operator errors on a zero-norm operand (ruling from this PR's test-engineer), so a zero vector would
+ * make every special-category write reject on a real pgvector store the instant T4 landed. Each
+ * component is an independent Gaussian sample normalized to unit length — the standard construction for a
+ * uniformly-random point on the unit sphere, so the placeholder's DIRECTION carries no information about
+ * the plaintext it stands in for (unlike, say, an all-ones or all-same-value vector, which is trivially
+ * distinguishable and would itself leak "this is a placeholder, not real content" to anyone inspecting
+ * stored vectors). The `while` guard is unreachable in practice (all-zero Gaussians have probability 0)
+ * but never silently divides by zero.
+ *
+ * HONESTY NOTE for the reviewer: because this is genuinely random (not deterministically derived from the
+ * record id or any other stable seed), its cosine similarity against any ONE fixed query vector is a
+ * continuous random variable — in a LOW test dimension (the pgvector-recall proof uses dimension 4) there
+ * is a small, quantifiable, non-zero probability that a placeholder happens to score unusually high
+ * against a specific query by pure chance, exactly like any other random-direction construction in a
+ * low-dimensional space. At this PR's production default dimension (1536) that probability is
+ * astronomically small. This is an inherent property of "genuinely random, content-independent" — not a
+ * bug — and is called out here rather than silently accepted.
+ */
+function randomUnitVector(dimension: number): number[] {
+  let v: number[] = [];
+  let norm = 0;
+  do {
+    v = Array.from({ length: dimension }, () => randomGaussian());
+    norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+  } while (norm === 0);
+  return v.map((x) => x / norm);
+}
+
+/**
+ * T5 — SPECIAL-category write-time dedup key: a keyed-HMAC-SHA256 over the SANITIZED plaintext (pre-
+ * encryption), so an exact-repeat of the SAME special-category fact can be detected WITHOUT ever
+ * comparing health/Art-9 text by vector similarity (that would require embedding it — the exact privacy
+ * boundary T4 exists to prevent). KEY DISCIPLINE: deliberately reuses the tenant's already-provisioned
+ * `MEMORY_ENCRYPTION_KEY` secret (the SAME key material `createAesGcmCrypto`'s DEFAULT scope reads,
+ * secrets-port.ts) as the HMAC key, rather than requiring a second, separately-provisioned secret — this
+ * mirrors server.ts's own `AUDIT_HMAC_SECRET` pattern of defaulting a keyed-HMAC to an ALREADY-configured
+ * secret rather than adding a new operator knob (its own doc comment: "AUDIT_HMAC_SECRET... defaults to
+ * [SHOPPER_TOKEN_SECRET] when not separately provisioned"). Returns `undefined` (no tag, dedup simply
+ * skipped for this candidate) when no key is configured for this tenant — this is NEVER the path that
+ * decides whether the special-category candidate itself is persisted (that fail-closed decision is
+ * `encryptOrRefuse`'s alone); a candidate with no dedup tag is stored exactly as before this PR, just
+ * without dedup protection. SECURITY-RELEVANT, flagged for the reviewer: unlike `subjectRef`'s hmacKey
+ * (which falls back to a PLAIN, unkeyed sha256 for a high-entropy guest anon id), this tag is computed
+ * over free-text SHOPPER CONTENT from a small, guessable vocabulary (health/allergy/pregnancy phrasing) —
+ * an unkeyed hash of that would be dictionary-attackable by anyone who can read `metadata.dedupTag`, so
+ * this function has NO unkeyed fallback path; it is keyed or it does not compute a tag at all.
+ */
+async function specialDedupTag(secrets: SecretsPort, tenantId: string, plaintext: string): Promise<string | undefined> {
+  const raw = await secrets.get(tenantId, "MEMORY_ENCRYPTION_KEY");
+  if (!raw) return undefined;
+  return createHmac("sha256", raw).update(plaintext).digest("hex");
+}
+
+// Bounded scan for the T5 special-category dedup lookup — same cap and the same "generous per-subject"
+// reasoning as `RECALL_LIMIT` below (the vector port has no native "find by metadata field" op, so this
+// is a plain keyset `list` scan filtered in application code).
+const DEDUP_SCAN_LIMIT = 500;
+
+/** Find an existing record in `namespace` whose `metadata.dedupTag` exactly equals `tag`, or `undefined`.
+ *  A single bounded page (`DEDUP_SCAN_LIMIT`) — see its own doc comment for why that is an accepted,
+ *  documented limit rather than an unbounded scan. */
+async function findByDedupTag(vector: VectorPort, namespace: string, tag: string): Promise<string | undefined> {
+  const page = await vector.list(namespace, { limit: DEDUP_SCAN_LIMIT });
+  const hit = page.find((item) => (item.metadata as { dedupTag?: string } | undefined)?.dedupTag === tag);
+  return hit?.id;
+}
 
 // ADR-0015 PR A (T7): wires flag -> consent -> classifier -> distiller -> VectorPort + audit. The
 // double gate (flag.ts) is the outermost check on BOTH methods — when off, neither method touches the
@@ -171,6 +308,19 @@ export interface MemoryServiceDeps {
    * plain sha256, safe only for a high-entropy guest anon id — required for an `acct:` subject's ref to
    * be genuinely pseudonymous rather than brute-forceable. Mirrors server.ts's `AUDIT_HMAC_SECRET`. */
   hmacKey?: string;
+  /**
+   * semantic-memory-v1 T9 — the DARK-SHIP flag for T4 (embed ordinary / never embed special)/T5
+   * (write-time dedup). Optional override, paralleling `enabled`'s own override seam: when omitted,
+   * defaults to a PLAIN env read, `process.env.MEMORY_SEMANTIC_RECALL === "true"` — unlike `enabled`,
+   * this is NOT restricted to "test runner only", because `MEMORY_SEMANTIC_RECALL` is a genuinely new,
+   * separately-reviewed, default-OFF operator flag (T9), not a route around flag.ts's ADR-0015 double
+   * gate (which remains the OUTER, authoritative check on whether `remember`/`recall` do anything at
+   * all — see `enabled` above). Deliberately NOT folded into `flag.ts`/`isMemoryEnabled` — see
+   * chat-memory-semantic-flag-off.test.ts's own standing pin that flag.ts's source never references this
+   * name. OFF (unset, or any value other than the exact string "true") is BYTE-IDENTICAL to this PR never
+   * having shipped: no embed call, no manifest read/write, no vector on any record, no dedup.
+   */
+  semanticRecall?: boolean;
 }
 
 export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
@@ -189,6 +339,10 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   // preserves flag.ts's "no caller can flip this on by config alone" guarantee by construction).
   const underTest = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
   const enabled = underTest ? (deps.enabled ?? isMemoryEnabled()) : isMemoryEnabled();
+  // T9 — see MemoryServiceDeps.semanticRecall's own doc comment for why this reads unconditionally
+  // (not test-runner-gated like `enabled` above): it is a new, separately-reviewed, default-off flag in
+  // its own right, not a way around the ADR-0015 double gate `enabled` already enforces.
+  const semanticRecallEnabled = deps.semanticRecall ?? process.env.MEMORY_SEMANTIC_RECALL === "true";
 
   async function remember(ctx: MemoryCtx, turn: MemoryTurn): Promise<{ written: FactClass[] }> {
     if (!enabled) return { written: [] }; // INERT — no vector call, no audit, nothing touched
@@ -197,6 +351,16 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     const candidates = await distiller.distill(turn);
     const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
     const now = clock().getTime();
+
+    // T4 — this tenant's memory-corpus embed pin, read AT MOST ONCE per `remember()` call and cached
+    // across every candidate in this turn (so a special candidate later in the SAME turn can see the
+    // dimension an ordinary candidate earlier in the SAME turn just pinned, without a second KV read —
+    // see `currentManifest`'s call sites below for exactly why that matters).
+    let cachedManifest: MemoryManifest | null | undefined; // undefined = not read yet this call
+    async function currentManifest(): Promise<MemoryManifest | null> {
+      if (cachedManifest === undefined) cachedManifest = await readMemoryManifest(deps.audit, { tenantId: ctx.tenantId });
+      return cachedManifest;
+    }
 
     const written: FactClass[] = [];
     const ordinaryRecords: VectorRecord[] = [];
@@ -252,15 +416,81 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       const mayWrite = effectiveClass === "special" ? capability.mayWriteSpecial : capability.mayWriteOrdinary;
       if (!mayWrite) continue; // consent gate (Inv 3 / Inv 9) — gated on the STRICTER combined class
 
+      // T4/T5 (semantic-memory-v1 PR2, gated on MEMORY_SEMANTIC_RECALL — T9). OFF is a complete no-op:
+      // `candidateVector` stays undefined (byte-identical VectorRecord to pre-PR) and `dedupTargetId`
+      // stays undefined (always a fresh id, exactly like before this PR).
+      let candidateVector: number[] | undefined;
+      let mustRecall = false;
+      let dedupTag: string | undefined;
+      let dedupTargetId: string | undefined; // set ⇒ this candidate COLLAPSES into an EXISTING record
+
+      if (semanticRecallEnabled) {
+        if (effectiveClass === "special") {
+          // THE PRIVACY BOUNDARY (governance-critical — the Art-9 leak guard this PR's tests pin): a
+          // special-category candidate's plaintext is NEVER sent to embed, regardless of whether the
+          // class came from the fact itself or from a sourceQuote promotion above. Its `.vector` is a
+          // RANDOM UNIT placeholder (never all-zero — see `randomUnitVector`'s own doc comment), sized to
+          // whatever dimension is already pinned for this tenant (an ordinary embed earlier in THIS turn,
+          // or a prior call) — falling back to the deployment's configured dimension only when no pin
+          // exists at all yet (the "placeholder dimension edge": a special-ONLY subject, first write).
+          const manifest = await currentManifest();
+          candidateVector = randomUnitVector(manifest?.dimension ?? configuredEmbedDimension());
+          mustRecall = true;
+
+          // T5 — special-category dedup: EXACT-MATCH ONLY, via a keyed-HMAC over the sanitized plaintext
+          // (pre-encryption). NEVER a vector similarity computation over health/Art-9 text.
+          dedupTag = await specialDedupTag(secrets, ctx.tenantId, sanitized);
+          if (dedupTag) dedupTargetId = await findByDedupTag(deps.vector, namespace, dedupTag);
+        } else if (deps.model && canEmbed(deps.model)) {
+          try {
+            const embedReq: EmbedRequest = { texts: [sanitized], purpose: "document", tenantId: ctx.tenantId };
+            requireEmbedInputs(embedReq); // same shared validator every adapter itself must call
+            const embedRes = await deps.model.embed(embedReq);
+            requireEmbedAlignment(embedReq, embedRes);
+
+            const manifest = await currentManifest();
+            if (manifest && memoryPinMismatch(manifest, { model: embedRes.model, dimension: embedRes.dimension })) {
+              // Refuse a CROSS-SPACE vector (mirrors the catalog corpus's own pin-mismatch refusal,
+              // catalog-index.ts `pinMismatch`): mixing vector spaces in one subject's corpus makes
+              // similarity meaningless. Refused exactly like any other candidate this turn drops —
+              // counted, never silent (finding 6's discipline extended to this new refusal reason).
+              refusedOrdinary++;
+              continue;
+            }
+            candidateVector = embedRes.vectors[0];
+            if (!manifest) {
+              // First embedded write for this tenant — pin it, WITH an audit record (T3's own "no silent
+              // write" discipline), before any candidate in this call relies on the dimension it fixes.
+              const fresh: MemoryManifest = { model: embedRes.model, dimension: embedRes.dimension, purpose: "document", at: new Date(now).toISOString() };
+              await writeMemoryManifest(deps.audit, { tenantId: ctx.tenantId }, fresh);
+              cachedManifest = fresh;
+            }
+
+            // T5 — ordinary-fact dedup: cosine similarity against this subject's EXISTING vectors (never
+            // against sibling candidates from this same turn, which are not upserted until after this
+            // loop — so a batch of near-duplicate candidates in ONE turn is not itself de-duplicated,
+            // only against what was already durably stored).
+            const top = await deps.vector.query(namespace, { vector: candidateVector, k: 1 });
+            if (top[0] && top[0].score >= dedupThreshold()) dedupTargetId = top[0].id;
+          } catch (e) {
+            // Never let an embed-provider hiccup break the turn — the fact is still worth storing
+            // without a semantic vector this one time (byte-identical to the flag being off for THIS
+            // candidate only; every OTHER candidate in the turn is unaffected).
+            console.error(`[memory] embed error tenant=${ctx.tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+          }
+        }
+      }
+
       // Security review finding 4 — bind every encrypted field to THIS specific record (and which field
       // of it) via GCM additional authenticated data, so a ciphertext copied onto a different record, or
       // onto a different field of the SAME record, fails authentication rather than decrypting cleanly.
-      // Built from the record's own id (minted HERE, before encryption, so it can be used as AAD) plus a
-      // field discriminator — deliberately NOT the namespace: a subject's namespace legitimately changes
-      // across a guest->account merge (merge.ts) while the record id does not, and record id + field
-      // alone already disambiguates every slot within a tenant (cross-tenant relocation is independently
+      // Built from the record's own id — either a FRESH one, or (T5 dedup hit) the EXISTING record's own
+      // id, so a re-stamp is a genuine upsert-in-place rather than a second row — plus a field
+      // discriminator. Deliberately NOT the namespace: a subject's namespace legitimately changes across
+      // a guest->account merge (merge.ts) while the record id does not, and record id + field alone
+      // already disambiguates every slot within a tenant (cross-tenant relocation is independently
       // defeated by CryptoPort's own tenant-scoped key derivation).
-      const recordId = randomUUID();
+      const recordId = dedupTargetId ?? randomUUID();
       const aadFor = (field: string) => `${recordId}|${field}`;
 
       // ADR-0015 Inv 9 — encrypt (or, for special-category with no key, REFUSE) before this fact ever
@@ -316,10 +546,17 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         expiresAt: new Date(now + ttlForClass(effectiveClass)).toISOString(),
         disposition,
         encrypted: encryptedFact.encrypted,
+        // T4/T5 — only ever set when MEMORY_SEMANTIC_RECALL is on; absent (not `false`/empty-string)
+        // otherwise, so a flag-off record is byte-identical to what this PR's predecessor would write.
+        ...(mustRecall ? { mustRecall: true } : {}),
+        ...(dedupTag !== undefined ? { dedupTag } : {}),
       };
       // The vector record's OWN `text` field is encrypted identically to `metadata.text` (same value) —
       // see the module-header "similarity-search trade-off" note for what this costs and why it's fine.
-      const record: VectorRecord = { id: recordId, text: encryptedFact.value, metadata };
+      // `vector` (T4) is derived from the SANITIZED PLAINTEXT for an ordinary fact (never re-derived from
+      // `encryptedFact.value`/ciphertext) and is a content-independent RANDOM placeholder for a special
+      // one — either way it is `undefined` whenever `semanticRecallEnabled` is off, exactly as before.
+      const record: VectorRecord = { id: recordId, text: encryptedFact.value, metadata, vector: candidateVector };
       written.push(effectiveClass);
       (effectiveClass === "special" ? specialRecords : ordinaryRecords).push(record);
     }

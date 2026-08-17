@@ -311,6 +311,12 @@ export async function buildServer(opts?: {
   // retention sweep — not a parallel one that can diverge from it.
   const underTestRunner = process.env.VITEST === "true" || process.env.NODE_ENV === "test";
   const memoryServiceEnabled = underTestRunner ? (opts?.memoryEnabled ?? isMemoryEnabled()) : isMemoryEnabled();
+  // semantic-memory-v1 T9 — the dark-ship flag for T4 (embed)/T5 (write-time dedup), threaded through
+  // HERE for a later PR3's recall-side use (harmless while it stays false: `memoryServiceEnabled` false
+  // means `memoryService` below is never even constructed, and passing `false` explicitly when it IS
+  // constructed is byte-identical to createMemoryService's own env-read default — see
+  // MemoryServiceDeps.semanticRecall's doc comment). Default OFF; not part of the ADR-0015 double gate.
+  const semanticRecallEnabled = process.env.MEMORY_SEMANTIC_RECALL === "true";
   const WIDGET_AUTH_REQUIRED = process.env.WIDGET_AUTH_REQUIRED === "true";
   assertMemoryAuthCoupling(memoryServiceEnabled, WIDGET_AUTH_REQUIRED);
   // D2 — serving reads the delegate token an OAuth install already custodied (B2's
@@ -524,6 +530,10 @@ export async function buildServer(opts?: {
         // text.
         model: createRedactingModelPort(meteredModel),
         enabled: memoryServiceEnabled,
+        // T9 — see this file's own `semanticRecallEnabled` doc comment. Explicit rather than left to
+        // service.ts's own env-read default, so this composition root stays the single source of truth
+        // for every posture flag it threads (matches how every other flag here is passed explicitly).
+        semanticRecall: semanticRecallEnabled,
         // ADR-0015 Inv 9 (go-live blocker #2) — encryption-at-rest for special-category facts. Reuses
         // the SAME composition-root `secrets` port already constructed above (Shopify creds, CAA client
         // id/secret) rather than a second SecretsPort instance; a tenant's memory-encryption key is
@@ -2433,16 +2443,20 @@ export async function buildServer(opts?: {
       // the clean SALES path only is a separate PR-11 human-sign-off scope decision; this guard is the
       // code-owned guardrail, not a business-policy choice.)
       if (memoryService && memorySubject && !kill && !d.flags.includes("no_autonomous_action")) {
-        try {
-          await memoryService.remember(
+        // semantic-memory-v1 T6 — fire-and-forget: the WRITE must never hold up the shopper's reply. This
+        // was `await`ed until this PR; the module header's own "Never blocks or breaks the response" was
+        // therefore only ever an INTENT, not something the code structurally honored — a `remember()`
+        // that never resolves (a hung vector-port write) genuinely blocked /chat's response. `void
+        // ...catch()` returns control to the caller immediately; a failure is still logged exactly as
+        // before, just asynchronously rather than from inside an awaited try/catch.
+        void memoryService
+          .remember(
             // `memoryConsentInputs` — the same object the client-facing `memoryActive` is derived from,
             // so what the shopper is TOLD and what is actually gated here are one decision, not two.
             { tenantId, anonId: memorySubject, ...memoryConsentInputs },
             { message, reply: d.reply },
-          );
-        } catch (e) {
-          console.error(`[/chat] memory remember error:`, (e as Error).message);
-        }
+          )
+          .catch((e) => console.error("[/chat] memory remember error:", (e as Error).message));
       }
       // ADR-0015 Inv 4 ("expiry is enforced, not aspirational") — opportunistic PER-SUBJECT retention
       // reclamation. `sweepExpired` (widget-memory/src/retention.ts) physically deletes what TTL-on-read

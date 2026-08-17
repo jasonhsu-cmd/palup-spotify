@@ -56,6 +56,25 @@ export type FactMetadata = {
    * vector-port layer, e.g. by a test or a future migration tool, bypassing `remember()` entirely).
    */
   encrypted?: boolean;
+  /**
+   * semantic-memory-v1 T4 (governance-critical): `true` iff this record's `vector` is a PLACEHOLDER —
+   * not derived from embedding this record's own plaintext — because the fact is special-category and
+   * special-category plaintext is NEVER sent to an embedding provider (the Art-9 privacy boundary).
+   * A caller doing real semantic recall (a later PR) MUST treat a `mustRecall:true` record as "always
+   * surface via the non-semantic floor (`list`), never rank/rank-out by vector similarity" — the
+   * placeholder carries no information about the fact's content, so ranking it against a query vector
+   * is meaningless (T4's whole point), and OMITTING it from recall merely because it doesn't score well
+   * would silently drop a shopper's own consented data. Absent/false on every ordinary record (real
+   * content-derived vector) and on every record written before this PR (no field at all).
+   */
+  mustRecall?: boolean;
+  /**
+   * semantic-memory-v1 T5 (write-time dedup for special-category facts): a keyed-HMAC over this record's
+   * SANITIZED plaintext (pre-encryption), used for EXACT-MATCH dedup only — never a vector similarity
+   * over health/Art-9 text (service.ts's own dedup note). Set only when `class === "special"` and
+   * `MEMORY_SEMANTIC_RECALL` is on at write time; absent otherwise (including every pre-PR record).
+   */
+  dedupTag?: string;
 }
 
 export interface MemoryService {
