@@ -17,6 +17,7 @@
     "eval:offer-check": "tsx packages/eval/src/eval-offer-check.ts",
     "eval:guard-classifier": "tsx packages/widget-backend/src/eval-guard-classifier.ts",
     "eval:retrieval": "tsx packages/widget-backend/src/eval-retrieval.ts",
+    "eval:memory-recall": "tsx packages/widget-memory/src/eval-memory-recall.ts",
     "shadow:offer-check": "tsx packages/eval/src/shadow-offer-check.ts",
     "shadow:guard-signals": "tsx packages/eval/src/shadow-guard-signals.ts",
     "shadow:retrieval": "tsx packages/eval/src/shadow-retrieval.ts",
