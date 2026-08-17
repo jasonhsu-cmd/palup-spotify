@@ -6,7 +6,12 @@
   list-all baseline and no embedding is written. **This ADR enables nothing.** Turning it on is a future
   human step gated on BOTH (a) the run-time evolution pipeline — eval gate → shadow(0%) → canary(1–5%) →
   named-human promotion (ADR-0002 / HITL-POLICY §5) — AND (b) the owner + legal sign-offs recorded in D3
-  and D4 below. This ADR **extends ADR-0015** (which governs whether cross-visit memory runs at all, and is
+  and D4 below. **Internal-staging enablement (owner: jason.hsu, 2026-08-17):** the owner has enabled
+  semantic memory on the internal-only staging service (`palup-skincare-jason`) with **D3 and D4 DEFERRED**
+  as an accepted internal-only risk — the same posture ADR-0015 takes for legal (internal users, not real
+  external-shopper data at scale). D3/D4 (and the D6 pinned-index + latency check) **remain REQUIRED before
+  any production / external enablement**; this internal-staging decision does not grant them. This ADR
+  **extends ADR-0015** (which governs whether cross-visit memory runs at all, and is
   Accepted for internal staging only, legal deferred): ADR-0015 owns enablement; this ADR owns the
   recall-semantics and embedding sub-decisions.
 - **Context:** FAST-V1 memory recall (`service.ts`) was a *list-all* — `query(ns,{text:"",k:500})` handed
@@ -55,10 +60,10 @@ must be stored **unencrypted** for the HNSW cosine index to function — a searc
 encrypted. Embeddings are partially invertible (approximate source-text reconstruction), so this is a **new
 at-rest exposure** for ordinary personal data, distinct from the Art-9 case. Scope that bounds it: ordinary
 facts only (never Art-9 — see D2), built from text already redacted of payment cards/SSNs. This is an
-**inherent tension of semantic ANN, not a fixable bug** — it is a policy acceptance. **Status: OPEN —
-requires the named owner + legal to sign off that this at-rest confidentiality change is acceptable before
-`MEMORY_SEMANTIC_RECALL` is enabled on any real environment.** (Surfaced by the PR #320 security review,
-item 2.)
+**inherent tension of semantic ANN, not a fixable bug** — it is a policy acceptance. **Status: DEFERRED for INTERNAL STAGING
+(owner: jason.hsu, 2026-08-17)** — accepted as an internal-only risk (internal testers, not real
+external-shopper data at scale), consistent with ADR-0015's legal deferral. **REQUIRED — owner + legal
+sign-off — before production / external enablement.** (Surfaced by the PR #320 security review, item 2.)
 
 ### D4 — The Art-9 `dedupTag` is a keyed-HMAC equality oracle — REQUIRES legal sign-off before enablement
 Write-time dedup for special facts uses a keyed-HMAC `dedupTag` over the sanitized plaintext (exact-match
@@ -67,7 +72,7 @@ only — no similarity oracle over health text). The HMAC key is **tenant-mixed 
 PR #320 review, Finding 3.A) and there is no unkeyed fallback (no key ⇒ no tag ⇒ dedup skipped). Content is
 not recoverable without the key. Residual: `metadata.dedupTag` is a **stable equality identifier** over an
 Art-9 fact in unencrypted metadata — a DB-reader can see that N records encode the same health fact.
-**Status: OPEN — record for legal sign-off alongside D3.** (Ordinary dedup uses vector top-1 ≥
+**Status: DEFERRED for INTERNAL STAGING alongside D3 (owner: jason.hsu, 2026-08-17); REQUIRED — legal sign-off — before production / external.** (Ordinary dedup uses vector top-1 ≥
 `MEMORY_DEDUP_THRESHOLD` = 0.95, **eval-gated** — too low silently merges a distinct consented fact, which
 the dedup eval guards; update-in-place is a newest-wins full upsert, class/consent can never be widened.)
 
