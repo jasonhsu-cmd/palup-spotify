@@ -1,0 +1,287 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  createInMemoryVectorStore,
+  InMemoryRuntimeStore,
+  createEnvSecrets,
+  type SecretsPort,
+  type ModelPort,
+  type EmbedRequest,
+  type EmbedResponse,
+} from "@palup/platform-ports";
+import { createMemoryService } from "../src/service.js";
+import { subjectNamespace } from "../src/identity.js";
+import type { MemoryCtx } from "../src/types.js";
+import type { FactDistiller } from "../src/distiller.js";
+
+// semantic-memory-v1, PR2 (write path), T5 — write-time dedup. Gated the same way T4 is
+// (MEMORY_SEMANTIC_RECALL=true) because ordinary-fact dedup is a similarity operation over the SAME
+// vectors T4 introduces — there is no vector to compare against with the flag off, so this file assumes
+// T4's embed integration exists once both land; today, both are red for the same underlying reason (no
+// embed integration at all yet).
+
+const SEMANTIC_FLAG = "MEMORY_SEMANTIC_RECALL";
+
+beforeEach(() => {
+  delete process.env[SEMANTIC_FLAG];
+  process.env[SEMANTIC_FLAG] = "true";
+});
+afterEach(() => {
+  delete process.env[SEMANTIC_FLAG];
+});
+
+function keyedSecrets(...tenantIds: string[]): SecretsPort {
+  const byTenant: Record<string, Record<string, string>> = {};
+  for (const t of tenantIds) byTenant[t] = { MEMORY_ENCRYPTION_KEY: `test-key-for-${t}` };
+  return createEnvSecrets(JSON.stringify(byTenant));
+}
+
+/** Security review finding 3.A fixture: multiple tenants provisioned with the SAME raw
+ *  `MEMORY_ENCRYPTION_KEY` value — the exact scenario the cross-tenant dedupTag isolation test below
+ *  exercises (an unconfigured/shared-default deployment where two tenants happen to hold identical raw
+ *  key material). */
+function sharedRawKeySecrets(rawKey: string, ...tenantIds: string[]): SecretsPort {
+  const byTenant: Record<string, Record<string, string>> = {};
+  for (const t of tenantIds) byTenant[t] = { MEMORY_ENCRYPTION_KEY: rawKey };
+  return createEnvSecrets(JSON.stringify(byTenant));
+}
+
+/** A FULLY test-controlled embed model: every input text maps to an EXPLICIT vector from `table`
+ *  (fixture text -> vector), so "near-duplicate" and "distinct" are exact, deterministic properties of
+ *  the fixture — never an artifact of a real model's fuzziness. Unmapped text throws loudly (a fixture
+ *  gap, not a silently-wrong vector). */
+function tableEmbedModel(dimension: number, table: Record<string, number[]>): ModelPort {
+  return {
+    async complete() {
+      throw new Error("tableEmbedModel: complete() should never be called — tests inject `distiller` directly");
+    },
+    async embed(req: EmbedRequest): Promise<EmbedResponse> {
+      const vectors = req.texts.map((t) => {
+        const v = table[t];
+        if (!v) throw new Error(`tableEmbedModel: no fixture vector registered for text: ${JSON.stringify(t)}`);
+        return v;
+      });
+      return { vectors, dimension, model: "table-embed", purpose: req.purpose };
+    },
+  };
+}
+
+function distillerReturning(text: string): FactDistiller {
+  return { async distill() { return [{ text }]; } };
+}
+
+describe("createMemoryService — write-time dedup, ORDINARY facts (semantic, near-duplicate vectors)", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const TABLE = {
+    "prefers fragrance-free products": [1, 0, 0],
+    "prefers fragrance free (no added fragrance)": [0.99, 0.01, 0], // near-duplicate: cosine ~0.9998
+    "loves hiking in national parks": [0, 1, 0], // orthogonal: cosine 0, clearly distinct
+  };
+
+  it("a near-duplicate write collapses into ONE record with a RE-STAMPED expiresAt (not a second row)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    let nowMs = new Date("2026-01-01T00:00:00Z").getTime();
+    const model = tableEmbedModel(3, TABLE);
+
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: distillerReturning("prefers fragrance-free products"),
+      model,
+      enabled: true,
+      clock: () => new Date(nowMs),
+    });
+    const ctx: MemoryCtx = { tenantId: "acme-dedup-ord", anonId: "guest-dedup-ord", region: "us", consent1: "in", consent2: "unknown" };
+
+    await service.remember(ctx, { message: "m1", reply: "r1" });
+
+    // 5 days later, a near-duplicate of the SAME preference is expressed differently.
+    nowMs += 5 * DAY;
+    const service2 = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: distillerReturning("prefers fragrance free (no added fragrance)"),
+      model,
+      enabled: true,
+      clock: () => new Date(nowMs),
+    });
+    await service2.remember(ctx, { message: "m2", reply: "r2" });
+
+    const ns = subjectNamespace("acme-dedup-ord", "guest-dedup-ord");
+    const listed = await vector.list(ns, { limit: 10 });
+    expect(listed).toHaveLength(1); // ONE record, not two
+
+    const expiresAt = (listed[0]!.metadata as { expiresAt?: string }).expiresAt;
+    expect(expiresAt).toBeDefined();
+    // Re-stamped from the SECOND write's clock (day 5), not the original (day 0): 5d + 30d = day 35.
+    const expected = new Date(nowMs + 30 * DAY).toISOString();
+    expect(expiresAt).toBe(expected);
+  });
+
+  it("a genuinely DISTINCT fact is stored as its OWN, second record (no over-merging)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const model = tableEmbedModel(3, TABLE);
+    const ctx: MemoryCtx = { tenantId: "acme-dedup-distinct", anonId: "guest-dedup-distinct", region: "us", consent1: "in", consent2: "unknown" };
+
+    const service1 = createMemoryService({ vector, audit: runtimeStore, distiller: distillerReturning("prefers fragrance-free products"), model, enabled: true });
+    await service1.remember(ctx, { message: "m1", reply: "r1" });
+
+    const service2 = createMemoryService({ vector, audit: runtimeStore, distiller: distillerReturning("loves hiking in national parks"), model, enabled: true });
+    await service2.remember(ctx, { message: "m2", reply: "r2" });
+
+    const ns = subjectNamespace("acme-dedup-distinct", "guest-dedup-distinct");
+    const listed = await vector.list(ns, { limit: 10 });
+    expect(listed).toHaveLength(2); // both stored — genuinely different preferences
+  });
+});
+
+describe("createMemoryService — write-time dedup, SPECIAL facts (exact-match keyed-HMAC dedupTag, NEVER vector similarity)", () => {
+  it("the SAME special-category plaintext, written twice, collapses to ONE record (via dedupTag, not embedding)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const ctx: MemoryCtx = { tenantId: "acme-dedup-special", anonId: "guest-dedup-special", region: "us", consent1: "in", consent2: "in" };
+
+    const service1 = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: distillerReturning("shopper has a tree-nut allergy"),
+      enabled: true,
+      secrets: keyedSecrets("acme-dedup-special"),
+    });
+    await service1.remember(ctx, { message: "m1", reply: "r1" });
+
+    const service2 = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: distillerReturning("shopper has a tree-nut allergy"), // EXACT same plaintext
+      enabled: true,
+      secrets: keyedSecrets("acme-dedup-special"),
+    });
+    await service2.remember(ctx, { message: "m2", reply: "r2" });
+
+    const ns = subjectNamespace("acme-dedup-special", "guest-dedup-special");
+    const listed = await vector.list(ns, { limit: 10 });
+    expect(listed).toHaveLength(1); // ONE record, not two
+    // The dedup mechanism for special facts is a keyed-HMAC tag stamped on the metadata (types.ts's new
+    // `FactMetadata.dedupTag`), never a vector similarity computation over health text.
+    expect(typeof (listed[0]!.metadata as { dedupTag?: string }).dedupTag).toBe("string");
+  });
+
+  it("a DIFFERENT special-category plaintext is stored as its own, second record", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const ctx: MemoryCtx = { tenantId: "acme-dedup-special-2", anonId: "guest-dedup-special-2", region: "us", consent1: "in", consent2: "in" };
+
+    const service1 = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: distillerReturning("shopper has a tree-nut allergy"),
+      enabled: true,
+      secrets: keyedSecrets("acme-dedup-special-2"),
+    });
+    await service1.remember(ctx, { message: "m1", reply: "r1" });
+
+    const service2 = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: distillerReturning("shopper is pregnant"), // a DIFFERENT special-category fact
+      enabled: true,
+      secrets: keyedSecrets("acme-dedup-special-2"),
+    });
+    await service2.remember(ctx, { message: "m2", reply: "r2" });
+
+    const ns = subjectNamespace("acme-dedup-special-2", "guest-dedup-special-2");
+    const listed = await vector.list(ns, { limit: 10 });
+    expect(listed).toHaveLength(2); // two genuinely different special facts, both retained
+  });
+});
+
+describe("createMemoryService — special-category dedupTag is CROSS-TENANT ISOLATED (security review finding 3.A)", () => {
+  it("two DIFFERENT tenants provisioned with the IDENTICAL raw MEMORY_ENCRYPTION_KEY get DIFFERENT dedupTags for the SAME special plaintext", async () => {
+    // Before the fix: specialDedupTag HMAC'd the RAW secret directly, with no tenant-mixing — two
+    // tenants sharing this raw key would produce the SAME tag for the SAME health phrase (a cross-tenant
+    // equality oracle over Art-9 facts). After the fix: the HMAC key is derived via `deriveKey` (crypto-
+    // port.ts), which mixes `tenantId` into the HKDF info, so the derived key — and therefore the tag —
+    // differs per tenant even for identical raw key material.
+    const SHARED_RAW_KEY = "identical-raw-key-shared-across-two-tenants-000000";
+    const secrets = sharedRawKeySecrets(SHARED_RAW_KEY, "tenant-a-shared-key", "tenant-b-shared-key");
+    const runtimeStore = new InMemoryRuntimeStore();
+
+    const vectorA = createInMemoryVectorStore();
+    const ctxA: MemoryCtx = { tenantId: "tenant-a-shared-key", anonId: "guest-a", region: "us", consent1: "in", consent2: "in" };
+    const serviceA = createMemoryService({
+      vector: vectorA,
+      audit: runtimeStore,
+      distiller: distillerReturning("shopper has a tree-nut allergy"),
+      enabled: true,
+      secrets,
+    });
+    await serviceA.remember(ctxA, { message: "m1", reply: "r1" });
+
+    const vectorB = createInMemoryVectorStore();
+    const ctxB: MemoryCtx = { tenantId: "tenant-b-shared-key", anonId: "guest-b", region: "us", consent1: "in", consent2: "in" };
+    const serviceB = createMemoryService({
+      vector: vectorB,
+      audit: runtimeStore,
+      distiller: distillerReturning("shopper has a tree-nut allergy"), // EXACT same plaintext as tenant A
+      enabled: true,
+      secrets,
+    });
+    await serviceB.remember(ctxB, { message: "m1", reply: "r1" });
+
+    const listedA = await vectorA.list(subjectNamespace("tenant-a-shared-key", "guest-a"), { limit: 10 });
+    const listedB = await vectorB.list(subjectNamespace("tenant-b-shared-key", "guest-b"), { limit: 10 });
+    expect(listedA).toHaveLength(1);
+    expect(listedB).toHaveLength(1);
+
+    const tagA = (listedA[0]!.metadata as { dedupTag?: string }).dedupTag;
+    const tagB = (listedB[0]!.metadata as { dedupTag?: string }).dedupTag;
+    expect(typeof tagA).toBe("string");
+    expect(typeof tagB).toBe("string");
+    expect(tagA).not.toBe(tagB); // THE cross-tenant isolation this fix guarantees
+  });
+});
+
+describe("createMemoryService — ordinary dedup NEVER targets a SPECIAL placeholder vector (defense-in-depth, security review finding 5)", () => {
+  it("an ordinary candidate whose embed vector coincides with an existing SPECIAL placeholder is stored as its OWN new record, never collapsed into the placeholder", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const ns = subjectNamespace("acme-placeholder-guard", "guest-placeholder-guard");
+
+    // Seed a pre-existing SPECIAL-category record directly at the vector-port layer, shaped exactly like
+    // T4's random-unit-vector placeholder (`mustRecall: true`, class "special") — with its vector set to
+    // the WORST CASE this guard exists for: identical to what the ordinary candidate below will embed to.
+    await vector.upsert(ns, [
+      {
+        id: "special-placeholder-1",
+        text: "ciphertext-placeholder",
+        metadata: {
+          text: "ciphertext-placeholder",
+          class: "special",
+          mustRecall: true,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        },
+        vector: [1, 0, 0],
+      },
+    ]);
+
+    const model = tableEmbedModel(3, { "prefers fragrance-free products": [1, 0, 0] }); // identical vector
+    const ctx: MemoryCtx = { tenantId: "acme-placeholder-guard", anonId: "guest-placeholder-guard", region: "us", consent1: "in", consent2: "unknown" };
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: distillerReturning("prefers fragrance-free products"),
+      model,
+      enabled: true,
+    });
+    await service.remember(ctx, { message: "m1", reply: "r1" });
+
+    const listed = await vector.list(ns, { limit: 10 });
+    // The placeholder AND the new ordinary record both exist — an ordinary dedup hit on the placeholder
+    // would have collapsed them into ONE row instead.
+    expect(listed).toHaveLength(2);
+    const placeholderStillIntact = listed.find((r) => r.id === "special-placeholder-1");
+    expect((placeholderStillIntact?.metadata as { class?: string } | undefined)?.class).toBe("special");
+  });
+});
