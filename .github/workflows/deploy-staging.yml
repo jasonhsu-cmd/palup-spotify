@@ -150,6 +150,12 @@ jobs:
           # Default 'false' keeps memory OFF (and reverts a bare Cloud Run flip on the next merge-deploy);
           # production is deployed nowhere and its MEMORY_ENABLED is unset, so nothing prod-facing turns on.
           MEMORY_ENABLED: ${{ vars.MEMORY_ENABLED || 'false' }}
+          # Semantic cross-visit memory recall (ADR-0021). Default 'false' ⇒ recall is the FAST-V1 list-all
+          # baseline and NO fact is embedded (dark). With VECTOR_ANN on, memory REQUIRES this true to
+          # function at all — the list-all path writes vector-less rows the pgvector store rejects. Enablement
+          # is gated per ADR-0021: the D3/D4 privacy sign-offs (DEFERRED for internal staging, REQUIRED before
+          # prod/external), the pinned-index + latency check, and the recall-quality eval gate.
+          MEMORY_SEMANTIC_RECALL: ${{ vars.MEMORY_SEMANTIC_RECALL || 'false' }}
           # D2 — the named fallback region/grounding mode for a tenant with NO pl_merchant row (staging's
           # `demo`). Registry merchants are served under their own row's values and ignore these entirely.
           # Defaulted here so the pair is never emitted empty, and so the value is VISIBLE rather than
@@ -189,7 +195,7 @@ jobs:
                       "SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}" "OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}" \
                       "SHOPPER_AUTH=${SHOPPER_AUTH}" "SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}" \
                       "CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}" "VECTOR_ANN=${VECTOR_ANN}" \
-                      "MEMORY_ENABLED=${MEMORY_ENABLED}" \
+                      "MEMORY_ENABLED=${MEMORY_ENABLED}" "MEMORY_SEMANTIC_RECALL=${MEMORY_SEMANTIC_RECALL}" \
                       "SHOPIFY_APP_CLIENT_ID=${SHOPIFY_APP_CLIENT_ID:-}" \
                       "SHOPIFY_INSTALL_REDIRECT_URI=${SHOPIFY_INSTALL_REDIRECT_URI:-}" \
                       "SHOPIFY_INSTALL_REGION=${SHOPIFY_INSTALL_REGION:-}" \
@@ -258,6 +264,7 @@ jobs:
           ENVS="${ENVS}@CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}"
           ENVS="${ENVS}@VECTOR_ANN=${VECTOR_ANN}"
           ENVS="${ENVS}@MEMORY_ENABLED=${MEMORY_ENABLED}"
+          ENVS="${ENVS}@MEMORY_SEMANTIC_RECALL=${MEMORY_SEMANTIC_RECALL}"
           # S2 — pins what a future `pnpm catalog:index` run embeds with (createVertexAdapter reads both
           # envs; catalog-index.ts's OFFLINE job is the only consumer of the embed path today). CONFIG-ONLY
           # and dark: this serves no shopper by itself — CATALOG_RETRIEVAL / VECTOR_ANN stay unset/off, so
