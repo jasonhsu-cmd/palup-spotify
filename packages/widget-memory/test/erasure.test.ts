@@ -153,22 +153,72 @@ describe("erasure — eraseTenant (KNOWN deferred gap under Option B — per-sub
   });
 });
 
-describe("erasure — completeness guard (Inv 5: a rights purge is never silently partial)", () => {
-  it("withdrawConsent2 FAILS CLOSED when the subject hits the enumeration cap", async () => {
+// semantic-memory-v1 foundation, T2 — SUPERSEDES the prior "completeness guard" test below (which
+// asserted `withdrawConsent2` FAILS CLOSED via a raw one-shot `query(ns,{text:"",k:500})` mock the
+// instant a subject hit 500 records). That guard existed only because a single query genuinely
+// couldn't prove completeness past its cap. Pagination (walking pages to a short page, no hard upper
+// bound) removes that limitation entirely — a subject sitting exactly at the OLD boundary must now
+// succeed with a complete, correctly-counted purge, not reject. This is an inferred design call (the
+// task's own framing: "today this fails-closed at 500 — RED until pagination lands"), flagged here as
+// exactly that: the old assertion's PREMISE is what this whole foundation removes, so keeping the old
+// mock-based assertion literally green would mean testing a guarantee the feature is designed to no
+// longer have. See erasure-scale.test.ts sibling below for the full 1500-fact proof.
+describe("erasure — completeness at the OLD 500-record boundary (semantic-memory-v1 foundation, T2)", () => {
+  it("withdrawConsent2 no longer fails closed at the old 500-record boundary — a subject with EXACTLY 500 special facts is purged COMPLETELY, not rejected", async () => {
+    const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
-    // A subject at/over the query cap: one query can't prove it saw everything, so a purge must throw
-    // rather than delete a partial set and audit it as complete.
-    const capped = Array.from({ length: 500 }, (_, i) => ({ id: `id-${i}`, text: "x", score: 0, metadata: { class: "special" as const } }));
-    const spyVector = {
-      upsert: async () => {},
-      query: async () => capped,
-      deleteById: async () => {},
-      deleteNamespace: async () => {},
-    };
-    await expect(
-      withdrawConsent2({ vector: spyVector as never, audit: runtimeStore }, { tenantId: "acme", anonId: "big" }),
-    ).rejects.toThrow(/complete purge/i);
+    const namespace = subjectNamespace("acme", "guest-boundary-500");
+    const records = Array.from({ length: 500 }, (_, i) => ({
+      id: `s-${String(i).padStart(3, "0")}`,
+      text: `special ${i}`,
+      metadata: { text: `special ${i}`, class: "special" as const },
+    }));
+    await vector.upsert(namespace, records);
+
+    const result = await withdrawConsent2({ vector, audit: runtimeStore }, { tenantId: "acme", anonId: "guest-boundary-500" });
+    expect(result.purged).toBe(500); // NOT a rejection — the old QUERY_LIMIT=500 fail-closed guard no longer applies
+
+    expect(await vector.query(namespace, { text: "", k: 2000 })).toEqual([]);
   });
+});
+
+describe("erasure — PAGINATED enumeration at scale (semantic-memory-v1 foundation, T2): a 1500-fact subject is no longer fail-closed at 500", () => {
+  it(
+    "withdrawConsent1 deletes EVERY ordinary id across 1500 facts (specials retained), and the " +
+      "consent.withdrawn audit count is the TRUE total — not capped at 500 (today: enumerateSubjectOrFail " +
+      "fails closed at k=500, so this REJECTS instead of resolving)",
+    async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const namespace = subjectNamespace("acme", "guest-1500-c1");
+      const ORDINARY = 1200;
+      const SPECIAL = 300;
+      const records = [
+        ...Array.from({ length: ORDINARY }, (_, i) => ({
+          id: `ord-${String(i).padStart(4, "0")}`,
+          text: `fact ${i}`,
+          metadata: { text: `fact ${i}`, class: "ordinary" as const },
+        })),
+        ...Array.from({ length: SPECIAL }, (_, i) => ({
+          id: `spec-${String(i).padStart(4, "0")}`,
+          text: `special ${i}`,
+          metadata: { text: `special ${i}`, class: "special" as const },
+        })),
+      ];
+      await vector.upsert(namespace, records);
+
+      const result = await withdrawConsent1({ vector, audit: runtimeStore }, { tenantId: "acme", anonId: "guest-1500-c1" });
+      expect(result.purged).toBe(ORDINARY); // the TRUE total, not the old 500 cap
+
+      const remaining = await vector.query(namespace, { text: "", k: 2000 });
+      expect(remaining).toHaveLength(SPECIAL);
+      expect(remaining.every((r) => (r.metadata as { class?: string } | undefined)?.class === "special")).toBe(true);
+
+      const log = await runtimeStore.readAudit({ tenantId: "acme" });
+      const row = log.find((r) => r.action === "consent.withdrawn" && (r.decision as { class?: string })?.class === "ordinary");
+      expect(row?.decision).toMatchObject({ count: ORDINARY });
+    },
+  );
 });
 
 describe("erasure — works on ENCRYPTED records too (ADR-0015 Inv 9, go-live blocker #2)", () => {

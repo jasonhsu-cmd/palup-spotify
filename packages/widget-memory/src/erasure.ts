@@ -1,4 +1,4 @@
-import type { RuntimeStatePort, VectorMatch, VectorPort } from "@palup/platform-ports";
+import type { RuntimeStatePort, VectorListItem, VectorPort } from "@palup/platform-ports";
 import { subjectNamespace } from "./identity.js";
 import { buildMemoryAudit } from "./audit.js";
 import type { FactClass } from "./classifier.js";
@@ -12,10 +12,54 @@ import type { FactMetadata } from "./types.js";
 // UNCONDITIONALLY, even when there was nothing to purge, because the withdrawal/erasure request is
 // itself the meaningful event, not just its side effect.
 
-// Mirrors service.ts's RECALL_LIMIT / retention.ts's SWEEP_QUERY_LIMIT rationale: an empty-text query
-// against the vector port returns every record in the namespace (tie-broken by id), which is exactly
-// "give me everything for this subject" for the modest per-subject fact counts this system deals in.
-const QUERY_LIMIT = 500;
+// semantic-memory-v1 foundation, T2 — RULING: paginate to exhaustion via VectorPort's `list`, rather than
+// a single capped `query(ns,{text:"",k:500})`. Completeness (Inv 5: erasure must be complete, never
+// silently partial) is now guaranteed by walking every page to a short (< PAGE_LIMIT) terminator, not by
+// refusing to enumerate past a cap. `PAGE_LIMIT` is just the per-page size — it bounds one round-trip, not
+// how many records total can be enumerated.
+const PAGE_LIMIT = 500;
+
+// A HIGH safety ceiling on pages walked per enumeration: PAGE_LIMIT * MAX_PAGES = 1,000,000 records —
+// several orders of magnitude past any realistic per-subject fact count this system deals in. This is a
+// backstop against a pathological/corrupt namespace, NOT a normal-path limit: exceeding it never happens
+// for a real shopper. If it's ever exceeded on a WITHDRAWAL path, the caller escalates to a full
+// `deleteNamespace` (the withdrawal already deletes something; a defensive full-erase of the whole
+// subject is a safe, never-worse outcome) rather than loop unbounded or silently truncate the purge.
+const MAX_PAGES = 2000;
+
+/** Thrown by `enumerateSubject` when a namespace isn't exhausted within `MAX_PAGES` pages. Carries the
+ *  partial page-walk so a WITHDRAWAL caller can escalate deliberately (see `withdrawConsent1`/
+ *  `withdrawConsent2`) rather than resolve with a silently incomplete purge. */
+export class PageCeilingExceeded extends Error {
+  constructor(
+    public readonly namespace: string,
+    public readonly partial: VectorListItem[],
+  ) {
+    super(
+      `enumerateSubject: ${namespace} was not exhausted within MAX_PAGES=${MAX_PAGES} pages ` +
+        `(PAGE_LIMIT=${PAGE_LIMIT}) — refusing to resolve with a partial enumeration (ADR-0015 Inv 5)`,
+    );
+    this.name = "PageCeilingExceeded";
+  }
+}
+
+/**
+ * Walk `namespace` to exhaustion via `VectorPort.list` (ascending id, `after` an exclusive lower bound —
+ * see list's own contract), returning EVERY record regardless of how many pages that takes. A page
+ * shorter than `PAGE_LIMIT` is the exhaustion terminator (mirrors the ANN/in-memory KEYSET-AT-SCALE
+ * contract tests). Throws `PageCeilingExceeded` rather than ever silently truncating.
+ */
+async function enumerateSubject(deps: ErasureDeps, namespace: string): Promise<VectorListItem[]> {
+  const out: VectorListItem[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const batch = await deps.vector.list(namespace, { limit: PAGE_LIMIT, after });
+    out.push(...batch);
+    if (batch.length < PAGE_LIMIT) return out; // short page — namespace exhausted
+    after = batch[batch.length - 1]!.id;
+  }
+  throw new PageCeilingExceeded(namespace, out);
+}
 
 export interface ErasureDeps {
   vector: VectorPort;
@@ -35,28 +79,8 @@ export interface SubjectRef {
   anonId: string;
 }
 
-function classOf(match: VectorMatch): FactClass | undefined {
-  return (match.metadata as Partial<FactMetadata> | undefined)?.class;
-}
-
-/**
- * Enumerate a subject's records for a data-RIGHTS purge, COMPLETELY or not at all. An empty-text query
- * returns up to `k` records, so getting exactly `k` back means there MAY be more we can't see — for a
- * GDPR withdrawal/erasure that must FAIL CLOSED (the caller escalates to a full deleteNamespace or a
- * port-level batch delete) rather than delete a partial set and audit it as a complete purge. Realistic
- * per-subject fact counts are far below the cap; this guard exists so incompleteness can never be
- * SILENT (Inv 5: erasure must be complete, never silently partial).
- */
-async function enumerateSubjectOrFail(deps: ErasureDeps, namespace: string): Promise<VectorMatch[]> {
-  const matches = await deps.vector.query(namespace, { text: "", k: QUERY_LIMIT });
-  if (matches.length >= QUERY_LIMIT) {
-    throw new Error(
-      `withdraw: subject has >= ${QUERY_LIMIT} records; one query cannot enumerate them completely, so a ` +
-        `complete purge can't be guaranteed — escalate to deleteNamespace or a port batch delete rather ` +
-        `than a silently partial purge (ADR-0015 Inv 5).`,
-    );
-  }
-  return matches;
+function classOf(item: VectorListItem): FactClass | undefined {
+  return (item.metadata as Partial<FactMetadata> | undefined)?.class;
 }
 
 /**
@@ -75,15 +99,54 @@ export async function eraseSubject(deps: ErasureDeps, ctx: SubjectRef): Promise<
 }
 
 /**
+ * Shared withdrawal enumeration: walks `namespace` to exhaustion via `enumerateSubject` and filters to
+ * `factClass`. On the (never-realistic) `PageCeilingExceeded` backstop, a per-class filter can no longer
+ * be trusted as complete either — so this escalates to a full `deleteNamespace` for the subject (safe:
+ * the withdrawal already deletes something, so a defensive full erase of whatever else is there is never
+ * a worse outcome than leaving it), audits the escalation with the partial count it DID manage to walk
+ * (a documented LOWER bound, not a "true total" — `PageCeilingExceeded`'s own doc comment), and re-throws
+ * so the caller never mistakes this for an ordinary, fully-accounted purge.
+ */
+async function idsForClassOrEscalate(
+  deps: ErasureDeps,
+  ctx: SubjectRef,
+  namespace: string,
+  factClass: FactClass,
+): Promise<string[]> {
+  let matches: VectorListItem[];
+  try {
+    matches = await enumerateSubject(deps, namespace);
+  } catch (e) {
+    if (!(e instanceof PageCeilingExceeded)) throw e;
+    await deps.vector.deleteNamespace(namespace);
+    await deps.audit.audit(
+      { tenantId: ctx.tenantId },
+      buildMemoryAudit({
+        action: "consent.withdrawn",
+        tenantId: ctx.tenantId,
+        anonId: ctx.anonId,
+        factClass,
+        count: e.partial.length, // a LOWER bound only — see PageCeilingExceeded
+        hmacKey: deps.hmacKey,
+      }),
+    );
+    throw e;
+  }
+  return matches.filter((m) => classOf(m) === factClass).map((m) => m.id);
+}
+
+/**
  * Consent-2 (special-category / Art. 9) withdrawal (ADR-0015 "Withdrawal is symmetric" — withdrawing
  * Consent 2 PURGES the sensitive fact). Erasure-first: deletes only the records classified `"special"`
  * for this subject and LEAVES ordinary facts untouched — Consent 2 is independent of Consent 1 (Inv 9),
  * so a shopper withdrawing the health tier alone must keep any ordinary memory they still consent to.
+ *
+ * T2: enumeration now PAGINATES to exhaustion (no more fail-closed-at-500) — a subject with any number of
+ * facts is purged completely, and the audited `count` is the TRUE total purged, not a capped estimate.
  */
 export async function withdrawConsent2(deps: ErasureDeps, ctx: SubjectRef): Promise<{ purged: number }> {
   const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
-  const matches = await enumerateSubjectOrFail(deps, namespace);
-  const specialIds = matches.filter((m) => classOf(m) === "special").map((m) => m.id);
+  const specialIds = await idsForClassOrEscalate(deps, ctx, namespace, "special");
 
   if (specialIds.length > 0) await deps.vector.deleteById(namespace, specialIds);
 
@@ -110,11 +173,13 @@ export async function withdrawConsent2(deps: ErasureDeps, ctx: SubjectRef): Prom
  * `"ordinary"`-classified fact for the subject, leaving any separately-consented special-category fact
  * untouched (Consent 2 is independent — withdrawing Consent 1 must never silently drop a fact the
  * shopper never withdrew consent for).
+ *
+ * T2: enumeration now PAGINATES to exhaustion (no more fail-closed-at-500) — a subject with any number of
+ * facts is purged completely, and the audited `count` is the TRUE total purged, not a capped estimate.
  */
 export async function withdrawConsent1(deps: ErasureDeps, ctx: SubjectRef): Promise<{ purged: number }> {
   const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
-  const matches = await enumerateSubjectOrFail(deps, namespace);
-  const ordinaryIds = matches.filter((m) => classOf(m) === "ordinary").map((m) => m.id);
+  const ordinaryIds = await idsForClassOrEscalate(deps, ctx, namespace, "ordinary");
 
   if (ordinaryIds.length > 0) await deps.vector.deleteById(namespace, ordinaryIds);
 

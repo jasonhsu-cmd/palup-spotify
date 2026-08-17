@@ -352,3 +352,35 @@ describe("merge — mergeGuestIntoAccount", () => {
     expect(result.merged).toBe(1);
   });
 });
+
+describe("merge — PAGINATED migration at scale (semantic-memory-v1 foundation, T2): a guest with >500 facts", () => {
+  it(
+    "mergeGuestIntoAccount migrates ALL 1500 guest facts into the account namespace — none dropped by " +
+      "the old k=500 query cap",
+    async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const anonNs = subjectNamespace("acme", "guest-1500-merge");
+      const records = Array.from({ length: 1500 }, (_, i) => ({
+        id: `g-${String(i).padStart(4, "0")}`,
+        text: `fact ${i}`,
+        metadata: { text: `fact ${i}`, class: "ordinary" as const },
+      }));
+      await vector.upsert(anonNs, records);
+
+      const result = await mergeGuestIntoAccount(
+        { vector, audit: runtimeStore },
+        { tenantId: "acme", anonId: "guest-1500-merge", accountId: "acct-1500", consent2: "unknown" },
+      );
+      expect(result.merged).toBe(1500); // not capped at the old QUERY_LIMIT=500
+
+      const acctNs = subjectNamespace("acme", accountSubjectId("acct-1500"));
+      const acctRecords = await vector.query(acctNs, { text: "", k: 2000 });
+      expect(acctRecords).toHaveLength(1500);
+      expect(new Set(acctRecords.map((r) => r.id))).toEqual(new Set(records.map((r) => r.id))); // every guest id, none dropped
+
+      // Copy-not-move (merge.ts's own header): the guest namespace is untouched.
+      expect(await vector.query(anonNs, { text: "", k: 2000 })).toHaveLength(1500);
+    },
+  );
+});

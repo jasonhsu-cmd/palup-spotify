@@ -1,4 +1,13 @@
-import { requireCleanText, scoreRecord, type VectorPort, type VectorRecord, type VectorQuery, type VectorMatch } from "@palup/platform-ports";
+import {
+  requireCleanText,
+  scoreRecord,
+  type VectorPort,
+  type VectorRecord,
+  type VectorQuery,
+  type VectorMatch,
+  type VectorListItem,
+  type VectorListOpts,
+} from "@palup/platform-ports";
 import type { Sql } from "./sql.js";
 
 // Postgres adapter for VectorPort (ADR-0001 `vector` port — durable, portable cross-visit memory,
@@ -169,6 +178,19 @@ export class PostgresVectorStore implements VectorPort {
     scored.sort((x, y) => y.score - x.score || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
     const limit = query.k != null ? Math.max(0, Math.floor(query.k)) : scored.length;
     return scored.slice(0, limit);
+  }
+
+  /** Plain keyset scan by id, leaving `query`/`MAX_SCAN_ROWS` untouched (see the file-level honesty
+   *  note above) — `list` is a distinct, unranked enumerate over `vp_records`. */
+  async list(namespace: string, opts: VectorListOpts): Promise<VectorListItem[]> {
+    const ns = requireNamespace(namespace);
+    const limit = Math.max(0, Math.floor(opts.limit));
+    if (limit === 0) return [];
+    const { rows } = await this.sql.query<{ id: string; metadata: Record<string, unknown> | null }>(
+      "SELECT id, metadata FROM vp_records WHERE namespace=$1 AND ($2::text IS NULL OR id > $2) ORDER BY id LIMIT $3",
+      [ns, opts.after ?? null, limit],
+    );
+    return rows.map((r) => ({ id: r.id, metadata: r.metadata ?? undefined }));
   }
 
   async deleteById(namespace: string, ids: string[]): Promise<void> {

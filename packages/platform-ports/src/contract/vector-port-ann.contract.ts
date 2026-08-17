@@ -16,6 +16,22 @@ import type { VectorPort } from "../vector-port.js";
 // `makeAdapter` must return a FRESH, namespace-empty adapter each call (same contract as
 // runVectorPortContract) — for a real Postgres/pgvector adapter this typically means truncating the
 // backing table against one shared container (see pgvector-store.contract.test.ts's wiring).
+// TEMPORARY BRIDGE (semantic-memory-v1 foundation, T1) — see vector-port.contract.ts's own copy of this
+// note (kept here too rather than shared, since these are two independent contract files): `VectorPort`
+// doesn't yet declare `list`; contract tests reach it through this narrow widening so a not-yet-updated
+// adapter fails at RUNTIME ("adapter.list is not a function"), not a repo-wide compile break. Delete once
+// `VectorPort` gains `list` for real.
+export interface VectorPortListItem {
+  id: string;
+  metadata?: Record<string, unknown>;
+}
+export interface VectorPortWithList extends VectorPort {
+  list(namespace: string, opts: { limit: number; after?: string }): Promise<VectorPortListItem[]>;
+}
+function listable(v: VectorPort): VectorPortWithList {
+  return v as unknown as VectorPortWithList;
+}
+
 export function runVectorPortAnnContract(
   makeAdapter: () => VectorPort | Promise<VectorPort>,
   dimension: number,
@@ -133,8 +149,43 @@ export function runVectorPortAnnContract(
       await expect(v.query("t", { text: "x", k: 5 })).rejects.toThrow(/unsupported|vector/i);
     }, 120_000);
 
+    // semantic-memory-v1 foundation, T1 — `list` on the vector-query-only ANN adapter: a plain keyset
+    // scan by id, unaffected by HNSW's approximate ranking (list never ranks by similarity at all).
+    describe("list — bounded keyset enumerate (vector-query-only adapter; list has no text/vector modality issue)", () => {
+      it("returns every record in ascending id order with metadata, honors limit, and pages via `after` with no overlap/gap", async () => {
+        const v = await makeAdapter();
+        await v.upsert("list-ns", [
+          { id: "c", vector: e(0), metadata: { seq: 3 } },
+          { id: "a", vector: e(1), metadata: { seq: 1 } },
+          { id: "b", vector: e(2), metadata: { seq: 2 } },
+          { id: "d", vector: e(0), metadata: { seq: 4 } },
+        ]);
+        const all = await listable(v).list("list-ns", { limit: 500 });
+        expect(all.map((r) => r.id)).toEqual(["a", "b", "c", "d"]);
+        expect(all.map((r) => r.metadata)).toEqual([{ seq: 1 }, { seq: 2 }, { seq: 3 }, { seq: 4 }]);
+
+        const first = await listable(v).list("list-ns", { limit: 2 });
+        expect(first.map((r) => r.id)).toEqual(["a", "b"]);
+        const second = await listable(v).list("list-ns", { limit: 2, after: "b" });
+        expect(second.map((r) => r.id)).toEqual(["c", "d"]);
+        const third = await listable(v).list("list-ns", { limit: 2, after: "d" });
+        expect(third).toEqual([]);
+      }, 120_000);
+
+      it("unknown namespace -> []; blank namespace rejected; never crosses namespaces", async () => {
+        const v = await makeAdapter();
+        expect(await listable(v).list("never-seen-list", { limit: 5 })).toEqual([]);
+        await expect(listable(v).list("", { limit: 5 })).rejects.toThrow(/namespace/i);
+
+        await v.upsert("list-tenant-a", [{ id: "a1", vector: e(0), metadata: { owner: "A" } }]);
+        await v.upsert("list-tenant-b", [{ id: "b1", vector: e(0), metadata: { owner: "B" } }]);
+        const bList = await listable(v).list("list-tenant-b", { limit: 10 });
+        expect(bList.map((r) => r.id)).toEqual(["b1"]);
+      }, 120_000);
+    });
+
     it(
-      "RECALL SPOT-CHECK: a near-duplicate of the query vector, planted among ~5000 random " +
+      "RECALL SPOT-CHECK: a near-duplicate of the query vector, planted among ~5000 random" +
         "background vectors, is found within the top-10 (recall floor, not exact ordering — HNSW is " +
         "approximate, so this proves the ANN index+ef_search is genuinely wired to real recall, not " +
         "just returning arbitrary rows)",

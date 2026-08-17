@@ -80,7 +80,7 @@ export type {
   InMemoryMerchantRegistryOpts,
 } from "./merchant-registry-port.js";
 export { createInMemoryMerchantRegistry, normalizePrimaryDomain } from "./merchant-registry-port.js";
-export type { VectorPort, VectorRecord, VectorQuery, VectorMatch } from "./vector-port.js";
+export type { VectorPort, VectorRecord, VectorQuery, VectorMatch, VectorListItem, VectorListOpts } from "./vector-port.js";
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type { ProductFactsPort, ProductFact } from "./product-facts-port.js";
 export { createInMemoryProductFactsStore, requireProductFactsTenant } from "./product-facts-port.js";

@@ -208,10 +208,13 @@ describe("B4 — sweepAllSubjects: the shopper who NEVER RETURNS is finally recl
       await recordSubject(store, { tenantId: TENANT, subject: s });
       await seedExpiredFact(vector, s);
     }
-    const realQuery = vector.query.bind(vector);
-    vi.spyOn(vector, "query").mockImplementation(async (ns, q) => {
+    // semantic-memory-v1 foundation, T2: sweepExpired now walks a subject's records via `vector.list`
+    // (bounded keyset enumerate), not `vector.query` — mock the method actually called on the failure
+    // path, so this still genuinely exercises "one subject's failure doesn't abort the run".
+    const realList = vector.list.bind(vector);
+    vi.spyOn(vector, "list").mockImplementation(async (ns, opts) => {
       if (ns === subjectNamespace(TENANT, "BROKENSUBJ")) throw new Error("vector down");
-      return realQuery(ns, q);
+      return realList(ns, opts);
     });
 
     const result = await sweepAllSubjects(deps(store, vector), TENANT);

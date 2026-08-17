@@ -1,4 +1,4 @@
-import type { RuntimeStatePort, VectorPort, VectorRecord } from "@palup/platform-ports";
+import type { RuntimeStatePort, VectorListItem, VectorPort, VectorRecord } from "@palup/platform-ports";
 import { subjectNamespace, accountSubjectId } from "./identity.js";
 import { buildMemoryAudit } from "./audit.js";
 import type { MemoryConsent } from "./consent.js";
@@ -35,10 +35,42 @@ import type { FactMetadata } from "./types.js";
 // unchanged. It buys principle, not protection. That is the same conclusion C1's own decision records.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
-// Mirrors service.ts's RECALL_LIMIT / retention.ts's SWEEP_QUERY_LIMIT rationale: an empty-text query
-// against the vector port returns every record in the namespace, which is exactly "give me everything
-// for this subject" for the modest per-subject fact counts this system deals in.
-const QUERY_LIMIT = 500;
+// semantic-memory-v1 foundation, T2 — RULING: page through a namespace's ENTIRE record set via
+// `VectorPort.list` rather than a single capped `query(ns,{text:"",k:500})` — the old idiom both
+// truncated at 500 (so a guest with >500 facts had some silently dropped by the migration) AND throws
+// outright on a text-query-only-unsupported ANN adapter (pgvector). `PAGE_LIMIT` is the per-page size;
+// `MAX_PAGES` is a generous defensive ceiling (PAGE_LIMIT * MAX_PAGES = 1,000,000 records) against a
+// pathological/corrupt namespace, never a normal-path limit — exceeding it throws rather than silently
+// truncating the migration.
+const PAGE_LIMIT = 500;
+const MAX_PAGES = 2000;
+
+/** Thrown by `listAll` when a namespace isn't exhausted within `MAX_PAGES` pages — a backstop so a
+ *  pathologically large/corrupt namespace can never be silently under-migrated. */
+export class MergePageCeilingExceeded extends Error {
+  constructor(namespace: string) {
+    super(
+      `mergeGuestIntoAccount: ${namespace} was not exhausted within MAX_PAGES=${MAX_PAGES} pages ` +
+        `(PAGE_LIMIT=${PAGE_LIMIT}) — refusing to migrate from a partial enumeration`,
+    );
+    this.name = "MergePageCeilingExceeded";
+  }
+}
+
+/** Walk `namespace` to exhaustion via `VectorPort.list` (ascending id, `after` an exclusive lower bound).
+ *  A page shorter than `PAGE_LIMIT` is the exhaustion terminator; exceeding `MAX_PAGES` throws rather
+ *  than ever silently truncating. */
+async function listAll(vector: VectorPort, namespace: string): Promise<VectorListItem[]> {
+  const out: VectorListItem[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const batch = await vector.list(namespace, { limit: PAGE_LIMIT, after });
+    out.push(...batch);
+    if (batch.length < PAGE_LIMIT) return out; // short page — namespace exhausted
+    after = batch[batch.length - 1]!.id;
+  }
+  throw new MergePageCeilingExceeded(namespace);
+}
 
 export interface MergeDeps {
   vector: VectorPort;
@@ -124,7 +156,7 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
       }),
     );
 
-  const matches = await deps.vector.query(anonNamespace, { text: "", k: QUERY_LIMIT });
+  const matches = await listAll(deps.vector, anonNamespace);
   // No guest facts: nothing to migrate, but the guest namespace was still READ under an account
   // principal — that cross-subject read is recorded (count 0), never silently skipped.
   if (matches.length === 0) {
@@ -135,9 +167,7 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
   // Copying is not self-limiting the way the old MOVE was (it erased its own source), so idempotence has
   // to come from CONTENT: migrate only ids the account does not already hold. Without this, every turn
   // would re-upsert the same facts and write a fresh `merge` audit row into an append-only log.
-  const alreadyHeld = new Set(
-    (await deps.vector.query(accountNamespace, { text: "", k: QUERY_LIMIT })).map((m) => m.id),
-  );
+  const alreadyHeld = new Set((await listAll(deps.vector, accountNamespace)).map((m) => m.id));
 
   const toMigrate: VectorRecord[] = [];
   for (const match of matches) {
