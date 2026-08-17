@@ -3,6 +3,7 @@ import type {
   RuntimeStatePort,
   VectorPort,
   VectorRecord,
+  VectorListItem,
   ModelPort,
   CryptoPort,
   SecretsPort,
@@ -280,6 +281,65 @@ function recallFloorCap(): number {
   const raw = process.env.MEMORY_FLOOR_CAP;
   const n = raw !== undefined ? Number(raw) : NaN;
   return Number.isInteger(n) && n > 0 ? n : 500;
+}
+
+/**
+ * SECURITY-REVIEW FIX (feat/memory-v1-pr3-semantic-recall, HIGH finding — a shopper's allergy/health fact
+ * could be silently dropped from recall entirely). This is the ONE predicate for "does this row belong to
+ * the safety floor" and it is shared, byte-for-byte, between the ranked-set EXCLUSION (a floor row must
+ * never rank — its vector is a content-independent random placeholder, T4) and the floor's own INCLUSION
+ * test below. Before this fix the two were independently written and had drifted: the ranked exclusion
+ * checked `mustRecall === true || class === "special"`, but the floor only re-included `mustRecall ===
+ * true` — so a row with `class:"special"` and NO `mustRecall` (a special fact written to this subject
+ * while `MEMORY_SEMANTIC_RECALL` was OFF — `mustRecall` is only ever stamped at write time under the flag,
+ * `remember()` above — but `class:"special"` is the DURABLE marker erasure.ts already treats as
+ * authoritative, `classOf` there filters on `class === "special"` alone) was excluded from ranking and
+ * never re-added by the floor: dropped from recall with no signal to the shopper or an operator. Keying
+ * the floor on the durable `class` marker, not just the flag-gated `mustRecall`, makes the floor's
+ * inclusion set a guaranteed SUPERSET of whatever the ranked set excludes — the invariant this predicate
+ * exists to hold structurally (one function, not two hand-kept-in-sync copies) rather than by convention.
+ */
+function isSafetyFloorRow(meta: { mustRecall?: boolean; class?: FactClass } | undefined): boolean {
+  return meta?.mustRecall === true || meta?.class === "special";
+}
+
+/**
+ * SECURITY-REVIEW FIX (same PR, MEDIUM finding) — the safety floor used to be a SINGLE bounded
+ * `VectorPort.list` page (`recallFloorCap()`, default 500), no `after` continuation. `list` returns
+ * ascending-id order and record ids are random UUIDs, so a subject with more than `recallFloorCap()` TOTAL
+ * facts (ordinary + special combined, since the cap bounds the whole namespace page, not just the special
+ * rows within it) saw only the lowest-UUID slice of their own corpus — any safety fact whose UUID happened
+ * to sort past that page was silently dropped, independent of the Hole-1 predicate fix above.
+ *
+ * FIX: paginate to exhaustion, reusing erasure.ts's own `enumerateSubject` page-walk shape (`after` an
+ * exclusive lower bound, loop until a short page terminates) — completeness for a safety-critical read
+ * deserves the same discipline erasure.ts already applies to a safety-critical delete. `FLOOR_MAX_PAGES`
+ * mirrors erasure.ts's `MAX_PAGES` reasoning verbatim: a backstop against a pathological/corrupt
+ * namespace, not a normal-path limit (`FLOOR_MAX_PAGES * recallFloorCap()` = 1,000,000 rows at the default
+ * cap — several orders of magnitude past any realistic per-subject fact count). Deliberately NOT a thrown
+ * `PageCeilingExceeded` the way erasure.ts's enumeration is: erasure is a legal deletion action where an
+ * incomplete purge must never be mistaken for a complete one, so escalating (to a defensive full erase) or
+ * throwing is the only honest outcome; `recall()` is a READ inside a live chat turn, where throwing would
+ * fail the shopper's whole turn over a backstop that should never fire in practice. So this degrades to
+ * best-effort (returns whatever was collected) and LOGS (never silent — mirrors this module's other
+ * `console.error` backstops, e.g. the embed-error catch in `remember()` above) rather than either silently
+ * truncating or throwing.
+ */
+const FLOOR_MAX_PAGES = 2000;
+
+async function enumerateFloor(vector: VectorPort, namespace: string, pageLimit: number, ref: string): Promise<VectorListItem[]> {
+  const out: VectorListItem[] = [];
+  let after: string | undefined;
+  for (let page = 0; page < FLOOR_MAX_PAGES; page++) {
+    const batch = await vector.list(namespace, { limit: pageLimit, after });
+    out.push(...batch);
+    if (batch.length < pageLimit) return out; // short page — namespace exhausted
+    after = batch[batch.length - 1]!.id;
+  }
+  console.error(
+    `[memory] safety-floor enumeration hit FLOOR_MAX_PAGES=${FLOOR_MAX_PAGES} (pageLimit=${pageLimit}) subjectRef=${ref} — using the partial floor collected so far; recall degrades best-effort here rather than failing the shopper's turn (unlike erasure.ts's own ceiling, which escalates)`,
+  );
+  return out;
 }
 
 interface EncryptedField {
@@ -744,25 +804,26 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // ordinary fact sitting just behind an excluded one, THEN cap to `recallTopK()`, nearest-first.
       const rankedRaw = await deps.vector.query(namespace, { vector: opts!.queryVector, k: RECALL_LIMIT });
       const ranked = rankedRaw
-        .filter((m) => {
-          const meta = m.metadata as { mustRecall?: boolean; class?: FactClass } | undefined;
-          // A mustRecall/special row NEVER ranks — its vector is a content-independent random placeholder
-          // (T4), so scoring it against a query is meaningless, and it always surfaces via the floor below
-          // regardless of similarity. `class === "special"` is checked too, defense-in-depth, in case a
-          // row somehow carries one without the other.
-          return !(meta?.mustRecall === true || meta?.class === "special");
-        })
+        // A safety-floor row (see `isSafetyFloorRow`'s own doc comment) NEVER ranks — its vector is a
+        // content-independent random placeholder (T4), so scoring it against a query is meaningless — and
+        // it always surfaces via the floor below instead, regardless of similarity.
+        .filter((m) => !isSafetyFloorRow(m.metadata as { mustRecall?: boolean; class?: FactClass } | undefined))
         .slice(0, recallTopK());
 
-      // The safety floor: EVERY mustRecall row for this subject, regardless of similarity to the query —
-      // a bounded `list` enumerate (no native "find by metadata field" op), deduped by id against the
-      // ranked half above.
-      const floorPage = await deps.vector.list(namespace, { limit: recallFloorCap() });
+      // The safety floor: EVERY row matching `isSafetyFloorRow` for this subject — `mustRecall === true`
+      // OR the durable `class === "special"` marker, the SAME predicate the ranked exclusion above uses,
+      // so the floor's inclusion set is a guaranteed superset of whatever ranking excluded (a `class:
+      // "special"` row written before MEMORY_SEMANTIC_RECALL existed carries no `mustRecall` but still
+      // surfaces here) — regardless of similarity to the query. Paginated to EXHAUSTION (`enumerateFloor`,
+      // mirroring erasure.ts's own completeness discipline), not a single bounded page: a subject with more
+      // total facts than one page's `recallFloorCap()` must not have a safety fact silently fall past the
+      // page boundary. Deduped by id against the ranked half above.
+      const floorPage = await enumerateFloor(deps.vector, namespace, recallFloorCap(), subjectRef(ctx.tenantId, ctx.anonId, deps.hmacKey));
       const seenIds = new Set(ranked.map((m) => m.id));
       matches = [...ranked];
       for (const item of floorPage) {
-        const meta = item.metadata as { mustRecall?: boolean } | undefined;
-        if (meta?.mustRecall === true && !seenIds.has(item.id)) {
+        const meta = item.metadata as { mustRecall?: boolean; class?: FactClass } | undefined;
+        if (isSafetyFloorRow(meta) && !seenIds.has(item.id)) {
           matches.push(item);
           seenIds.add(item.id);
         }

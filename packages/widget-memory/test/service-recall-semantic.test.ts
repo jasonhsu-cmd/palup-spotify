@@ -11,6 +11,7 @@ import {
 } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
 import { subjectNamespace } from "../src/identity.js";
+import { writeMemoryManifest } from "../src/manifest.js";
 import type { MemoryCtx, RecalledFact } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
@@ -33,14 +34,17 @@ import type { FactDistiller } from "../src/distiller.js";
 
 const SEMANTIC_FLAG = "MEMORY_SEMANTIC_RECALL";
 const TOP_K_ENV = "MEMORY_RECALL_TOP_K";
+const FLOOR_CAP_ENV = "MEMORY_FLOOR_CAP";
 
 beforeEach(() => {
   delete process.env[SEMANTIC_FLAG];
   delete process.env[TOP_K_ENV];
+  delete process.env[FLOOR_CAP_ENV];
 });
 afterEach(() => {
   delete process.env[SEMANTIC_FLAG];
   delete process.env[TOP_K_ENV];
+  delete process.env[FLOOR_CAP_ENV];
 });
 
 function keyedSecrets(...tenantIds: string[]): SecretsPort {
@@ -330,5 +334,108 @@ describe("T7 — the ranked+floor UNION still respects existing TTL-on-read + au
     const renewEvt = log.find((r) => r.action === "ttl_renew");
     expect(renewEvt).toBeDefined();
     expect((renewEvt?.decision as { count?: number } | undefined)?.count).toBe(2); // BOTH halves slid, not just the ranked one
+  });
+});
+
+// SECURITY-REVIEW REGRESSION LOCK (feat/memory-v1-pr3-semantic-recall, PR #321 — the PR was BLOCKED on
+// these two completeness holes; the fixes are in service.ts's `isSafetyFloorRow`/`enumerateFloor`).
+describe("T7 — security-review fix: the safety floor must never silently drop a shopper's own safety fact", () => {
+  it("HOLE 1 (HIGH): a class:\"special\" row with NO `mustRecall` field (as written before MEMORY_SEMANTIC_RECALL ever existed) still surfaces via the floor, even though its vector is ORTHOGONAL to the query", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const tenantId = "acme-legacy-special";
+    const anonId = "guest-legacy-special";
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: distillerReturning(NEAR_TEXT),
+      model: tableEmbedModel({ [NEAR_TEXT]: basis(0) }),
+      enabled: true,
+    });
+    const ctx: MemoryCtx = { tenantId, anonId, region: "us", consent1: "in", consent2: "in" };
+    process.env[SEMANTIC_FLAG] = "true";
+    // Establishes this tenant's embed pin (the manifest `recall()`'s semantic path requires) via an
+    // ordinary write — same setup shape as this file's other hand-seeded tests.
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    // Simulate a special-category fact written BEFORE MEMORY_SEMANTIC_RECALL existed on this tenant:
+    // `class: "special"` but deliberately NO `mustRecall` key at all — `mustRecall` is only ever stamped
+    // by the flag-gated write path in `remember()`, so a pre-existing special fact never carries it.
+    const ns = subjectNamespace(tenantId, anonId);
+    const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
+    await vector.upsert(ns, [
+      {
+        id: "legacy-special-1",
+        text: "shopper is allergic to tree nuts",
+        vector: basis(1), // ORTHOGONAL to QUERY_VECTOR (basis(0)) — cosine 0, never ranks in on similarity
+        metadata: {
+          text: "shopper is allergic to tree nuts",
+          class: "special",
+          // NOTE: no `mustRecall` field here — this is the exact shape the bug dropped.
+          expiresAt: future,
+          encrypted: false,
+        },
+      },
+    ]);
+
+    const recalled = await service.recall(ctx, { queryVector: QUERY_VECTOR, pin: PIN });
+    const texts = recalled.map((f) => f.text);
+    expect(texts).toContain("shopper is allergic to tree nuts");
+    expect(recalled.some((f) => f.class === "special")).toBe(true);
+  });
+
+  it("HOLE 2 (MEDIUM): a subject with more facts than one MEMORY_FLOOR_CAP page still surfaces a floor fact whose id sorts past the first page — the floor paginates to exhaustion", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const tenantId = "acme-floor-paginate";
+    const anonId = "guest-floor-paginate";
+    const ns = subjectNamespace(tenantId, anonId);
+
+    // A small cap so a modest fixture (well under the production default of 500) still forces multiple
+    // pages. The in-memory store's `list` returns ids in ASCENDING lexicographic order (vector-port.ts),
+    // so 12 ordinary rows with ids that sort strictly BEFORE the special row's id will fully occupy the
+    // first two pages at cap=5, and the special row (id "zzz-special-1") only turns up on page 3 — dropped
+    // entirely by a single-page floor, surfaced only if the floor paginates to exhaustion.
+    process.env[FLOOR_CAP_ENV] = "5";
+    const ORDINARY_COUNT = 12;
+    const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
+    const ordinaryRows = Array.from({ length: ORDINARY_COUNT }, (_, i) => ({
+      id: `row-${String(i).padStart(2, "0")}`, // "row-00".."row-11" — sorts before "zzz-special-1"
+      text: `ordinary fact number ${i}`,
+      vector: basis(2 + i),
+      metadata: { text: `ordinary fact number ${i}`, class: "ordinary" as const, expiresAt: future, encrypted: false },
+    }));
+    await vector.upsert(ns, ordinaryRows);
+    await vector.upsert(ns, [
+      {
+        id: "zzz-special-1",
+        text: "shopper has a severe bee-sting allergy",
+        vector: basis(1),
+        metadata: {
+          text: "shopper has a severe bee-sting allergy",
+          class: "special",
+          mustRecall: true,
+          expiresAt: future,
+          encrypted: false,
+        },
+      },
+    ]);
+    // Seed the tenant's own embed pin directly (no need to route a real embed call through `remember()`
+    // for a test that only exercises floor pagination, not ranking).
+    await writeMemoryManifest(runtimeStore, { tenantId }, { model: PIN.model, dimension: DIMENSION, purpose: "document", at: new Date().toISOString() });
+
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: { async distill() { return []; } },
+      enabled: true,
+      semanticRecall: true,
+    });
+    const ctx: MemoryCtx = { tenantId, anonId, region: "us", consent1: "in", consent2: "in" };
+
+    const recalled = await service.recall(ctx, { queryVector: QUERY_VECTOR, pin: PIN });
+    const texts = recalled.map((f) => f.text);
+    expect(texts).toContain("shopper has a severe bee-sting allergy");
+    expect(recalled.some((f) => f.class === "special")).toBe(true);
   });
 });
