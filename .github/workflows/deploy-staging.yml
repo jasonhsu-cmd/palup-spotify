@@ -98,8 +98,9 @@ jobs:
         #     fail-safe as AUDIT_HMAC_SECRET immediately above: a reference to a secret that does not exist
         #     makes `gcloud run deploy` itself fail, so this mounts only once an operator names an existing
         #     secret in the GUEST_TOKEN_SECRET_NAME repo variable. Absent ⇒ not mounted ⇒ guest tokens
-        #     simply cannot be minted — correct while the feature is unbuilt/off (ADR-0019 task 10 is still
-        #     gated on legal + owner re-acceptance; MEMORY_ADR_ACCEPTED is false).
+        #     simply cannot be minted. For the 2026-08-17 internal-staging memory enablement this secret MUST
+        #     be provisioned and named (a hard A4 condition) — guest cross-visit memory cannot function
+        #     without it. (ADR-0019 task 10 — the guest→account carry-over — stays unbuilt + legal-gated.)
         env:
           GCP_PROJECT: ${{ vars.GCP_PROJECT }}
           GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
@@ -140,12 +141,14 @@ jobs:
           # Enabling it REQUIRES a pgvector-enabled DATABASE_URL and an indexed corpus; default-false keeps
           # the in-memory scan path. Serving a corpus >5000 SKUs requires it.
           VECTOR_ANN: ${{ vars.VECTOR_ANN || 'false' }}
-          # Cross-visit memory — the OPERATOR half of the double gate (widget-memory/flag.ts). INERT on its
-          # own: isMemoryEnabled() also requires the hardcoded MEMORY_ADR_ACCEPTED const, which only a HUMAN
-          # flips after ADR-0015's legal + security sign-offs (merge-gate.sh REFUSES a PR that sets it). Threaded
-          # here (default 'false') so that once that flip lands, memory is a one-var deploy flip and not silently
-          # reverted by the next merge-deploy. Default 'false' ⇒ enables NOTHING. Enabling ALSO requires
-          # WIDGET_AUTH_REQUIRED=true (server.ts assertMemoryAuthCoupling), which staging already sets.
+          # Cross-visit memory — the OPERATOR gate (widget-memory/flag.ts). As of 2026-08-17 the build-time
+          # MEMORY_ADR_ACCEPTED const is flipped true (ADR-0015 Accepted for INTERNAL STAGING, legal DEFERRED;
+          # the const flip is a human-only manual merge — merge-gate.sh still REFUSES it). So this env var is
+          # now the LIVE gate: MEMORY_ENABLED=true engages memory. Enabling REQUIRES WIDGET_AUTH_REQUIRED=true
+          # (server.ts assertMemoryAuthCoupling, already set) AND — per the A4 security conditions — a
+          # per-tenant MEMORY_ENCRYPTION_KEY for the serving tenant plus a provisioned GUEST_TOKEN_SECRET.
+          # Default 'false' keeps memory OFF (and reverts a bare Cloud Run flip on the next merge-deploy);
+          # production is deployed nowhere and its MEMORY_ENABLED is unset, so nothing prod-facing turns on.
           MEMORY_ENABLED: ${{ vars.MEMORY_ENABLED || 'false' }}
           # D2 — the named fallback region/grounding mode for a tenant with NO pl_merchant row (staging's
           # `demo`). Registry merchants are served under their own row's values and ignore these entirely.

@@ -1,10 +1,13 @@
 # Cross-visit memory — go-live checklist
 
-> **Status: NOT READY. Several conditions below are unmet.** This document is the single gate list for
-> flipping `MEMORY_ADR_ACCEPTED` (`packages/widget-memory/src/flag.ts`) and moving ADR-0015 from
-> *Proposed* to *Accepted*. That flip is **human-only** (CLAUDE.md §3, ADR-0015 Status): it requires a
-> named human owner, a recorded `security-reviewer` sign-off, and a recorded **legal** sign-off. No build
-> agent may perform it, and no amount of green CI substitutes for the legal conditions.
+> **Status: ACCEPTED FOR INTERNAL STAGING (2026-08-17) — NOT production / external shoppers.**
+> `MEMORY_ADR_ACCEPTED` is flipped `true` and memory runs on the internal-only staging service
+> (`MEMORY_ENABLED=true`, tenant `palup-skincare-jason`) — a **named-owner decision (jason.hsu@framy.co)
+> with LEGAL DEFERRED** as an accepted risk for internal users. `security-reviewer` = **PASS-WITH-CONDITIONS**
+> (A4 below). The **legal** §A rows (A1/A2/A3/A5/A6) and ADR-0019 Q19 stay **OPEN** and gate any external /
+> production enablement — this document remains the gate list for THAT, and no green CI substitutes for the
+> legal conditions. The flip is human-only (CLAUDE.md §3): the merge-gate refuses it by construction, so the
+> named owner merges it manually; no build agent may perform it.
 
 **What the flip actually does.** `isMemoryEnabled()` is `MEMORY_ENABLED === "true" && MEMORY_ADR_ACCEPTED`.
 Both must be true. The env var alone can never enable memory (NN#1) — the const is a build-time change that
@@ -100,10 +103,10 @@ These cannot be closed by engineering work. They are the reason this checklist e
 | A1 | **Privacy notice covering cross-visit memory, executed.** Draft exists (`docs/legal/memory-privacy-notice-draft.md`) — explicitly *not* legal advice, *not* executed. | **OPEN** |
 | A2 | **DPA / processor terms covering health (Art-9) data, executed.** Draft exists (`docs/legal/memory-dpa-addendum-draft.md`). `docs/legal/provisions-brief.md` §0 records that no agreements currently exist. | **OPEN** |
 | A3 | **Legal sign-off recorded in ADR-0015**, resolving `docs/legal/memory-open-questions-for-counsel.md` — in particular the US Consent-2 fail-closed default, the sliding-renewal retention model, and the Art-9 lawful basis. | **OPEN** |
-| A4 | **`security-reviewer` sign-off recorded at the flip.** Per-PR security reviews across the program are *not* this: ADR-0015's Status line requires a sign-off on enablement itself. | **OPEN** |
+| A4 | **`security-reviewer` sign-off recorded at the flip.** Per-PR security reviews across the program are *not* this: ADR-0015's Status line requires a sign-off on enablement itself. | **MET for internal staging — 2026-08-17: PASS-WITH-CONDITIONS.** Identity/isolation/kill/audit machinery is sound; F1 attack tests pass in the merged tree; the guest-token primitive is well-built; `mergeGuestIntoAccount` (ADR-0019 task 10) has NO production caller — the linchpin keeping the deferred Art-9 legal question dormant (**if ever wired, this reverts to BLOCK**). NON-LEGAL conditions before `MEMORY_ENABLED=true`: (1) per-tenant `MEMORY_ENCRYPTION_KEY` for `palup-skincare-jason` (existing key is `demo`-only → else ordinary facts plaintext-at-rest + Art-9 fail-closed); (2) `GUEST_TOKEN_SECRET` = high-entropy **separate** secret; (3) `WIDGET_AUTH_REQUIRED=true` + `SHOPPER_AUTH=true` on the serving revision; (4) retention sweep scheduled for `palup-skincare-jason`; (5) keep `MEMORY_ENABLED` scoped to staging (repo-wide const flip ⇒ second gate spent). Residuals re-judged **stale in the safe direction**; **C14** accepted for internal staging, revisit before external. Full text in ADR-0015's 2026-08-17 amendment. **LEGAL (§A) NOT blessed — owner-deferred for internal only.** |
 | A5 | **Legal review of the shopper-facing consent copy** (the health/Consent-2 prompt shipped in PR-11b/11c is health-consent language). | **OPEN** |
 | A6 | **DPIA / lawful-basis coverage for the classifier running on shopper messages.** Once live, `classifyFact` inspects every message to decide whether to *ask* for consent (pure, in-memory, stores nothing — but it does process message text). | **OPEN** |
-| A7 | **ADR-0015 Status → Accepted** and **named human owner merges the flip.** | **OPEN** |
+| A7 | **ADR-0015 Status → Accepted** and **named human owner merges the flip.** | **MET for internal staging on merge — 2026-08-17.** ADR-0015 Status → "Accepted for internal staging"; the named owner (jason) merges this flip PR manually (the merge-gate refuses the const flip by construction), and that merge IS the §C-residual acceptance + go-live sign-off. **Production / external stays OPEN** (legal §A). |
 
 ## B. Technical preconditions
 
