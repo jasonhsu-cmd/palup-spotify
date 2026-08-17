@@ -315,3 +315,38 @@ describe("retention — sweepExpired (reclaims storage; audited)", () => {
     expect(deleted).toBe(2);
   });
 });
+
+describe("retention — PAGINATED sweep at scale (semantic-memory-v1 foundation, T2): 1500 facts, half expired", () => {
+  it(
+    "sweepExpired deletes EXACTLY the expired half (750 of 1500) — not just whatever the first " +
+      "500-record scan happened to catch (today: query(ns,{text:'',k:500}) truncates to the first 500 " +
+      "by ascending id, well short of the true expired count)",
+    async () => {
+      const vector = createInMemoryVectorStore();
+      const runtimeStore = new InMemoryRuntimeStore();
+      const namespace = subjectNamespace("acme", "guest-1500-sweep");
+      const now = new Date("2026-01-01T00:00:00.000Z");
+      const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+      const future = new Date("2030-01-01T00:00:00.000Z").toISOString();
+
+      // Interleaved by ascending id: the OLD truncate-at-first-500-scanned behavior would only ever
+      // see ~250 expired (half of its own 500-record window) — nowhere near the true 750 — so this
+      // proves genuine pagination, not an accidental pass from a lucky id ordering.
+      const records = Array.from({ length: 1500 }, (_, i) => ({
+        id: `f-${String(i).padStart(4, "0")}`,
+        text: `fact ${i}`,
+        metadata: { text: `fact ${i}`, class: "ordinary" as const, expiresAt: i % 2 === 0 ? past : future },
+      }));
+      await vector.upsert(namespace, records);
+
+      const deleted = await sweepExpired({ vector, audit: runtimeStore }, "acme", ["guest-1500-sweep"], now);
+      expect(deleted).toBe(750); // exactly the true expired half across all 1500, not the old ~250
+
+      const remaining = await vector.query(namespace, { text: "", k: 2000 });
+      expect(remaining).toHaveLength(750);
+      expect(
+        remaining.every((r) => new Date((r.metadata as { expiresAt: string }).expiresAt).getTime() > now.getTime()),
+      ).toBe(true);
+    },
+  );
+});

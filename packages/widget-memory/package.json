@@ -7,5 +7,9 @@
   "dependencies": {
     "@palup/platform-ports": "workspace:*",
     "@palup/widget-brain": "workspace:*"
+  },
+  "devDependencies": {
+    "@palup/state-postgres": "workspace:*",
+    "testcontainers": "^12.1.0"
   }
 }

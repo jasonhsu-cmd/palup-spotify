@@ -4,6 +4,8 @@ import {
   type VectorRecord,
   type VectorQuery,
   type VectorMatch,
+  type VectorListItem,
+  type VectorListOpts,
 } from "@palup/platform-ports";
 import type { Sql } from "./sql.js";
 
@@ -109,6 +111,20 @@ export class PgVectorStore implements VectorPort {
       return rows.map((r) => ({ id: r.id, score: Number(r.score), metadata: r.metadata ?? undefined }));
     });
   }
+  /** Plain keyset scan by id — NO vector op, no `SET LOCAL ef_search`, no transaction (this is the whole
+   *  point: pgvector's `query` is vector-query-only and throws on the text-modality "list everything"
+   *  idiom, but `list` never ranks anything, so a plain ORDER BY id scan works unconditionally). */
+  async list(namespace: string, opts: VectorListOpts): Promise<VectorListItem[]> {
+    const ns = requireNamespace(namespace);
+    const limit = Math.max(0, Math.floor(opts.limit));
+    if (limit === 0) return [];
+    const { rows } = await this.sql.query<{ id: string; metadata: Record<string, unknown> | null }>(
+      `SELECT id, metadata FROM vp_ann WHERE namespace=$1 AND ($2::text IS NULL OR id > $2) ORDER BY id LIMIT $3`,
+      [ns, opts.after ?? null, limit],
+    );
+    return rows.map((r) => ({ id: r.id, metadata: r.metadata ?? undefined }));
+  }
+
   async deleteById(namespace: string, ids: string[]): Promise<void> {
     const ns = requireNamespace(namespace);
     if (ids.length === 0) return;

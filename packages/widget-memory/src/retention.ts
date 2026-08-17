@@ -48,10 +48,27 @@ export function ttlForClass(factClass: FactClass): number {
   return days * DAY_MS;
 }
 
-// Mirrors service.ts's RECALL_LIMIT rationale: the vector port has no native "list all" op, so an
-// empty-text query ties every record at score 0 and returns them in stable id order up to `k` — exactly
-// "give me every record in this namespace" for the modest per-subject fact counts this system deals in.
-const SWEEP_QUERY_LIMIT = 500;
+// semantic-memory-v1 foundation, T2 — RULING: page through a subject's ENTIRE record set via
+// `VectorPort.list` (bounded keyset enumerate) rather than a single capped `query(ns,{text:"",k:500})` —
+// the old idiom both truncated at 500 (so a subject with >500 facts had its true expired count
+// undercounted) AND throws outright on a text-query-only-unsupported ANN adapter (pgvector). `SWEEP_PAGE_LIMIT`
+// is just the per-page size; `MAX_SWEEP_PAGES` is a generous defensive ceiling (SWEEP_PAGE_LIMIT *
+// MAX_SWEEP_PAGES = 1,000,000 records) against a pathological/corrupt namespace, never a normal-path
+// limit — exceeding it throws rather than silently truncating the sweep.
+const SWEEP_PAGE_LIMIT = 500;
+const MAX_SWEEP_PAGES = 2000;
+
+/** Thrown by `sweepExpired` when one subject's namespace isn't exhausted within `MAX_SWEEP_PAGES` pages —
+ *  a backstop so a pathologically large/corrupt namespace can never be silently under-swept. */
+export class SweepPageCeilingExceeded extends Error {
+  constructor(namespace: string) {
+    super(
+      `sweepExpired: ${namespace} was not exhausted within MAX_SWEEP_PAGES=${MAX_SWEEP_PAGES} pages ` +
+        `(SWEEP_PAGE_LIMIT=${SWEEP_PAGE_LIMIT}) — refusing to sweep a partial enumeration`,
+    );
+    this.name = "SweepPageCeilingExceeded";
+  }
+}
 
 export interface RetentionDeps {
   vector: VectorPort;
@@ -113,20 +130,27 @@ export async function sweepExpired(
 
   for (const anonId of subjects) {
     const namespace = subjectNamespace(tenantId, anonId);
-    const matches = await deps.vector.query(namespace, { text: "", k: SWEEP_QUERY_LIMIT });
 
-    // INVARIANT (security review, Finding 10, NOTE): a record with NO `expiresAt` at all is structurally
-    // UNREACHABLE by this sweep (and by recall's renewal, service.ts) — it would be retained and served
-    // forever. Nothing in this codebase writes such a record today (service.ts's `remember` always
-    // stamps `expiresAt`), so this is latent, not live. If any future non-widget-memory writer ever
-    // touches `vp_records` without stamping `expiresAt`, that record silently escapes Inv 4 entirely —
-    // this filter has no floor for metadata-less rows.
-    const expiredIds = matches
-      .filter((match) => {
-        const meta = match.metadata as Partial<FactMetadata> | undefined;
-        return meta?.expiresAt !== undefined && new Date(meta.expiresAt).getTime() <= nowMs;
-      })
-      .map((match) => match.id);
+    // Page to exhaustion (T2) — see the module-level note above. A short (< SWEEP_PAGE_LIMIT) page is the
+    // exhaustion terminator; exceeding MAX_SWEEP_PAGES throws rather than sweeping a partial view.
+    const expiredIds: string[] = [];
+    let after: string | undefined;
+    for (let page = 0; ; page++) {
+      if (page >= MAX_SWEEP_PAGES) throw new SweepPageCeilingExceeded(namespace);
+      const batch = await deps.vector.list(namespace, { limit: SWEEP_PAGE_LIMIT, after });
+      // INVARIANT (security review, Finding 10, NOTE): a record with NO `expiresAt` at all is structurally
+      // UNREACHABLE by this sweep (and by recall's renewal, service.ts) — it would be retained and served
+      // forever. Nothing in this codebase writes such a record today (service.ts's `remember` always
+      // stamps `expiresAt`), so this is latent, not live. If any future non-widget-memory writer ever
+      // touches `vp_records` without stamping `expiresAt`, that record silently escapes Inv 4 entirely —
+      // this filter has no floor for metadata-less rows.
+      for (const item of batch) {
+        const meta = item.metadata as Partial<FactMetadata> | undefined;
+        if (meta?.expiresAt !== undefined && new Date(meta.expiresAt).getTime() <= nowMs) expiredIds.push(item.id);
+      }
+      if (batch.length < SWEEP_PAGE_LIMIT) break; // short page — namespace exhausted
+      after = batch[batch.length - 1]!.id;
+    }
 
     if (expiredIds.length === 0) continue;
 
@@ -226,7 +250,7 @@ export async function sweepAllSubjects(
       // Retire only on a CONFIRMED-empty namespace, re-read after the delete — never inferred from the
       // delete count, which would wrongly retire a subject whose only records happened to be expired
       // while a concurrent write was landing.
-      const remainingRecords = await deps.vector.query(subjectNamespace(tenantId, entry.subject), { text: "", k: 1 });
+      const remainingRecords = await deps.vector.list(subjectNamespace(tenantId, entry.subject), { limit: 1 });
       if (remainingRecords.length === 0) {
         await retireSubject(deps.audit, { tenantId, subject: entry.subject });
         result.retired++;

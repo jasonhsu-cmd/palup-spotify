@@ -40,12 +40,37 @@ export interface VectorMatch {
   metadata?: Record<string, unknown>;
 }
 
+/** One page of `list`'s bounded keyset enumerate: the record id and a copy of its metadata. Deliberately
+ *  narrower than `VectorMatch` (no `score` — `list` never ranks anything). */
+export interface VectorListItem {
+  id: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** `list`'s paging window: `limit` bounds how many rows come back; `after`, when supplied, is an
+ *  EXCLUSIVE lower bound on `id` (ascending order) — pass the last id of the previous page to continue. */
+export interface VectorListOpts {
+  limit: number;
+  after?: string;
+}
+
 export interface VectorPort {
   /** Insert-or-replace records within one tenant namespace (keyed by `record.id`). */
   upsert(namespace: string, records: VectorRecord[]): Promise<void>;
   /** Nearest records to the query, scoped to `namespace` ONLY, ordered nearest-first (capped at `k`).
    *  An unknown namespace yields []. Never returns another namespace's records. */
   query(namespace: string, query: VectorQuery): Promise<VectorMatch[]>;
+  /**
+   * A plain, bounded KEYSET enumerate over one namespace — ascending `id` order, up to `limit` rows,
+   * `after` an EXCLUSIVE lower bound so pages never overlap and never gap. Distinct from `query`: this
+   * does NO similarity ranking (no cosine/lexical scoring, no `score` in the result) — it is the "give me
+   * the next page of this namespace by id" operation every adapter can do with a plain scan, including an
+   * ANN adapter whose `query` is vector-only and would THROW on `query(ns,{text:"",k})`'s "list everything"
+   * idiom. An unknown namespace yields []; a blank/missing namespace is rejected (`requireNamespace`);
+   * NEVER crosses namespaces. Returned metadata is deep-cloned — independent of caller mutation, like
+   * `query`'s.
+   */
+  list(namespace: string, opts: VectorListOpts): Promise<VectorListItem[]>;
   /** Right-to-erasure by id: remove the given ids from `namespace` (missing ids are ignored). */
   deleteById(namespace: string, ids: string[]): Promise<void>;
   /** Right-to-erasure by tenant: erase the entire namespace (all of that tenant's records). */
@@ -185,6 +210,16 @@ export function createInMemoryVectorStore(): VectorPort {
       scored.sort((x, y) => y.score - x.score || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
       const limit = query.k != null ? Math.max(0, Math.floor(query.k)) : scored.length;
       return scored.slice(0, limit);
+    },
+
+    async list(namespace, opts) {
+      requireNamespace(namespace);
+      const inner = byNamespace.get(namespace);
+      if (!inner) return []; // unknown namespace — never falls back to another tenant
+      const ids = Object.keys(inner).sort();
+      const limit = Math.max(0, Math.floor(opts.limit));
+      const start = opts.after !== undefined ? ids.filter((id) => id > opts.after!) : ids;
+      return start.slice(0, limit).map((id) => ({ id, metadata: clone(inner[id]!.metadata) }));
     },
 
     async deleteById(namespace, ids) {

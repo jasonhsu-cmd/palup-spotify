@@ -46,7 +46,7 @@
     "e2e:monitor": "playwright test --config e2e/playwright.monitor.config.ts",
     "e2e:embed": "playwright test --config e2e/playwright.embed.config.ts",
     "typecheck": "tsc -b --pretty",
-    "test:pgvector": "vitest run packages/state-postgres/test/pgvector-container.smoke.test.ts packages/state-postgres/test/pgvector-store.migrate.test.ts packages/state-postgres/test/pgvector-store.upsert.test.ts packages/state-postgres/test/pgvector-store.query.test.ts packages/state-postgres/test/pgvector-store.erasure.test.ts packages/state-postgres/test/pgvector-store.contract.test.ts packages/state-postgres/test/vector-factory.ann.test.ts packages/widget-backend/test/catalog-index-pgvector-reconcile.test.ts packages/widget-backend/test/catalog-clear-pgvector.test.ts packages/widget-backend/test/retrieval-promotion-evidence.test.ts"
+    "test:pgvector": "vitest run packages/state-postgres/test/pgvector-container.smoke.test.ts packages/state-postgres/test/pgvector-store.migrate.test.ts packages/state-postgres/test/pgvector-store.upsert.test.ts packages/state-postgres/test/pgvector-store.query.test.ts packages/state-postgres/test/pgvector-store.erasure.test.ts packages/state-postgres/test/pgvector-store.contract.test.ts packages/state-postgres/test/pgvector-list.test.ts packages/state-postgres/test/vector-factory.ann.test.ts packages/widget-backend/test/catalog-index-pgvector-reconcile.test.ts packages/widget-backend/test/catalog-clear-pgvector.test.ts packages/widget-backend/test/retrieval-promotion-evidence.test.ts packages/widget-memory/test/memory-pgvector-scale.test.ts"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",

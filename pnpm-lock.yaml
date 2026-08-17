@@ -185,6 +185,13 @@ importers:
       '@palup/widget-brain':
         specifier: workspace:*
         version: link:../widget-brain
+    devDependencies:
+      '@palup/state-postgres':
+        specifier: workspace:*
+        version: link:../state-postgres
+      testcontainers:
+        specifier: ^12.1.0
+        version: 12.1.0
 
 packages:
 
