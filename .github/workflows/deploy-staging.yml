@@ -230,8 +230,13 @@ jobs:
           ENVS="${ENVS}@WIDGET_AUTH_REQUIRED=${WIDGET_AUTH_REQUIRED}"
           ENVS="${ENVS}@MERCHANT_CRED_READBACK_ENABLED=${MERCHANT_CRED_READBACK_ENABLED}"
           ENVS="${ENVS}@MERCHANT_CRED_SHARED_KEY_ENABLED=${MERCHANT_CRED_SHARED_KEY_ENABLED}"
-          ENVS="${ENVS}@WIDGET_EMBED_KEYS={\"demo-embed-key\":\"demo\"}"
-          ENVS="${ENVS}@SHOPIFY_STORES={\"demo\":\"palup-skincare-jason.myshopify.com\"}"
+          # Serving consolidated onto the OAuth-installed tenant `palup-skincare-jason` (2026-08-17): it holds
+          # the registry row + registered catalog webhooks + custodied delegate credential, so webhooks (which
+          # resolve the tenant via the registry, shopify-webhooks.ts) reconcile the SAME tenant that serves.
+          # The embed key stays `demo-embed-key` (widget snippet unchanged); only the tenant it maps to moves.
+          # The prior `demo` config tenant is retired (it had a corpus but no install/webhooks).
+          ENVS="${ENVS}@WIDGET_EMBED_KEYS={\"demo-embed-key\":\"palup-skincare-jason\"}"
+          ENVS="${ENVS}@SHOPIFY_STORES={\"palup-skincare-jason\":\"palup-skincare-jason.myshopify.com\"}"
           ENVS="${ENVS}@MERCHANT_REGION=${MERCHANT_REGION}"
           ENVS="${ENVS}@MERCHANT_GROUNDING_MODE=${MERCHANT_GROUNDING_MODE}"
           # Shopper-widget feature-posture flags (all default 'false' — see the env: block above). Emitted
