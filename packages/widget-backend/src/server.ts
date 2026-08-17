@@ -6,6 +6,7 @@ import {
   createBrain,
   createSession,
   DEFAULT_CATALOG_RETRIEVAL_K,
+  TURN_EMBED_AGENT_TYPE,
   type Policy,
   type Signals,
   type Consent,
@@ -548,28 +549,41 @@ export async function buildServer(opts?: {
     : undefined;
   const memoryPort = memoryService
     ? {
-        recall: (ctx: { tenantId: string; anonId: string; region?: Signals["region"]; consent?: Signals["consent"] }) =>
-          memoryService.recall({
-            tenantId: ctx.tenantId,
-            anonId: ctx.anonId,
-            // B7 FIX (2026-08-05) — these were hardcoded to "unknown", which made the sliding-TTL
-            // RENEWAL structurally unreachable on the /chat path: a subject with a real consent1="in"
-            // on file never got their fact's expiry slid forward on return, because this wrapper never
-            // told service.ts so (Inv 4's 2026-08-04 amendment was therefore inert here). That was a
-            // documented, pre-existing gap, deferred at the time as needing its own reviewed change.
-            //
-            // The brain now threads THIS TURN's server-derived consent context through the recall port
-            // (widget-brain types.ts `MemoryRecallPort`), so the real values arrive here. `?? "unknown"`
-            // keeps the fail-closed default for any caller that does not supply them — identical to the
-            // old behavior, rather than assuming consent when the context is missing.
-            //
-            // This only affects RETENTION RENEWAL and never what surfaces: brain.ts re-checks read-time
-            // consent independently on whatever this returns (`consentedAtReadTime`), so a permissive
-            // value here can never push an unconsented fact into the prompt.
-            region: ctx.region,
-            consent1: ctx.consent?.memoryOrdinary ?? "unknown",
-            consent2: ctx.consent?.memorySpecial ?? "unknown",
-          }),
+        recall: (ctx: {
+          tenantId: string;
+          anonId: string;
+          region?: Signals["region"];
+          consent?: Signals["consent"];
+          // semantic-memory-v1, PR3, T8 — the brain's shared turn-embedding, forwarded straight through
+          // to the memory service's own `recall(ctx, opts)` second argument. Absent ⇒ T7's own list-all
+          // fallback (byte-identical to before this PR).
+          queryVector?: number[];
+          pin?: { model: string; dimension: number };
+        }) =>
+          memoryService.recall(
+            {
+              tenantId: ctx.tenantId,
+              anonId: ctx.anonId,
+              // B7 FIX (2026-08-05) — these were hardcoded to "unknown", which made the sliding-TTL
+              // RENEWAL structurally unreachable on the /chat path: a subject with a real consent1="in"
+              // on file never got their fact's expiry slid forward on return, because this wrapper never
+              // told service.ts so (Inv 4's 2026-08-04 amendment was therefore inert here). That was a
+              // documented, pre-existing gap, deferred at the time as needing its own reviewed change.
+              //
+              // The brain now threads THIS TURN's server-derived consent context through the recall port
+              // (widget-brain types.ts `MemoryRecallPort`), so the real values arrive here. `?? "unknown"`
+              // keeps the fail-closed default for any caller that does not supply them — identical to the
+              // old behavior, rather than assuming consent when the context is missing.
+              //
+              // This only affects RETENTION RENEWAL and never what surfaces: brain.ts re-checks read-time
+              // consent independently on whatever this returns (`consentedAtReadTime`), so a permissive
+              // value here can never push an unconsented fact into the prompt.
+              region: ctx.region,
+              consent1: ctx.consent?.memoryOrdinary ?? "unknown",
+              consent2: ctx.consent?.memorySpecial ?? "unknown",
+            },
+            ctx.queryVector !== undefined || ctx.pin !== undefined ? { queryVector: ctx.queryVector, pin: ctx.pin } : undefined,
+          ),
       }
     : undefined;
   // ADR-0016 enactment — the subscription skip/pause self-serve posture flag. Default OFF ⇒ byte-
@@ -640,6 +654,15 @@ export async function buildServer(opts?: {
     vector: vectorPort,
     model: createMeteringModelPort(activeModelPort, telemetry, { agentType: CATALOG_RETRIEVAL_AGENT_TYPE }),
   });
+  // semantic-memory-v1, PR3, T8 — the brain's SHARED turn-embedder, constructed UNCONDITIONALLY (mirrors
+  // `catalogRetriever`'s own model wrapper immediately above) and metered under its OWN agentType
+  // (TURN_EMBED_AGENT_TYPE) — distinct from CATALOG_RETRIEVAL_AGENT_TYPE, so a cost review can tell "one
+  // shared turn embed, reused by both memory recall and catalog retrieval" apart from "the catalog
+  // retriever fell back to its own internal embed" (a turn that supplies a matching precomputed vector to
+  // `retrieve()` never spends under CATALOG_RETRIEVAL_AGENT_TYPE at all). Spends nothing until the brain's
+  // own decide()-time gating (`memory && anonId`, or catalog retrieval enabled) actually calls embed on a
+  // clean-sales-path turn — see brain.ts's own doc comment on the `turnEmbedder` constructor parameter.
+  const turnEmbedder = createMeteringModelPort(activeModelPort, telemetry, { agentType: TURN_EMBED_AGENT_TYPE });
   // T1 phase 2 — the guard classifier's model port, metered under its OWN agentType so its per-turn
   // classification spend is distinguishable from generation/embedding (ADR-0013). Constructed ONLY when
   // SERVER_GUARD_SIGNALS is on, so a deployment that never enables it spends nothing.
@@ -720,6 +743,10 @@ export async function buildServer(opts?: {
         // Position 22 — A1b/D2 staleness ceiling. Only consulted on the hydration path (flag-gated above);
         // a fact past this age renders `priceConfirmed:false` and the agent offers to confirm the price.
         PRODUCT_FACTS_MAX_AGE_MS,
+        // Position 23 — semantic-memory-v1, PR3, T8. The shared turn-embedder, metered under
+        // TURN_EMBED_AGENT_TYPE (constructed unconditionally above). Consulted by the brain at
+        // decide()-time only on the clean sales path, and only when a consumer would actually use it.
+        turnEmbedder,
       );
       brains.set(key, b);
     }

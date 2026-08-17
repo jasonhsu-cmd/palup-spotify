@@ -97,9 +97,7 @@ function productIdOf(metadata: Record<string, unknown> | undefined): string | un
  */
 export function createCatalogRetriever(deps: CatalogRetrieverDeps): CatalogRetrieverPort {
   return {
-    async retrieve({ tenantId, query, k }): Promise<CatalogRetrievalResult> {
-      const text = query.trim();
-      if (!text) throw new CatalogRetrievalUnavailable("catalog-retrieval: refusing to embed a blank query");
+    async retrieve({ tenantId, query, k, queryVector, pin }): Promise<CatalogRetrievalResult> {
       const limit = Math.max(0, Math.floor(k));
 
       // ── the manifest first: every check it can answer costs nothing ──
@@ -123,30 +121,45 @@ export function createCatalogRetriever(deps: CatalogRetrieverDeps): CatalogRetri
             "with `pnpm catalog:index --tenant <id> --reindex`",
         );
       }
-      if (!canEmbed(deps.model)) {
-        // A capability ABSENCE, static and free to check (#188) — never confused with a failed call.
-        throw new CatalogRetrievalUnavailable(
-          "catalog-retrieval: this deployment's model adapter cannot embed, so a query cannot be vectorised",
-        );
+
+      // semantic-memory-v1, PR3, T8 — turn-embed reuse: a PRE-COMPUTED query vector is trusted for
+      // ranking ONLY when its `pin` matches THIS corpus's own manifest exactly (model AND dimension) —
+      // never a cross-space vector, and never a vector with no pin to check it against at all. When
+      // trusted, this SKIPS the internal `model.embed` call entirely (the whole point: one shared turn
+      // embed instead of one per consumer). Anything else falls back to embedding the query here,
+      // byte-identical to before this PR.
+      let vector: number[];
+      if (queryVector && pin && pin.model === manifest.model && pin.dimension === manifest.dimension) {
+        vector = queryVector;
+      } else {
+        const text = query.trim();
+        if (!text) throw new CatalogRetrievalUnavailable("catalog-retrieval: refusing to embed a blank query");
+        if (!canEmbed(deps.model)) {
+          // A capability ABSENCE, static and free to check (#188) — never confused with a failed call.
+          throw new CatalogRetrievalUnavailable(
+            "catalog-retrieval: this deployment's model adapter cannot embed, so a query cannot be vectorised",
+          );
+        }
+
+        // ── the one metered call ──
+        const req = { texts: [text], purpose: "query" as const, tenantId };
+        const res = await deps.model.embed(req);
+        // The port's own validator, including the purpose ECHO: an adapter that answered with a document
+        // embedding produced the right shape in the wrong space, and nothing downstream would notice.
+        requireEmbedAlignment(req, res);
+
+        if (res.model !== manifest.model || res.dimension !== manifest.dimension) {
+          throw new CatalogRetrievalUnavailable(
+            `catalog-retrieval: the corpus is pinned to ${manifest.model}/${manifest.dimension}d but this query ` +
+              `embedded as ${res.model}/${res.dimension}d — similarity across two vector spaces is meaningless; ` +
+              "rebuild the corpus with `--reindex` when the embedding model change is intended",
+          );
+        }
+
+        const v = res.vectors[0];
+        if (!v) throw new CatalogRetrievalUnavailable("catalog-retrieval: the embedder returned no query vector");
+        vector = v;
       }
-
-      // ── the one metered call ──
-      const req = { texts: [text], purpose: "query" as const, tenantId };
-      const res = await deps.model.embed(req);
-      // The port's own validator, including the purpose ECHO: an adapter that answered with a document
-      // embedding produced the right shape in the wrong space, and nothing downstream would notice.
-      requireEmbedAlignment(req, res);
-
-      if (res.model !== manifest.model || res.dimension !== manifest.dimension) {
-        throw new CatalogRetrievalUnavailable(
-          `catalog-retrieval: the corpus is pinned to ${manifest.model}/${manifest.dimension}d but this query ` +
-            `embedded as ${res.model}/${res.dimension}d — similarity across two vector spaces is meaningless; ` +
-            "rebuild the corpus with `--reindex` when the embedding model change is intended",
-        );
-      }
-
-      const vector = res.vectors[0];
-      if (!vector) throw new CatalogRetrievalUnavailable("catalog-retrieval: the embedder returned no query vector");
 
       const matches = await deps.vector.query(catalogNamespace(tenantId), { vector, k: limit });
       const hits: RetrievedProduct[] = [];

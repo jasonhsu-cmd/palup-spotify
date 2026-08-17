@@ -157,6 +157,17 @@ export interface MemoryRecallPort {
     anonId: string;
     region?: Signals["region"];
     consent?: Signals["consent"];
+    /**
+     * PR3 (semantic-memory-v1) T8 — a PRE-COMPUTED query embedding, shared with catalog retrieval by the
+     * brain's turn-embedder so the turn spends at most ONE embed call regardless of how many consumers
+     * are active. Optional and purely additive: an implementation that ignores it (ranks nothing, returns
+     * its own list-all) is unaffected — this can never narrow or withhold what a caller without one gets.
+     */
+    queryVector?: number[];
+    /** The embed space `queryVector` was produced in, for the implementation to check against its own
+     *  corpus/manifest pin before trusting it for ranking (mirrors `CatalogRetrieverPort.retrieve`'s same
+     *  field, and widget-memory's `MemoryRecallOpts.pin`). */
+    pin?: { model: string; dimension: number };
   }): Promise<RecalledFact[]>;
 }
 
@@ -215,7 +226,23 @@ export interface CatalogRetrievalResult {
  * never a worse/wrong catalog. See `brain.retrieveViaShell`.
  */
 export interface CatalogRetrieverPort {
-  retrieve(ctx: { tenantId: string; query: string; k: number }): Promise<CatalogRetrievalResult>;
+  retrieve(ctx: {
+    tenantId: string;
+    query: string;
+    k: number;
+    /**
+     * PR3 (semantic-memory-v1) T8 — a PRE-COMPUTED query embedding, shared with memory recall by the
+     * brain's turn-embedder. When present AND `pin` matches this corpus's own embed manifest, an
+     * implementation SHOULD skip its own internal embed call and rank directly against `queryVector`
+     * (the whole point: at most one embed per turn instead of one per consumer). Optional and purely
+     * additive — an implementation that ignores it and embeds the query itself (today's behavior) is
+     * unaffected; this field can never narrow or withhold what a caller without one gets.
+     */
+    queryVector?: number[];
+    /** The embed space `queryVector` was produced in, to check against this corpus's own manifest pin
+     *  before trusting it — mirrors `MemoryRecallPort.recall`'s same field. */
+    pin?: { model: string; dimension: number };
+  }): Promise<CatalogRetrievalResult>;
 }
 
 /**
