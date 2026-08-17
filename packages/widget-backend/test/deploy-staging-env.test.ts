@@ -137,6 +137,34 @@ describe("D3 — the optional pieces are opt-in, so a deploy can never reference
   });
 });
 
+describe("D3 — Customer Account API (ADR-0018) enablement env is opt-in and ships dark", () => {
+  it("SHOPPER_TOKEN_SECRET is mounted only when an operator NAMES an existing secret", () => {
+    // Half of the CAA_ENABLED gate (server.ts): CAA mints a shopper token signed with SHOPPER_TOKEN_SECRET,
+    // so it must be non-empty for the routes to register. It is a SIGNING SECRET, so it is a --set-secrets
+    // mount — gated on a repo variable holding the secret's name, the SAME fail-safe as GUEST_TOKEN_SECRET
+    // and AUDIT_HMAC_SECRET: naming a Secret Manager secret that does not exist fails `gcloud run deploy`
+    // itself, so hard-coding the mount would break every merge until the secret was created.
+    expect(yml).toContain("SHOPPER_TOKEN_SECRET_NAME");
+    expect(yml).toMatch(/SHOPPER_TOKEN_SECRET=\$\{?SHOPPER_TOKEN_SECRET_NAME/);
+  });
+
+  it("CAA_REDIRECT_URI is threaded from a repo variable and appended ONLY when non-empty", () => {
+    // The other half of the CAA_ENABLED gate (server.ts). It has NO safe default — it is a URL that must
+    // byte-match the redirect registered on the Shopify Customer Account API OAuth client — so it is
+    // appended conditionally and is never emitted empty (the empty-pair guard above forbids `@X=@`). Empty
+    // repo variable ⇒ absent ⇒ CAA stays 404 (inert), which is the dark default.
+    expect(yml).toContain("CAA_REDIRECT_URI");
+    expect(yml).toMatch(/if \[ -n "\$\{CAA_REDIRECT_URI:-\}" \]; then ENVS="\$\{ENVS\}@CAA_REDIRECT_URI=\$\{CAA_REDIRECT_URI\}"; fi/);
+  });
+
+  it("CAA_SCOPE is an optional override appended only when non-empty (code default otherwise)", () => {
+    // Not part of the gate — server.ts defaults it to "openid email customer-account-api:full". Threaded so
+    // an operator can retune the OAuth scope to match the Shopify client WITHOUT a code change, and appended
+    // conditionally so an unset repo variable falls through to the code default rather than blanking it.
+    expect(yml).toMatch(/if \[ -n "\$\{CAA_SCOPE:-\}" \]; then ENVS="\$\{ENVS\}@CAA_SCOPE=\$\{CAA_SCOPE\}"; fi/);
+  });
+});
+
 describe("D3 — the safety properties of this workflow are unchanged", () => {
   it("still deploys only after ci CONCLUDED SUCCESSFULLY (never as a sibling of it)", () => {
     expect(yml).toMatch(/workflow_run:\s*\n\s*workflows: \[ci\]/);
