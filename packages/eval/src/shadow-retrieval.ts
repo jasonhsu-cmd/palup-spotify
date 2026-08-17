@@ -25,6 +25,7 @@ import { createRuntimeStore, createVectorStore } from "@palup/state-postgres";
 import { buildIndexedRetriever } from "@palup/widget-backend/src/retrieval-eval.js";
 import { writeRetrievalEvidence } from "@palup/widget-backend/src/retrieval-promotion-evidence.js";
 import { runShadow, type BrainFactory, type ShadowCase } from "./shadow-harness.js";
+import { AliasGroundingAdapter, resolveEvalTenant } from "./eval-tenant.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_LAYERS = new Set(["grounding", "pitch", "pairwise", "golden"]);
@@ -40,7 +41,17 @@ async function main() {
   cases = cases.filter((c) => (layerFilter ? layerFilter.includes(c.layer ?? "") : DEFAULT_LAYERS.has(c.layer ?? "")));
   if (process.env.SHADOW_LIMIT) cases = cases.slice(0, Number(process.env.SHADOW_LIMIT));
 
-  const grounding = new StaticGroundingAdapter();
+  // ISOLATED EVAL TENANT (safety) — index AND query under a dedicated non-serving tenant, NEVER the real
+  // "demo" corpus. `resolveEvalTenant` defaults to "shadow-eval". `AliasGroundingAdapter` maps that tenant
+  // onto the demo fixture's catalog so the CHAMPION (which grounds via getContext) still has a full catalog
+  // to narrow; every case's signals.tenantId is pinned to the SAME tenant below so the candidate's
+  // retriever.retrieve({tenantId}) hits the corpus we index under it. Index tenant == query tenant, and it
+  // is a tenant serving never touches (buildIndexedRetriever's clobber-guard is the structural backstop).
+  const evalTenant = resolveEvalTenant();
+  const grounding = new AliasGroundingAdapter(new StaticGroundingAdapter(), evalTenant, "demo");
+  // The brain reads signals.tenantId (defaulting to the REAL "demo"), so pin every case to the eval tenant —
+  // otherwise the candidate would query the real "demo" corpus and the shadow would be a silent no-op.
+  cases = cases.map((c) => ({ ...c, signals: { ...(c.signals ?? {}), tenantId: evalTenant } }));
   const commerce = new MockCommerceAdapter();
   const model = createVertexAdapter();
   if (!canEmbed(model)) {
@@ -68,9 +79,10 @@ async function main() {
     );
   }
 
-  // Index the SAME demo catalog the brain grounds on, under the "demo" tenant the eval cases resolve to.
-  const demo = await grounding.getContext("demo");
-  const { retriever } = await buildIndexedRetriever(demo.products, model, "demo", store, vector);
+  // Index the SAME demo catalog the brain grounds on, under the ISOLATED eval tenant the cases now resolve
+  // to (getContext(evalTenant) returns the demo fixture's products via the alias, with tenantId==evalTenant).
+  const demo = await grounding.getContext(evalTenant);
+  const { retriever } = await buildIndexedRetriever(demo.products, model, evalTenant, store, vector);
 
   const champion: BrainFactory = (m) => createBrain(m, grounding, DEFAULT_POLICY, commerce, "shopper-demo");
   // Candidate: positions 11 (retriever) + 12 (catalogRetrievalEnabled) + 13 (k) on; everything else default.
@@ -98,7 +110,7 @@ async function main() {
   // all-zero one a clean pass guarantees. See retrieval-promotion-evidence.ts's `shadow` field doc.
   const probe = await model.embed({ texts: ["shadow-retrieval evidence probe"], purpose: "document" });
   const evidencePath = writeRetrievalEvidence({
-    tenantId: process.env.RETRIEVAL_TENANT ?? "demo",
+    tenantId: evalTenant,
     model: probe.model,
     dimension: probe.dimension,
     corpusSize: demo.products.length,

@@ -1,7 +1,15 @@
 import { InMemoryRuntimeStore, createInMemoryVectorStore } from "@palup/platform-ports";
 import type { ModelPort, RuntimeStatePort, VectorPort, GroundingContext } from "@palup/platform-ports";
 import type { RetrievedProduct } from "@palup/widget-brain";
-import { runCatalogIndex, type CatalogSource } from "./jobs/catalog-index.js";
+import {
+  catalogRecordId,
+  MANIFEST_COLLECTION,
+  MANIFEST_KEY,
+  runCatalogIndex,
+  type CatalogManifest,
+  type CatalogSource,
+} from "./jobs/catalog-index.js";
+import { readCorpusLedger } from "./jobs/catalog-ledger.js";
 import { createCatalogRetriever } from "./catalog-retriever.js";
 
 // CATALOG_RETRIEVAL (E1) eval harness — the retrieval-QUALITY layer that catalog-retrieval.test.ts defers to
@@ -48,6 +56,36 @@ export async function buildIndexedRetriever(
     policy: { returns: "30 days", shipping: "free over $75" },
   };
   const catalog: CatalogSource = async (t) => (t === tenantId ? ctx : undefined);
+
+  // SILENT-CLOBBER GUARD (eval/shadow only). This helper ALWAYS indexes WITHOUT `--reindex`, so
+  // `runCatalogIndex`'s non-reindex path treats any existing corpus id absent from THIS corpus as "stale"
+  // and DELETES it, rewriting the manifest to this corpus's size. Pointed (via a real `store`/`vector` and a
+  // mis-set tenant) at a REAL serving tenant that already has a populated corpus, that silently destroys
+  // production data — the incident where the fixture overwrote the real 2,150-product "demo" corpus. Refuse
+  // BEFORE any write when a populated corpus already exists whose records this eval corpus would prune. This
+  // fires ONLY on the eval/shadow indexing entry point (this function); the producer path (`runCatalogIndex`
+  // / `reconcileProducts` called directly, and any legitimate `--reindex`) is untouched. Benign re-runs pass:
+  // the default fresh in-memory stores have no manifest, and re-indexing the SAME corpus (or a superset)
+  // prunes nothing.
+  const existing = await store.get<CatalogManifest>({ tenantId }, MANIFEST_COLLECTION, MANIFEST_KEY);
+  if (existing && existing.products > 0) {
+    const priorIds = new Set((await readCorpusLedger(store, tenantId)).keys());
+    const nextIds = new Set(products.map((p) => catalogRecordId(p.id)));
+    // With a ledger we can read, refuse only if real records would actually be pruned (an idempotent
+    // re-index of the same corpus, or growing it, prunes nothing). A populated manifest with NO ledger is a
+    // pre-ledger corpus we cannot prove overlap with — refuse conservatively (treat all of it as at risk).
+    const wouldPrune = priorIds.size === 0 ? existing.products : [...priorIds].filter((id) => !nextIds.has(id)).length;
+    if (wouldPrune > 0) {
+      throw new Error(
+        `retrieval eval refusing to index tenant "${tenantId}": a populated catalog corpus already exists ` +
+          `(manifest reports ${existing.products} products) and indexing this ${products.length}-product eval ` +
+          `corpus would delete ${wouldPrune} of its records. This is the eval/shadow silent-clobber guard — an ` +
+          `eval or shadow index must run against an ISOLATED eval-only tenant that real serving never uses ` +
+          `(set RETRIEVAL_TENANT to a non-serving value like "shadow-eval"), never a real serving tenant.`,
+      );
+    }
+  }
+
   const reports = await runCatalogIndex({ store, vector, model, catalog }, [tenantId], {});
   const report = reports[0];
   if (!report || (report.outcome !== "indexed" && report.outcome !== "unchanged")) {
