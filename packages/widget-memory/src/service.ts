@@ -8,7 +8,7 @@ import type {
   SecretsPort,
   EmbedRequest,
 } from "@palup/platform-ports";
-import { createAesGcmCrypto, createEnvSecrets, canEmbed, requireEmbedInputs, requireEmbedAlignment } from "@palup/platform-ports";
+import { createAesGcmCrypto, createEnvSecrets, canEmbed, requireEmbedInputs, requireEmbedAlignment, deriveKey } from "@palup/platform-ports";
 import { isMemoryEnabled } from "./flag.js";
 import { subjectNamespace } from "./identity.js";
 import { decideMemoryWrite } from "./consent.js";
@@ -31,9 +31,11 @@ import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact, FactMetadata }
 // references this name.
 
 /**
- * Cosine-similarity floor above which an ORDINARY candidate collapses into an EXISTING record (T5:
- * re-stamp its retention window) instead of inserting a second row for what is very likely the same
- * underlying preference, restated. Overridable via `MEMORY_DEDUP_THRESHOLD` (parsed as a float).
+ * Cosine-similarity floor above which an ORDINARY candidate collapses into an EXISTING record (T5: the
+ * existing row is fully REPLACED in place with the new candidate's text/disposition/vector plus a fresh
+ * `expiresAt` — a full upsert-in-place where the newest phrasing wins, NOT a TTL-only re-stamp of the old
+ * content) instead of inserting a second row for what is very likely the same underlying preference,
+ * restated. Overridable via `MEMORY_DEDUP_THRESHOLD` (parsed as a float).
  *
  * 0.95 IS A STARTING DEFAULT, NOT A TUNED VALUE — chosen the same way `DEFAULT_CATALOG_RETRIEVAL_K`
  * (widget-brain/src/brain.ts) was: a bound picked from first principles (near-paraphrase preferences
@@ -115,25 +117,49 @@ function randomUnitVector(dimension: number): number[] {
  * T5 — SPECIAL-category write-time dedup key: a keyed-HMAC-SHA256 over the SANITIZED plaintext (pre-
  * encryption), so an exact-repeat of the SAME special-category fact can be detected WITHOUT ever
  * comparing health/Art-9 text by vector similarity (that would require embedding it — the exact privacy
- * boundary T4 exists to prevent). KEY DISCIPLINE: deliberately reuses the tenant's already-provisioned
- * `MEMORY_ENCRYPTION_KEY` secret (the SAME key material `createAesGcmCrypto`'s DEFAULT scope reads,
- * secrets-port.ts) as the HMAC key, rather than requiring a second, separately-provisioned secret — this
- * mirrors server.ts's own `AUDIT_HMAC_SECRET` pattern of defaulting a keyed-HMAC to an ALREADY-configured
- * secret rather than adding a new operator knob (its own doc comment: "AUDIT_HMAC_SECRET... defaults to
- * [SHOPPER_TOKEN_SECRET] when not separately provisioned"). Returns `undefined` (no tag, dedup simply
- * skipped for this candidate) when no key is configured for this tenant — this is NEVER the path that
- * decides whether the special-category candidate itself is persisted (that fail-closed decision is
- * `encryptOrRefuse`'s alone); a candidate with no dedup tag is stored exactly as before this PR, just
+ * boundary T4 exists to prevent).
+ *
+ * KEY DISCIPLINE (security review, feat/memory-v1-pr2-write-path, finding 3.A): the HMAC key is DERIVED
+ * from the tenant's already-provisioned `MEMORY_ENCRYPTION_KEY` secret via `deriveKey` (crypto-port.ts) —
+ * the SAME tenant-mixing (HKDF `info` includes `tenantId`) and the SAME entropy floor
+ * (`MIN_KEY_MATERIAL_BYTES`) that `createAesGcmCrypto` applies to the AES encryption key — NOT the raw
+ * secret bytes directly. `deriveKey` is called with a purpose label (`"memory-dedup"`, folded into the
+ * HKDF info as `"<tenantId>|memory-dedup"`) so this HMAC key is also DOMAIN-SEPARATED from the AES key:
+ * the two keys never coincide even for the same tenant. Before this fix, the raw secret was hashed
+ * directly with no tenant-mixing at all — two tenants provisioned with the IDENTICAL raw
+ * `MEMORY_ENCRYPTION_KEY` (e.g. an unconfigured/shared-default deployment) produced the SAME tag for the
+ * SAME health phrase: a cross-tenant equality oracle over special-category (Art-9) facts. Deriving the
+ * tag key with `tenantId` mixed into the HKDF info closes that — two tenants sharing the identical raw
+ * secret now get DIFFERENT tags for the identical plaintext, matching the ciphertext's own cross-tenant
+ * separation (crypto-port.ts's stated invariant).
+ *
+ * Returns `undefined` (no tag, dedup simply skipped for this candidate) when no key is configured for
+ * this tenant, OR when the configured material is below `MIN_KEY_MATERIAL_BYTES` (`deriveKey` throws;
+ * caught here and treated identically to "no key" rather than falling back to an unkeyed/weak tag) — this
+ * is NEVER the path that decides whether the special-category candidate itself is persisted (that
+ * fail-closed decision is `encryptOrRefuse`'s alone, which independently refuses a below-floor key before
+ * any tag would be persisted); a candidate with no dedup tag is stored exactly as before this PR, just
  * without dedup protection. SECURITY-RELEVANT, flagged for the reviewer: unlike `subjectRef`'s hmacKey
  * (which falls back to a PLAIN, unkeyed sha256 for a high-entropy guest anon id), this tag is computed
  * over free-text SHOPPER CONTENT from a small, guessable vocabulary (health/allergy/pregnancy phrasing) —
  * an unkeyed hash of that would be dictionary-attackable by anyone who can read `metadata.dedupTag`, so
- * this function has NO unkeyed fallback path; it is keyed or it does not compute a tag at all.
+ * this function has NO unkeyed fallback path; it is keyed (and tenant-derived) or it does not compute a
+ * tag at all.
  */
 async function specialDedupTag(secrets: SecretsPort, tenantId: string, plaintext: string): Promise<string | undefined> {
   const raw = await secrets.get(tenantId, "MEMORY_ENCRYPTION_KEY");
   if (!raw) return undefined;
-  return createHmac("sha256", raw).update(plaintext).digest("hex");
+  try {
+    const { key } = deriveKey(tenantId, raw, "memory-dedup");
+    return createHmac("sha256", key).update(plaintext).digest("hex");
+  } catch {
+    // Below MIN_KEY_MATERIAL_BYTES — deriveKey's own entropy floor. Treated exactly like "no key
+    // configured": no tag, dedup skipped. Defense-in-depth, not the only enforcement of the floor:
+    // `encryptOrRefuse` independently refuses the special candidate itself for the same reason
+    // (`crypto.encrypt` also calls `deriveKey`), so a below-floor key never reaches a persisted tag either
+    // way — but this function does not rely solely on that outer refusal.
+    return undefined;
+  }
 }
 
 // Bounded scan for the T5 special-category dedup lookup — same cap and the same "generous per-subject"
@@ -471,7 +497,16 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
             // loop — so a batch of near-duplicate candidates in ONE turn is not itself de-duplicated,
             // only against what was already durably stored).
             const top = await deps.vector.query(namespace, { vector: candidateVector, k: 1 });
-            if (top[0] && top[0].score >= dedupThreshold()) dedupTargetId = top[0].id;
+            // Defense-in-depth (security review, finding 5): a SPECIAL-category record's `.vector` is a
+            // content-independent RANDOM placeholder (`randomUnitVector` above), so an ordinary query can
+            // in principle score it above threshold by pure chance — negligible probability at this
+            // deployment's real embed dimension (1536), but non-zero, and the `mustRecall`/special-class
+            // exclusion that would otherwise prevent this is PR3's recall-side work, not this PR's. Fail
+            // safe: never let an ordinary dedup collapse into a special placeholder row — treat a match on
+            // one as no dedup hit at all (skip it), never overwrite it in place.
+            const topMeta = top[0]?.metadata as { mustRecall?: boolean; class?: FactClass } | undefined;
+            const topIsSpecialPlaceholder = topMeta?.mustRecall === true || topMeta?.class === "special";
+            if (top[0] && !topIsSpecialPlaceholder && top[0].score >= dedupThreshold()) dedupTargetId = top[0].id;
           } catch (e) {
             // Never let an embed-provider hiccup break the turn — the fact is still worth storing
             // without a semantic vector this one time (byte-identical to the flag being off for THIS
@@ -485,8 +520,9 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // of it) via GCM additional authenticated data, so a ciphertext copied onto a different record, or
       // onto a different field of the SAME record, fails authentication rather than decrypting cleanly.
       // Built from the record's own id — either a FRESH one, or (T5 dedup hit) the EXISTING record's own
-      // id, so a re-stamp is a genuine upsert-in-place rather than a second row — plus a field
-      // discriminator. Deliberately NOT the namespace: a subject's namespace legitimately changes across
+      // id, so the dedup-hit case is a genuine full upsert-in-place (newest candidate's text/disposition/
+      // vector + a fresh `expiresAt`, NOT a TTL-only re-stamp of the old content) rather than a second row
+      // — plus a field discriminator. Deliberately NOT the namespace: a subject's namespace legitimately changes across
       // a guest->account merge (merge.ts) while the record id does not, and record id + field alone
       // already disambiguates every slot within a tenant (cross-tenant relocation is independently
       // defeated by CryptoPort's own tenant-scoped key derivation).

@@ -126,7 +126,7 @@ const KEY_SCOPE_SEPARATOR = "__";
  */
 const KEY_SCOPE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
-interface DerivedKey {
+export interface DerivedKey {
   key: Buffer;
   keyId: string;
 }
@@ -161,23 +161,34 @@ export function keyScopeSecretName(secretName: string, keyScope: string | undefi
 }
 
 /**
- * HKDF-SHA256-derives a 256-bit AES key from arbitrary `raw` secret material, with `tenantId` mixed in
+ * HKDF-SHA256-derives a 256-bit key from arbitrary `raw` secret material, with `tenantId` mixed in
  * as the HKDF `info` parameter (security review finding 3) — so two tenants sharing the identical raw
  * secret still get different keys, unlike the prior plain `sha256(raw)` KDF. Throws when `raw` is
  * shorter than `MIN_KEY_MATERIAL_BYTES` — a low-entropy passphrase is never silently accepted. Returns,
  * alongside the key, a short, NON-SECRET fingerprint of the DERIVED key (`keyId`, stored in the envelope
  * — see the module header's rotation note) so a rotation is detectable/recoverable rather than a silent,
  * untraceable mass decrypt failure (security review finding 5).
+ *
+ * `purpose` (optional — security review, feat/memory-v1-pr2-write-path, finding 3.A): an extra,
+ * caller-supplied domain-separation label folded into the HKDF `info` alongside `tenantId`
+ * (`"<tenantId>|<purpose>"` instead of bare `tenantId`). Omitting it is BYTE-IDENTICAL to today's
+ * behavior (every call in this file omits it, so every existing envelope's key/keyId is unchanged) —
+ * it exists so a caller outside this adapter that needs a DIFFERENT key than the AES-GCM encryption key
+ * for the SAME tenant (e.g. widget-memory's special-category dedup HMAC tag) can derive one from the
+ * SAME raw secret, with the SAME tenant-mixing and the SAME entropy floor, without reusing the AES key
+ * for a second cryptographic purpose (key-reuse-across-primitives is avoided on principle, not because a
+ * concrete attack is known against HMAC+AES-GCM sharing a key).
  */
-function deriveKey(tenantId: string, raw: string): DerivedKey {
+export function deriveKey(tenantId: string, raw: string, purpose?: string): DerivedKey {
   if (Buffer.byteLength(raw, "utf8") < MIN_KEY_MATERIAL_BYTES) {
     throw new Error(
       `CryptoPort: key material for tenant "${tenantId}" is shorter than the ${MIN_KEY_MATERIAL_BYTES}-byte ` +
-        `minimum — refusing to derive an AES key from low-entropy material (fail closed)`,
+        `minimum — refusing to derive a key from low-entropy material (fail closed)`,
     );
   }
+  const info = purpose ? `${tenantId}|${purpose}` : tenantId;
   const key = Buffer.from(
-    hkdfSync("sha256", Buffer.from(raw, "utf8"), Buffer.alloc(0), Buffer.from(tenantId, "utf8"), HKDF_KEY_BYTES),
+    hkdfSync("sha256", Buffer.from(raw, "utf8"), Buffer.alloc(0), Buffer.from(info, "utf8"), HKDF_KEY_BYTES),
   );
   const keyId = createHash("sha256").update(key).digest("hex").slice(0, KEY_ID_HEX_CHARS);
   return { key, keyId };

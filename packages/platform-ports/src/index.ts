@@ -66,8 +66,8 @@ export { createCachingGroundingPort, invalidateGroundingCache } from "./groundin
 export type { CachingGroundingOpts } from "./grounding-cache.js";
 export type { SecretsPort } from "./secrets-port.js";
 export { createEnvSecrets } from "./secrets-port.js";
-export type { CryptoPort, AesGcmCryptoOpts } from "./crypto-port.js";
-export { createAesGcmCrypto, keyScopeSecretName, requireKeyScope, DEFAULT_KEY_SCOPE } from "./crypto-port.js";
+export type { CryptoPort, AesGcmCryptoOpts, DerivedKey } from "./crypto-port.js";
+export { createAesGcmCrypto, keyScopeSecretName, requireKeyScope, DEFAULT_KEY_SCOPE, deriveKey } from "./crypto-port.js";
 export type {
   MerchantRegistryPort,
   MerchantRecord,
