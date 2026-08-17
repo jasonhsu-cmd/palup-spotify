@@ -5,20 +5,27 @@ import { armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
 import { guestTokenHeader } from "./helpers/guest-token.js";
 
-// semantic-memory-v1, PR2 (write path), T6 — async fire-and-forget write. TODAY (before this PR's
-// implementation), server.ts:2437 does `await memoryService.remember(...)` directly on the /chat
-// response path (confirmed: server.ts's own comment at that call site — "Never blocks or breaks the
-// response" is the INTENT, but the code does not yet honor it structurally: a `remember()` that never
-// resolves genuinely blocks the reply today). This file pins the ACCEPTANCE CRITERION: a hung write must
-// never hang the shopper's reply.
+// semantic-memory-v1, PR2 (write path), T6 — REVERTED (live-staging finding, 2026-08-18). T6 made the
+// /chat write path fire-and-forget (`void memoryService.remember(...).catch(...)`) on the theory that the
+// write is off the shopper's critical path. Live diagnosis on staging proved the opposite: Cloud Run
+// throttles a container's CPU to ~0 once the HTTP response has been sent, so a write kicked off AFTER the
+// reply never actually runs — confirmed by 0 facts ever landing in `vp_ann` and by metering showing only
+// ONE `shopper`-tagged model call per turn (the reply) instead of two (reply + distiller). server.ts now
+// `await`s `remember()` INSIDE the existing try/catch, so the write runs DURING the request, where Cloud
+// Run guarantees CPU. This file's ORIGINAL acceptance criterion ("the reply returns before the write
+// resolves") is exactly the property that caused the staging outage, so it is retired here, not merely
+// updated: this file now pins the opposite, corrected contract —
+//   1. the write is now genuinely synchronous (awaited), so it has a real chance to complete before the
+//      Cloud Run container's CPU is throttled post-response; and
+//   2. fail-open is preserved: a `remember()` that THROWS is still caught and logged, and never turns into
+//      a broken/non-200 reply to the shopper.
 //
-// `vectorPort.upsert` never resolving is how we simulate "a memory service whose remember() never
-// resolves" — buildServer has no `distiller`/`memoryService` injection seam (only `store` / `modelPort` /
-// `vectorPort`), so the most faithful, least-invasive way to make `remember()` hang without touching any
-// other code path is to hang the ONE vector-port op `remember()` itself calls to persist
-// (`deps.vector.upsert`, service.ts:328/342) — `query`/`list`/`deleteById`/`deleteNamespace` are left
-// fully functional so nothing else on this path (e.g. the opportunistic `sweepExpired`, already
-// fire-and-forget via `void ...catch()`) is perturbed.
+// `vectorPort.upsert` throwing is how we simulate "the memory write failed" — buildServer has no
+// `distiller`/`memoryService` injection seam (only `store` / `modelPort` / `vectorPort`), so the most
+// faithful, least-invasive way to make `remember()` fail is to make the ONE vector-port op `remember()`
+// calls to persist (`deps.vector.upsert`, service.ts:702/716) reject — `query`/`list`/`deleteById`/
+// `deleteNamespace` are left fully functional so nothing else on this path (e.g. the opportunistic
+// `sweepExpired`, still fire-and-forget via `void ...catch()`) is perturbed.
 
 const WIDGET_SECRET = "wsecret";
 const DEMO_WIDGET_TOKEN = mintWidgetToken(WIDGET_SECRET, "demo", 3_600);
@@ -40,27 +47,18 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
   };
 }
 
-/** Wraps a real in-memory VectorPort but replaces `upsert` with a promise that NEVER resolves — the
- *  narrowest possible simulation of "the write never comes back", isolated to exactly the op `remember()`
- *  persists through. */
-function vectorPortWithHungUpsert(): VectorPort {
+/** Wraps a real in-memory VectorPort but replaces `upsert` with one that always REJECTS — the narrowest
+ *  possible simulation of "the write failed", isolated to exactly the op `remember()` persists through. */
+function vectorPortWithFailingUpsert(): VectorPort {
   const real = createInMemoryVectorStore();
   return {
     ...real,
-    upsert: () => new Promise<void>(() => {}), // never resolves, never rejects
+    upsert: () => Promise.reject(new Error("simulated vector-store failure")),
   };
 }
 
-/** A sentinel used to detect "did not resolve within the deadline" without ever actually hanging the
- *  test process — `Promise.race` settles on whichever promise finishes first; the losing promise is
- *  simply left to float (no timer/socket keeps the event loop alive, so it does not block process exit). */
-const TIMEOUT = Symbol("timeout");
-async function raceAgainstTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMEOUT> {
-  return Promise.race([p, new Promise<typeof TIMEOUT>((resolve) => setTimeout(() => resolve(TIMEOUT), ms))]);
-}
-
-describe("POST /chat — memory write is async fire-and-forget (T6)", () => {
-  it("a memory write that never resolves must NOT hang the shopper's reply — /chat still returns 200 well within a short deadline, and memoryActive is IDENTICAL to a normal (non-hung) turn with the same signals", async () => {
+describe("POST /chat — memory write is synchronous (T6 reverted)", () => {
+  it("a memory write that throws is caught and does NOT break the shopper's reply — /chat still returns 200, and memoryActive is IDENTICAL to a normal (non-failing) turn with the same signals", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
     process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
@@ -87,36 +85,27 @@ describe("POST /chat — memory write is async fire-and-forget (T6)", () => {
       modelPort: distillingModel([{ text: "prefers fragrance-free products" }]),
       memoryEnabled: true,
     });
-    const control = await controlApp.inject({ method: "POST", url: "/chat", headers: headers(), payload: payloadFor("async-write-control") });
+    const control = await controlApp.inject({ method: "POST", url: "/chat", headers: headers(), payload: payloadFor("sync-write-control") });
     expect(control.statusCode).toBe(200);
     const goldenMemoryActive = control.json().memoryActive;
     expect(goldenMemoryActive).toBeDefined();
     await controlApp.close();
 
-    // The actual case under test: an identical turn, but the vector port's `upsert` never resolves.
+    // The actual case under test: an identical turn, but the vector port's `upsert` always rejects.
     const store = new InMemoryRuntimeStore();
-    const vector = vectorPortWithHungUpsert();
+    const vector = vectorPortWithFailingUpsert();
     const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
     const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true });
-    const injected = app.inject({ method: "POST", url: "/chat", headers: headers(), payload: payloadFor("async-write-1") });
+    const result = await app.inject({ method: "POST", url: "/chat", headers: headers(), payload: payloadFor("sync-write-1") });
 
-    // Generous relative to a real request's latency, but far short of vitest's default per-test timeout
-    // — if remember() genuinely blocks the reply (today), this races out to TIMEOUT and the assertion
-    // below fails with a clear, deterministic reason rather than a real multi-second hang.
-    const result = await raceAgainstTimeout(injected, 500);
-    expect(result).not.toBe(TIMEOUT);
-    if (result === TIMEOUT) return; // unreachable after the assertion above; narrows the type for TS
-
+    // Fail-open: the write is now awaited INSIDE the request, so a rejecting `remember()` is caught right
+    // there (server.ts's try/catch around the `await`) — it must never surface as a broken/non-200 reply.
     expect(result.statusCode).toBe(200);
     expect(result.json().memoryActive).toEqual(goldenMemoryActive);
-    // Deliberately no `app.close()` here: the injected request's internal work (the hung `upsert` call)
-    // is still pending by design. A bare, unresolved Promise holds no timer/socket, so it cannot keep the
-    // process alive on its own — but calling `close()` while a route handler may still be "in flight"
-    // (however that flight ends, once this PR's fire-and-forget change lands) is an unnecessary risk this
-    // test doesn't need to take to prove its point.
+    await app.close();
   });
 
-  it("companion pin (already green — NOT part of this PR's red set): a kill-armed turn still triggers NO memory write at all, fire-and-forget or not", async () => {
+  it("companion pin (unchanged by this fix): a kill-armed turn still triggers NO memory write at all", async () => {
     process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
     process.env.WIDGET_AUTH_REQUIRED = "true";
     process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
@@ -133,7 +122,7 @@ describe("POST /chat — memory write is async fire-and-forget (T6)", () => {
       // not trivially true merely because no subject resolved at all.
       headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
       payload: {
-        sessionId: "async-write-killed-1",
+        sessionId: "sync-write-killed-1",
         message: "I like fragrance-free stuff",
         signals: { cart: "empty" },
         widgetToken: DEMO_WIDGET_TOKEN,

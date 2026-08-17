@@ -2458,8 +2458,9 @@ export async function buildServer(opts?: {
       // (signals.anonId) — mirrors the brain's own `if (memory && signals.anonId)` recall guard; there is
       // nothing to key a write on for an anonymous, non-recognized shopper. Every consent/classification/
       // TTL decision is made INSIDE `remember()` (reused unchanged); this call site only decides WHETHER
-      // to call it and WITH WHAT turn. Never blocks or breaks the response — a memory-service failure is
-      // caught and logged, exactly like every other fail-open side effect on this path (telemetry/traffic).
+      // to call it and WITH WHAT turn. Awaited synchronously (see the write-timing note below) but never
+      // BREAKS the response — a memory-service failure is caught and logged, fail-open exactly like every
+      // other side effect on this path (telemetry/traffic), it just no longer runs off the critical path.
       //
       // NN#4 (kill-switch completeness) — a memory write IS an autonomous, audited action, so an operator
       // kill must halt it like everything else. Skip remember() when a kill is armed for this tenant/agent
@@ -2470,20 +2471,29 @@ export async function buildServer(opts?: {
       // the clean SALES path only is a separate PR-11 human-sign-off scope decision; this guard is the
       // code-owned guardrail, not a business-policy choice.)
       if (memoryService && memorySubject && !kill && !d.flags.includes("no_autonomous_action")) {
-        // semantic-memory-v1 T6 — fire-and-forget: the WRITE must never hold up the shopper's reply. This
-        // was `await`ed until this PR; the module header's own "Never blocks or breaks the response" was
-        // therefore only ever an INTENT, not something the code structurally honored — a `remember()`
-        // that never resolves (a hung vector-port write) genuinely blocked /chat's response. `void
-        // ...catch()` returns control to the caller immediately; a failure is still logged exactly as
-        // before, just asynchronously rather than from inside an awaited try/catch.
-        void memoryService
-          .remember(
+        // semantic-memory-v1 T6 REVERTED (live-staging finding, 2026-08-18) — the write is SYNCHRONOUS
+        // (`await`ed inside this try/catch), not fire-and-forget. T6 made this `void ...catch()` on the
+        // theory that the write is off the shopper's critical path; live diagnosis on staging proved the
+        // opposite: Cloud Run throttles a container's CPU to ~0 once the HTTP response has been sent, so a
+        // write kicked off AFTER the reply (the distiller's `model.complete` + embed + upsert) is starved
+        // and never runs at all — confirmed by 0 facts ever landing in `vp_ann` and by metering showing
+        // exactly one `shopper`-tagged model call per turn (the reply) instead of two (reply + distiller).
+        // Awaiting the write here keeps it inside the request, where Cloud Run guarantees CPU. Fail-open is
+        // unchanged: a `remember()` failure is caught and logged, never surfaced to the shopper or allowed
+        // to break the reply — only WHEN the write runs moved (during vs. after the response), not whether
+        // a failure can affect it. This trades back some of T6's tail-latency win; the latency-preserving
+        // follow-up is a proper async write queue (Cloud Tasks/Pub/Sub, mirroring the catalog-webhook
+        // path) so the write is durably handed off instead of raced against a frozen container.
+        try {
+          await memoryService.remember(
             // `memoryConsentInputs` — the same object the client-facing `memoryActive` is derived from,
             // so what the shopper is TOLD and what is actually gated here are one decision, not two.
             { tenantId, anonId: memorySubject, ...memoryConsentInputs },
             { message, reply: d.reply },
-          )
-          .catch((e) => console.error("[/chat] memory remember error:", (e as Error).message));
+          );
+        } catch (e) {
+          console.error(`[/chat] memory remember error:`, (e as Error).message);
+        }
       }
       // ADR-0015 Inv 4 ("expiry is enforced, not aspirational") — opportunistic PER-SUBJECT retention
       // reclamation. `sweepExpired` (widget-memory/src/retention.ts) physically deletes what TTL-on-read

@@ -84,11 +84,24 @@ is guaranteed by exhaustion rather than a fail-closed-at-500 cap. *Verified: PR 
 erasure completeness + namespace isolation.*
 
 ### D6 — Latency posture
-Memory writes move **off the `/chat` critical path** (fire-and-forget) — this removes FAST-V1's synchronous
-distiller round-trip and makes the new embed/dedup free to the shopper. Recall **reuses the one turn
+**Corrected 2026-08-18 (live-staging finding).** Memory writes were originally moved **off the `/chat`
+critical path** (fire-and-forget, `void memoryService.remember(...).catch(...)`) to remove FAST-V1's
+synchronous distiller round-trip and make the new embed/dedup free to the shopper. Live diagnosis on the
+internal-staging deployment proved this posture **does not work on Cloud Run**: once the HTTP response is
+sent, Cloud Run throttles the container's CPU to ~0, so a write kicked off AFTER the reply (the distiller's
+`model.complete` + embed + upsert) is starved and never runs — confirmed by 0 facts ever landing in
+`vp_ann` and by metering showing exactly one `shopper`-tagged model call per turn (the reply) instead of two
+(reply + distiller). The write is therefore **SYNCHRONOUS** (`await`ed inside `/chat`'s existing try/catch,
+`server.ts`): this keeps it inside the request, where Cloud Run guarantees CPU, at the cost of adding the
+distiller round-trip back to the shopper-visible turn latency — trading back part of the win this decision
+originally claimed. Fail-open is unchanged: a `remember()` failure is caught and logged, never breaking the
+reply. **Follow-up (not yet built):** a durable async write queue (Cloud Tasks / Pub/Sub, mirroring the
+catalog-webhook path) is the correct way to reclaim the latency — hand the write off durably instead of
+racing it against a container whose CPU may be reclaimed at any moment. Recall **reuses the one turn
 embedding** the catalog retriever already computes (metered `TURN_EMBED_AGENT_TYPE`), computed once on the
 clean-sales path only (zero embeds on a guardrail-short-circuited turn) — so semantic recall adds no new
-per-turn model call. **Pre-promotion follow-up:** the safety-floor enumerate is O(N)/recall at
+per-turn model call; this part of the original posture is unaffected. **Pre-promotion follow-up (recall
+side, unaffected by the write-path fix above):** the safety-floor enumerate is O(N)/recall at
 thousands-scale (no server-side metadata filter); a pinned-fact index (separate per-subject namespace or a
 subject-pinned index) must land before promotion so the floor is O(pinned). A latency check must accompany
 that optimization before promotion — the PR4 eval suite measures recall *quality* (relevance / safety-floor
