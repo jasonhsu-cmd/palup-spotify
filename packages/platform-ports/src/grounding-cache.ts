@@ -1,4 +1,4 @@
-import type { GroundingContext, GroundingPort, GroundingShell } from "./grounding-port.js";
+import type { GroundingContext, GroundingPort, GroundingShell, Product } from "./grounding-port.js";
 import type { RuntimeStatePort } from "./runtime-state-port.js";
 
 // Caching + degradation wrapper for any GroundingPort (mirrors createRedactingModelPort). A merchant's
@@ -110,6 +110,19 @@ export function createCachingGroundingPort(
         // Fail CLOSED, exactly like getContext's cold path: a brandless "this store" + empty policy, so the
         // brain grounds honestly rather than inventing or leaking.
         return { tenantId, brandName: "this store", policy: { returns: "", shipping: "" } };
+      }
+    },
+
+    // Cart/retrieval coexistence — no TTL cache row for this (it is a small, bounded, per-turn fetch, not
+    // the whole catalog), but the SAME timeout + fail-closed discipline as getShell's cold path: on a
+    // timeout/throw, fail closed to `[]` rather than ever inventing or leaking a product. `ids.length ===
+    // 0` short-circuits without touching the inner adapter at all.
+    async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
+      if (ids.length === 0) return [];
+      try {
+        return await withTimeout(inner.getProductsByIds(tenantId, ids), timeoutMs);
+      } catch {
+        return [];
       }
     },
   };

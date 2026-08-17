@@ -46,6 +46,7 @@ function groundingOf(ctx: GroundingContext): GroundingPort {
   return {
     async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; },
     async getShell() { return { tenantId: ctx.tenantId, brandName: ctx.brandName, policy: ctx.policy }; },
+    async getProductsByIds(_tenantId, ids) { return ctx.products.filter((p) => ids.includes(p.id)); },
   };
 }
 

@@ -1005,8 +1005,12 @@ This is the operator procedure for the per-tenant `CATALOG_RETRIEVAL` promotion 
 - [ ] **A fresh reindex first + ProductFacts populated for the tenant** — the shell serving path has no live
       catalog, so a delisted product lingers until the corpus is reindexed, and a product with no fresh fact
       renders priceless. Run Step 2 immediately before enabling.
-- [ ] **Do NOT co-enable `CART_LINE_ITEMS` with retrieval** (S3/S4-parked gap: the shell path builds
-      `products:[]`, so the cart block silently drops). Leave `CART_LINE_ITEMS` off for a retrieval-enabled tenant.
+- [ ] **`CART_LINE_ITEMS` may now be co-enabled with retrieval** (parked S3/S4 gap RESOLVED 2026-08-17). The
+      shell path resolves cart line-items by id via a bounded live Storefront fetch
+      (`GroundingPort.getProductsByIds` over the existing `nodes(ids:)`, capped at `MAX_CART_LINE_ITEMS`=30
+      ids — never the full catalog), so the cart block renders instead of silently dropping. A fetch failure
+      fail-closes to no cart block and flags `cart:byid_unavailable` (audited), never a wrong cart. Enabling
+      `CART_LINE_ITEMS` for a tenant remains a per-tenant §5 step like any serving flag.
 
 0. **Resolve the §3-rule-4 statutory-erasure decision (OPEN — see HITL-POLICY §8).** As built, `shop/redact`
    + `app/uninstalled` erase the catalog corpus **unconditionally** (design A); the alternative (B) is to

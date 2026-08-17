@@ -52,6 +52,9 @@ const groundingWith = (products: Product[]): GroundingPort => ({
   async getShell() {
     return { tenantId: "demo", brandName: "Auria", policy: { returns: "30 days", shipping: "2-4 days" } } as never;
   },
+  async getProductsByIds() {
+    return [];
+  },
 } as never);
 
 async function systemPromptFor(products: Product[]): Promise<string> {

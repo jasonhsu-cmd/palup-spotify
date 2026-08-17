@@ -19,6 +19,10 @@ const grounding: GroundingPort = {
   async getShell() {
     return { tenantId: "acme", brandName: "Acme", policy: { returns: "30 days", shipping: "free over $75" } };
   },
+  async getProductsByIds(_tenantId, ids) {
+    const products = [{ id: "serum", title: "Serum", price: "$34", description: "A serum.", availableForSale: true }];
+    return products.filter((p) => ids.includes(p.id));
+  },
 };
 
 /** A generation model that always replies with the same text (so we control what the checker sees). */

@@ -1,4 +1,4 @@
-import type { GroundingContext, GroundingPort, GroundingShell } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, GroundingShell, Product } from "@palup/platform-ports";
 
 // Rich in-memory demo catalog (the "Auria" store) — stands in for the Shopify Storefront-MCP/Catalog
 // adapter, which implements the same port later (ADR-0001). Tenant-scoped.
@@ -71,5 +71,20 @@ export class StaticGroundingAdapter implements GroundingPort {
   async getShell(tenantId: string): Promise<GroundingShell> {
     const { brandName, policy } = await this.getContext(tenantId);
     return { tenantId, brandName, policy };
+  }
+
+  // Cart/retrieval coexistence — DERIVED from getContext exactly as getShell is above: build an id→Product
+  // map from this tenant's own catalog and return the requested subset in request order, omitting ids not
+  // found (never a placeholder). `ids.length === 0` short-circuits to `[]` without a getContext call.
+  async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
+    if (ids.length === 0) return [];
+    const { products } = await this.getContext(tenantId);
+    const byId = new Map(products.map((p) => [p.id, p]));
+    const out: Product[] = [];
+    for (const id of ids) {
+      const p = byId.get(id);
+      if (p) out.push(p);
+    }
+    return out;
   }
 }

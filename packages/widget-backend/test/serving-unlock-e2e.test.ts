@@ -65,6 +65,7 @@ describe("S2 headline E2E — >1000-SKU store renders top-K in /chat", () => {
     const grounding: GroundingPort = {
       async getContext() { throw new Error("CEILING: whole-catalog fetch must not happen on the render path"); },
       async getShell(tenantId) { return { tenantId, brandName: "MegaSkin", policy: { returns: "30d", shipping: "free" } }; },
+      async getProductsByIds() { return []; },
     };
 
     // 4) brain, retrieval + hydration ON, real retriever over the in-memory corpus.

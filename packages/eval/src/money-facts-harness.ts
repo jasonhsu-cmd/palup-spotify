@@ -1,6 +1,6 @@
 import { createBrain, DEFAULT_CATALOG_RETRIEVAL_K, DEFAULT_POLICY, MockCommerceAdapter, type Brain } from "@palup/widget-brain";
 import { createInMemoryProductFactsStore } from "@palup/platform-ports";
-import type { GroundingContext, GroundingPort, GroundingShell, ModelPort } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, GroundingShell, ModelPort, Product } from "@palup/platform-ports";
 
 // go-live §B — the MONEY-FACTS eval harness. It exercises the A1b fresh-price serving path END TO END:
 // build a brain with retrieval + hydration on, seed the Tier-2 fact store, run the shopper's price
@@ -65,6 +65,17 @@ export async function buildMoneyFactsBrain(spec: MoneyFactsCase, model: ModelPor
     },
     async getShell(tenantId): Promise<GroundingShell> {
       return { tenantId, brandName: "Test Store", policy: { returns: "30 days", shipping: "free over $75" } };
+    },
+    // Derived from this harness's own getContext (S2 owner-ruled: this harness's cases run the shell
+    // render path, so getProductsByIds is never exercised by them, but the port requires it to compile).
+    async getProductsByIds(tenantId, ids): Promise<Product[]> {
+      const byId = new Map(products.map((p) => [p.id, p]));
+      const out: Product[] = [];
+      for (const id of ids) {
+        const p = byId.get(id);
+        if (p) out.push(p);
+      }
+      return out;
     },
   };
   // Nearest-first on the case's REAL ids only, so hydration applies exactly to them. S2 — the render path

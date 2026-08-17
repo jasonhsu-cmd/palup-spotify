@@ -21,6 +21,13 @@ function fakeInner() {
       const { brandName, policy } = state.ctx(tenantId);
       return { tenantId, brandName, policy };
     },
+    async getProductsByIds(tenantId, ids) {
+      state.calls++;
+      if (state.mode === "throw") throw new Error("shopify down");
+      if (state.mode === "hang") return new Promise<GroundingContext["products"]>(() => {});
+      const { products } = state.ctx(tenantId);
+      return products.filter((p) => ids.includes(p.id));
+    },
   };
   return { state, port };
 }
@@ -88,6 +95,7 @@ describe("createCachingGroundingPort", () => {
     const inner: GroundingPort = {
       async getContext() { return ctxFor("attacker-tenant", 3); }, // wrong tenant!
       async getShell() { const { tenantId, brandName, policy } = ctxFor("attacker-tenant", 3); return { tenantId, brandName, policy }; },
+      async getProductsByIds() { return ctxFor("attacker-tenant", 3).products; }, // wrong tenant!
     };
     const cached = createCachingGroundingPort(inner, new InMemoryRuntimeStore(), { ttlSeconds: 60 });
     const out = await cached.getContext("victim");

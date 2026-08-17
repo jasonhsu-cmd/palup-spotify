@@ -52,6 +52,7 @@ function groundingOf(ctx: GroundingContext): GroundingPort {
   return {
     async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; },
     async getShell() { return { tenantId: ctx.tenantId, brandName: ctx.brandName, policy: ctx.policy }; },
+    async getProductsByIds(_tenantId, ids) { return ctx.products.filter((p) => ids.includes(p.id)); },
   };
 }
 
@@ -222,6 +223,7 @@ describe("E1 — retrieval fails OPEN, never to a worse or invented answer", () 
     const throwingShell: GroundingPort = {
       async getContext() { return bigCatalog(); },
       async getShell() { throw new Error("grounding adapter down"); },
+      async getProductsByIds() { return []; },
     };
     const d = await brainWith(model, throwingShell, fakeRetriever(["p1"]), true).decide(SALES, ASK);
     expect(d.flags).toContain("retrieval:unavailable");

@@ -1,4 +1,4 @@
-import type { GroundingContext, GroundingPort, GroundingShell } from "@palup/platform-ports";
+import type { GroundingContext, GroundingPort, GroundingShell, Product } from "@palup/platform-ports";
 
 // The ISOLATED, non-serving tenant a CATALOG_RETRIEVAL shadow indexes AND queries under.
 //
@@ -46,5 +46,9 @@ export class AliasGroundingAdapter implements GroundingPort {
   async getShell(tenantId: string): Promise<GroundingShell> {
     const shell = await this.base.getShell(tenantId === this.alias ? this.source : tenantId);
     return { ...shell, tenantId };
+  }
+
+  async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
+    return this.base.getProductsByIds(tenantId === this.alias ? this.source : tenantId, ids);
   }
 }

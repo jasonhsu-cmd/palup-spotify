@@ -1,4 +1,4 @@
-import type { CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
+import type { CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, Product, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
 import { createRedactingModelPort, createCachingGroundingPort } from "@palup/platform-ports";
 import { MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
@@ -80,6 +80,18 @@ export function createGroundingPort(
         return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch, opts.shopifyShellFetch).getShell(tenantId);
       if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
       return fixtures.getShell(tenantId);
+    },
+    async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
+      const outcome = await resolveStorefrontCredential(tenantId, {
+        secrets,
+        credRead: opts.credRead,
+        readbackEnabled: opts.readbackEnabled,
+        shopDomainFor: opts.shopDomainFor,
+      });
+      if (outcome.status === "live")
+        return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch, opts.shopifyShellFetch).getProductsByIds(tenantId, ids);
+      if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
+      return fixtures.getProductsByIds(tenantId, ids);
     },
   };
   return createCachingGroundingPort(router, store);

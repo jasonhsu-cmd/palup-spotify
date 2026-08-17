@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import type { Product } from "@palup/platform-ports";
 import {
   mapStorefrontToContext,
   mapStorefrontToShell,
@@ -7,6 +8,7 @@ import {
   storefrontShellFetch,
   STOREFRONT_API_VERSION,
   type StorefrontData,
+  type StorefrontProductNode,
 } from "../src/shopify-grounding.js";
 
 const SAMPLE: StorefrontData = {
@@ -92,6 +94,32 @@ describe("createShopifyGroundingAdapter", () => {
     expect(ctx.products[0].title.length).toBe(200);
     expect(ctx.products[0].description.length).toBe(600);
     expect(ctx.products[0].tags!.length).toBe(20);
+  });
+
+  // Cart/retrieval coexistence — the render path (S2) needs a bounded by-id fetch to resolve cart line
+  // items without paging the whole catalog. Not yet wired: `createShopifyGroundingAdapter` takes no
+  // by-id fetch parameter and the returned adapter has no `getProductsByIds` method, so this is expected
+  // to fail (TypeError: adapter.getProductsByIds is not a function) until the builder adds both.
+  it("getProductsByIds maps nodes(ids:) results through mapStorefrontToContext and drops null nodes", async () => {
+    const requestedIds: string[][] = [];
+    const byIdFetch = async (_creds: unknown, ids: string[]) => {
+      requestedIds.push(ids);
+      // One resolvable node (the SAMPLE fixture's first product) + one `null` — the documented
+      // `nodes(ids:)` shape for an id that doesn't resolve (missing/delisted/wrong type).
+      return { products: { nodes: [SAMPLE.products!.nodes[0] as StorefrontProductNode | null, null] } };
+    };
+    const adapter = createShopifyGroundingAdapter(
+      { shopDomain: "acme.myshopify.com", accessToken: "tok" },
+      async () => SAMPLE,
+      async () => ({ shop: SAMPLE.shop }),
+      // Not yet a real parameter on createShopifyGroundingAdapter — passed anyway so the RED failure is
+      // the adapter's missing method/wiring, not a call-site typo.
+      byIdFetch as unknown as never,
+    ) as unknown as { getProductsByIds: (tenantId: string, ids: string[]) => Promise<Product[]> };
+    const products = await adapter.getProductsByIds("acme", ["gid://shopify/Product/1", "gid://shopify/Product/999"]);
+    expect(requestedIds[0]).toEqual(["gid://shopify/Product/1", "gid://shopify/Product/999"]);
+    expect(products).toHaveLength(1); // the null node is dropped, never mapped into a placeholder
+    expect(products[0]).toMatchObject({ id: "gid://shopify/Product/1", title: "Gentle Cleanser", price: "$18.00" });
   });
 });
 
