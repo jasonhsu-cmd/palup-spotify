@@ -1,4 +1,5 @@
-import type { CommercePort, GroundingContext, GroundingPort, ModelPort, Product, ProductFactsPort } from "@palup/platform-ports";
+import type { CommercePort, EmbedRequest, GroundingContext, GroundingPort, ModelPort, Product, ProductFactsPort } from "@palup/platform-ports";
+import { canEmbed, requireEmbedAlignment, requireEmbedInputs } from "@palup/platform-ports";
 import { hydrateProductFacts } from "./hydrate-facts.js";
 import { classifyOutgoingOffer } from "./offer-check.js";
 import {
@@ -785,6 +786,18 @@ export interface Brain {
   decide(signals: Signals, message: string, history?: HistoryTurn[]): Promise<Decision>;
 }
 
+/**
+ * semantic-memory-v1, PR3, T8 — the agent type the composition root (widget-backend's server.ts) MUST
+ * meter the shared turn-embedder under (mirrors `OFFER_CHECK_AGENT_TYPE`'s own placement/precedent,
+ * offer-check.ts). Distinct from `CATALOG_RETRIEVAL_AGENT_TYPE` (widget-backend's catalog-retriever.ts):
+ * that constant metered the catalog retriever's OWN internal embed call, which T8 makes conditional — a
+ * turn that supplies a precomputed `queryVector` to `retrieve()` never spends under that agent type at
+ * all, and this one is charged instead, so a cost review can tell "one shared turn embed" apart from "the
+ * catalog retriever embedded its own query" even though both are, mechanically, one `ModelPort.embed`
+ * call in a shopper turn.
+ */
+export const TURN_EMBED_AGENT_TYPE = "turn-embed";
+
 export function createBrain(
   model: ModelPort,
   grounding?: GroundingPort,
@@ -924,6 +937,18 @@ export function createBrain(
   // Undefined ⇒ no ceiling ⇒ every matched fact is overlaid (the pre-D2 behaviour). Server supplies it
   // from PRODUCT_FACTS_MAX_AGE_MS; it only ever takes effect on the already-flag-gated hydration path.
   productFactsMaxAgeMs?: number,
+  // semantic-memory-v1, PR3, T8 — the shared TURN embedder: an embed-capable `ModelPort` the composition
+  // root meters under `TURN_EMBED_AGENT_TYPE` (never a bare, unmetered activeModelPort — ADR-0013).
+  // Consulted at MOST once per turn, on the CLEAN SALES PATH ONLY (every guardrail rung has already
+  // returned by the time `decide()` reaches it — so a kill/injection/safety/support/uncertainty/b2b/
+  // proactive turn spends zero embeds), and only when `canEmbed(turnEmbedder)` AND either consumer would
+  // actually use it (`memory && signals.anonId`, or catalog retrieval enabled this turn) — the resulting
+  // `{queryVector, pin}` is handed to BOTH `memory.recall` and `catalogRetriever.retrieve`, so the turn
+  // spends at most one embed call regardless of how many consumers are active. Absent, an adapter that
+  // cannot embed, or any embed failure ⇒ every existing call site keeps working unchanged: catalog
+  // retrieval falls back to its own internal embed exactly as today, and memory recall falls back to
+  // list-all exactly as today (T7) — never a throw.
+  turnEmbedder?: ModelPort,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -959,6 +984,11 @@ export function createBrain(
     tenantId: string,
     query: string,
     flags: string[],
+    // semantic-memory-v1, PR3, T8 — the brain's own shared turn-embedding, passed through unchanged to
+    // `CatalogRetrieverPort.retrieve`. Absent ⇒ byte-identical to before this PR (the retriever embeds the
+    // query itself); see `CatalogRetrieverPort.retrieve`'s own doc comment for the trust contract.
+    queryVector?: number[],
+    pin?: { model: string; dimension: number },
   ): Promise<{ ctx: GroundingContext | undefined; rendered?: Product[]; corpusTotal?: number }> => {
     const k = Math.max(1, Math.floor(catalogRetrievalK));
     let shell;
@@ -971,7 +1001,7 @@ export function createBrain(
     const ctx: GroundingContext = { tenantId: shell.tenantId, brandName: shell.brandName, products: [], policy: shell.policy };
     let result;
     try {
-      result = await retriever.retrieve({ tenantId, query, k });
+      result = await retriever.retrieve({ tenantId, query, k, queryVector, pin });
     } catch {
       flags.push("retrieval:unavailable");
       return { ctx }; // brand+policy, but no catalog block
@@ -1009,7 +1039,10 @@ export function createBrain(
     pageContext?: string,
     // E1 — set ONLY by the clean sales-path call site, and only with the shopper's own turn. Absent
     // everywhere else, which is what keeps every other call site byte-identical.
-    retrieval?: { query: string; flags: string[]; enabled: boolean },
+    // semantic-memory-v1, PR3, T8 — `queryVector`/`pin` are the brain's shared turn-embedding (see
+    // `decide()`'s own computation), threaded through to `retrieveViaShell` unchanged. Both optional and
+    // additive: absent (the pre-T8 shape) is byte-identical.
+    retrieval?: { query: string; flags: string[]; enabled: boolean; queryVector?: number[]; pin?: { model: string; dimension: number } },
     // E2 — the per-turn citation map to FILL IN, set ONLY by the same clean sales-path call site. Absent
     // everywhere else (support fallback, proactive exit-intent, the classifier), so no other prompt in
     // this file gains a tag. Independent of `retrieval`: the candidate set is whatever the CATALOG block
@@ -1029,7 +1062,7 @@ export function createBrain(
     // turn", reused below so the cart's product source matches whichever branch actually ran.
     const onRetrievalPath = !!(retrieval?.enabled && catalogRetriever && grounding && retrieval.query.trim() !== "");
     if (onRetrievalPath) {
-      const built = await retrieveViaShell(catalogRetriever!, tenantId, retrieval!.query, retrieval!.flags);
+      const built = await retrieveViaShell(catalogRetriever!, tenantId, retrieval!.query, retrieval!.flags, retrieval!.queryVector, retrieval!.pin);
       ({ ctx, rendered: retrieved, corpusTotal } = built);
     } else {
       ctx = grounding ? await grounding.getContext(tenantId) : undefined;
@@ -1712,6 +1745,29 @@ export function createBrain(
           }
         }
       }
+      // semantic-memory-v1, PR3, T8 — compute the turn's SHARED query-embedding ONCE, on the CLEAN SALES
+      // PATH ONLY (every guardrail rung above has already returned by this point — kill / injection /
+      // safety / identity / giveaway / support / honest-uncertainty / b2b / proactive-exit-intent all
+      // short-circuit before here, so a guardrail-short-circuited turn spends ZERO embeds), iff EITHER
+      // consumer below will actually use it: memory recall (`memory && signals.anonId`, the SAME gate the
+      // recall call itself uses, just below) or catalog retrieval (`catalogRetrievalOn`). Absent
+      // `turnEmbedder`, an adapter that cannot embed, or any embed failure ⇒ `undefined` — NEVER a throw:
+      // catalog retrieval falls back to its own internal embed (today's behavior) and memory recall falls
+      // back to list-all (T7's own fallback), exactly as if this PR had not shipped.
+      let turnQuery: { queryVector: number[]; pin: { model: string; dimension: number } } | undefined;
+      const wantsTurnEmbed = (memory && signals.anonId !== undefined) || catalogRetrievalOn;
+      if (wantsTurnEmbed && turnEmbedder && canEmbed(turnEmbedder)) {
+        try {
+          const embedReq: EmbedRequest = { texts: [message], purpose: "query", tenantId };
+          requireEmbedInputs(embedReq); // same shared validator every adapter itself must call
+          const embedRes = await turnEmbedder.embed(embedReq);
+          requireEmbedAlignment(embedReq, embedRes);
+          const vector = embedRes.vectors[0];
+          if (vector) turnQuery = { queryVector: vector, pin: { model: embedRes.model, dimension: embedRes.dimension } };
+        } catch {
+          turnQuery = undefined; // never let a provider hiccup block the turn — both consumers just fall back
+        }
+      }
       // ADR-0015 T11 — cross-visit memory RECALL, CLEAN SALES PATH ONLY (Inv 10). We only reach this
       // line after every guardrail rung above has already returned (kill / injection / safety / identity
       // / giveaway / support / honest-uncertainty / b2b / proactive-exit-intent all short-circuit before
@@ -1720,7 +1776,15 @@ export function createBrain(
       // consulted when a memory port is wired AND the server derived a subject key (`anonId`) for this
       // shopper; otherwise recall is never called (no autonomy granted, no subject to key on).
       if (memory && signals.anonId) {
-        const recalledRaw = await memory.recall({ tenantId, anonId: signals.anonId, region: signals.region, consent: signals.consent });
+        const recalledRaw = await memory.recall({
+          tenantId,
+          anonId: signals.anonId,
+          region: signals.region,
+          consent: signals.consent,
+          // semantic-memory-v1, PR3, T8 — the shared turn embedding, reused here so memory recall spends
+          // no embed of its own. Absent ⇒ MemoryRecallPort's own list-all fallback (T7).
+          ...(turnQuery ? { queryVector: turnQuery.queryVector, pin: turnQuery.pin } : {}),
+        });
         // PR-8 carried condition (PR-1 Finding 2, extended from the style translation below to the WHOLE
         // recall/DATA surface): a recalled fact may only surface at ALL — even as caution-only DATA,
         // even the bare `memory:recalled` flag — when THIS TURN's read-time consent for its own
@@ -1767,7 +1831,10 @@ export function createBrain(
           systemExtra + PITCH_PLAYBOOK[pitch],
           history,
           signals.pageContext,
-          { query: message, flags, enabled: catalogRetrievalOn },
+          // semantic-memory-v1, PR3, T8 — the SAME shared turn embedding memory recall just consumed
+          // above, so catalog retrieval spends no embed of its own this turn. Absent ⇒
+          // CatalogRetrieverPort's own internal-embed fallback (today's behavior).
+          { query: message, flags, enabled: catalogRetrievalOn, queryVector: turnQuery?.queryVector, pin: turnQuery?.pin },
           citations,
           // E4 — the ONLY call site that passes cart line items, for the same reason E1's retrieval query
           // is passed only here: every guardrail rung above has already declined to return, so no

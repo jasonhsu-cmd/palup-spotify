@@ -77,10 +77,39 @@ export type FactMetadata = {
   dedupTag?: string;
 }
 
+/**
+ * semantic-memory-v1, PR3 (READ path), T7 — optional per-call semantic-read arguments for `recall()`.
+ * Absent (or `queryVector` absent, or `pin` not matching the tenant's own `MemoryManifest`) ⇒ the exact
+ * pre-PR3 list-all baseline, byte-identical to `recall()` never having taken a second argument at all.
+ */
+export interface MemoryRecallOpts {
+  /**
+   * A PRE-COMPUTED query embedding — `recall()` itself never calls an embedder (embedding is always the
+   * CALLER's job; T8/PR3 has the brain's shared turn-embedder produce this once and hand it to both
+   * catalog retrieval and this call). Used to rank this subject's own ORDINARY facts by cosine similarity,
+   * `mustRecall`/special rows excluded from that ranked set entirely (they always surface via the
+   * separate, similarity-independent safety-floor enumerate — see `FactMetadata.mustRecall`'s own doc
+   * comment). Ignored (fallback to list-all) when absent, or when `pin` does not match.
+   */
+  queryVector?: number[];
+  /**
+   * The embed space `queryVector` was produced in. Checked against the tenant's own `MemoryManifest`
+   * (manifest.ts) before `queryVector` is trusted for ranking — a mismatch (or no manifest at all yet)
+   * means mixing vector spaces, which is meaningless, so `recall()` falls back to list-all rather than
+   * rank against the wrong space.
+   */
+  pin?: { model: string; dimension: number };
+}
+
 export interface MemoryService {
   /** Distill + classify + consent-gate + (maybe) persist facts from one turn. No-op `{written: []}`
    * touching nothing when the double gate (flag.ts) is off. */
   remember(ctx: MemoryCtx, turn: MemoryTurn): Promise<{ written: FactClass[] }>;
-  /** Read this subject's non-expired facts. `[]` (touching nothing) when the double gate is off. */
-  recall(ctx: MemoryCtx): Promise<RecalledFact[]>;
+  /**
+   * Read this subject's non-expired facts. `[]` (touching nothing) when the double gate is off.
+   *
+   * `opts` (T7, PR3) is entirely optional and additive: omitted (or ignored per `MemoryRecallOpts`'s own
+   * doc comment) is byte-identical to the plain list-all this method has always done.
+   */
+  recall(ctx: MemoryCtx, opts?: MemoryRecallOpts): Promise<RecalledFact[]>;
 }

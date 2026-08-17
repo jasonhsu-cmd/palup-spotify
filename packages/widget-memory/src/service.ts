@@ -20,7 +20,7 @@ import { buildMemoryAudit, subjectRef } from "./audit.js";
 import { ttlForClass, RENEW_MIN_GAP_MS } from "./retention.js";
 import { recordSubject } from "./subject-index.js";
 import { readMemoryManifest, writeMemoryManifest, memoryPinMismatch, type MemoryManifest } from "./manifest.js";
-import type { MemoryCtx, MemoryService, MemoryTurn, RecalledFact, FactMetadata } from "./types.js";
+import type { MemoryCtx, MemoryRecallOpts, MemoryService, MemoryTurn, RecalledFact, FactMetadata } from "./types.js";
 
 // semantic-memory-v1, PR2 (write path) — T4 (embed ordinary / NEVER embed special / stamp `.vector`) and
 // T5 (write-time dedup), both gated on the NEW, separately-reviewed MEMORY_SEMANTIC_RECALL flag (T9,
@@ -243,8 +243,44 @@ async function findByDedupTag(vector: VectorPort, namespace: string, tag: string
 // A generous per-subject cap on how many facts `recall` retrieves in one call. The vector port has no
 // native "list all" op; querying with an empty text scores every record 0 (tie) and returns them in
 // stable id order up to `k`, which is exactly "give me everything for this subject" for the modest
-// per-subject fact counts this system deals in.
+// per-subject fact counts this system deals in. ALSO reused (T7) as the overfetch `k` for the ranked
+// semantic query below, before floor-exclusion filtering and the topK slice — the same "modest
+// per-subject fact counts" reasoning applies: a subject's whole corpus fits comfortably under it, so
+// filtering `mustRecall`/special rows out of an already-complete ranked list never starves the topK slice
+// of a genuinely-near ordinary fact sitting just behind an excluded one.
 const RECALL_LIMIT = 500;
+
+/**
+ * semantic-memory-v1 T7 (PR3, read path) — how many of a subject's own ORDINARY facts (mustRecall/special
+ * rows excluded — see `recall()`) rank into the semantic slice, nearest-first. Overridable via
+ * `MEMORY_RECALL_TOP_K` (parsed as an integer).
+ *
+ * 16 IS A STARTING DEFAULT, NOT A TUNED VALUE — chosen the same way `DEFAULT_CATALOG_RETRIEVAL_K`
+ * (widget-brain/src/brain.ts) and this module's own `dedupThreshold` were: a bound picked from first
+ * principles (wide enough that a handful of genuinely-relevant recalled facts almost never all miss it;
+ * small enough that stale/tangential facts from a long-lived subject don't crowd the prompt), not measured
+ * against real embeddings or real recall-quality. Nothing in this repo has measured recall@k for memory
+ * facts — that is the eval gate's job (a promotion decision), not this PR's.
+ */
+function recallTopK(): number {
+  const raw = process.env.MEMORY_RECALL_TOP_K;
+  const n = raw !== undefined ? Number(raw) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : 16;
+}
+
+/**
+ * semantic-memory-v1 T7 — the bounded `VectorPort.list` page size for the SAFETY FLOOR enumerate: every
+ * one of the subject's own `metadata.mustRecall === true` rows, regardless of similarity to the query.
+ * Mirrors `DEDUP_SCAN_LIMIT`'s own "single bounded page, no native find-by-metadata-field op" reasoning —
+ * this is NOT a tuned value either, just a generous cap matching this module's other per-subject bounds
+ * (`RECALL_LIMIT`/`DEDUP_SCAN_LIMIT`, both 500) so a subject's whole corpus fits in one page. Overridable
+ * via `MEMORY_FLOOR_CAP` (parsed as an integer).
+ */
+function recallFloorCap(): number {
+  const raw = process.env.MEMORY_FLOOR_CAP;
+  const n = raw !== undefined ? Number(raw) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : 500;
+}
 
 interface EncryptedField {
   value: string;
@@ -367,8 +403,13 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   const enabled = underTest ? (deps.enabled ?? isMemoryEnabled()) : isMemoryEnabled();
   // T9 — see MemoryServiceDeps.semanticRecall's own doc comment for why this reads unconditionally
   // (not test-runner-gated like `enabled` above): it is a new, separately-reviewed, default-off flag in
-  // its own right, not a way around the ADR-0015 double gate `enabled` already enforces.
-  const semanticRecallEnabled = deps.semanticRecall ?? process.env.MEMORY_SEMANTIC_RECALL === "true";
+  // its own right, not a way around the ADR-0015 double gate `enabled` already enforces. Read FRESH on
+  // every call (never memoized into a `const` at construction time) — mirroring `dedupThreshold()`/
+  // `configuredEmbedDimension()`/`recallTopK()`/`recallFloorCap()` below — so a caller that flips the env
+  // var AFTER constructing the service (or between a `remember()` and a later `recall()`) is honored
+  // exactly as if it had been set from the start; an explicit `deps.semanticRecall` override always wins,
+  // regardless of the env var, exactly like before.
+  const semanticRecallOn = () => deps.semanticRecall ?? process.env.MEMORY_SEMANTIC_RECALL === "true";
 
   async function remember(ctx: MemoryCtx, turn: MemoryTurn): Promise<{ written: FactClass[] }> {
     if (!enabled) return { written: [] }; // INERT — no vector call, no audit, nothing touched
@@ -450,7 +491,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       let dedupTag: string | undefined;
       let dedupTargetId: string | undefined; // set ⇒ this candidate COLLAPSES into an EXISTING record
 
-      if (semanticRecallEnabled) {
+      if (semanticRecallOn()) {
         if (effectiveClass === "special") {
           // THE PRIVACY BOUNDARY (governance-critical — the Art-9 leak guard this PR's tests pin): a
           // special-category candidate's plaintext is NEVER sent to embed, regardless of whether the
@@ -679,12 +720,56 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     return { written };
   }
 
-  async function recall(ctx: MemoryCtx): Promise<RecalledFact[]> {
+  async function recall(ctx: MemoryCtx, opts?: MemoryRecallOpts): Promise<RecalledFact[]> {
     if (!enabled) return []; // INERT — no vector call, no audit, nothing touched
 
     const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
     const now = clock().getTime();
-    const matches = await deps.vector.query(namespace, { text: "", k: RECALL_LIMIT });
+
+    // T7 (semantic-memory-v1, PR3) — semantic ranked-set + safety-floor UNION, gated on
+    // MEMORY_SEMANTIC_RECALL AND a `queryVector`/`pin` that matches this TENANT's own memory-corpus
+    // manifest (mixing vector spaces is meaningless — mirrors the write-side `memoryPinMismatch` refusal).
+    // Anything else — flag off, no queryVector, no pin, no manifest yet, or a pin mismatch — falls through
+    // to the EXACT pre-PR3 list-all baseline below, byte-identical to `recall()` never having taken a
+    // second argument at all.
+    const pinSupplied = semanticRecallOn() && opts?.queryVector !== undefined && opts?.pin !== undefined;
+    let manifest: MemoryManifest | null = null;
+    if (pinSupplied) manifest = await readMemoryManifest(deps.audit, { tenantId: ctx.tenantId });
+    const useSemantic = pinSupplied && manifest !== null && !memoryPinMismatch(manifest, opts!.pin!);
+
+    let matches: Array<{ id: string; metadata?: Record<string, unknown> }>;
+    if (useSemantic) {
+      // The ranked half: overfetch (RECALL_LIMIT, same generous per-subject cap as the fallback query
+      // below) so filtering `mustRecall`/special rows out never starves the topK slice of a genuinely-near
+      // ordinary fact sitting just behind an excluded one, THEN cap to `recallTopK()`, nearest-first.
+      const rankedRaw = await deps.vector.query(namespace, { vector: opts!.queryVector, k: RECALL_LIMIT });
+      const ranked = rankedRaw
+        .filter((m) => {
+          const meta = m.metadata as { mustRecall?: boolean; class?: FactClass } | undefined;
+          // A mustRecall/special row NEVER ranks — its vector is a content-independent random placeholder
+          // (T4), so scoring it against a query is meaningless, and it always surfaces via the floor below
+          // regardless of similarity. `class === "special"` is checked too, defense-in-depth, in case a
+          // row somehow carries one without the other.
+          return !(meta?.mustRecall === true || meta?.class === "special");
+        })
+        .slice(0, recallTopK());
+
+      // The safety floor: EVERY mustRecall row for this subject, regardless of similarity to the query —
+      // a bounded `list` enumerate (no native "find by metadata field" op), deduped by id against the
+      // ranked half above.
+      const floorPage = await deps.vector.list(namespace, { limit: recallFloorCap() });
+      const seenIds = new Set(ranked.map((m) => m.id));
+      matches = [...ranked];
+      for (const item of floorPage) {
+        const meta = item.metadata as { mustRecall?: boolean } | undefined;
+        if (meta?.mustRecall === true && !seenIds.has(item.id)) {
+          matches.push(item);
+          seenIds.add(item.id);
+        }
+      }
+    } else {
+      matches = await deps.vector.query(namespace, { text: "", k: RECALL_LIMIT });
+    }
 
     const facts: RecalledFact[] = [];
     // Security review finding 5 — a record dropped because it would not decrypt is a real operator event:
