@@ -21,6 +21,13 @@ function fakeInner() {
       const { brandName, policy } = state.ctx(tenantId);
       return { tenantId, brandName, policy };
     },
+    async getProductsByIds(tenantId, ids) {
+      state.calls++;
+      if (state.mode === "throw") throw new Error("shopify down");
+      if (state.mode === "hang") return new Promise<GroundingContext["products"]>(() => {});
+      const { products } = state.ctx(tenantId);
+      return products.filter((p) => ids.includes(p.id));
+    },
   };
   return { state, port };
 }
@@ -88,6 +95,7 @@ describe("createCachingGroundingPort", () => {
     const inner: GroundingPort = {
       async getContext() { return ctxFor("attacker-tenant", 3); }, // wrong tenant!
       async getShell() { const { tenantId, brandName, policy } = ctxFor("attacker-tenant", 3); return { tenantId, brandName, policy }; },
+      async getProductsByIds() { return ctxFor("attacker-tenant", 3).products; }, // wrong tenant!
     };
     const cached = createCachingGroundingPort(inner, new InMemoryRuntimeStore(), { ttlSeconds: 60 });
     const out = await cached.getContext("victim");
@@ -126,6 +134,29 @@ describe("createCachingGroundingPort", () => {
     // re-read acme → its own cache, not northwind's
     expect((await cached.getContext("acme")).brandName).toBe("Brand-acme");
     expect(state.calls).toBe(2);
+  });
+
+  it("getProductsByIds: short-circuits empty ids, returns the resolvable subset, and PROPAGATES a fetch failure/timeout (the caller fails closed, not the cache)", async () => {
+    const { state, port } = fakeInner();
+    const cached = createCachingGroundingPort(port, new InMemoryRuntimeStore(), { ttlSeconds: 60, timeoutMs: 20 });
+
+    // empty ids never touch the inner adapter
+    expect(await cached.getProductsByIds("t", [])).toEqual([]);
+    expect(state.calls).toBe(0);
+
+    // success: exactly the requested-and-resolvable products (ctxFor has only p0), unknown ids omitted
+    expect((await cached.getProductsByIds("t", ["p0", "p2"])).map((p) => p.id)).toEqual(["p0"]);
+
+    // UNLIKE getContext/getShell (which fail closed to safe-empty / last-known-good), a throw is
+    // PROPAGATED — there is no last-known-good for an arbitrary per-turn id set, and a silent [] would
+    // drop the cart block with no audit trail. The brain's cart path is the fail-closed point + the
+    // cart:byid_unavailable flag.
+    state.mode = "throw";
+    await expect(cached.getProductsByIds("t", ["p0"])).rejects.toThrow("shopify down");
+
+    // a hang likewise surfaces as a timeout rejection, never a swallowed []
+    state.mode = "hang";
+    await expect(cached.getProductsByIds("t", ["p0"])).rejects.toThrow();
   });
 });
 

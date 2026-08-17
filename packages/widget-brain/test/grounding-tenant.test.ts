@@ -15,6 +15,9 @@ describe("per-tenant grounding threading", () => {
       async getShell(tenantId) {
         return { tenantId, brandName: `T-${tenantId}`, policy: { returns: "", shipping: "" } };
       },
+      async getProductsByIds() {
+        return [];
+      },
     };
     return { seen, port };
   };

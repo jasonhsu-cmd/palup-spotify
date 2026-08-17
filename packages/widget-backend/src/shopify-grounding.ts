@@ -88,19 +88,26 @@ function firstVariantNumericId(node: StorefrontProductNode): string | undefined 
 }
 
 export function mapStorefrontToContext(tenantId: string, data: StorefrontData): GroundingContext {
-  const products: Product[] = (data.products?.nodes ?? []).map((n) => ({
-    id: n.id,
-    title: bound(n.title, MAX_TITLE),
-    description: bound(n.description, MAX_DESC),
-    price: formatPrice(n.priceRange?.minVariantPrice),
-    tags: (n.tags ?? []).slice(0, MAX_TAGS),
-    // Only carried when Shopify actually returned a boolean. A missing/non-boolean value stays
-    // UNDEFINED rather than collapsing to false, because "unknown" and "not purchasable" are different
-    // claims to make to a shopper and the prompt handles them differently.
-    availableForSale: typeof n.availableForSale === "boolean" ? n.availableForSale : undefined,
-    // C1 — the opaque cart/checkout variant id (undefined when the source reports no variant).
-    variantId: firstVariantNumericId(n),
-  }));
+  // A `nodes(ids:)` by-id response can carry a raw `null` (an id that doesn't resolve) or a node with no
+  // `id` (a GID whose concrete type didn't match the `... on Product` fragment) — the documented
+  // `nodes(ids:)` shape (see `STOREFRONT_NODES_QUERY`'s doc comment). The normal paginated `products`
+  // connection never contains either, so this filter is a no-op there and this stays ONE mapping for both
+  // call sites, exactly as intended. Dropped, never mapped into a placeholder.
+  const products: Product[] = (data.products?.nodes ?? [])
+    .filter((n): n is StorefrontProductNode => n != null && typeof n.id === "string")
+    .map((n) => ({
+      id: n.id,
+      title: bound(n.title, MAX_TITLE),
+      description: bound(n.description, MAX_DESC),
+      price: formatPrice(n.priceRange?.minVariantPrice),
+      tags: (n.tags ?? []).slice(0, MAX_TAGS),
+      // Only carried when Shopify actually returned a boolean. A missing/non-boolean value stays
+      // UNDEFINED rather than collapsing to false, because "unknown" and "not purchasable" are different
+      // claims to make to a shopper and the prompt handles them differently.
+      availableForSale: typeof n.availableForSale === "boolean" ? n.availableForSale : undefined,
+      // C1 — the opaque cart/checkout variant id (undefined when the source reports no variant).
+      variantId: firstVariantNumericId(n),
+    }));
   const policy: StorePolicy = {
     returns: bound(data.shop?.refundPolicy?.body, MAX_DESC),
     shipping: bound(data.shop?.shippingPolicy?.body, MAX_DESC),
@@ -520,11 +527,14 @@ export function storefrontFetchByIds(
   };
 }
 
-/** GroundingPort backed by a merchant's Shopify store. `fetchImpl` defaults to the live Storefront call. */
+/** GroundingPort backed by a merchant's Shopify store. `fetchImpl` defaults to the live Storefront call.
+ *  `byIdFetchImpl` defaults to the chunked `nodes(ids:)` fetch — cart/retrieval coexistence's bounded
+ *  by-id lookup for the S2 render path (which only fetches `getShell`, never the full catalog). */
 export function createShopifyGroundingAdapter(
   creds: ShopifyStoreCreds,
   fetchImpl: StorefrontFetch = storefrontFetch(),
   shellFetchImpl: StorefrontShellFetch = storefrontShellFetch(),
+  byIdFetchImpl: StorefrontByIdFetch = storefrontFetchByIds(),
 ): GroundingPort {
   return {
     async getContext(tenantId: string): Promise<GroundingContext> {
@@ -534,6 +544,11 @@ export function createShopifyGroundingAdapter(
     async getShell(tenantId: string): Promise<GroundingShell> {
       const data = await shellFetchImpl(creds);
       return mapStorefrontToShell(tenantId, data);
+    },
+    async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
+      if (ids.length === 0) return [];
+      const data = await byIdFetchImpl(creds, ids);
+      return mapStorefrontToContext(tenantId, data).products;
     },
   };
 }

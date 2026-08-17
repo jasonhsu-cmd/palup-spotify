@@ -79,4 +79,13 @@ export interface GroundingPort {
    * so it can never hit the catalog-size ceiling. Tenant-scoped exactly like `getContext`.
    */
   getShell(tenantId: string): Promise<GroundingShell>;
+  /**
+   * Cart/retrieval coexistence — a BOUNDED by-id fetch, so the S2 render path (which only fetches
+   * `getShell`, never the whole catalog) can still resolve a shopper's cart line items without paging the
+   * full catalog. Tenant-scoped exactly like `getContext`/`getShell`. Contract: unknown/delisted ids are
+   * OMITTED from the result (never throw for a missing id, never a placeholder product); `ids.length ===
+   * 0` returns `[]`. A genuine fetch failure (adapter down, timeout, …) throws, exactly like `getContext`
+   * — the caller degrades (fails closed to no cart block), never receives a silently-wrong result.
+   */
+  getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]>;
 }

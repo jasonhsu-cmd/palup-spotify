@@ -24,6 +24,7 @@ function bigCatalog(): GroundingContext {
 const groundingOf = (ctx: GroundingContext): GroundingPort => ({
   async getContext() { return JSON.parse(JSON.stringify(ctx)) as GroundingContext; },
   async getShell() { return { tenantId: ctx.tenantId, brandName: ctx.brandName, policy: ctx.policy }; },
+  async getProductsByIds(_tenantId, ids) { return ctx.products.filter((p) => ids.includes(p.id)); },
 });
 
 // S2 — the render path builds each Product from the hit's own metadata (title/variantId), never a live

@@ -215,6 +215,9 @@ describe("merchant CLI — `invalidate-grounding` (go-live hygiene)", () => {
       async getShell(tenantId) {
         return { tenantId, brandName: `Brand-${tenantId}`, policy: { returns: "r", shipping: "s" } };
       },
+      async getProductsByIds() {
+        return [];
+      },
     };
     const grounding = createCachingGroundingPort(inner, store, { ttlSeconds: 1800 });
 

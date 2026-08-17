@@ -14,6 +14,9 @@ function shellOnlyGrounding(): GroundingPort {
     async getShell(tenantId) {
       return { tenantId, brandName: "BigStore", policy: { returns: "30 days", shipping: "free" } };
     },
+    async getProductsByIds() {
+      return [];
+    },
   };
 }
 

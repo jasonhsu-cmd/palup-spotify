@@ -1,4 +1,4 @@
-import type { GroundingContext, GroundingPort, GroundingShell } from "./grounding-port.js";
+import type { GroundingContext, GroundingPort, GroundingShell, Product } from "./grounding-port.js";
 import type { RuntimeStatePort } from "./runtime-state-port.js";
 
 // Caching + degradation wrapper for any GroundingPort (mirrors createRedactingModelPort). A merchant's
@@ -111,6 +111,19 @@ export function createCachingGroundingPort(
         // brain grounds honestly rather than inventing or leaking.
         return { tenantId, brandName: "this store", policy: { returns: "", shipping: "" } };
       }
+    },
+
+    // Cart/retrieval coexistence — no TTL cache row for this (a small, bounded, per-turn fetch, not the
+    // whole catalog). Same timeout BOUND as getShell, but — UNLIKE getContext/getShell — a failure is
+    // PROPAGATED, not swallowed to `[]`. There is no last-known-good to serve for an arbitrary per-turn id
+    // set, and a silent `[]` is indistinguishable from a legitimate "no ids resolved" — which would drop
+    // the shopper's cart block with NO audit trail (the §3-rule-5 silent-degrade this fetch's flag exists
+    // to prevent). The sole caller (the brain's cart path) wraps this in try/catch and IS the fail-closed
+    // point: on a throw it renders no cart block AND records `cart:byid_unavailable`. `ids.length === 0`
+    // short-circuits without touching the inner adapter.
+    async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
+      if (ids.length === 0) return [];
+      return withTimeout(inner.getProductsByIds(tenantId, ids), timeoutMs);
     },
   };
 }
