@@ -361,19 +361,17 @@ but it is a policy decision with legal consequences and it needs the named owner
 should have counsel's eye on the 30-day figure and on point 1's exposure. Until then, treat the
 webhook handlers' current behaviour as the interim position, not as policy.
 
-> **OPEN DECISION (S4 §F, flagged for the named owner, NOT settled here):** the tenant's catalog
-> corpus + corpus-state ledger erasure (`eraseCatalogCorpus` / `runCatalogClear`, wired into both
-> `shop/redact` and `app/uninstalled`) was built to run **UNCONDITIONALLY, never kill-gated** — unlike
-> the memory-namespace + traffic-log erasure in the same handlers, which one section up defers while a
-> kill is armed (NN#4). The implementation's own rationale: NN#4 halts *agent autonomy*, not a merchant's
-> (or the law's) own erasure request, so gating catalog erasure on an unrelated armed kill would leave a
-> shop's catalog corpus un-erased for as long as the halt stays armed — arguably worse for this section's
-> statutory obligation than running it. That is a real tension with §3 rule 4 ("the Kill Switch must
-> always work... never add a code path an operator cannot stop") that this policy has not resolved: is
-> "always work" read as "halts all writes this handler makes" (→ defer catalog erasure too, matching the
-> memory/traffic pattern) or as "halts agent autonomy, not a compelled statutory act" (→ the built
-> behavior is correct)? **This is not decided as policy by this document — it needs the named owner
-> (jason.hsu@framy.co) to pick one reading and either affirm the built unconditional behavior or route it
-> to defer-under-kill like its neighbor.** See `docs/superpowers/specs/2026-08-16-s3-freshness-at-scale-design.md`
-> §H(3)/§F and `docs/adr/0020-durable-grounding-at-scale.md` for the implementation detail.
+> **RESOLVED — DECISION A, affirmed by the named owner (jason.hsu@framy.co, 2026-08-16):** the tenant's
+> catalog corpus + corpus-state ledger erasure (`eraseCatalogCorpus` / `runCatalogClear`, wired into both
+> `shop/redact` and `app/uninstalled`) runs **UNCONDITIONALLY, never kill-gated** — the built behavior is
+> affirmed as policy. Reading adopted: §3 rule 4's Kill Switch halts **agent autonomy** (a run-time agent
+> acting on its own initiative), not a merchant's (or the law's) own compelled erasure request. Gating a
+> statutory erasure on an unrelated armed kill would leave a shop's catalog corpus un-erased for as long as
+> the halt stayed armed — worse for the ADR-0015 obligation. Rule 4 is not weakened: the action is
+> per-tenant (never cross-tenant), audited (NN#5), idempotent, and runs only after HMAC verification; and
+> the operator retains a coarse stop — the erasure only fires on a genuine Shopify redact/uninstall, and
+> `CATALOG_WEBHOOKS` / the webhook path can be disabled to halt the trigger entirely. The rejected
+> alternative (B) was to defer catalog erasure under an armed kill, matching the memory/traffic pattern.
+> See `docs/superpowers/specs/2026-08-16-s3-freshness-at-scale-design.md` §H(3)/§F and
+> `docs/adr/0020-durable-grounding-at-scale.md` for the implementation detail.
 
