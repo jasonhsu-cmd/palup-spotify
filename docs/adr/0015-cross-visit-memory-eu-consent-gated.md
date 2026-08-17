@@ -1,11 +1,15 @@
 # ADR-0015: Cross-visit shopper memory — two-tier (guest / signed-up), EU-consent-gated
 
-- **Status: Proposed — NOT enacted.** Records the design + the consent/retention/erasure model for durable,
-  cross-visit shopper memory. It enables nothing on its own: no memory is written until this ADR is
-  **Accepted** by the named owner, `security-reviewer` + legal (privacy) sign-off is recorded, and the
-  consent/notice UX + retention/erasure subsystem exist. The **in-session** multi-turn memory already
-  shipped (PR #76) is unaffected — that holds no server-side transcript; this ADR is the *durable,
-  cross-visit* half.
+- **Status: ACCEPTED for INTERNAL STAGING (2026-08-17) — NOT for production / external shoppers.** The
+  build-time gate `MEMORY_ADR_ACCEPTED` is flipped `true` (`packages/widget-memory/src/flag.ts`); memory
+  runs only on the internal-only staging service where `MEMORY_ENABLED=true` (tenant `palup-skincare-jason`).
+  This is a **named-owner decision (jason.hsu@framy.co) with LEGAL DEFERRED as an accepted risk** because
+  staging serves internal users only. `security-reviewer` sign-off is **PASS-WITH-CONDITIONS** (recorded at
+  [`MEMORY-GO-LIVE-CHECKLIST.md`](../MEMORY-GO-LIVE-CHECKLIST.md) A4 and in the 2026-08-17 amendment below).
+  The §A legal items (A1/A2/A3/A5/A6) and ADR-0019 Q19 stay **OPEN** and MUST be closed before any
+  external-shopper / production enablement — **production go-live remains a separate, legally-gated
+  decision this status does not grant.** The **in-session** multi-turn memory already shipped (PR #76) is
+  unaffected — that holds no server-side transcript; this ADR is the *durable, cross-visit* half.
 - **Enablement gate list: [`docs/MEMORY-GO-LIVE-CHECKLIST.md`](../MEMORY-GO-LIVE-CHECKLIST.md)** — the
   single checklist of everything that must be MET (and the residuals that must be explicitly ACCEPTED)
   before `MEMORY_ADR_ACCEPTED` may be flipped and this Status moved to *Accepted*. Human-only step.
@@ -36,6 +40,38 @@
   land BEFORE `MEMORY_ADR_ACCEPTED` is flipped: no fact has ever been written, so the switch is free now and
   unfixable-without-trusting-the-client afterwards — which makes resolving the block time-sensitive rather
   than optional.
+- **Amendment — ACCEPTED FOR INTERNAL STAGING (2026-08-17; named owner jason.hsu@framy.co; LEGAL DEFERRED):**
+  `MEMORY_ADR_ACCEPTED` is flipped `true`. Memory is enabled in staging for **internal users only**, tenant
+  `palup-skincare-jason`. Rationale for deferring legal: the §A Art-9/consent items concern real
+  external-shopper health data at scale; staging serves internal users, so those items are **DEFERRED as an
+  owner-accepted risk, not resolved**. **This acceptance does not extend to production or external
+  shoppers** — they stay blocked on §A (A1/A2/A3/A5/A6) and ADR-0019 Q19.
+  - **`security-reviewer` verdict (A4): PASS-WITH-CONDITIONS** (full text at
+    [`MEMORY-GO-LIVE-CHECKLIST.md`](../MEMORY-GO-LIVE-CHECKLIST.md) A4). The identity/isolation/kill/audit
+    machinery is sound and, in the merged tree, materially stronger than the pre-ADR-0019 residual rows
+    describe: the F1 attack tests pass, the guest-token primitive is well-built (HMAC-SHA256, separate
+    secret, mandatory tenant binding), and **`mergeGuestIntoAccount` (ADR-0019 task 10 carry-over) has NO
+    production caller** — the linchpin that keeps the deferred Art-9 cross-subject legal question dormant.
+    **If task 10 is ever wired, this acceptance is VOID and the verdict reverts to BLOCK.**
+  - **NON-LEGAL conditions that MUST be met before the operator flip `MEMORY_ENABLED=true` (a separate
+    step):** (1) provision a per-tenant `MEMORY_ENCRYPTION_KEY` for `palup-skincare-jason` — the existing
+    key is `demo`-only; without it ordinary facts persist **plaintext at rest** and Art-9 facts fail-closed;
+    (2) provision `GUEST_TOKEN_SECRET` as a high-entropy **separate** secret (the guest boundary rests on
+    it); (3) confirm `WIDGET_AUTH_REQUIRED=true` **and** `SHOPPER_AUTH=true` on the serving revision;
+    (4) schedule the retention sweep for `palup-skincare-jason`; (5) keep `MEMORY_ENABLED` scoped to the
+    staging service — **the const flip is repo-wide, so the second gate is now spent and `MEMORY_ENABLED`
+    alone is load-bearing on every build.** Production is deployed nowhere and its `MEMORY_ENABLED` is unset,
+    so nothing production-facing turns on.
+  - **§C residuals — owner acceptance (checklist D-step 3).** The A4 review re-judged the residual rows
+    against the shipped ADR-0019 code and found them **stale in the SAFE direction** — the raw
+    client-`anonId` bearer path they describe no longer exists in the serving/consent/forget code; the
+    residual narrows to the device-access threat **C1** already accepts. **C14** (an authenticated opt-out
+    does not govern that browser's signed-OUT turns — a write-when-denied) is the one residual that is
+    *not* privacy-conservative; it is a product-correctness defect against internal test personas, accepted
+    for internal staging and to be revisited before external go-live. **The named owner's acceptance of the
+    §C set is recorded by this owner MERGING the flip PR** — the merge-gate refuses the flip by construction
+    (`merge-gate.sh`), so it is a deliberate manual human merge (CLAUDE.md §3), which is itself the
+    governance sign-off.
 - **Decisions recorded (owner, this revision):** (a) **scope = B** — special-category (health/allergy)
   facts *may* be remembered, but **only behind a separate, explicit Article-9 health-data consent**;
   **not** non-sensitive-only, and **not** accounts-only (a consented guest may also have one remembered);

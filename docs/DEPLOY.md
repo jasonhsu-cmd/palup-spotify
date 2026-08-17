@@ -513,9 +513,12 @@ change and the deploy does not create them:
    minted — ADR-0019's guest-identity feature stays inert.** That is the **correct state today**: this is
    only ADR-0019 task 2 (the conditional-mount wiring + this procedure). `mintGuestToken` /
    `createGuestTokenIdentity` exist in `packages/platform-ports` (task 1, merged), but no server route
-   calls them yet — `POST /widget/guest` (task 3) is not built — so provisioning this secret does not, by
-   itself, mint anything. `MEMORY_ADR_ACCEPTED` is also still `false`
-   (`packages/widget-memory/src/flag.ts`).
+   calls them yet — so provisioning this secret does not, by itself, mint anything. **UPDATE 2026-08-17:**
+   ADR-0019 tasks 1–9 shipped (`POST /widget/guest` mint/renew now exists, `server.ts`), and
+   `MEMORY_ADR_ACCEPTED` is flipped `true` for INTERNAL STAGING (`packages/widget-memory/src/flag.ts`), so
+   for the staging memory enablement `GUEST_TOKEN_SECRET` IS provisioned + named (A4 condition 2) — the
+   "inert / not built" framing above is the pre-2026-08-17 state, kept for the provisioning steps it
+   documents. (ADR-0019 task 10, the guest→account carry-over, stays unbuilt + legal-gated.)
 5. **The `pl_merchant` grants** (`GRANT SELECT, INSERT, UPDATE … TO palup_app`, deliberately no `DELETE`) —
    see *Cloud SQL* below. `migrate()` runs the DDL at boot only when the install or webhook routes are
    enabled, i.e. only once (1) exists.
@@ -689,11 +692,14 @@ deployed** by `deploy-staging.yml`, so the CLI above is the only path that works
   `MEMORY_ENCRYPTION_KEY`, provisioned per tenant in the SAME `PALUP_SECRETS` JSON map the Shopify
   Storefront token already lives in (`{"<tenant>":{"MEMORY_ENCRYPTION_KEY":"<a high-entropy secret,
   16+ bytes>", ...}}`) — without it, a special-category memory write is REFUSED (fail-closed, never
-  stored in the clear) and a `write.refused` audit entry records it. **None of this is reachable in
-  production yet**: cross-visit memory itself stays fully OFF behind `MEMORY_ADR_ACCEPTED` (hardcoded
-  `false`, `packages/widget-memory/src/flag.ts`) until a separately-governed PR flips it with named-owner +
-  `security-reviewer` + LEGAL sign-off (ADR-0015 Status note) — so `MEMORY_ENCRYPTION_KEY` is go-live prep,
-  not yet something staging needs provisioned.
+  stored in the clear) and a `write.refused` audit entry records it. **As of 2026-08-17 `MEMORY_ADR_ACCEPTED`
+  is flipped `true`** (`packages/widget-memory/src/flag.ts`; ADR-0015 Accepted for INTERNAL STAGING, legal
+  DEFERRED, `security-reviewer` PASS-WITH-CONDITIONS), so on the staging service where `MEMORY_ENABLED=true`
+  memory is LIVE — which makes **`MEMORY_ENCRYPTION_KEY` for the serving tenant a HARD precondition, not
+  go-live prep** (A4 condition 1). It must be provisioned for the actual serving tenant `palup-skincare-jason`
+  (the earlier key was `demo`-only); without it ordinary facts persist in the clear and special-category
+  writes fail-closed. Production stays OFF (deployed nowhere, `MEMORY_ENABLED` unset) and external go-live
+  remains legally gated.
 - **Rotating `MEMORY_ENCRYPTION_KEY` — two steps, in this order.** A naive one-step replacement is
   IRRECOVERABLE: every fact written under the outgoing key stops decrypting, and `recall` drops each one
   permanently (it is detected — a PII-free `recall.dropped` audit records the count — but detection is
@@ -789,9 +795,11 @@ so a shopper who never comes back is **never physically reclaimed**, which is pr
 `MEMORY-GO-LIVE-CHECKLIST.md` B4 exists to close. Expiry that nothing runs is aspirational, and
 ADR-0015 Inv 4 says it must not be.
 
-**Schedule this BEFORE flipping `MEMORY_ADR_ACCEPTED`.** With memory off nothing is ever written, so the
-job simply reports zeros — there is no reason to wait, and §D step 7 asks for it in that order so the
-mechanism is proven before the first real write exists to depend on it.
+**Schedule this BEFORE setting `MEMORY_ENABLED=true`** (the `MEMORY_ADR_ACCEPTED` const is already flipped
+for internal staging as of 2026-08-17, so `MEMORY_ENABLED` is the remaining live gate — A4 condition 4).
+With memory off nothing is ever written, so the job simply reports zeros — there is no reason to wait, and
+§D step 7 asks for it in that order so the mechanism is proven before the first real write exists to depend
+on it. It must target the serving tenant `palup-skincare-jason` (`SWEEP_TENANTS`/`SHOPIFY_STORES`).
 
 The job needs the **same** `DATABASE_URL` and `AUDIT_HMAC_SECRET` as the service (its audit `subjectRef`s
 must correlate with serving's — `retention-sweep.ts` mirrors server.ts's own fallback to

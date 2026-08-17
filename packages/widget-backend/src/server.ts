@@ -1835,10 +1835,12 @@ export async function buildServer(opts?: {
     // CORRECTED (2026-08-05, verified by reading this handler end to end): this comment previously
     // concluded "so a caller can only ever erase their OWN subject." That is FALSE as written, and it
     // contradicted this file's own code and comments ~30 lines apart in two ways:
-    //   (i) the shopper token is never REQUIRED here — an unauthenticated caller (or one who simply omits
-    //       the header) still reaches the guest path below with any well-formed anonId they hold. That is
-    //       the accepted C1 bearer-capability residual the paragraph ABOVE this one already states plainly
-    //       (named-owner decision, 2026-08-04, docs/MEMORY-GO-LIVE-CHECKLIST.md C1); and
+    //   (i) the shopper token is never REQUIRED here — a caller who omits it still reaches the guest path
+    //       below. POST-ADR-0019 (tasks 1–9 shipped 2026-08-17) that path derives the guest subject from a
+    //       server-issued, SIGNED `x-guest-token` (`guestAnonIdFrom`), NOT from a client-supplied anonId,
+    //       so a caller can no longer name "any well-formed anonId they hold"; the C1 residual narrows to a
+    //       caller who has STOLEN the victim's signed guest token from their browser — the device-access
+    //       threat C1 already accepts (named-owner decision, 2026-08-04, docs/MEMORY-GO-LIVE-CHECKLIST.md C1); and
     //  (ii) on a VERIFIED turn the N1 block below deliberately ALSO erases a co-presented anonId, which
     //       the server cannot distinguish from the caller's own — see its own comment for why that is a
     //       safe trade rather than a new capability.
@@ -1865,10 +1867,10 @@ export async function buildServer(opts?: {
     // only while the shipped widget's own `forgetMe()` still sends the shopper's just-superseded guest
     // anonId in the SAME request body (`prevAnonId`, index.html) — meaning real erasure silently stopped
     // short of what the UI promised ("Done — I've cleared what I remembered"). This is SAFE, not a
-    // repeat of the C1 delete attack: the guest path a few lines above already lets an *unauthenticated*
-    // caller erase ANY well-formed anonId they hold with no token at all, so erasing a caller-presented
-    // anonId on a VERIFIED turn grants an attacker nothing they could not already get by omitting the
-    // token entirely. Only fires when the presented `anonId` is (a) well-formed (`validateAnonId`) and
+    // repeat of the C1 delete attack: post-ADR-0019 the guest-era namespace erased here is named by the
+    // VERIFIED `x-guest-token` (`guestTokenAnonId`), not a client-supplied string, so it can only erase a
+    // namespace the caller already proved control of — granting an attacker nothing beyond the
+    // device-access threat C1 accepts. Only fires when the guest-token anonId is (a) well-formed and
     // (b) actually a DIFFERENT namespace from the account subject (a guest calling /forget with no
     // shopper token already goes through the `subject` erase above and must not double-audit itself).
     if (verifiedShopperId && guestTokenAnonId && guestTokenAnonId !== subject) {
