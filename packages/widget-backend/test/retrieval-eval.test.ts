@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ModelPort, EmbedRequest, EmbedResponse } from "@palup/platform-ports";
+import { InMemoryRuntimeStore, createInMemoryVectorStore, type ModelPort, type EmbedRequest, type EmbedResponse } from "@palup/platform-ports";
 import { buildIndexedRetriever, gradeRetrieval, generateScaleCorpusAndCases, type RetrievalCase, type RetrievalProduct } from "../src/retrieval-eval.js";
 
 // CATALOG_RETRIEVAL eval — plumbing + grader, gate-tested WITHOUT creds. A deterministic bag-of-words embed
@@ -59,6 +59,67 @@ describe("CATALOG_RETRIEVAL eval — plumbing (real index + retrieve paths, fake
     const { retriever, tenantId } = await buildIndexedRetriever(synthetic, new FakeEmbedModel(), "t-synth2");
     const { hits } = await retriever.retrieve({ tenantId, query: "quantum spreadsheet compiler", k: 3 });
     expect(hits).toEqual([]);
+  });
+});
+
+describe("CATALOG_RETRIEVAL eval — silent-clobber guard (never prune a real serving corpus)", () => {
+  // Regression guard for the shadow:retrieval incident: buildIndexedRetriever indexes WITHOUT --reindex, so
+  // pointed at a durable store already holding a REAL populated corpus it would treat that corpus's ids as
+  // "stale" and DELETE them, rewriting the manifest to the tiny eval fixture (the real 2,150-product "demo"
+  // corpus overwritten by the 13-product fixture). The guard must refuse BEFORE any write, and must NOT fire
+  // on the benign cases (fresh store, idempotent re-index, growing the corpus).
+
+  const serving: RetrievalProduct[] = [
+    { id: "prod-1", title: "Serving Product One", price: "$10", description: "the real merchant corpus one", tags: ["real"] },
+    { id: "prod-2", title: "Serving Product Two", price: "$11", description: "the real merchant corpus two", tags: ["real"] },
+    { id: "prod-3", title: "Serving Product Three", price: "$12", description: "the real merchant corpus three", tags: ["real"] },
+    { id: "prod-4", title: "Serving Product Four", price: "$13", description: "the real merchant corpus four", tags: ["real"] },
+    { id: "prod-5", title: "Serving Product Five", price: "$14", description: "the real merchant corpus five", tags: ["real"] },
+  ];
+  const evalFixture: RetrievalProduct[] = [
+    { id: "fix-a", title: "Eval Fixture A", price: "$1", description: "the small eval fixture a", tags: ["fixture"] },
+    { id: "fix-b", title: "Eval Fixture B", price: "$2", description: "the small eval fixture b", tags: ["fixture"] },
+  ];
+
+  it("refuses to index over a pre-existing populated corpus that this eval corpus would prune, and leaves it intact", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    // Stand in for the real serving corpus already present under this (mis-set) serving tenant.
+    const { retriever } = await buildIndexedRetriever(serving, new FakeEmbedModel(), "demo", store, vector);
+
+    await expect(
+      buildIndexedRetriever(evalFixture, new FakeEmbedModel(), "demo", store, vector),
+    ).rejects.toThrow(/silent-clobber guard|ISOLATED eval-only tenant|shadow-eval/i);
+
+    // The throw happens BEFORE any write, so the real corpus is untouched: its products still retrieve.
+    const { hits } = await retriever.retrieve({ tenantId: "demo", query: "the real merchant corpus one", k: 5 });
+    expect(hits.map((h) => h.productId)).toContain("prod-1");
+    expect(hits.map((h) => h.productId)).not.toContain("fix-a");
+  });
+
+  it("allows an idempotent re-index of the SAME corpus on a shared durable store (prunes nothing)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    await buildIndexedRetriever(serving, new FakeEmbedModel(), "eval-only", store, vector);
+    const { retriever } = await buildIndexedRetriever(serving, new FakeEmbedModel(), "eval-only", store, vector);
+    const { hits } = await retriever.retrieve({ tenantId: "eval-only", query: "the real merchant corpus two", k: 5 });
+    expect(hits.map((h) => h.productId)).toContain("prod-2");
+  });
+
+  it("allows GROWING an existing corpus (superset ids) — nothing is pruned", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    await buildIndexedRetriever(serving.slice(0, 3), new FakeEmbedModel(), "eval-only", store, vector);
+    const grown = [...serving, { id: "prod-6", title: "Serving Product Six", price: "$15", description: "the real merchant corpus six", tags: ["real"] }];
+    const { retriever } = await buildIndexedRetriever(grown, new FakeEmbedModel(), "eval-only", store, vector);
+    const { hits } = await retriever.retrieve({ tenantId: "eval-only", query: "the real merchant corpus six", k: 5 });
+    expect(hits.map((h) => h.productId)).toContain("prod-6");
+  });
+
+  it("the default fresh in-memory store has no manifest, so a first index is never blocked", async () => {
+    const { retriever, tenantId } = await buildIndexedRetriever(serving, new FakeEmbedModel(), "t-fresh");
+    const { hits } = await retriever.retrieve({ tenantId, query: "the real merchant corpus three", k: 5 });
+    expect(hits.map((h) => h.productId)).toContain("prod-3");
   });
 });
 
