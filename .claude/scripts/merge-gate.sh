@@ -84,11 +84,19 @@ gate_step "Embed round-trip E2E (mock)" "pnpm e2e:embed"
 # run that reports 0 tests executed (e.g. every file skipIf'd) fails the gate instead of reading green.
 gate_step "pgvector ANN adapter (testcontainer)" '
   docker info >/dev/null 2>&1 || { echo "Docker is not reachable — required for the pgvector ANN adapter gate" >&2; exit 1; }
-  OUT=$(PGVECTOR_TESTCONTAINER=required pnpm test:pgvector 2>&1)
+  # Colour breaks the vacuous-guard grep below: it matches a literal "Tests <n> passed", but the runners
+  # ANSI escapes (e.g. "Tests \e[32m43 passed" — whose codes even CONTAIN digits, so a [^digit] skip cannot
+  # absorb them) split "Tests" from the count and false-fail a genuinely green run. Fix: force PLAIN output
+  # (NO_COLOR/FORCE_COLOR=0); and, as a belt if a tool ignores that, strip any residual escapes before the
+  # grep — falling back to the raw output if perl is unavailable, so the strip can never itself cause a
+  # false-fail. The strict [1-9] count still fails a 0-passed / vacuous run exactly as before.
+  OUT=$(NO_COLOR=1 FORCE_COLOR=0 PGVECTOR_TESTCONTAINER=required pnpm test:pgvector 2>&1)
   STATUS=$?
   echo "$OUT"
   [ $STATUS -eq 0 ] || exit 1
-  echo "$OUT" | grep -qE "Tests[[:space:]]+[1-9][0-9]*[[:space:]]+passed" \
+  CLEAN=$(printf "%s\n" "$OUT" | perl -pe "s/\e\[[0-9;]*[A-Za-z]//g" 2>/dev/null)
+  [ -n "$CLEAN" ] || CLEAN="$OUT"
+  printf "%s\n" "$CLEAN" | grep -qE "Tests[[:space:]]+[1-9][0-9]*[[:space:]]+passed" \
     || { echo "pgvector suite reported zero passed tests — refusing a vacuous gate" >&2; exit 1; }
 '
 
