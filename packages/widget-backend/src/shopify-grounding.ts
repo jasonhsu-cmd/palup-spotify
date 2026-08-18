@@ -81,8 +81,9 @@ const IMAGE_HOST = /^(cdn\.shopify\.com|[a-z0-9][a-z0-9-]*\.shopifycdn\.net|[a-z
 // anything else so a malformed slug can never become part of a rendered URL.
 const HANDLE_SHAPE = /^[a-z0-9][a-z0-9_-]*$/i;
 
-/** Validate a Shopify product image URL, returning it only when it is an https Shopify-CDN URL. Pure. */
-function safeImageUrl(url: string | undefined): string | undefined {
+/** Validate a Shopify product image URL, returning it only when it is an https Shopify-CDN URL. Pure.
+ *  Exported so the storefront-catalog WIRE layer can re-validate defensively (single source of truth). */
+export function safeImageUrl(url: string | undefined): string | undefined {
   if (typeof url !== "string") return undefined;
   const u = url.trim();
   if (u.length === 0 || u.length > MAX_IMAGE_URL) return undefined;

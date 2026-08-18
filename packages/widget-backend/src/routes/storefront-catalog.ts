@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { GroundingContext, StorePolicy } from "@palup/platform-ports";
 import { cartPermalink } from "../cart-permalink.js";
 import { productPermalink } from "../product-permalink.js";
+import { safeImageUrl } from "../shopify-grounding.js";
 
 // WS2 — public storefront catalog read endpoint. Backs the sample storefront's product grid + PDP + cart
 // (it renders the SAME live catalog the assistant is grounded on, so page and agent finally agree). It
@@ -61,7 +62,9 @@ export function projectStorefrontCatalog(
     priceConfirmed: p.priceConfirmed,
     availableForSale: p.availableForSale,
     tags: p.tags,
-    imageUrl: p.imageUrl,
+    // Defense in depth (security-review LOW): re-validate at the wire, not just at the adapter, so a
+    // future non-conforming GroundingPort adapter can never surface an unvalidated `<img src>` URL.
+    imageUrl: safeImageUrl(p.imageUrl),
     handle: p.handle,
     description: p.description,
     ingredients: p.ingredients,
@@ -87,6 +90,13 @@ export interface StorefrontCatalogDeps {
   shopDomainFor(tenantId: string): Promise<string | undefined>;
   /** Per-IP rate check (public, unauthenticated). true = allowed. Fail-OPEN like /widget/token. */
   allowIp(ipKey: string): Promise<boolean>;
+  /**
+   * Per-TENANT rate ceiling (security-review MEDIUM — denial-of-wallet backstop). This endpoint fronts the
+   * cold `getContext` fetch on the merchant's PRIVATE Shopify token; the per-IP limiter is spoofable via
+   * X-Forwarded-For, so an attacker who knows a public *.myshopify.com domain could otherwise stampede a
+   * merchant's Storefront API quota at each cache-TTL boundary. This ceiling is keyed by the SERVER-derived
+   * tenantId (unspoofable) and MUST fail CLOSED — the server impl denies on any store error. true = allowed. */
+  allowTenant(tenantId: string): Promise<boolean>;
   /** Client IP key from the request (server composes from x-forwarded-for + req.ip). */
   ipKeyFor(req: FastifyRequest): string;
 }
@@ -118,14 +128,30 @@ export function registerStorefrontCatalogRoutes(app: FastifyInstance, deps: Stor
     }
 
     // Resolve BEFORE any grounding fetch: cheap, and it keeps the 404 path from doing any work / being an
-    // oracle. One uniform 404 body for every non-ok outcome.
+    // oracle. One uniform 404 body for every non-ok outcome. The resolver swallows its own errors today,
+    // but guard a throw too (security-review LOW) so a future throwing resolver can't create a 500-vs-404
+    // oracle (error distinguishable from unknown) — every failure collapses to the same 404.
     const shop = (req.query as { shop?: string } | undefined)?.shop;
-    const resolved = await deps.resolveTenant(shop);
+    let resolved: { ok: boolean; tenantId?: string };
+    try {
+      resolved = await deps.resolveTenant(shop);
+    } catch {
+      resolved = { ok: false };
+    }
     if (!resolved.ok || !resolved.tenantId) {
       reply.code(404);
       return { error: "not found" };
     }
     const tenantId = resolved.tenantId;
+
+    // Per-tenant cost ceiling (security-review MEDIUM). Keyed by the SERVER-derived tenantId (unspoofable),
+    // fails CLOSED in the server impl — the real denial-of-wallet backstop for the cold-fetch path, since
+    // the per-IP limiter above is spoofable and fail-open. Checked AFTER resolution so an unknown shop can
+    // never consume a real tenant's budget.
+    if (!(await deps.allowTenant(tenantId))) {
+      reply.code(429);
+      return { error: "rate limited" };
+    }
 
     // The cached grounding port already fails closed to safe-empty; guard a genuine throw too so a cold
     // Shopify failure degrades to an honest empty catalog (200) rather than a 500.

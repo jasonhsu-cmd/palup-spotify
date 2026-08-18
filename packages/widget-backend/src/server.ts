@@ -1404,8 +1404,10 @@ export async function buildServer(opts?: {
 
   // WS2 — public storefront catalog read endpoint. Renders the SAME live catalog the assistant is grounded
   // on (getContext → the 30-min cache; no new fetch path), so the sample storefront's grid/PDP/cart and the
-  // widget finally agree. Injected deps mirror routes/embed.ts. Per-IP rate-limited (fail-open, like the
-  // /widget/token mint); uniform 404 for every non-ok tenant (no existence oracle).
+  // widget finally agree. Injected deps mirror routes/embed.ts. Rate-limited per-IP (fail-open, like the
+  // /widget/token mint) AND per-tenant (fail-CLOSED cost backstop — security-review MEDIUM: the per-IP
+  // limiter is XFF-spoofable, so the unspoofable per-tenant ceiling is what stops a cold-fetch stampede on
+  // a merchant's private Shopify token). Uniform 404 for every non-ok tenant (no existence oracle).
   registerStorefrontCatalogRoutes(app, {
     resolveTenant: async (shop) => {
       const r = await merchants.tenantForShopDomain(shop ?? "");
@@ -1414,6 +1416,15 @@ export async function buildServer(opts?: {
     getContext: (tenantId) => grounding.getContext(tenantId),
     shopDomainFor: (tenantId) => merchants.shopDomainFor(tenantId),
     allowIp: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
+    allowTenant: async (tenantId) => {
+      // Dedicated counter key ("storefront-catalog") so it never shares the /chat per-tenant bucket.
+      // Fail-CLOSED: a store error denies rather than silently disabling the cost ceiling.
+      try {
+        return await underLimit(store, { tenantId }, "storefront-catalog", RL_TENANT, RL_WINDOW);
+      } catch {
+        return false;
+      }
+    },
     ipKeyFor: (req) => {
       const xff = req.headers["x-forwarded-for"];
       return clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);

@@ -38,6 +38,7 @@ const baseDeps = (over: Partial<StorefrontCatalogDeps> = {}): StorefrontCatalogD
   getContext: async () => CTX,
   shopDomainFor: async () => "acme.myshopify.com",
   allowIp: async () => true,
+  allowTenant: async () => true,
   ipKeyFor: () => "ip-1",
   ...over,
 });
@@ -90,6 +91,38 @@ describe("GET /storefront/catalog (route unit)", () => {
     const a = await app({ allowIp: async () => false });
     const res = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com" });
     expect(res.statusCode).toBe(429);
+    await a.close();
+  });
+
+  it("returns 429 when the per-TENANT ceiling denies (denial-of-wallet backstop), checked only after resolve", async () => {
+    const denyTenant = { allowTenant: async () => false };
+    const a = await app(denyTenant);
+    // A known shop is throttled by the tenant ceiling...
+    const known = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com" });
+    expect(known.statusCode).toBe(429);
+    // ...but an UNKNOWN shop still 404s (the tenant check runs AFTER resolution, so it can't consume budget
+    // for / leak the existence of a tenant that didn't resolve).
+    const unknown = await a.inject({ method: "GET", url: "/storefront/catalog?shop=stranger.myshopify.com" });
+    expect(unknown.statusCode).toBe(404);
+    await a.close();
+  });
+
+  it("collapses a THROWING resolver to the uniform 404 (no 500-vs-404 oracle)", async () => {
+    const a = await app({ resolveTenant: async () => { throw new Error("registry down"); } });
+    const res = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com" });
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body)).toEqual({ error: "not found" });
+    await a.close();
+  });
+
+  it("re-validates imageUrl at the wire — a non-conforming adapter's bad URL is dropped (defense in depth)", async () => {
+    const bad: GroundingContext = {
+      tenantId: "demo", brandName: "Auria", policy: { returns: "", shipping: "" },
+      products: [{ id: "p1", title: "X", price: "$1", description: "d", imageUrl: "javascript:alert(1)" }],
+    };
+    const a = await app({ getContext: async () => bad });
+    const res = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com" });
+    expect(JSON.parse(res.body).products[0].imageUrl).toBeUndefined();
     await a.close();
   });
 
