@@ -91,11 +91,32 @@ export interface MergeCtx {
   /** Consent 2 status FOR THE ACCOUNT. Only `"in"` lets special-category facts migrate (Inv 9); any
    * other value (`"out"`/`"unknown"`) drops them — never promoted under sign-up ToS alone. */
   consent2: MemoryConsent;
+  /** R2-2 (both-sides consent) — Consent 2 status FOR THE GUEST subject being merged FROM (its own
+   * recorded `memorySpecial`, looked up the SAME way the account's `consent2` is). A special-category
+   * fact must never be promoted onto the account's consent alone: the GUEST must have separately opted
+   * in too, or the merge would let a shopper's account-level Consent-2 grant retroactively "claim"
+   * health facts the guest session itself never authorised for carry-over (they may have been left there
+   * by a different person on a shared device, or granted only for THAT anonymous session). Trusting a
+   * guest "in" here — unlike `consent.ts`'s `mergeConsentTier`, which explicitly REFUSES to adopt a guest
+   * "in" for its unauthenticated raw-anonId write path — is safe specifically BECAUSE this `anonId` is
+   * never a client-supplied string: every caller of `mergeGuestIntoAccount` must derive it from a
+   * server-VERIFIED, SIGNED guest token (see server.ts's `guestAnonIdFrom`), so there is no bearer-token-
+   * guessing / cross-subject-borrowing risk the way there would be if this ran off a raw `body.anonId`. */
+  consent2Source: MemoryConsent;
+  /** Q19(c) — whether health-data carry-over was named/disclosed to the shopper at sign-in (distinct
+   * from EITHER consent tier: a shopper can have granted Consent 2 for both subjects and still never have
+   * been told that signing in would carry health facts across). A special-category fact migrates ONLY
+   * when this is `true` AND both consent tiers above are `"in"` — the compound gate immediately below. */
+  healthDisclosed: boolean;
 }
 
 /**
- * Audited guest -> account fact CARRY-OVER (ADR-0015 Tier 2). Ordinary facts always follow;
- * special-category facts follow ONLY when `ctx.consent2 === "in"` (Inv 9).
+ * Audited guest -> account fact CARRY-OVER (ADR-0015 Tier 2). Ordinary (Art-6) facts always follow,
+ * UNCHANGED by the special-category gate below — there is no new gate on them here, deliberately.
+ * Special-category (Art-9) facts follow ONLY when the R2-2 + Q19(c) compound gate holds: the ACCOUNT's
+ * own `consent2 === "in"` AND the GUEST's own `consent2Source === "in"` AND `healthDisclosed === true`
+ * (Inv 9, extended). Any one of the three failing drops the row from THIS migration — never promoted
+ * onto a single insufficient signal alone. See `MergeCtx`'s own doc comments for each field.
  *
  * The guest namespace is left INTACT (see the module header for why). Calling this repeatedly is safe:
  * it migrates only ids the account does not already hold, returning `{merged: 0}` when there is nothing
@@ -186,7 +207,14 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
     // Defense-in-depth: post-#125 a `class:"special"` row should never appear in the MAIN namespace (it
     // routes to the floor at write time), but Inv 9's gate still applies here in case one does — a
     // pre-existing row seeded directly at the port layer, or written before this PR ever shipped.
-    if (meta?.class === "special" && ctx.consent2 !== "in") continue; // Inv 9 — dropped, never promoted
+    //
+    // R2-2 + Q19(c) — the compound special-category gate: ALL THREE of (account consent2 "in") AND
+    // (guest consent2Source "in") AND (healthDisclosed) must hold, or the row is dropped rather than
+    // promoted on any single one of those alone. See MergeCtx's own doc comments for why trusting the
+    // guest "in" here is safe (a server-verified signed guest token, not a raw/guessable anonId) —
+    // unlike consent.ts's `mergeConsentTier`, which refuses a guest "in" for its unauthenticated
+    // raw-anonId write path.
+    if (meta?.class === "special" && !(ctx.consent2 === "in" && ctx.consent2Source === "in" && ctx.healthDisclosed)) continue;
     if (alreadyHeld.has(match.id)) continue;
     toMigrate.push({ id: match.id, text: meta?.text, metadata: match.metadata });
   }
@@ -198,7 +226,11 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
   // copy-not-move, same as the rest of this function).
   const toMigrateFloor: VectorRecord[] = [];
   for (const match of floorMatches) {
-    if (ctx.consent2 !== "in") continue; // Inv 9 — dropped, never promoted onto sign-up ToS alone
+    // R2-2 + Q19(c) — same compound gate as the main-namespace case above: account consent2 "in" AND
+    // guest consent2Source "in" AND healthDisclosed, all three, or dropped (never promoted on any one
+    // alone). Every row here IS a safety-floor (special-category) fact by construction (#125), so the
+    // gate applies unconditionally.
+    if (!(ctx.consent2 === "in" && ctx.consent2Source === "in" && ctx.healthDisclosed)) continue;
     if (alreadyHeldFloor.has(match.id)) continue;
     const meta = match.metadata as Partial<FactMetadata> | undefined;
     toMigrateFloor.push({ id: match.id, text: meta?.text, metadata: match.metadata });
@@ -211,15 +243,31 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
     return { merged: 0 };
   }
 
-  if (toMigrate.length > 0) await deps.vector.upsert(accountNamespace, toMigrate);
-  if (toMigrateFloor.length > 0) await deps.vector.upsert(accountFloorNamespace, toMigrateFloor);
+  // §5 / security-review LOW-1 — a throw BETWEEN the two upserts (or during either) can leave facts already
+  // landed in the account namespace with no audit row if the audit is written only after both succeed. Every
+  // autonomous write must be logged (NN#5), so track what actually landed and, on any error, record that
+  // partial count before rethrowing (the caller then returns 500; a retry is idempotent — copy-not-move +
+  // content dedup). `recordMerge` still fires exactly once on every path.
+  let mergedSoFar = 0;
+  try {
+    if (toMigrate.length > 0) {
+      await deps.vector.upsert(accountNamespace, toMigrate);
+      mergedSoFar += toMigrate.length;
+    }
+    if (toMigrateFloor.length > 0) {
+      await deps.vector.upsert(accountFloorNamespace, toMigrateFloor);
+      mergedSoFar += toMigrateFloor.length;
+    }
+  } catch (e) {
+    await recordMerge(mergedSoFar); // audit whatever actually landed, even on partial failure
+    throw e;
+  }
   // THE GUEST NAMESPACE(S) ARE DELIBERATELY LEFT ALONE — see this module's header. Neither is orphaned:
   // both stop being written to once the shopper is signed in, so the scheduled retention sweep (B4)
   // reclaims them on the ordinary TTL. Minimisation by expiry, with no deletion primitive for an attacker
   // to reach.
 
-  const totalMerged = toMigrate.length + toMigrateFloor.length;
-  await recordMerge(totalMerged);
+  await recordMerge(mergedSoFar);
 
-  return { merged: totalMerged };
+  return { merged: mergedSoFar };
 }

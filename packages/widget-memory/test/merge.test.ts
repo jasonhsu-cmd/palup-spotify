@@ -47,7 +47,7 @@ describe("merge — mergeGuestIntoAccount", () => {
 
     const result = await mergeGuestIntoAccount(
       { vector, audit: runtimeStore },
-      { tenantId: "acme", anonId: "guest-merge", accountId: "acct-1", consent2: "unknown" },
+      { tenantId: "acme", anonId: "guest-merge", accountId: "acct-1", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
     );
     expect(result.merged).toBe(1);
 
@@ -71,7 +71,7 @@ describe("merge — mergeGuestIntoAccount", () => {
     await service.remember(ctx, { message: "m", reply: "r" });
 
     const deps = { vector, audit: runtimeStore };
-    const mergeCtx = { tenantId: "acme", anonId: "guest-twice", accountId: "acct-2", consent2: "unknown" as const };
+    const mergeCtx = { tenantId: "acme", anonId: "guest-twice", accountId: "acct-2", consent2: "unknown" as const, consent2Source: "unknown" as const, healthDisclosed: false };
 
     const first = await mergeGuestIntoAccount(deps, mergeCtx);
     expect(first.merged).toBe(1);
@@ -97,9 +97,11 @@ describe("merge — mergeGuestIntoAccount", () => {
     await service.remember(ctx, { message: "m", reply: "r" });
     expect(await service.recall(ctx)).toHaveLength(1);
 
+    // Isolates the ACCOUNT-side variable: guest opted in and disclosure happened, but the account itself
+    // never granted Consent 2 — still dropped (R2-2/Q19(c) is a compound AND, not an OR).
     const result = await mergeGuestIntoAccount(
       { vector, audit: runtimeStore },
-      { tenantId: "acme", anonId: "guest-special", accountId: "acct-3", consent2: "unknown" },
+      { tenantId: "acme", anonId: "guest-special", accountId: "acct-3", consent2: "unknown", consent2Source: "in", healthDisclosed: true },
     );
     expect(result.merged).toBe(0); // dropped, never promoted under sign-up ToS
 
@@ -107,7 +109,7 @@ describe("merge — mergeGuestIntoAccount", () => {
     expect(await service.recall(acctCtx)).toEqual([]);
   });
 
-  it("special facts DO migrate when Consent 2 is explicitly granted for the account", async () => {
+  it("special facts DO migrate (to the account FLOOR namespace) when all three hold: account consent2 'in', guest consent2Source 'in', AND healthDisclosed", async () => {
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
     const service = createMemoryService({
@@ -122,7 +124,7 @@ describe("merge — mergeGuestIntoAccount", () => {
 
     const result = await mergeGuestIntoAccount(
       { vector, audit: runtimeStore },
-      { tenantId: "acme", anonId: "guest-special-in", accountId: "acct-4", consent2: "in" },
+      { tenantId: "acme", anonId: "guest-special-in", accountId: "acct-4", consent2: "in", consent2Source: "in", healthDisclosed: true },
     );
     expect(result.merged).toBe(1);
 
@@ -140,6 +142,81 @@ describe("merge — mergeGuestIntoAccount", () => {
     expect(mainListed).toHaveLength(0);
   });
 
+  it("R2-2 — special facts are DROPPED when the GUEST did not opt in (consent2Source !== 'in'), even though the account did AND disclosure happened", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: fixedDistiller(["shopper has a tree-nut allergy"]),
+      enabled: true,
+      secrets: keyedSecrets("acme"),
+    });
+    // Written under the GUEST's own consent2 "in" so the fact exists as a special-category row at all —
+    // but the case under test is the MERGE-TIME consent2Source, which we deliberately pass as "unknown"
+    // below (simulating a guest record that was never actually looked up as "in", e.g. a stale/incomplete
+    // guest consent record) to prove R2-2's guest-side leg is independently load-bearing.
+    const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-r22-source", region: "us", consent1: "in", consent2: "in" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    const result = await mergeGuestIntoAccount(
+      { vector, audit: runtimeStore },
+      { tenantId: "acme", anonId: "guest-r22-source", accountId: "acct-r22", consent2: "in", consent2Source: "unknown", healthDisclosed: true },
+    );
+    expect(result.merged).toBe(0); // dropped: the GUEST subject's own recorded consent2 was not "in"
+
+    const acctCtx: MemoryCtx = { tenantId: "acme", anonId: "acct:acct-r22", region: "us", consent1: "in", consent2: "in" };
+    expect(await service.recall(acctCtx)).toEqual([]);
+  });
+
+  it("Q19(c) — special facts are DROPPED when healthDisclosed is false, even though both consent tiers are 'in'", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: fixedDistiller(["shopper has a tree-nut allergy"]),
+      enabled: true,
+      secrets: keyedSecrets("acme"),
+    });
+    const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-q19c", region: "us", consent1: "in", consent2: "in" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    const result = await mergeGuestIntoAccount(
+      { vector, audit: runtimeStore },
+      { tenantId: "acme", anonId: "guest-q19c", accountId: "acct-q19c", consent2: "in", consent2Source: "in", healthDisclosed: false },
+    );
+    expect(result.merged).toBe(0); // dropped: sign-in never named health-data carry-over
+
+    const acctCtx: MemoryCtx = { tenantId: "acme", anonId: "acct:acct-q19c", region: "us", consent1: "in", consent2: "in" };
+    expect(await service.recall(acctCtx)).toEqual([]);
+  });
+
+  it("ordinary facts still carry regardless of the special-category compound gate (Art-6 vs Art-9 are independent)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const service = createMemoryService({
+      vector,
+      audit: runtimeStore,
+      distiller: fixedDistiller(["prefers fragrance-free", "shopper has a tree-nut allergy"]),
+      enabled: true,
+      secrets: keyedSecrets("acme"),
+    });
+    const ctx: MemoryCtx = { tenantId: "acme", anonId: "guest-mixed", region: "us", consent1: "in", consent2: "in" };
+    await service.remember(ctx, { message: "m", reply: "r" });
+
+    // All three special-category gates fail (account never opted in, guest never opted in, no
+    // disclosure) — the ordinary fact must still migrate untouched.
+    const result = await mergeGuestIntoAccount(
+      { vector, audit: runtimeStore },
+      { tenantId: "acme", anonId: "guest-mixed", accountId: "acct-mixed", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
+    );
+    expect(result.merged).toBe(1); // ordinary only; the special row was dropped
+
+    const acctCtx: MemoryCtx = { tenantId: "acme", anonId: "acct:acct-mixed", region: "us", consent1: "in", consent2: "in" };
+    expect(await service.recall(acctCtx)).toEqual([{ text: "prefers fragrance-free", class: "ordinary" }]);
+  });
+
   it("emits a merge audit", async () => {
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
@@ -154,7 +231,7 @@ describe("merge — mergeGuestIntoAccount", () => {
 
     await mergeGuestIntoAccount(
       { vector, audit: runtimeStore },
-      { tenantId: "acme", anonId: "guest-audit", accountId: "acct-5", consent2: "unknown" },
+      { tenantId: "acme", anonId: "guest-audit", accountId: "acct-5", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
     );
 
     const log = await runtimeStore.readAudit({ tenantId: "acme" });
@@ -180,7 +257,7 @@ describe("merge — mergeGuestIntoAccount", () => {
 
       await mergeGuestIntoAccount(
         { vector, audit: runtimeStore, hmacKey: "test-key" },
-        { tenantId: "acme", anonId: "guest-f8", accountId: "acct-f8", consent2: "unknown" },
+        { tenantId: "acme", anonId: "guest-f8", accountId: "acct-f8", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
       );
 
       const log = await runtimeStore.readAudit({ tenantId: "acme" });
@@ -204,7 +281,7 @@ describe("merge — mergeGuestIntoAccount", () => {
 
       const result = await mergeGuestIntoAccount(
         { vector, audit: runtimeStore, hmacKey: "test-key" },
-        { tenantId: "acme", anonId: "guest-empty", accountId: "acct-empty", consent2: "unknown" },
+        { tenantId: "acme", anonId: "guest-empty", accountId: "acct-empty", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
       );
       expect(result.merged).toBe(0);
 
@@ -230,7 +307,7 @@ describe("merge — mergeGuestIntoAccount", () => {
       await service.remember(ctx, { message: "m", reply: "r" });
 
       const deps = { vector, audit: runtimeStore, hmacKey: "test-key" };
-      const mergeCtx = { tenantId: "acme", anonId: "guest-f8-dup", accountId: "acct-f8-dup", consent2: "unknown" as const };
+      const mergeCtx = { tenantId: "acme", anonId: "guest-f8-dup", accountId: "acct-f8-dup", consent2: "unknown" as const, consent2Source: "unknown" as const, healthDisclosed: false };
       await mergeGuestIntoAccount(deps, mergeCtx); // first call moves the fact
 
       const result = await mergeGuestIntoAccount(deps, mergeCtx); // second call: nothing new to move
@@ -261,7 +338,7 @@ describe("merge — mergeGuestIntoAccount", () => {
 
       const result = await mergeGuestIntoAccount(
         { vector, audit: runtimeStore, hmacKey: "test-key" },
-        { tenantId: "acme", anonId: "guest-f8-special", accountId: "acct-f8-special", consent2: "unknown" },
+        { tenantId: "acme", anonId: "guest-f8-special", accountId: "acct-f8-special", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
       );
       expect(result.merged).toBe(0); // dropped, never promoted under sign-up ToS
 
@@ -309,7 +386,7 @@ describe("merge — mergeGuestIntoAccount", () => {
       { vector, audit: runtimeStore },
       // Note: MergeCtx has NO field for sessionDisposition/SessionState at all — passing one is not even
       // expressible; this is the "reject-in-full" type-level version of the exclusion.
-      { tenantId: "acme", anonId: "guest-session-disp", accountId: "acct-6", consent2: "unknown" },
+      { tenantId: "acme", anonId: "guest-session-disp", accountId: "acct-6", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
     );
     expect(result.merged).toBe(1); // only the durable fact migrated
 
@@ -333,7 +410,7 @@ describe("merge — mergeGuestIntoAccount", () => {
     process.env.NODE_ENV = "production";
     try {
       await expect(
-        mergeGuestIntoAccount({ vector, audit: runtimeStore }, { tenantId: "acme", anonId: "guest-n6", accountId: "acct-n6", consent2: "unknown" }),
+        mergeGuestIntoAccount({ vector, audit: runtimeStore }, { tenantId: "acme", anonId: "guest-n6", accountId: "acct-n6", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false }),
       ).rejects.toThrow(/hmacKey/);
     } finally {
       if (originalVitest === undefined) delete process.env.VITEST;
@@ -357,7 +434,7 @@ describe("merge — mergeGuestIntoAccount", () => {
 
     const result = await mergeGuestIntoAccount(
       { vector, audit: runtimeStore, hmacKey: "test-audit-key" },
-      { tenantId: "acme", anonId: "guest-n6b", accountId: "acct-n6b", consent2: "unknown" },
+      { tenantId: "acme", anonId: "guest-n6b", accountId: "acct-n6b", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
     );
     expect(result.merged).toBe(1);
   });
@@ -380,7 +457,7 @@ describe("merge — PAGINATED migration at scale (semantic-memory-v1 foundation,
 
       const result = await mergeGuestIntoAccount(
         { vector, audit: runtimeStore },
-        { tenantId: "acme", anonId: "guest-1500-merge", accountId: "acct-1500", consent2: "unknown" },
+        { tenantId: "acme", anonId: "guest-1500-merge", accountId: "acct-1500", consent2: "unknown", consent2Source: "unknown", healthDisclosed: false },
       );
       expect(result.merged).toBe(1500); // not capped at the old QUERY_LIMIT=500
 
@@ -393,4 +470,38 @@ describe("merge — PAGINATED migration at scale (semantic-memory-v1 foundation,
       expect(await vector.query(anonNs, { text: "", k: 2000 })).toHaveLength(1500);
     },
   );
+});
+
+// §5 / security-review LOW-1: a throw between the two upserts must not swallow the audit — a partial
+// write (facts already landed in the account main namespace) still has to be logged (NN#5), then rethrown.
+describe("merge — partial-failure still audits (LOW-1)", () => {
+  it("a throw during the FLOOR upsert records a merge audit for what landed, then rethrows", async () => {
+    const base = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const acctFloorNs = floorNamespace("acme", accountSubjectId("acct-low1"));
+    // A guest with one ordinary (main) + one special (floor) fact, so BOTH account upserts run.
+    await base.upsert(subjectNamespace("acme", "g-low1"), [{ id: "ord", text: "t", metadata: { class: "ordinary", text: "t" } }]);
+    await base.upsert(floorNamespace("acme", "g-low1"), [{ id: "spec", text: "h", metadata: { class: "special", text: "h" } }]);
+    // Fail ONLY the account FLOOR upsert — the account MAIN upsert lands first, creating the partial state.
+    const vector = {
+      ...base,
+      upsert: async (ns: string, recs: Parameters<typeof base.upsert>[1]) => {
+        if (ns === acctFloorNs) throw new Error("floor upsert boom");
+        return base.upsert(ns, recs);
+      },
+    };
+
+    await expect(
+      mergeGuestIntoAccount(
+        { vector, audit: runtimeStore, hmacKey: "k" },
+        { tenantId: "acme", anonId: "g-low1", accountId: "acct-low1", consent2: "in", consent2Source: "in", healthDisclosed: true },
+      ),
+    ).rejects.toThrow("floor upsert boom");
+
+    // NN#5 — the merge audit row was still written on the failure path (the catch), exactly once.
+    const mergeAudits = (await runtimeStore.readAudit({ tenantId: "acme" })).filter((r) => r.action === "merge");
+    expect(mergeAudits).toHaveLength(1);
+    // The ordinary fact really did land in the account main namespace before the floor upsert threw.
+    expect(await base.query(subjectNamespace("acme", accountSubjectId("acct-low1")), { text: "", k: 10 })).toHaveLength(1);
+  });
 });

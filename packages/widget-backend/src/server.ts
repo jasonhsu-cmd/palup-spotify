@@ -46,6 +46,7 @@ import {
   decideMemoryWrite,
   ERASURE_TOMBSTONE_COLLECTION,
   tombstoneKey,
+  mergeGuestIntoAccount,
 } from "@palup/widget-memory";
 import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
@@ -2064,6 +2065,115 @@ export async function buildServer(opts?: {
       }
     }
     return { ok: true };
+  });
+
+  // Task 10 (ADR-0015 Tier 2 / ADR-0019 R2-1, R2-2, Q19(c)) — the production caller of
+  // `mergeGuestIntoAccount` (widget-memory/src/merge.ts), reached by the widget ONCE per CAA sign-in
+  // handoff (best-effort, never on every /chat turn — merge.ts's own doc comment is explicit that an
+  // every-turn caller is exactly what this must NOT be, since every call — including a no-op — writes an
+  // audit row). Guarded exactly like `/consent` and `/forget`: per-IP + per-tenant rate limit (429), the
+  // NN#4 operator kill switch (503), and registered only while memory is actually live
+  // (`memoryServiceEnabled`) — unlike `/forget`, a carry-over of nothing has no data-rights argument for
+  // staying reachable while the feature is off, so this one 404s like every other memory-gated route.
+  //
+  // SUBJECT DERIVATION IS THE WHOLE POINT: the account subject comes ONLY from a server-VERIFIED shopper
+  // token (`verifiedShopperIdFor`) — no verified shopper, no merge, 401 (there is no account to merge
+  // INTO otherwise). The guest subject comes ONLY from a server-VERIFIED, SIGNED `x-guest-token`
+  // (`guestAnonIdFrom`) — NEVER `body.anonId` — exactly like `/consent`/`/forget`'s own invariant 4. A
+  // request that supplies only a `body.anonId` (no valid guest token) names no guest subject at all, so
+  // it degrades to "nothing to merge" (`{merged:0}`), never to trusting the client's string.
+  app.post("/memory/merge", async (req, reply) => {
+    if (!memoryServiceEnabled) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    const xff = req.headers["x-forwarded-for"];
+    const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    try {
+      if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open: mirrors /consent and /forget */
+    }
+    const body = (req.body ?? {}) as {
+      anonId?: unknown; // NEVER trusted as the guest subject — see the route's own doc comment above.
+      healthDisclosed?: unknown;
+      widgetToken?: string;
+      /** Mirrors /chat's/consent's dual-transport fallback for the x-shopper-token header. */
+      shopperToken?: string;
+    };
+    const authHeader = req.headers["authorization"];
+    const widgetToken =
+      typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7)
+        : typeof body.widgetToken === "string"
+          ? body.widgetToken
+          : undefined;
+    const principal = await widgetIdentity.authenticate(widgetToken);
+    if (principal.kind !== "merchant" && WIDGET_AUTH_REQUIRED) {
+      reply.code(401);
+      return { error: "unauthenticated" };
+    }
+    const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
+    try {
+      if (!(await underLimit(store, { tenantId }, "memory-merge", RL_TENANT, RL_WINDOW))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open, as above */
+    }
+    // NN#4 — the operator kill switch outranks everything: a merge is a governed, audited memory write
+    // (mergeGuestIntoAccount's own `recordMerge`), so the halt must be able to stop it too.
+    if (await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) {
+      reply.code(503);
+      return { error: "paused" };
+    }
+
+    // The account identity ONLY from a verified shopper token — a merge with no signed-in shopper has no
+    // account to merge INTO, so this is a hard 401, not a fall-through to some other subject.
+    const verifiedShopperId = await verifiedShopperIdFor(principal, tenantId, req.headers["x-shopper-token"], body.shopperToken);
+    if (!verifiedShopperId) {
+      reply.code(401);
+      return { error: "a verified shopper is required to merge guest memory into an account" };
+    }
+    // The guest identity ONLY from a verified, signed x-guest-token — NEVER body.anonId (invariant 4,
+    // same helper /consent and /forget already use). Absent/invalid ⇒ nothing to merge, not an error.
+    const guestAnonId = await guestAnonIdFrom(req, tenantId);
+    if (!guestAnonId) {
+      return { merged: 0 };
+    }
+
+    const accountSubject = memorySubjectId({ verifiedShopperId });
+    const [accountConsent, guestConsent] = await Promise.all([
+      lookupConsent(store, { tenantId, anonId: accountSubject! }),
+      lookupConsent(store, { tenantId, anonId: guestAnonId }),
+    ]);
+    // MED-1 (security review) — INTERIM: `healthDisclosed` is a CLIENT-ASSERTED Q19(c) gate leg. The other
+    // two legs (both consent tiers) are server-recorded; this one is not. A tampered client already holding
+    // valid shopper+guest tokens with Consent 2 "in" on BOTH subjects could assert `true` and carry Art-9
+    // facts even if the disclosure UI never showed (bounded: self-data, own account, both consents still
+    // required — not a cross-subject/exfil path). Before the memory feature is ENABLED, this must become a
+    // SERVER-RECORDED disclosure event (recorded when the widget carry-over prompt actually names health
+    // data), read here instead of trusting a body boolean — a named-owner/counsel go-live residual, landing
+    // with the R2-1 carry-over prompt (CARRY_OVER_PROMPT_ENABLED, still legal-gated off). Safe as-is only
+    // because the route 404s while memory is dark and no widget caller sets this true yet.
+    const healthDisclosed = body.healthDisclosed === true;
+
+    const result = await mergeGuestIntoAccount(
+      { vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET },
+      {
+        tenantId,
+        anonId: guestAnonId,
+        accountId: verifiedShopperId,
+        consent2: accountConsent.memorySpecial,
+        consent2Source: guestConsent.memorySpecial,
+        healthDisclosed,
+      },
+    );
+    return { merged: result.merged };
   });
 
   app.post("/chat", async (req, reply) => {
