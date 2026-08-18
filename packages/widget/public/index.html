@@ -20,7 +20,10 @@
     --brand-text:var(--brand-glow);
     --shadow:0 18px 50px rgba(15,23,42,.18);
   }
-  @media (prefers-color-scheme: dark){ :root{
+  /* Dark scheme is opt-out-able: a host that pins data-theme="light" (the embedded /embed/panel, kept
+     light-toned to match the storefront) stays light; the /widget a11y harness sets nothing, so it still
+     follows the OS scheme and the dark-mode a11y states keep exercising this block. */
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
     --bg:#0b0e14; --panel:#141924; --fg:#e6e9ef; --muted:#94a3b8; --line:#232a37;
     --brand:#4f46e5; --brand-glow:#818cf8; --palup:#5eb99b;
     --agent:#1b212e; --user:var(--brand);
@@ -93,7 +96,7 @@
   .agent{ align-self:flex-start; background:var(--agent); border-bottom-left-radius:5px }
   .agent.safety{ background:var(--safe); border:1px solid var(--safeln) }
   .badge{ font-size:11px; color:#475569; margin-top:5px; font-family:ui-monospace,monospace }
-  @media (prefers-color-scheme: dark){ .badge{ color:#94a3b8 } }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .badge{ color:#94a3b8 } }
   .badge[hidden]{ display:none }
   /* human take-over handoff + offline system lines */
   .handoff{ align-self:stretch; max-width:100%; text-align:center; color:var(--muted); font-size:12.5px; padding:9px 12px; margin:4px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:color-mix(in srgb,var(--brand) 9%,transparent) }

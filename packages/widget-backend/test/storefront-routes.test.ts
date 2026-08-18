@@ -26,6 +26,7 @@ describe("WS3 — storefront routes", () => {
     expect(res.body).toContain('data-shop="palup-skincare-jason.myshopify.com"');
     expect(res.body).toContain('src="/storefront/app.js"');
     expect(res.body).not.toContain('id="widget"'); // the widget is embedded via the loader, not inlined
+    expect(res.body).toContain('data-theme="light"'); // pinned light-toned per owner directive
     await app.close();
   });
 
@@ -45,8 +46,10 @@ describe("WS3 — storefront routes", () => {
     expect(p.statusCode).toBe(200);
     expect(p.headers["content-type"]).toContain("text/html");
     expect(p.body).toContain('id="pdp"');
+    expect(p.body).toContain('data-theme="light"');
     expect(c.statusCode).toBe(200);
     expect(c.body).toContain('id="cart"');
+    expect(c.body).toContain('data-theme="light"');
     await app.close();
   });
 

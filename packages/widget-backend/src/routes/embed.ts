@@ -71,7 +71,12 @@ export function registerEmbedRoutes(app: FastifyInstance, deps: EmbedDeps): void
     // WS10 — inject the merchant brand theme FOUC-free at the panel's <!--PALUP_THEME--> marker. Values are
     // validated hex (CSS) + JSON-escaped name/logo; a shop that doesn't resolve gets the default indigo theme.
     const theme = await deps.resolveThemeFor(shop);
-    return deps.panelHtml.replace("<!--PALUP_THEME-->", themeStyleBlock(theme));
+    // Pin the embedded chat to the light scheme so it matches the light-toned storefront and never
+    // darkens on a dark-OS shopper (owner directive). The raw widgetHtml served at /widget stays
+    // unpinned, so the a11y suite keeps exercising the dark scheme there.
+    return deps.panelHtml
+      .replace("<!--PALUP_THEME-->", themeStyleBlock(theme))
+      .replace('<html lang="en">', '<html lang="en" data-theme="light">');
   });
   // WS10 — the loader's shadow-DOM launcher (on the merchant page, cross-origin) fetches this to recolour
   // its bubble to the brand. JSON, cacheable, only the two colours the bubble needs — never a secret.

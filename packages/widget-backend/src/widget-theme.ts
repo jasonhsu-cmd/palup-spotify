@@ -133,7 +133,7 @@ function safeLogoUrl(url: string | undefined): string | undefined {
 export function themeStyleBlock(theme: ResolvedTheme): string {
   const style =
     `<style id="palup-theme">:root{--brand:${theme.brand};--brand-ink:${theme.brandInk};--brand-glow:${theme.brandText};}` +
-    `@media (prefers-color-scheme: dark){:root{--brand:${theme.brand};--brand-ink:${theme.brandInk};--brand-glow:${theme.brandTextDark};}}</style>`;
+    `@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--brand:${theme.brand};--brand-ink:${theme.brandInk};--brand-glow:${theme.brandTextDark};}}</style>`;
   const meta = JSON.stringify({ brandName: theme.brandName, logoUrl: theme.logoUrl }).replace(/</g, "\\u003c");
   const script = `<script>window.PALUP=Object.assign(window.PALUP||{},{theme:${meta}});</script>`;
   return style + script;
