@@ -165,6 +165,40 @@ describe("D3 — Customer Account API (ADR-0018) enablement env is opt-in and sh
   });
 });
 
+describe("#126 — the async memory-write Pub/Sub push env is opt-in and ships dark, mirroring P4", () => {
+  it("MEMORY_PUBSUB_AUDIENCE is threaded as its OWN gate (mirrors CATALOG_PUBSUB_AUDIENCE)", () => {
+    expect(yml).toContain("MEMORY_PUBSUB_AUDIENCE: ${{ vars.MEMORY_PUBSUB_AUDIENCE }}");
+  });
+
+  it("the update-env-vars block is gated on the audience and sets the memory-write trio, mirroring the catalog block", () => {
+    // Same fail-closed shell idiom as the CATALOG_PUBSUB_AUDIENCE block: `if [ -n ... ]; then ... fi`, not
+    // `|| true` (a merge-gate no-weakening check greps ADDED lines for that, continue-on-error, if: false).
+    expect(yml).toMatch(/if \[ -n "\$\{MEMORY_PUBSUB_AUDIENCE:-\}" \]; then/);
+    expect(yml).toContain(
+      'MEMORY_PUBSUB_TOPIC=memory-write,MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT=pubsub-memory-push@${GCP_PROJECT}.iam.gserviceaccount.com,MEMORY_PUBSUB_PUSH_AUDIENCE=${MEMORY_PUBSUB_AUDIENCE}',
+    );
+  });
+
+  it("absent MEMORY_PUBSUB_AUDIENCE is a documented no-op, not a silent one", () => {
+    expect(yml).toMatch(/MEMORY_PUBSUB_AUDIENCE not set.*inert/);
+  });
+
+  it("no `|| true`, `continue-on-error`, or `if: false` was introduced by the memory push-env block", () => {
+    // Scoped NARROWLY to the actual added run-script block (not the whole file, and not the env: comment
+    // above it) — pre-existing shell idiom elsewhere in this workflow legitimately uses `|| true` for
+    // `&&`-chained non-assertions (e.g. the C1 install-env-count loop), so this must only catch a NEW
+    // occurrence inside the lines this task adds, anchored on a string unique to this block's own comment.
+    const start = yml.indexOf("a SECOND --update-env-vars");
+    expect(start).toBeGreaterThan(-1);
+    const end = yml.indexOf("Post-deploy smoke gate");
+    expect(end).toBeGreaterThan(start);
+    const block = yml.slice(start, end);
+    expect(block).not.toMatch(/\|\|\s*true/);
+    expect(block).not.toMatch(/continue-on-error/);
+    expect(block).not.toMatch(/if:\s*false/);
+  });
+});
+
 describe("D3 — the safety properties of this workflow are unchanged", () => {
   it("still deploys only after ci CONCLUDED SUCCESSFULLY (never as a sibling of it)", () => {
     expect(yml).toMatch(/workflow_run:\s*\n\s*workflows: \[ci\]/);

@@ -192,6 +192,12 @@ jobs:
           # register the OIDC push route on staging so its gate can be smoke-verified BEFORE the producer is
           # enabled (the route is decoupled from CATALOG_WEBHOOKS). Empty ⇒ not set ⇒ route absent (inert).
           CATALOG_PUBSUB_AUDIENCE: ${{ vars.CATALOG_PUBSUB_AUDIENCE }}
+          # #126 — the durable Pub/Sub memory-write push route (CONSUME side), mirroring CATALOG_PUBSUB_AUDIENCE
+          # immediately above but a SEPARATE gate: set this repo variable to the memory-write push endpoint URL
+          # (which MUST byte-equal the terraform subscription's OIDC audience, infra/terraform/pubsub-memory.tf)
+          # to register the route on staging. Empty ⇒ not set ⇒ route absent (inert) ⇒ /chat's memory write
+          # stays fully INLINE (dispatchMemoryWrite's queue-undefined branch) — no governance flag involved.
+          MEMORY_PUBSUB_AUDIENCE: ${{ vars.MEMORY_PUBSUB_AUDIENCE }}
         run: |
           set -euo pipefail
 
@@ -378,6 +384,24 @@ jobs:
               --update-env-vars "PUBSUB_CATALOG_TOPIC=catalog-reconcile,PUBSUB_PUSH_SERVICE_ACCOUNT=pubsub-catalog-push@${GCP_PROJECT}.iam.gserviceaccount.com,PUBSUB_PUSH_AUDIENCE=${CATALOG_PUBSUB_AUDIENCE}"
           else
             echo "CATALOG_PUBSUB_AUDIENCE not set — the Pub/Sub push route stays absent (inert)."
+          fi
+
+          # #126 — the durable async memory-write Pub/Sub push env (CONSUME side), a SECOND --update-env-vars
+          # call for the same reason as the catalog one above: the push SA email contains '@' (the ^@^
+          # delimiter used by --set-env-vars would mis-split it), and --update-env-vars MERGES so it re-adds
+          # these three AFTER the --set-env-vars call above dropped them (they are not in ENVS). Gated on its
+          # OWN audience repo variable, entirely independent of CATALOG_PUBSUB_AUDIENCE: absent ⇒ no-op ⇒ the
+          # memory push route stays 404/absent (inert) ⇒ /chat's memory write stays fully INLINE, exactly as
+          # before this task. Registering this route does not itself turn memory on — memoryServiceEnabled
+          # (the ADR-0015 double gate) is a separate, human-only precondition (docs/MEMORY-GO-LIVE-CHECKLIST.md).
+          if [ -n "${MEMORY_PUBSUB_AUDIENCE:-}" ]; then
+            echo "#126: registering the durable memory-write Pub/Sub push env (audience=${MEMORY_PUBSUB_AUDIENCE})"
+            gcloud run services update palup-widget-staging \
+              --project "${GCP_PROJECT}" \
+              --region "${GCP_REGION}" \
+              --update-env-vars "MEMORY_PUBSUB_TOPIC=memory-write,MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT=pubsub-memory-push@${GCP_PROJECT}.iam.gserviceaccount.com,MEMORY_PUBSUB_PUSH_AUDIENCE=${MEMORY_PUBSUB_AUDIENCE}"
+          else
+            echo "MEMORY_PUBSUB_AUDIENCE not set — the memory-write push route stays absent (inert; /chat memory writes stay inline)."
           fi
       - name: Post-deploy smoke gate (health + live /chat + auth)
         run: |

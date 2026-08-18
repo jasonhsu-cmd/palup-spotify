@@ -75,6 +75,8 @@ import { createReconcileCoalescer, CATALOG_RECONCILE_COALESCE_MS_DEFAULT } from 
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
 import { reconcileByReason, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
+import { registerMemoryWritePushRoute } from "./routes/pubsub-push-memory.js";
+import { dispatchMemoryWrite } from "./memory-write-dispatch.js";
 
 // Run-time agent identity for the operator Kill Switch. Single-tenant demo for now; when real
 // multi-tenancy lands, thread the AUTHENTICATED tenant (from the widget embed key, never the shopper)
@@ -301,6 +303,14 @@ export async function buildServer(opts?: {
    * authoritative regardless, so no caller can flip memory on via config/injection alone (NN#1).
    */
   memoryEnabled?: boolean;
+  /**
+   * #126 W1.5 test seam — mirrors `opts.memoryEnabled`'s EXACT safeguard: honored ONLY under a real test
+   * runner (VITEST=true / NODE_ENV=test). Lets a test prove the /chat call site hands off through
+   * `dispatchMemoryWrite` (memory-write-dispatch.ts) instead of calling `remember()` inline, without a real
+   * Pub/Sub topic. In production (no test runner) this is IGNORED — the MEMORY_PUBSUB_* trio below is the
+   * only thing that can produce a real queue, so no caller can flip the write path via injection alone.
+   */
+  memoryWriteQueue?: QueuePort;
 }) {
   // Security review (Finding 6 — LOW, corrected): FAIL FAST, before any store/pool construction or DDL —
   // mirrors how `createRuntimeStore` fails fast on PALUP_REQUIRE_DATABASE_URL. This guard previously ran
@@ -1194,6 +1204,60 @@ export async function buildServer(opts?: {
       }
     }
   }
+
+  // #126 W1.5 — the durable async memory-write queue + its OIDC-verified push route, mirroring the P4
+  // catalog Pub/Sub pattern immediately above but scoped to memory writes and gated on its OWN env trio
+  // (INDEPENDENT of PUBSUB_CATALOG_TOPIC/CATALOG_WEBHOOKS — an operator can turn on the durable catalog
+  // path without touching memory, and vice versa). Ships dark: absent env ⇒ `memoryWriteQueue` stays
+  // undefined ⇒ `dispatchMemoryWrite` at the /chat call site below runs the SAME inline `remember()` as
+  // today (server-sync-memory-write.test.ts pins this). No governance flag is touched here — memory's own
+  // ADR-0015 double gate (`memoryServiceEnabled`) is reused unchanged as an ADDITIONAL precondition: a queue
+  // for a feature that is itself off would register a route with nothing legitimate to write.
+  const MEMORY_PUBSUB_TOPIC = process.env.MEMORY_PUBSUB_TOPIC?.trim();
+  const MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT = process.env.MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT?.trim();
+  const MEMORY_PUBSUB_PUSH_AUDIENCE = process.env.MEMORY_PUBSUB_PUSH_AUDIENCE?.trim();
+  const memoryPushConfigured = Boolean(MEMORY_PUBSUB_TOPIC && MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT && MEMORY_PUBSUB_PUSH_AUDIENCE);
+
+  // CONSUME side — registered only when memory is actually live AND the push env is fully configured.
+  if (memoryServiceEnabled && memoryPushConfigured) {
+    // Dynamic import so the GCP SDK loads ONLY when memory push is configured (mirrors the catalog route
+    // above — portability, ADR-0001/NN#3: no provider SDK import outside this gated branch).
+    const { OAuth2Client } = await import("google-auth-library");
+    const memoryOauth = new OAuth2Client();
+    const memoryVerify: OidcVerifier = async (token) => {
+      // Same verifyIdToken pattern as the catalog route's verifier, but a DIFFERENT audience — each push
+      // route has its own dedicated OIDC audience, so the two verifiers are never interchangeable.
+      const ticket = await memoryOauth.verifyIdToken({ idToken: token, audience: MEMORY_PUBSUB_PUSH_AUDIENCE! });
+      const p = ticket.getPayload();
+      return p?.email && p.email_verified === true ? { email: p.email } : null;
+    };
+    registerMemoryWritePushRoute(app, {
+      verify: memoryVerify,
+      expectedServiceAccount: MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT!,
+      remember: (ctx, turn) => memoryService!.remember(ctx, turn),
+      checkRateLimit: (ip) => underLimit(store, { tenantId: "__mint__" }, `ip:${ip}`, RL_IP, RL_WINDOW),
+    });
+    console.warn(
+      "[config] memory-write Pub/Sub OIDC push route registered (consume side) — its OIDC verify (signature + " +
+        "audience + expected SA + email_verified) is the SOLE control on this internet-reachable route, mirroring " +
+        "the catalog push route's gate. Registration requires memoryServiceEnabled (ADR-0015 double gate) — " +
+        "MEMORY_ADR_ACCEPTED being hardcoded false keeps this absent in real production regardless of env.",
+    );
+  }
+
+  // PUBLISH side — the QueuePort `dispatchMemoryWrite` (memory-write-dispatch.ts) hands writes off to at
+  // the /chat call site, instead of calling `remember()` inline. `opts.memoryWriteQueue` is the test seam
+  // (honored ONLY under a real test runner, mirroring `opts.memoryEnabled` exactly); real construction below
+  // is the ONLY thing that can produce a live queue in production.
+  let memoryWriteQueue: QueuePort | undefined = underTestRunner ? opts?.memoryWriteQueue : undefined;
+  if (!memoryWriteQueue && memoryServiceEnabled && memoryPushConfigured) {
+    const { PubSub } = await import("@google-cloud/pubsub");
+    memoryWriteQueue = createPubSubQueue({
+      client: new PubSub() as unknown as PubSubClientLike,
+      topicName: () => MEMORY_PUBSUB_TOPIC!,
+    });
+  }
+
   if (SHOPIFY_WEBHOOKS_ENABLED) {
     // Idempotent DDL, and only when C1 has not already run it (an injected registry has no migration).
     registerShopifyWebhookRoutes(app, {
@@ -2485,12 +2549,22 @@ export async function buildServer(opts?: {
         // follow-up is a proper async write queue (Cloud Tasks/Pub/Sub, mirroring the catalog-webhook
         // path) so the write is durably handed off instead of raced against a frozen container.
         try {
-          await memoryService.remember(
+          // #126 W1.5 — enqueue-or-inline. `memoryWriteQueue` undefined (the dark default, always true in
+          // real production until the MEMORY_PUBSUB_* env is set) ⇒ this calls `remember()` INLINE, byte-
+          // identical to before this change; a configured queue hands the write off async instead, falling
+          // back to the SAME inline call on any publish failure (memory-write-dispatch.ts). Either way the
+          // fail-open try/catch below is unchanged — a throw from either path is caught and logged, never
+          // surfaced to the shopper.
+          await dispatchMemoryWrite({
+            queue: memoryWriteQueue,
+            remember: (ctx, turn) => memoryService.remember(ctx, turn),
             // `memoryConsentInputs` — the same object the client-facing `memoryActive` is derived from,
             // so what the shopper is TOLD and what is actually gated here are one decision, not two.
-            { tenantId, anonId: memorySubject, ...memoryConsentInputs },
-            { message, reply: d.reply },
-          );
+            ctx: { tenantId, anonId: memorySubject, ...memoryConsentInputs },
+            turn: { message, reply: d.reply },
+            nowMs: Date.now(),
+            log: (m) => console.error(m),
+          });
         } catch (e) {
           console.error(`[/chat] memory remember error:`, (e as Error).message);
         }
