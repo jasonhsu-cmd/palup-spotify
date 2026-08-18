@@ -179,7 +179,8 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // like mood/cart, accepted ONLY as the known enum. It can only route to a MORE restrained proactive
     // cart_recovery on the clean sales path; every server cap still holds (precedence ladder, mood brake,
     // support/safety suppression, and the ONE INV-E budget), so passing it through grants no autonomy.
-    proactiveTrigger: r.proactiveTrigger === "exit_intent" ? "exit_intent" : undefined,
+    proactiveTrigger:
+      r.proactiveTrigger === "exit_intent" || r.proactiveTrigger === "greeting" ? r.proactiveTrigger : undefined,
     // Page context (§4): the product/page the shopper is viewing — UNTRUSTED merchant-page content,
     // bounded here (defense-in-depth) and sanitized again in the brain before it reaches the model.
     pageContext: typeof r.pageContext === "string" && r.pageContext ? r.pageContext.slice(0, 400) : undefined,
