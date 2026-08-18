@@ -191,6 +191,17 @@ describe("projectStorefrontCatalog (pure)", () => {
     const out = projectStorefrontCatalog(CTX, undefined);
     expect(out.products.every((p) => p.cartUrl === undefined && p.productUrl === undefined)).toBe(true);
   });
+  it("strips HTML from Shopify policy bodies for a clean, readable footer", () => {
+    const htmlCtx: GroundingContext = {
+      ...CTX,
+      policy: { returns: "<p>30-day returns.</p><!-- obsidian -->", shipping: "<ul><li>Free over $50</li></ul>&amp; fast" },
+    };
+    const out = projectStorefrontCatalog(htmlCtx, "acme.myshopify.com");
+    expect(out.policy.returns).toBe("30-day returns.");
+    expect(out.policy.shipping).toBe("Free over $50 & fast");
+    expect(out.policy.returns).not.toContain("<");
+    expect(out.policy.shipping).not.toContain("<");
+  });
 });
 
 // ── buildServer wiring smoke — proves the route is registered + resolves via the real merchants/grounding.

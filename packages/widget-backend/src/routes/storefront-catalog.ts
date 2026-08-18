@@ -39,6 +39,24 @@ export interface StorefrontProductWire {
   productUrl?: string;
 }
 
+// Shopify policy bodies (returns/shipping) are HTML. The assistant reads them as-is (in the prompt), but a
+// storefront FOOTER must show clean prose, not literal `<p>`/`<meta>`/comment markup. Strip tags + decode the
+// few common entities + collapse whitespace — display-only, and safe because the page still renders via
+// textContent. Bounded input (the adapter caps policy length).
+function toPlainText(s: string): string {
+  return (s || "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#39;|&rsquo;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export interface StorefrontCatalogWire {
   brandName: string;
   policy: StorePolicy;
@@ -78,7 +96,12 @@ export function projectStorefrontCatalog(
     cartUrl: shopDomain && p.variantId ? cartPermalink(shopDomain, p.variantId) : undefined,
     productUrl: shopDomain && p.handle ? productPermalink(shopDomain, p.handle) : undefined,
   }));
-  return { brandName: context.brandName, policy: context.policy, products, nextCursor };
+  const policy: StorePolicy = {
+    returns: toPlainText(context.policy.returns),
+    shipping: toPlainText(context.policy.shipping),
+    ...(context.policy.allergens ? { allergens: toPlainText(context.policy.allergens) } : {}),
+  };
+  return { brandName: context.brandName, policy, products, nextCursor };
 }
 
 const EMPTY_CATALOG: StorefrontCatalogWire = {
