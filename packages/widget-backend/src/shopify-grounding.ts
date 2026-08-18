@@ -281,9 +281,14 @@ export interface StorefrontEgressLog {
   maxPages?: number;
 }
 
+// The per-product NODE fields, shared by the paginated `products` connection AND the single-product
+// `product(handle:)` query below, so both resolve a Product through the SAME mapStorefrontToContext
+// (identical validation + bounds). Exported for the query-shape test.
+export const PRODUCT_NODE_FIELDS = `id title description tags availableForSale handle featuredImage { url altText } priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } }`;
+
 // Exported for the query-shape test (proving the live query actually REQUESTS the render fields — a
 // mapping test alone can't catch a query that never asks Shopify for them). Shared by both page queries.
-export const PRODUCT_PAGE_FIELDS = `nodes { id title description tags availableForSale handle featuredImage { url altText } priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } } }
+export const PRODUCT_PAGE_FIELDS = `nodes { ${PRODUCT_NODE_FIELDS} }
     pageInfo { hasNextPage endCursor }`;
 
 /** Page 1: shop/policy + the first product page. `$after` is nullable — null means "start of the list". */
@@ -568,6 +573,69 @@ export function storefrontCatalogPageFetch(
       const data = json.data ?? {};
       nodeCount = data.products?.nodes?.length ?? 0;
       return data;
+    } finally {
+      try {
+        log({ host: creds.shopDomain, status, ok, ms: Date.now() - start, page: 1, nodes: nodeCount });
+      } catch {
+        /* ignore logging errors */
+      }
+    }
+  };
+}
+
+/** Single-product-by-handle query: the shop shell + exactly one product. `$handle` is the URL slug. */
+const STOREFRONT_PRODUCT_BY_HANDLE_QUERY = `query PalUpGroundingProductByHandle($handle: String!) {
+  shop { name refundPolicy { body } shippingPolicy { body } }
+  product(handle: $handle) { ${PRODUCT_NODE_FIELDS} }
+}`;
+
+export type StorefrontProductByHandleFetch = (creds: ShopifyStoreCreds, handle: string) => Promise<StorefrontData>;
+
+/**
+ * Storefront SINGLE-PRODUCT fetch by handle — resolves ONE product for a DIRECT PDP hit (SEO/ad/typed
+ * URL, i.e. no home→click stash) without paging the whole catalog, which the >1000-SKU stores cannot do
+ * client-side. Reshapes the `{ product, shop }` response into the SAME `{ products: { nodes }, shop }`
+ * shape the pagination path returns, so it flows through `mapStorefrontToContext` UNCHANGED (identical
+ * safeImageUrl/safeHandle/firstVariantNumericId/bounds). A handle that resolves to nothing →
+ * `{ products: { nodes: [] }, shop }` (zero products, brand/policy intact) — the route turns that into the
+ * honest not-found. Same host guard + private-token header + per-request timeout as the sibling fetchers;
+ * the token is never logged.
+ *
+ * NOT LIVE-VERIFIED: `product(handle:)` matches the Storefront API docs (Query.product(handle: String))
+ * but was added after the 2026-07-31 live check — confirm via drift-check / model:smoke before relying on it.
+ */
+export function storefrontProductByHandleFetch(
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  opts: { version?: string; timeoutMs?: number; log?: (info: StorefrontEgressLog) => void } = {},
+): StorefrontProductByHandleFetch {
+  const version = opts.version ?? STOREFRONT_API_VERSION;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PAGE_TIMEOUT_MS;
+  const log = opts.log ?? ((info: StorefrontEgressLog) => console.log("[grounding.shopify] " + JSON.stringify(info)));
+  return async (creds, handle) => {
+    if (!SHOP_HOST.test(creds.shopDomain)) {
+      throw new Error("refusing Shopify fetch: shopDomain is not a *.myshopify.com host"); // never leak the token
+    }
+    const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
+    const start = Date.now();
+    let status = 0;
+    let ok = false;
+    let nodeCount: number | undefined;
+    try {
+      const res = await fetchFn(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Shopify-Storefront-Private-Token": creds.accessToken },
+        body: JSON.stringify({ query: STOREFRONT_PRODUCT_BY_HANDLE_QUERY, variables: { handle } }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      status = res.status;
+      ok = res.ok;
+      if (!res.ok) throw new Error("Shopify Storefront API request failed"); // static (F1)
+      const json = (await res.json()) as { data?: { product?: StorefrontProductNode | null; shop?: StorefrontData["shop"] }; errors?: Array<{ message?: string }> };
+      if (Array.isArray(json.errors) && json.errors.length) throw new Error("Shopify Storefront GraphQL error");
+      const product = json.data?.product ?? null;
+      nodeCount = product ? 1 : 0;
+      // Reshape { product, shop } → the { products: { nodes }, shop } shape mapStorefrontToContext expects.
+      return { shop: json.data?.shop, products: { nodes: product ? [product] : [] } };
     } finally {
       try {
         log({ host: creds.shopDomain, status, ok, ms: Date.now() - start, page: 1, nodes: nodeCount });

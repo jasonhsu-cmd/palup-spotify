@@ -33,9 +33,13 @@ const CTX: GroundingContext = {
   ],
 };
 
+// A single-product context (what a by-handle resolve returns) — the first product of CTX.
+const ONE_PRODUCT: GroundingContext = { ...CTX, products: [CTX.products[0]!] };
+
 const baseDeps = (over: Partial<StorefrontCatalogDeps> = {}): StorefrontCatalogDeps => ({
   resolveTenant: async (shop) => (shop === "acme.myshopify.com" ? { ok: true, tenantId: "demo" } : { ok: false }),
   getCatalogPage: async () => ({ context: CTX }),
+  getProductByHandle: async (_t, handle) => (handle === "vitamin-c-serum" ? { context: ONE_PRODUCT } : null),
   shopDomainFor: async () => "acme.myshopify.com",
   allowIp: async () => true,
   allowTenant: async () => true,
@@ -174,6 +178,69 @@ describe("GET /storefront/catalog (route unit)", () => {
   it("OPTIONS preflight returns 204 with CORS headers", async () => {
     const a = await app();
     const res = await a.inject({ method: "OPTIONS", url: "/storefront/catalog" });
+    expect(res.statusCode).toBe(204);
+    expect(res.headers["access-control-allow-origin"]).toBe("*");
+    expect(res.headers["access-control-allow-methods"]).toContain("GET");
+    await a.close();
+  });
+});
+
+describe("GET /storefront/product (route unit) — direct-PDP handle resolve", () => {
+  it("returns 200 with the ONE projected product (cart/product URLs built) for a known shop + handle", async () => {
+    const a = await app();
+    const res = await a.inject({ method: "GET", url: "/storefront/product?shop=acme.myshopify.com&handle=vitamin-c-serum" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe("*");
+    expect(res.headers["cache-control"]).toBe("public, max-age=300, stale-while-revalidate=600");
+    const body = JSON.parse(res.body);
+    expect(body.product).toMatchObject({
+      id: "gid://shopify/Product/1",
+      title: "Vitamin-C Serum",
+      variantId: "4567",
+      handle: "vitamin-c-serum",
+      cartUrl: "https://acme.myshopify.com/cart/4567:1",
+      productUrl: "https://acme.myshopify.com/products/vitamin-c-serum",
+    });
+    await a.close();
+  });
+
+  it("returns a UNIFORM 404 for an unknown tenant AND a missing handle (no oracle)", async () => {
+    const a = await app();
+    const unknownShop = await a.inject({ method: "GET", url: "/storefront/product?shop=stranger.myshopify.com&handle=x" });
+    const missingHandle = await a.inject({ method: "GET", url: "/storefront/product?shop=acme.myshopify.com" });
+    expect(unknownShop.statusCode).toBe(404);
+    expect(missingHandle.statusCode).toBe(404);
+    expect(unknownShop.body).toBe(missingHandle.body);
+    expect(JSON.parse(unknownShop.body)).toEqual({ error: "not found" });
+    await a.close();
+  });
+
+  it("returns 404 when the tenant resolves but the handle is unknown (product null)", async () => {
+    const a = await app();
+    const res = await a.inject({ method: "GET", url: "/storefront/product?shop=acme.myshopify.com&handle=does-not-exist" });
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body)).toEqual({ error: "not found" });
+    await a.close();
+  });
+
+  it("collapses a THROWING resolve to the uniform 404 (a cold store error reads as honest not-found)", async () => {
+    const a = await app({ getProductByHandle: async () => { throw new Error("shopify down"); } });
+    const res = await a.inject({ method: "GET", url: "/storefront/product?shop=acme.myshopify.com&handle=vitamin-c-serum" });
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body)).toEqual({ error: "not found" });
+    await a.close();
+  });
+
+  it("returns 429 when the per-IP limiter denies, and (after resolve) when the per-tenant ceiling denies", async () => {
+    const ipDenied = await (await app({ allowIp: async () => false })).inject({ method: "GET", url: "/storefront/product?shop=acme.myshopify.com&handle=vitamin-c-serum" });
+    expect(ipDenied.statusCode).toBe(429);
+    const tenantDenied = await (await app({ allowTenant: async () => false })).inject({ method: "GET", url: "/storefront/product?shop=acme.myshopify.com&handle=vitamin-c-serum" });
+    expect(tenantDenied.statusCode).toBe(429);
+  });
+
+  it("OPTIONS preflight returns 204 with CORS headers", async () => {
+    const a = await app();
+    const res = await a.inject({ method: "OPTIONS", url: "/storefront/product" });
     expect(res.statusCode).toBe(204);
     expect(res.headers["access-control-allow-origin"]).toBe("*");
     expect(res.headers["access-control-allow-methods"]).toContain("GET");

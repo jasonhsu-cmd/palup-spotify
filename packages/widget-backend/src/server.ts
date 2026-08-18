@@ -79,7 +79,7 @@ import {
 } from "./customer-account-flow.js";
 import { parseStoreDomains, parsePrimaryDomains, resolveStorefrontCredential } from "./merchant-store.js";
 import type { StorefrontFetch } from "./shopify-grounding.js";
-import { storefrontCatalogPageFetch, mapStorefrontToContext } from "./shopify-grounding.js";
+import { storefrontCatalogPageFetch, storefrontProductByHandleFetch, mapStorefrontToContext } from "./shopify-grounding.js";
 import { createMerchantResolver, consentModeFor } from "./merchant-resolver.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE, DELEGATE_SCOPES_DEFAULT } from "./shopify-install-identity.js";
 import {
@@ -1510,12 +1510,34 @@ export async function buildServer(opts?: {
     const ctx = await grounding.getContext(tenantId);
     return { context: { ...ctx, products: ctx.products.slice(0, first) }, nextCursor: undefined };
   };
+  // WS-storefront — resolve ONE product by handle for a direct PDP hit. Live path: a single Storefront
+  // `product(handle:)` call (never the whole-catalog ceiling). Non-live (dev/fixtures): find it in the
+  // grounding port's own catalog by handle/id. `null` when it resolves to nothing → the route's 404.
+  const productByHandleFetch = storefrontProductByHandleFetch();
+  const getProductByHandle = async (tenantId: string, handle: string) => {
+    const outcome = await resolveStorefrontCredential(tenantId, {
+      secrets,
+      credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
+      readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
+      shopDomainFor: (t) => merchants.shopDomainFor(t),
+    });
+    if (outcome.status === "live") {
+      const data = await productByHandleFetch(outcome.creds, handle);
+      const ctx = mapStorefrontToContext(tenantId, data);
+      return ctx.products.length ? { context: ctx } : null;
+    }
+    if (outcome.status === "refuse") throw new Error("storefront credential unreadable");
+    const ctx = await grounding.getContext(tenantId);
+    const p = ctx.products.find((x) => x.handle === handle || x.id === handle);
+    return p ? { context: { ...ctx, products: [p] } } : null;
+  };
   registerStorefrontCatalogRoutes(app, {
     resolveTenant: async (shop) => {
       const r = await merchants.tenantForShopDomain(shop ?? "");
       return { ok: r.kind === "ok", tenantId: r.kind === "ok" ? r.tenantId : undefined };
     },
     getCatalogPage,
+    getProductByHandle,
     shopDomainFor: (tenantId) => merchants.shopDomainFor(tenantId),
     allowIp: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
     allowTenant: async (tenantId) => {
