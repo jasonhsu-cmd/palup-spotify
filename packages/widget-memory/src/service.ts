@@ -825,10 +825,15 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // ordinary fact sitting just behind an excluded one, THEN cap to `recallTopK()`, nearest-first.
       const rankedRaw = await deps.vector.query(namespace, { vector: opts!.queryVector, k: RECALL_LIMIT });
       const ranked = rankedRaw
-        // #125 — this filter now excludes NOTHING in steady state: every safety-floor row lives in
-        // `floorNs`, not `namespace`, so a floor row can no longer even appear in `rankedRaw`. Kept anyway
-        // (harmless) as a defense-in-depth backstop for any row that predates this change or was seeded
-        // directly at the port layer — a content-independent random placeholder vector must never rank.
+        // #125 — post-#125, every special/`isSafetyFloorRow` fact lives ONLY in `floorNs`, so in steady
+        // state this filter removes nothing from the ranked `namespace` result. If a special row somehow
+        // still sits in the MAIN namespace (a pre-#125 legacy row, or one seeded directly at the port,
+        // bypassing write-side routing), this filter EXCLUDES it from the ranked result here — and since
+        // it's absent from `floorNs` too, it does NOT surface via this SEMANTIC branch at all; only the
+        // fallback/list-all branch below (which unions main+floor with no such filter) would surface it.
+        // #125 verified zero such rows exist in the live (staging) main namespace, so this edge is not
+        // live today — the filter is retained as a guard for the invariant "the ranked main query never
+        // yields a floor row."
         .filter((m) => !isSafetyFloorRow(m.metadata as { mustRecall?: boolean; class?: FactClass } | undefined))
         .slice(0, recallTopK());
       for (const m of ranked) originOf.set(m.id, namespace);
