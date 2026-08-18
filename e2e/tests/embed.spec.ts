@@ -138,3 +138,67 @@ test("embed: /embed/panel's real, on-the-wire CSP response header includes the s
   expect(panelCsp).toContain("https://acme.myshopify.com");
   expect(panelCsp).toContain("https://shop.acme-brand.example"); // the SHOPIFY_PRIMARY_DOMAINS entry
 });
+
+// WS4 bridge, END TO END through the REAL loader. The host page publishes its cart on `window.PALUP.cart`
+// exactly as the storefront's app.js does; the loader must read it (readHostContext), forward it over the
+// `palup:context` postMessage (loader→panel), the panel must cache it (readPanelContext) and cartSignal()
+// must put it on the /chat wire as `signals.cartItems` — WHITELISTED to productId + quantity only. Existing
+// coverage stops short of this exact path: widget.spec E4 injects window.PALUP.cart on the /widget harness
+// and reads cartSignal() DIRECTLY, bypassing the loader→panel postMessage hop that only exists in the embed.
+test("embed: the host cart (window.PALUP.cart) reaches /chat as signals.cartItems through the real loader→panel bridge, stripped to ids + quantities", async ({
+  page,
+}) => {
+  // Seed the host's cart BEFORE the loader mounts, with extra merchant fields that MUST NOT cross the bridge.
+  await page.addInitScript(() => {
+    (window as unknown as { PALUP?: unknown }).PALUP = {
+      cart: [
+        { productId: "gid://shopify/Product/1", variantId: "111", title: "Secret Serum", price: "$99", quantity: 2 },
+        { productId: "gid://shopify/Product/2", quantity: 1 },
+      ],
+      pageContext: "product:secret-serum",
+    };
+  });
+
+  // Capture every /chat body; we pick the USER turn by its message so a proactive greeting turn (which
+  // also carries cartSignal) can't make this assert the wrong request.
+  const chatBodies: Array<{ message?: string; signals?: { cartItems?: unknown } }> = [];
+  await page.route("**/chat", async (route) => {
+    try {
+      chatBodies.push(route.request().postDataJSON() as { message?: string; signals?: { cartItems?: unknown } });
+    } catch {
+      /* non-JSON body — ignore */
+    }
+    await route.continue();
+  });
+
+  await page.goto("/embed-host");
+  await expect(page.locator("[data-palup-host]")).toHaveAttribute("data-palup-mounted", "true");
+
+  await page.evaluate(() => {
+    type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
+    const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
+    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
+    launcher.click();
+  });
+
+  const frame = await panelFrame(page);
+  const MESSAGE = "what goes well with what's in my cart?";
+  await frame.getByTestId("chat-input").fill(MESSAGE);
+  await frame.getByTestId("send").click();
+
+  await expect
+    .poll(() => chatBodies.find((b) => b.message === MESSAGE)?.signals?.cartItems, {
+      message: "the user /chat turn never carried signals.cartItems forwarded from the host cart",
+    })
+    .toEqual([
+      { productId: "gid://shopify/Product/1", quantity: 2 },
+      { productId: "gid://shopify/Product/2", quantity: 1 },
+    ]);
+
+  // the whitelist dropped the merchant-authored title/price — only ids + quantities ever leave the page
+  const wire = JSON.stringify(chatBodies.find((b) => b.message === MESSAGE)?.signals?.cartItems);
+  expect(wire).not.toContain("Secret Serum");
+  expect(wire).not.toContain("$99");
+  expect(wire).not.toContain("111"); // the variantId is host-only, never forwarded over this bridge
+});
