@@ -90,6 +90,7 @@ import {
 } from "./routes/shopify-install.js";
 import { registerShopifyWebhookRoutes, WEBHOOK_ROUTES } from "./routes/shopify-webhooks.js";
 import { subscribeCatalogReconcile, type ReconcileReason } from "./catalog-webhook-queue.js";
+import { subscribeOrderAttribution } from "./order-attribution-queue.js";
 import { createReconcileCoalescer, CATALOG_RECONCILE_COALESCE_MS_DEFAULT } from "./catalog-reconcile-coalescer.js";
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
@@ -1100,6 +1101,14 @@ export async function buildServer(opts?: {
   // is off (Shopify auto-deletes a subscription after 8 failed deliveries).
   const SHOPIFY_WEBHOOKS_ENABLED = Boolean(shopifyAppSecretPresent && merchantRegistry);
   const CATALOG_WEBHOOKS = SHOPIFY_WEBHOOKS_ENABLED && process.env.CATALOG_WEBHOOKS === "true";
+  // W2-C — order-attribution ingestion (orders/create, orders/updated, refunds/create). Gated the SAME
+  // way CATALOG_WEBHOOKS is, and independently of it (a separate queue/topic — see routes/shopify-
+  // webhooks.ts's `orderQueue` doc). Flipping this true does NOT by itself grant `read_orders` or
+  // subscribe the topics on Shopify's side — see the W2-C header note in routes/shopify-webhooks.ts for
+  // why these routes receive no live traffic regardless of this flag until an OWNER completes both of
+  // those separately-gated steps. Registering the (inert without a real subscription) route early is
+  // the same "carries no extra exposure" reasoning P4 already applies to the catalog push route.
+  const ORDER_ATTRIBUTION_WEBHOOKS = SHOPIFY_WEBHOOKS_ENABLED && process.env.ORDER_ATTRIBUTION_WEBHOOKS === "true";
   const SHOPIFY_INSTALL_ENABLED = Boolean(
     SHOPIFY_APP_CLIENT_ID &&
       SHOPIFY_INSTALL_REDIRECT_URI &&
@@ -1291,6 +1300,28 @@ export async function buildServer(opts?: {
     }
   }
 
+  // W2-C — order-attribution ingestion: enqueue-then-200 on the webhook route, `subscribeOrderAttribution`
+  // (order-attribution-queue.ts) as the worker, OFF the webhook's own request/response cycle. IN-MEMORY
+  // ONLY in this increment (mirrors CATALOG_WEBHOOKS's own in-memory fallback, "SYNCHRONOUS… a webhook
+  // blocks on its reconcile" — same trade-off, same honesty about it): a durable Pub/Sub transport
+  // (mirroring PUBSUB_CATALOG_TOPIC / MEMORY_PUBSUB_TOPIC's env trio + OIDC push route) is a deliberate,
+  // named follow-up, not built here — nothing in the explicit scope of this increment requires it, and
+  // this path is unreachable in real deployments anyway until read_orders + a live topic subscription
+  // exist (see the W2-C header note in routes/shopify-webhooks.ts).
+  let orderQueue: QueuePort | undefined;
+  if (ORDER_ATTRIBUTION_WEBHOOKS) {
+    orderQueue = createInMemoryQueue({});
+    subscribeOrderAttribution(orderQueue, store);
+    console.warn(
+      "[config] ORDER_ATTRIBUTION_WEBHOOKS is ON with the IN-MEMORY queue (dev/staging only): each " +
+        "verified orders/create, orders/updated or refunds/create delivery resolves + tallies synchronously " +
+        "within the same request. No durable Pub/Sub transport is wired yet — a follow-up, mirroring the " +
+        "catalog/memory push-route pattern, is required before any real deployment. This flag alone grants " +
+        "no Shopify scope and subscribes no topic — read_orders + a real webhook subscription are separate, " +
+        "owner-gated steps (routes/shopify-webhooks.ts's W2-C header).",
+    );
+  }
+
   // #126 W1.5 — the durable async memory-write queue + its OIDC-verified push route, mirroring the P4
   // catalog Pub/Sub pattern immediately above but scoped to memory writes and gated on its OWN env trio
   // (INDEPENDENT of PUBSUB_CATALOG_TOPIC/CATALOG_WEBHOOKS — an operator can turn on the durable catalog
@@ -1386,6 +1417,9 @@ export async function buildServer(opts?: {
       now: () => Date.now(),
       // A3 — present ONLY when CATALOG_WEBHOOKS is on, so the catalog routes register only then (else 404).
       queue: catalogQueue,
+      // W2-C — present ONLY when ORDER_ATTRIBUTION_WEBHOOKS is on, so the order-attribution routes
+      // register only then (else 404) — the same inert-by-absence pattern as `queue` above.
+      orderQueue,
     });
   }
 

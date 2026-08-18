@@ -156,6 +156,136 @@ export const UNINSTALL_TOPIC = "app/uninstalled" as const;
 export const CATALOG_TOPICS = ["products/create", "products/update", "products/delete", "inventory_levels/update"] as const;
 
 /**
+ * W2-C — the order-attribution topics. `ORDER_TOPICS` fire on the same resource (a Shopify Order) at
+ * two different lifecycle points; `REFUND_TOPIC` fires on a DIFFERENT resource (a Refund, keyed by
+ * `order_id` back to its order) so its extraction helpers are separate (`refundOrderIdOf` /
+ * `refundedAmountOf` below), mirroring how `productIdOf` and `customerIdOf` are separate reads over
+ * different resource shapes rather than one polymorphic reader.
+ *
+ * ⚠ RECOLLECTION, NOT A PRIMARY-SOURCE CITATION (unlike [W1]/[W2]/[W3] above). Every other wire-format
+ * claim in this file cites a retrieved, dated shopify.dev/GitHub source; this session had no web
+ * access, so the Order/Refund payload field names below (`note_attributes`, `total_price`, `currency`,
+ * `order_id`, `transactions[].amount`) are from general knowledge of Shopify's Admin REST resources,
+ * NOT a fetched or captured document. `read_orders` is not a granted scope (deliberately — see
+ * `routes/shopify-webhooks.ts`'s W2-C header), so nothing here has ever seen a live payload either.
+ * Treat every extractor below as UNVERIFIED until a real captured (or shopify.dev-cited) payload
+ * confirms the field names — the same caveat this file's own header already carries for the
+ * compliance/catalog topics ("NO GOLDEN VECTOR… NO LIVE DELIVERY"), stated explicitly here because
+ * this time it also covers the FIELD NAMES, not just byte-equality.
+ */
+export const ORDER_TOPICS = ["orders/create", "orders/updated"] as const;
+export const REFUND_TOPIC = "refunds/create" as const;
+
+/** The Storefront/Admin GID prefix for an Order node — used only if a future increment needs a
+ *  GID-shaped id; the order-attribution KEY SPACE itself (below) deliberately does NOT use GIDs. */
+export const SHOPIFY_ORDER_GID_PREFIX = "gid://shopify/Order/";
+
+/** The cart `note_attribute` name the (out-of-scope) widget change attaches the opaque join token
+ *  under. A leading underscore is Shopify's own convention for a note attribute hidden from the
+ *  merchant-facing order-detail note-attributes display while remaining fully present on the API/
+ *  webhook body — appropriate for an internal measurement key with nothing a merchant needs to see. */
+export const JOIN_TOKEN_NOTE_ATTRIBUTE = "_palup_join_token";
+
+/**
+ * The order's own numeric id, as a bare decimal string, or `undefined`. Deliberately the BARE NUMBER
+ * (not a GID like `productIdOf`) because it is the one field guaranteed derivable from BOTH an Order
+ * body's `id` and a Refund body's `order_id` — using it as the shared key space means the order→arm
+ * resolution map (`order-attribution-queue.ts`) never has to reconcile two differently-shaped ids for
+ * the same order. Same refuse-rather-than-coerce / safe-integer discipline as `customerIdOf`.
+ */
+export function orderNumericIdOf(body: Record<string, unknown>): string | undefined {
+  const id = body.id;
+  if (typeof id === "number") return Number.isSafeInteger(id) && id >= 0 ? String(id) : undefined;
+  if (typeof id === "string" && /^\d+$/.test(id)) return id;
+  return undefined;
+}
+
+/**
+ * The opaque join token from an Order body's `note_attributes` array (`[{name, value}, …]`), or
+ * `undefined` if absent/malformed/blank. Never guessed, never coerced from another field — an order
+ * that carries no such attribute (every order today, before the widget change ships) simply has no
+ * token, which is the correct, honest "unattributed" input to the worker.
+ */
+export function joinTokenOf(body: Record<string, unknown>): string | undefined {
+  const attrs = body.note_attributes;
+  if (!Array.isArray(attrs)) return undefined;
+  for (const entry of attrs) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const e = entry as Record<string, unknown>;
+    if (e.name !== JOIN_TOKEN_NOTE_ATTRIBUTE) continue;
+    const value = e.value;
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return undefined;
+}
+
+/** A non-negative finite amount from a Shopify money field, which is documented as a decimal STRING
+ *  (e.g. `"409.94"`) on every Admin REST resource this file has seen; a JSON number is also accepted
+ *  defensively. Anything else (missing, negative, NaN, `"abc"`) is `undefined` — refused, never
+ *  coerced to 0 (a silent 0 would tally a real order as zero revenue rather than as unattributed). */
+function moneyAmountOf(value: unknown): number | undefined {
+  const n = typeof value === "string" ? Number(value) : typeof value === "number" ? value : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+/** The order's total price (`total_price`), or `undefined` if missing/malformed. */
+export function orderTotalOf(body: Record<string, unknown>): number | undefined {
+  return moneyAmountOf(body.total_price);
+}
+
+/** The order's ISO-4217-shaped currency code, or `undefined`. Loose format check only (three upper-case
+ *  letters) — this value is carried through to the ledger for display/audit, never parsed further. */
+export function orderCurrencyOf(body: Record<string, unknown>): string | undefined {
+  const c = body.currency;
+  return typeof c === "string" && /^[A-Z]{3}$/.test(c) ? c : undefined;
+}
+
+/** A Refund body's parent order id (`order_id`), as a bare decimal string — the SAME key space
+ *  `orderNumericIdOf` produces from an Order body, so a refund can look up the order→arm row the
+ *  order webhook wrote. `undefined` if missing/malformed. */
+export function refundOrderIdOf(body: Record<string, unknown>): string | undefined {
+  const id = body.order_id;
+  if (typeof id === "number") return Number.isSafeInteger(id) && id >= 0 ? String(id) : undefined;
+  if (typeof id === "string" && /^\d+$/.test(id)) return id;
+  return undefined;
+}
+
+/**
+ * The refunded amount: the sum of `transactions[].amount` on a Refund body (each a money-string per
+ * `moneyAmountOf`). Malformed/non-numeric entries are skipped rather than aborting the whole sum — a
+ * refund body with at least one good transaction still yields a real (if partial) amount rather than
+ * `undefined`. Returns `undefined` only when there is NO array or NOT ONE valid amount anywhere in it
+ * — a body that provably refunded nothing must never be summed to a false `0` (0 is a valid completed
+ * measurement; `undefined` is "could not read this body", and the two must never be confused).
+ */
+export function refundedAmountOf(body: Record<string, unknown>): number | undefined {
+  const txns = body.transactions;
+  if (!Array.isArray(txns)) return undefined;
+  let total = 0;
+  let sawValid = false;
+  for (const t of txns) {
+    if (t === null || typeof t !== "object" || Array.isArray(t)) continue;
+    const amount = moneyAmountOf((t as Record<string, unknown>).amount);
+    if (amount === undefined) continue;
+    total += amount;
+    sawValid = true;
+  }
+  return sawValid ? total : undefined;
+}
+
+/** The currency of the first valid refund transaction, or `undefined`. */
+export function refundCurrencyOf(body: Record<string, unknown>): string | undefined {
+  const txns = body.transactions;
+  if (!Array.isArray(txns)) return undefined;
+  for (const t of txns) {
+    if (t === null || typeof t !== "object" || Array.isArray(t)) continue;
+    const c = (t as Record<string, unknown>).currency;
+    if (typeof c === "string" && /^[A-Z]{3}$/.test(c)) return c;
+  }
+  return undefined;
+}
+
+/**
  * Why `app/uninstalled` takes its shop from a header while every GDPR topic takes it from the body.
  *
  * The HMAC covers the BODY ONLY. So a body field is authenticated and a header is not. Every compliance
@@ -305,15 +435,30 @@ export const PAYLOAD_SHAPES: Record<string, PayloadShape> = {
   // stops a captured, validly-signed catalog delivery from being replayed here to make a merchant inert.
   [UNINSTALL_TOPIC]: {
     required: [],
-    forbidden: ["shop_domain", "customer", "data_request", "title", "handle", "variants", "inventory_item_id"],
+    forbidden: ["shop_domain", "customer", "data_request", "title", "handle", "variants", "inventory_item_id", "order_id", "transactions"],
   },
   // A3 — catalog/inventory bodies. Discriminators only (the worker re-fetches, never trusting the body);
-  // `forbidden` keeps a compliance body (shop_domain/customer/data_request) from ever matching a catalog
-  // topic and vice-versa. products/* carry `id`; inventory_levels/update carries `inventory_item_id`.
-  "products/create": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request"] },
-  "products/update": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request"] },
-  "products/delete": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request"] },
+  // `forbidden` keeps a compliance body (shop_domain/customer/data_request) AND — W2-C — a Refund body
+  // (`order_id`/`transactions`, which carries no forbidden compliance field of its own) from ever
+  // matching a catalog topic. Without this, a validly-signed `refunds/create` body (bare `id` +
+  // `order_id` + `transactions`, no `customer`/`shop_domain`) would satisfy products/create's OLD
+  // required-only-"id" shape and could be replayed there — caught by this file's own cross-topic test.
+  "products/create": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request", "order_id", "transactions"] },
+  "products/update": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request", "order_id", "transactions"] },
+  "products/delete": { required: ["id"], forbidden: ["shop_domain", "customer", "data_request", "order_id", "transactions"] },
   "inventory_levels/update": { required: ["inventory_item_id"], forbidden: ["shop_domain", "customer", "data_request"] },
+  // W2-C — an Order body carries `id` + `note_attributes` + `total_price` together; nothing else in
+  // this table's documented shapes does (a Refund has `order_id`/`transactions`, never `total_price`;
+  // a compliance body has `shop_domain`, which an Order never carries — see APP_UNINSTALLED_SHOP_SOURCE
+  // for why this file already treats an Order-shaped body's shop as HEADER-sourced, same reasoning).
+  // `orders/create` and `orders/updated` are the SAME resource shape (mirrors products/create vs
+  // products/update above) — the topic, not the body shape, is what tells the two apart.
+  "orders/create": { required: ["id", "note_attributes", "total_price"], forbidden: ["shop_domain", "data_request", "order_id", "transactions"] },
+  "orders/updated": { required: ["id", "note_attributes", "total_price"], forbidden: ["shop_domain", "data_request", "order_id", "transactions"] },
+  // A Refund carries `order_id` (its PARENT order's id) + `transactions`; an Order never carries
+  // `order_id` (it IS the order, not a reference to one) — the cleanest discriminator from the two
+  // topics directly above.
+  "refunds/create": { required: ["id", "order_id"], forbidden: ["shop_domain", "customer", "data_request", "note_attributes", "total_price"] },
 };
 
 /** True when `body` matches exactly the shape this topic's documented payload has. Own-property checks

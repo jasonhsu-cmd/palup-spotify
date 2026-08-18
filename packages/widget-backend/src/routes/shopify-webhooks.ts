@@ -5,11 +5,14 @@ import { buildShopifyShopperId } from "@palup/platform-ports";
 import { accountSubjectId, eraseSubject, listSubjects, retireSubject } from "@palup/widget-memory";
 import { clientIpKey } from "../rate-limit.js";
 import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage, type ReconcileReason } from "../catalog-webhook-queue.js";
+import { ORDER_ATTRIBUTION_TOPIC, orderAttributionMessage } from "../order-attribution-queue.js";
 import { runCatalogClear } from "../jobs/catalog-index.js";
 import {
   APP_UNINSTALLED_SHOP_SOURCE,
   CATALOG_TOPICS,
   COMPLIANCE_TOPICS,
+  ORDER_TOPICS,
+  REFUND_TOPIC,
   UNINSTALL_TOPIC,
   WEBHOOK_HMAC_HEADER,
   WEBHOOK_ID_HEADER,
@@ -18,9 +21,16 @@ import {
   customerIdOf,
   dataRequestIdOf,
   isValidShopDomain,
+  joinTokenOf,
   matchesPayloadShape,
+  orderCurrencyOf,
+  orderNumericIdOf,
+  orderTotalOf,
   parseWebhookBody,
   productIdOf,
+  refundCurrencyOf,
+  refundOrderIdOf,
+  refundedAmountOf,
   singleHeader,
   verifyWebhookHmac,
 } from "../shopify-webhook-identity.js";
@@ -118,7 +128,30 @@ export const WEBHOOK_ROUTES = {
   productsUpdate: "/shopify/webhooks/products/update",
   productsDelete: "/shopify/webhooks/products/delete",
   inventoryLevelsUpdate: "/shopify/webhooks/inventory_levels/update",
+  // W2-C — order-attribution ingestion (registered only when `orderQueue` is wired). NO read_orders
+  // scope is requested for this — see the header note just below the imports for why these routes
+  // receive no live traffic today regardless of registration.
+  ordersCreate: "/shopify/webhooks/orders/create",
+  ordersUpdated: "/shopify/webhooks/orders/updated",
+  refundsCreate: "/shopify/webhooks/refunds/create",
 } as const;
+
+// ****************************************************************************************************
+// W2-C — READ THIS BEFORE WIRING `orderQueue` IN THE COMPOSITION ROOT. The three routes just added
+// above exist to turn a holdout EXPOSURE (W2-B, `assignHoldoutArm`) into a measured incremental
+// REVENUE tally (W2-A's `ArmTally` ledger, via `order-attribution-queue.ts`'s worker) — but they
+// receive NO LIVE Shopify traffic until a human deliberately does BOTH of the following, neither of
+// which this increment does or may do:
+//   1. Grant this app the `read_orders` scope in `shopify.app.toml` (untouched by this change, on
+//      purpose) AND complete Shopify's protected-customer-data review for it — both are OWNER-gated
+//      steps outside a build agent's authority (mirrors `docs/MEMORY-GO-LIVE-CHECKLIST.md`'s posture
+//      for `widget-memory`'s go-live gate).
+//   2. Subscribe the shop to these three webhook topics (which itself requires step 1's scope).
+// Until then these routes are either UNREGISTERED (404 — `orderQueue` absent, which is the actual
+// state today: nothing in the composition root constructs one) or, once wired, registered-but-silent
+// (verify-then-enqueue code with nothing subscribed to send them a signed body). Ships dark by
+// construction, not by a separate flag: there is no scope to sign a delivery with.
+// ****************************************************************************************************
 
 /**
  * SEPARATE PATHS, not one endpoint dispatching on `X-Shopify-Topic`. [W2]'s TOML sample points all three
@@ -176,6 +209,13 @@ export interface ShopifyWebhookDeps {
    *  CATALOG_WEBHOOKS is on; absent ⇒ the catalog routes are not registered at all, so those topics 404
    *  exactly as before this feature (inert). Never used by the compliance/uninstall handlers. */
   queue?: QueuePort;
+  /** W2-C — the queue a verified `orders/create` / `orders/updated` / `refunds/create` delivery is
+   *  enqueued to, for the order-attribution worker (`order-attribution-queue.ts`) to consume OFF this
+   *  route's own request/response cycle. A SEPARATE queue/topic from `queue` above — different message
+   *  shape, different consumer group; never conflated. Present ONLY when a human has wired it (see the
+   *  W2-C header note above `WEBHOOK_ROUTES`); absent ⇒ these three routes are not registered — 404,
+   *  same inert-by-absence pattern as the catalog routes. */
+  orderQueue?: QueuePort;
 }
 
 /** A refusal reason, for the SERVER-SIDE log only. The HTTP response never distinguishes these — a
@@ -434,6 +474,65 @@ async function handleCatalogChange(deps: ShopifyWebhookDeps, v: Verified, topic:
   await deps.queue.publish(
     CATALOG_RECONCILE_TOPIC,
     catalogReconcileMessage(tenantId, topic, v.webhookId, deps.now(), { ...(productIds ? { productIds } : {}), reason }),
+  );
+  await markHandled(deps, tenantId, topic, v.webhookId);
+  return "applied";
+}
+
+/**
+ * W2-C — a verified `orders/create` / `orders/updated` / `refunds/create` delivery: extract the FEW
+ * non-PII fields (`shopify-webhook-identity.ts`'s `joinTokenOf`/`orderNumericIdOf`/`orderTotalOf`/
+ * `orderCurrencyOf` for order topics; `refundOrderIdOf`/`refundedAmountOf`/`refundCurrencyOf` for the
+ * refund topic) and enqueue ONE `order.attribution` message — this handler NEVER reads the ledger,
+ * NEVER resolves the token, and NEVER writes an `ArmTally`; that is entirely `order-attribution-
+ * queue.ts`'s worker, off this route's own request/response cycle (file header: "OFF the hot path").
+ *
+ * The rest of the shape mirrors `handleCatalogChange` deliberately (same family of handler): shop from
+ * the HEADER (an Order/Refund body carries no `shop_domain` field — see `PAYLOAD_SHAPES`'s doc for
+ * why, and `APP_UNINSTALLED_SHOP_SOURCE` for the same trust bound applied here: the only action a wrong
+ * header can cause is a revenue tally landing under the wrong tenant's OWN ledger, reversible with a
+ * compensating delta, never a cross-tenant read/write of anything else), kill-gated (NN#4), deduped by
+ * `alreadyHandled`/`markHandled` on the webhook's OWN id (on top of the worker's own message-level
+ * dedup — belt-and-suspenders across the enqueue/consume boundary, `order-attribution-queue.ts`'s
+ * header). UNLIKE `handleCatalogChange`, there is no poll-job backstop for a delivery lost to a
+ * long-armed kill switch or an exhausted Shopify retry window — stated here rather than glossed,
+ * mirroring this file's own convention of naming every gap it accepts.
+ *
+ * ALWAYS enqueues once shop/tenant/kill/dedup pass — even with an absent/malformed token, order id, or
+ * amount. The WORKER decides "unattributed" (never this route): keeping that decision off the hot path
+ * is the entire point of the split, and duplicating the "is this attributable" logic here would just
+ * be a second, driftable copy of what `applyOrderAttribution` already does correctly.
+ */
+async function handleOrderWebhook(deps: ShopifyWebhookDeps, v: Verified, topic: string): Promise<Ack | { refused: Refusal }> {
+  if (!deps.orderQueue) return "unknown_shop"; // defensive; the route is only registered when a queue is wired
+  if (!v.shopHeader) return { refused: "no_shop_header" };
+  if (!isValidShopDomain(v.shopHeader)) return { refused: "bad_shop" };
+  const shopDomain = v.shopHeader.toLowerCase();
+  const existing = await resolveTenant(deps, shopDomain);
+  if (!existing) return "unknown_shop";
+  const tenantId = existing.tenantId;
+  if (await deps.killCheck(tenantId)) return "halted_deferred";
+  if (await alreadyHandled(deps, tenantId, topic, v.webhookId)) return "already_handled";
+
+  const isRefund = topic === REFUND_TOPIC;
+  const orderId = isRefund ? refundOrderIdOf(v.body) : orderNumericIdOf(v.body);
+  const amount = isRefund ? refundedAmountOf(v.body) : orderTotalOf(v.body);
+  const currency = isRefund ? refundCurrencyOf(v.body) : orderCurrencyOf(v.body);
+  const joinToken = isRefund ? undefined : joinTokenOf(v.body);
+
+  await deps.orderQueue.publish(
+    ORDER_ATTRIBUTION_TOPIC,
+    orderAttributionMessage({
+      tenantId,
+      topic,
+      kind: isRefund ? "refund" : "order",
+      webhookId: v.webhookId,
+      nowMs: deps.now(),
+      ...(orderId !== undefined ? { orderId } : {}),
+      ...(joinToken !== undefined ? { joinToken } : {}),
+      ...(amount !== undefined ? { amount } : {}),
+      ...(currency !== undefined ? { currency } : {}),
+    }),
   );
   await markHandled(deps, tenantId, topic, v.webhookId);
   return "applied";
@@ -964,6 +1063,15 @@ export function registerShopifyWebhookRoutes(app: FastifyInstance, deps: Shopify
       route(WEBHOOK_ROUTES.productsUpdate, CATALOG_TOPICS[1], (d, v) => handleCatalogChange(d, v, CATALOG_TOPICS[1]));
       route(WEBHOOK_ROUTES.productsDelete, CATALOG_TOPICS[2], (d, v) => handleCatalogChange(d, v, CATALOG_TOPICS[2]));
       route(WEBHOOK_ROUTES.inventoryLevelsUpdate, CATALOG_TOPICS[3], (d, v) => handleCatalogChange(d, v, CATALOG_TOPICS[3]));
+    }
+
+    // W2-C — order-attribution ingestion, registered ONLY when `orderQueue` is wired (see the header
+    // note above `WEBHOOK_ROUTES`). With no queue these paths 404, exactly like the catalog topics
+    // before their own queue is wired.
+    if (deps.orderQueue) {
+      route(WEBHOOK_ROUTES.ordersCreate, ORDER_TOPICS[0], (d, v) => handleOrderWebhook(d, v, ORDER_TOPICS[0]));
+      route(WEBHOOK_ROUTES.ordersUpdated, ORDER_TOPICS[1], (d, v) => handleOrderWebhook(d, v, ORDER_TOPICS[1]));
+      route(WEBHOOK_ROUTES.refundsCreate, REFUND_TOPIC, (d, v) => handleOrderWebhook(d, v, REFUND_TOPIC));
     }
   });
 }
