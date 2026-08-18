@@ -24,6 +24,22 @@ export interface Product {
    * no Shopify URL crosses this port). OPTIONAL: absent when the source reports no purchasable variant.
    */
   variantId?: string;
+  /**
+   * Storefront render — the product's primary image URL (a Shopify CDN URL today). VENDOR-NEUTRAL: an
+   * opaque absolute `https:` URL the storefront page and the widget's product-card thumbnail use as
+   * `<img src>`. OPTIONAL: absent when the source publishes no image, or when the URL failed the
+   * adapter's host validation (never an arbitrary/`http:`/`javascript:` host). Display-only — like
+   * `variantId`, it is NEVER entered into the retrieval corpus, product-facts, telemetry, or the system
+   * prompt (it grounds nothing the model reasons over).
+   */
+  imageUrl?: string;
+  /**
+   * Storefront render — the product's URL slug/handle. VENDOR-NEUTRAL/opaque: the platform-specific
+   * product-page URL (`https://<shop>/products/<handle>`) is built in the widget-backend WIRE layer
+   * (product-permalink.ts), never across this port — exactly like `variantId` and the cart URL.
+   * OPTIONAL: absent when the source reports none (the storefront then routes/links by `id`).
+   */
+  handle?: string;
   tags?: string[];
   /**
    * The product's ingredient list (INCI / label order), if the merchant publishes one. OPTIONAL:

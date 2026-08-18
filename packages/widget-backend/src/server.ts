@@ -53,6 +53,7 @@ import { createModelPort, createGroundingPort, createCommercePort } from "./mode
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
 import { registerEmbedRoutes, bundleLoader } from "./routes/embed.js";
+import { registerStorefrontCatalogRoutes } from "./routes/storefront-catalog.js";
 // E3 — both functions return `{}` unless the `Decision` already carries cited products, so they are inert
 // for any turn E2 did not cite on. They are no longer inert BY CONSTRUCTION: this composition root now
 // reads PRODUCT_CITATIONS/PRODUCT_CARDS and can produce such a Decision (see the Wave 4 flag block below).
@@ -1365,10 +1366,12 @@ export async function buildServer(opts?: {
     frameAncestors: async (shop) => {
       const isMyshopify = Boolean(shop && /^[a-z0-9.-]+\.myshopify\.com$/i.test(shop));
       // Security-review F1: a missing/malformed `?shop=` can never resolve a tenant anyway (the mint
-      // 401s), so the old permissive `"https:"` fallback bought nothing and denying framing outright is
-      // strictly better. `*.myshopify.com` breadth (F2) is unchanged — a documented follow-up, not this
-      // change's job.
-      let allow = isMyshopify ? `https://${shop} https://*.myshopify.com` : "'none'";
+      // 401s). `*.myshopify.com` breadth (F2) is unchanged — a documented follow-up, not this change's job.
+      // WS5 — `'self'` lets a page on THE PANEL'S OWN ORIGIN frame it: the PalUp-hosted sample storefront
+      // (served from this same backend origin) embeds the panel via the loader, and without `'self'` its
+      // same-origin iframe would be CSP-refused. `'self'` widens nothing toward the merchant — it is only
+      // the panel's own origin — so cross-origin framing stays restricted to the shop's own domain(s).
+      let allow = isMyshopify ? `'self' https://${shop} https://*.myshopify.com` : "'self'";
       if (isMyshopify) {
         // Custom-domain CSP support. Reached ONLY via this SERVER-side registry/env lookup keyed by the
         // already-accepted, myshopify-shaped `shop` — NEVER a second, client-supplied query parameter
@@ -1396,6 +1399,35 @@ export async function buildServer(opts?: {
         return `${allow} http://127.0.0.1:${process.env.PORT}`;
       }
       return allow;
+    },
+  });
+
+  // WS2 — public storefront catalog read endpoint. Renders the SAME live catalog the assistant is grounded
+  // on (getContext → the 30-min cache; no new fetch path), so the sample storefront's grid/PDP/cart and the
+  // widget finally agree. Injected deps mirror routes/embed.ts. Rate-limited per-IP (fail-open, like the
+  // /widget/token mint) AND per-tenant (fail-CLOSED cost backstop — security-review MEDIUM: the per-IP
+  // limiter is XFF-spoofable, so the unspoofable per-tenant ceiling is what stops a cold-fetch stampede on
+  // a merchant's private Shopify token). Uniform 404 for every non-ok tenant (no existence oracle).
+  registerStorefrontCatalogRoutes(app, {
+    resolveTenant: async (shop) => {
+      const r = await merchants.tenantForShopDomain(shop ?? "");
+      return { ok: r.kind === "ok", tenantId: r.kind === "ok" ? r.tenantId : undefined };
+    },
+    getContext: (tenantId) => grounding.getContext(tenantId),
+    shopDomainFor: (tenantId) => merchants.shopDomainFor(tenantId),
+    allowIp: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
+    allowTenant: async (tenantId) => {
+      // Dedicated counter key ("storefront-catalog") so it never shares the /chat per-tenant bucket.
+      // Fail-CLOSED: a store error denies rather than silently disabling the cost ceiling.
+      try {
+        return await underLimit(store, { tenantId }, "storefront-catalog", RL_TENANT, RL_WINDOW);
+      } catch {
+        return false;
+      }
+    },
+    ipKeyFor: (req) => {
+      const xff = req.headers["x-forwarded-for"];
+      return clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
     },
   });
 

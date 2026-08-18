@@ -31,6 +31,10 @@ export interface StorefrontProductNode {
   availableForSale?: boolean;
   /** C1 — the first variant's node, for the one-tap cart permalink id. `variants(first: 1) { nodes { id } }`. */
   variants?: { nodes?: { id?: string }[] };
+  /** Storefront `Product.featuredImage { url altText }` — the primary product image (nullable). */
+  featuredImage?: { url?: string; altText?: string | null } | null;
+  /** Storefront `Product.handle: String!` — the URL slug for the product page. */
+  handle?: string;
 }
 
 /**
@@ -61,7 +65,44 @@ export interface StorefrontData {
 const MAX_TITLE = 200;
 const MAX_DESC = 600;
 const MAX_TAGS = 20;
+const MAX_HANDLE = 200;
+const MAX_IMAGE_URL = 2048;
 const bound = (s: string | undefined, max: number): string => (s ?? "").slice(0, max);
+
+// Storefront render fields — display-only, host/charset-validated at the adapter (defense in depth: the
+// `featuredImage.url` reaches a shopper's browser as `<img src>`, so a compromised/injected Storefront
+// response must never smuggle a `javascript:`/`http:`/arbitrary-host URL onto the page — the same posture
+// SHOP_HOST takes for the token host and cart-permalink.ts takes for the cart URL). Only the opaque neutral
+// `Product.imageUrl`/`handle` cross the port; the product-page URL is built in the widget-backend WIRE layer.
+// Product images are served from the Shopify CDN (`cdn.shopify.com`, legacy `*.shopifycdn.net`, per-shop
+// `*.myshopify.com`); anything else is dropped to undefined rather than trusted.
+const IMAGE_HOST = /^(cdn\.shopify\.com|[a-z0-9][a-z0-9-]*\.shopifycdn\.net|[a-z0-9][a-z0-9-]*\.myshopify\.com)$/i;
+// Shopify handles are lowercase alphanumerics + hyphens (underscores permitted historically); reject
+// anything else so a malformed slug can never become part of a rendered URL.
+const HANDLE_SHAPE = /^[a-z0-9][a-z0-9_-]*$/i;
+
+/** Validate a Shopify product image URL, returning it only when it is an https Shopify-CDN URL. Pure.
+ *  Exported so the storefront-catalog WIRE layer can re-validate defensively (single source of truth). */
+export function safeImageUrl(url: string | undefined): string | undefined {
+  if (typeof url !== "string") return undefined;
+  const u = url.trim();
+  if (u.length === 0 || u.length > MAX_IMAGE_URL) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(u);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "https:" || !IMAGE_HOST.test(parsed.hostname)) return undefined;
+  return u;
+}
+
+/** Validate a Shopify product handle/slug (bounded, restricted charset), else undefined. Pure. */
+function safeHandle(handle: string | undefined): string | undefined {
+  if (typeof handle !== "string") return undefined;
+  const h = handle.trim();
+  return h.length > 0 && h.length <= MAX_HANDLE && HANDLE_SHAPE.test(h) ? h : undefined;
+}
 
 function formatPrice(p?: { amount?: string; currencyCode?: string }): string {
   if (!p?.amount) return "";
@@ -107,6 +148,9 @@ export function mapStorefrontToContext(tenantId: string, data: StorefrontData): 
       availableForSale: typeof n.availableForSale === "boolean" ? n.availableForSale : undefined,
       // C1 — the opaque cart/checkout variant id (undefined when the source reports no variant).
       variantId: firstVariantNumericId(n),
+      // Storefront render — host-validated image URL + slug (undefined when absent/invalid). Display-only.
+      imageUrl: safeImageUrl(n.featuredImage?.url),
+      handle: safeHandle(n.handle),
     }));
   const policy: StorePolicy = {
     returns: bound(data.shop?.refundPolicy?.body, MAX_DESC),
@@ -237,7 +281,9 @@ export interface StorefrontEgressLog {
   maxPages?: number;
 }
 
-const PRODUCT_PAGE_FIELDS = `nodes { id title description tags availableForSale priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } } }
+// Exported for the query-shape test (proving the live query actually REQUESTS the render fields — a
+// mapping test alone can't catch a query that never asks Shopify for them). Shared by both page queries.
+export const PRODUCT_PAGE_FIELDS = `nodes { id title description tags availableForSale handle featuredImage { url altText } priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } } }
     pageInfo { hasNextPage endCursor }`;
 
 /** Page 1: shop/policy + the first product page. `$after` is nullable — null means "start of the list". */
@@ -455,7 +501,7 @@ export function storefrontShellFetch(
  */
 export const STOREFRONT_NODES_QUERY = `query PalUpGroundingByIds($ids: [ID!]!) {
   nodes(ids: $ids) {
-    ... on Product { id title description tags availableForSale priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } } }
+    ... on Product { id title description tags availableForSale handle featuredImage { url altText } priceRange { minVariantPrice { amount currencyCode } } variants(first: 1) { nodes { id } } }
   }
 }`;
 
