@@ -202,3 +202,46 @@ test("embed: the host cart (window.PALUP.cart) reaches /chat as signals.cartItem
   expect(wire).not.toContain("$99");
   expect(wire).not.toContain("111"); // the variantId is host-only, never forwarded over this bridge
 });
+
+// Regression guard for the #347 loader race (open() posted palup:open to the not-yet-loaded panel, so it
+// was dropped and the panel's first-touch greeting never fired). The panel fires sendGreeting() ONLY on
+// receiving palup:open, and that turn carries signals.proactiveTrigger:"greeting" REGARDLESS of the
+// GREETING_PROACTIVE flag (the SERVER decides whether to emit any greeting text; the client turn is what
+// proves palup:open arrived). So: open the real embed and assert exactly one greeting turn fires BEFORE
+// any user input — not zero (the dropped-message bug) and not two (the double-fire the fix also guards).
+test("embed: opening the panel delivers palup:open so the first-touch greeting turn fires exactly once (guards the #347 race)", async ({
+  page,
+}) => {
+  const greetingTurns: unknown[] = [];
+  await page.route("**/chat", async (route) => {
+    try {
+      const b = route.request().postDataJSON() as { signals?: { proactiveTrigger?: string } };
+      if (b?.signals?.proactiveTrigger === "greeting") greetingTurns.push(b);
+    } catch {
+      /* non-JSON — ignore */
+    }
+    await route.continue();
+  });
+
+  await page.goto("/embed-host");
+  await expect(page.locator("[data-palup-host]")).toHaveAttribute("data-palup-mounted", "true");
+
+  await page.evaluate(() => {
+    type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
+    const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
+    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
+    launcher.click();
+  });
+  await panelFrame(page);
+
+  // WITHOUT typing anything: palup:open must have reached the panel and fired exactly one greeting turn.
+  await expect
+    .poll(() => greetingTurns.length, {
+      message: "the panel never fired a first-touch greeting turn on open — palup:open was not delivered (the #347 race)",
+    })
+    .toBe(1);
+  // give any erroneous double-fire a chance to show up, then confirm it stayed at one (once-per-session).
+  await page.waitForTimeout(300);
+  expect(greetingTurns.length).toBe(1);
+});
