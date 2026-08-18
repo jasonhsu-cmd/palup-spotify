@@ -207,6 +207,17 @@ describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
     expect(rec.gate?.pass).toBe(true);
   });
 
+  it("FAILS CLOSED — a candidate whose measuredOutcome.incrementalLift is NON-FINITE (NaN) blocks (never silently passes)", async () => {
+    const e = new EvolutionEngine({
+      champion: champWithMO(0.05),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: NaN } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-invalid");
+  });
+
   it("FAILS CLOSED — a candidate WITH a measuredOutcome but a champion baseline WITHOUT one blocks (no baseline to compare)", async () => {
     const e = new EvolutionEngine({
       champion, // no measuredOutcome

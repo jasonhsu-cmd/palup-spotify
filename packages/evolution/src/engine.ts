@@ -170,12 +170,22 @@ export class EvolutionEngine {
     // safety/floor/counter-metric/fairness/holdout failure above, it can only ADD a requirement.
     const candMO = cand.measuredOutcome;
     const champMO = champ.measuredOutcome;
+    // Fail-CLOSED on a malformed measuredOutcome (security review): a present-but-non-finite
+    // `incrementalLift` (NaN/Infinity/non-number) on EITHER side must BLOCK, mirroring the `complaintRate`
+    // `isRate01` hardening above — a raw `<` would evaluate false and silently no-op the seam (fail-OPEN).
+    // Dormant until Phase 1 feeds a live value, but the malformed branch must fail closed before then.
+    const measuredOutcomeMalformed =
+      (candMO !== undefined && !Number.isFinite(candMO.incrementalLift)) ||
+      (champMO !== undefined && !Number.isFinite(champMO.incrementalLift));
     const measuredOutcomeBaselineAbsent = candMO !== undefined && champMO === undefined;
     const measuredOutcomeRegressed =
-      candMO !== undefined && champMO !== undefined && candMO.incrementalLift < champMO.incrementalLift;
+      candMO !== undefined && champMO !== undefined &&
+      Number.isFinite(candMO.incrementalLift) && Number.isFinite(champMO.incrementalLift) &&
+      candMO.incrementalLift < champMO.incrementalLift;
+    if (measuredOutcomeMalformed) reasons.push("measured-outcome-invalid");
     if (measuredOutcomeBaselineAbsent) reasons.push("measured-outcome-baseline-absent");
     if (measuredOutcomeRegressed) reasons.push("measured-outcome-regressed");
-    const measuredOutcomeOk = !measuredOutcomeBaselineAbsent && !measuredOutcomeRegressed;
+    const measuredOutcomeOk = !measuredOutcomeMalformed && !measuredOutcomeBaselineAbsent && !measuredOutcomeRegressed;
     // Fail-CLOSED cross-family gate (ADR-0014): a grade the grader marked ADVISORY (gating === false —
     // a same-family judge, e.g. Gemini grading the Gemini agent, or no cross-family judge available) can
     // NEVER pass. It may still be recorded/observed, but proposer≠evaluator is unmet so it must not gate
