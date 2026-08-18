@@ -48,7 +48,7 @@ import {
   tombstoneKey,
   mergeGuestIntoAccount,
 } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -65,6 +65,7 @@ import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buil
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 import { readActiveChampion } from "./champion.js";
+import { HOLDOUT_PLAY, assignHoldoutArm, holdoutIdentity, holdoutPeriod, readHoldoutConfig, resolveControlPolicy } from "./holdout.js";
 import { guardCommercePort, withRequestPrincipal } from "./commerce-guard.js";
 import { verifyShopifyAppProxyShopper, normalizeAppProxyQuery } from "./shopify-shopper-identity.js";
 import { createCustomerGrantStore } from "./customer-grant-store.js";
@@ -2813,6 +2814,27 @@ export async function buildServer(opts?: {
         ? { ordinary: memoryCapability.mayWriteOrdinary, special: memoryCapability.mayWriteSpecial }
         : undefined;
 
+      // W2-B — the business HOLDOUT (holdout.ts; ADR-0007 / attribution-and-billing.md §1). Read once per
+      // turn, like matchedKill/matchedCostCap above. DEFAULT `{enabled:false}` (readHoldoutConfig's own
+      // honest default when nothing has been written) ⇒ `holdoutArm` stays undefined and NOTHING below
+      // in this block — arm assignment, the control-policy override, and the exposure tally further down
+      // — runs: byte-identical to before this feature existed. Identity prefers the server-VERIFIED
+      // shopperId (`verifiedShopperId`, derived above from the x-shopper-token — never client-claimed)
+      // and falls back to the (hashed) sessionId, mirroring canary's own trust boundary. `holdoutPeriod()`
+      // is computed once and reused at the exposure-tally call below so one turn can never straddle two
+      // periods.
+      const holdoutConfig = await readHoldoutConfig(store, tenantId);
+      const holdoutPeriodValue = holdoutPeriod();
+      const holdoutArm = holdoutConfig.enabled
+        ? await assignHoldoutArm(
+            store,
+            tenantId,
+            holdoutConfig,
+            holdoutIdentity({ verifiedShopperId, sessionId }),
+            holdoutPeriodValue,
+          )
+        : undefined;
+
       // Canary split: a sticky fraction of THIS tenant's sessions is served by that tenant's canary
       // policy; the rest by champion. Keyed by the server-derived tenantId, so one merchant's canary can
       // never bucket another merchant's shoppers (ADR-0014 blast-radius fix).
@@ -2822,7 +2844,14 @@ export async function buildServer(opts?: {
       // nothing has been promoted yet — this is what makes engine.promote actually reach shoppers
       // (ADR-0003 promote→serving). Canary still overrides for its sticky traffic slice.
       const champion = (await readActiveChampion(store, tenantId)) ?? DEFAULT_POLICY;
-      const policy = canary ? canary.policy : champion;
+      // A holdout CONTROL arm overrides canary/champion entirely — it is the un-treated baseline the
+      // flywheel measures against, never a canary/champion variant (step 3 of the design: "control ⇒
+      // serve a designated CONTROL policy"; "treated ⇒ serve champion/canary exactly as today"). The
+      // control arm still goes through every guardrail (kill switch, cost cap, safety) exactly like any
+      // other policy — `resolveControlPolicy` only changes styleDirective/proactivityDefault, the same
+      // narrow surface a promoted champion is limited to (see champion.test.ts's CONTAINMENT case), so
+      // this is a policy choice, never a bypass.
+      const policy = holdoutArm === "control" ? resolveControlPolicy(holdoutConfig) : canary ? canary.policy : champion;
       // autoPersist:false — we persist the advanced session state ourselves, atomically with the audit.
       //
       // `level` comes from the SERVING POLICY (canary's when bucketed, else the promoted champion's) and
@@ -2989,15 +3018,43 @@ export async function buildServer(opts?: {
           console.error(`[/chat] ttl_sweep error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
         });
       }
+      // W2-B — tally this turn's EXPOSURE onto the holdout arm's `ArmTally` row, only while the holdout
+      // is enabled (`holdoutArm` is undefined otherwise, and this whole block is skipped — no ledger
+      // write at all when off, per the design's step 6). AWAITED (not fire-and-forget): the semantic-
+      // memory-v1 T6 revert above already proved that work kicked off after a response starts being
+      // returned can be starved by Cloud Run's post-response CPU throttling, and this feeds a
+      // measurement the flywheel's incrementality metric depends on, so it gets the same treatment as
+      // that memory write — inside the request, fail-open (a tally failure never breaks the reply).
+      // `orders`/`revenue` stay 0 here by design: W2-C's order webhook is what populates those later.
+      // DELIBERATELY unconditional on `kill`/`no_autonomous_action`: an exposure records that this
+      // shopper reached the surface under this arm this period, not that the model took an action — and
+      // the kill switch is tenant/agent-wide, so it depresses BOTH arms' exposure counts equally and
+      // cannot bias the treated-vs-control comparison the way an arm-specific effect would.
+      if (holdoutArm) {
+        try {
+          await accumulateArmTally(store, {
+            tenantId,
+            play: HOLDOUT_PLAY,
+            period: holdoutPeriodValue,
+            arm: holdoutArm,
+            exposures: 1,
+          });
+        } catch (e) {
+          console.error(`[/chat] holdout arm_tally error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+        }
+      }
       // M3 — per-turn telemetry enrichment: the business dimensions (mode/pitch/servedBy/escalate) and
       // end-to-end turn latency the model-port decorator can't see. PII-free (no message/reply). Under
-      // the server-derived tenant; fail-open like logTraffic.
+      // the server-derived tenant; fail-open like logTraffic. `arm` (W2-B) is undefined — hence
+      // structurally absent, not present-and-null — whenever the holdout is off, so this row is
+      // unchanged from before this feature existed for every tenant that never enables it.
       void telemetry
-        .record(serving, { kind: "turn", agentType: RUNTIME_AGENT_TYPE, servedBy: policy.id, mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, latencyMs: Date.now() - turnStart, ...recommendationTelemetryFields(d) })
+        .record(serving, { kind: "turn", agentType: RUNTIME_AGENT_TYPE, servedBy: policy.id, mode: d.mode, pitch: d.pitch, escalate: d.escalateToHuman, arm: holdoutArm, latencyMs: Date.now() - turnStart, ...recommendationTelemetryFields(d) })
         .catch(() => {});
       // T9 — logTraffic is the choke point that redacts message/reply and hashes sessionId at the
       // write boundary (see canary.ts), so no raw shopper PII lands in the shadow-grading log at rest.
-      await logTraffic(store, tenantId, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope });
+      // `arm` (W2-B) is joinable-but-optional here too, same absence-when-off rule as telemetry above.
+      await logTraffic(store, tenantId, { servedBy: policy.id, sessionId, message, reply: d.reply, mode: d.mode, escalate: d.escalateToHuman, killScope: kill?.scope, arm: holdoutArm });
       // F11 (NN #5): commit the advanced session state AND its governance-audit record in ONE tx, so
       // the governed state (pitch budget / safety latch) can never advance without its audit on a
       // mid-turn store failure. Both live under the serving tenant. "session" matches session-store.ts.

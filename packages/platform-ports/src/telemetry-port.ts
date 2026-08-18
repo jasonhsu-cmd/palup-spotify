@@ -1,4 +1,5 @@
 import type { RuntimeStatePort } from "./runtime-state-port.js";
+import type { Arm } from "./outcome-ledger.js";
 
 // Telemetry port (ADR-0001 names `telemetry`; ADR-0013 pins the interface). Passive MEASUREMENT of the
 // run-time plane — per-request/tenant/agent/model tokens + latency — so cost/margin become visible and
@@ -67,6 +68,16 @@ export interface TelemetryEvent {
    * data, and no title, price or reply text is carried.
    */
   recommendedProductIds?: string[];
+  /**
+   * Wave 2 / W2-B — the business HOLDOUT arm this turn was served under ("treated" | "control"), when the
+   * holdout is enabled for this tenant (`packages/widget-backend/src/holdout.ts`). Present only on a
+   * `"turn"` event and only while the holdout is on; omitted (not `undefined`-valued in the *serialized*
+   * wire form, but structurally absent) whenever it is off — the default — so every turn recorded today,
+   * and every turn for a tenant that never enables it, is unaffected. PII-free: an arm label, never a
+   * shopper/session identifier. NOT a billing basis by itself — see `outcome-ledger.ts`'s own guardrail
+   * comment; this field is for observability/join, the actual measurement is `ArmTally`.
+   */
+  arm?: Arm;
   /** ISO timestamp; stamped by the adapter on record if the caller omits it. */
   at?: string;
 }
