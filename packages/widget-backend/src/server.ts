@@ -288,12 +288,14 @@ const storefrontCss = readFileSync(join(STOREFRONT_DIR, "app.css"), "utf8");
 const storefrontJs = readFileSync(join(STOREFRONT_DIR, "app.js"), "utf8");
 
 const { port: modelPort, name: modelName } = createModelPort();
-// ADR-0017 T7 — every commerce call goes through the ADR-0016 fail-closed guard. `commerceIsLive` is a
-// capability marker from the composition root (model.ts): false for MockCommerceAdapter, so the guard
-// is a tested no-op today; a future live adapter sets it true and every read/write below automatically
-// requires a verified shopper principal (bound per-request via withRequestPrincipal in the /chat handler).
-const { port: rawCommerce, isLive: commerceIsLive } = createCommercePort();
-const commerce = guardCommercePort(rawCommerce, commerceIsLive);
+// ADR-0017 T7 / Wave-1 E — every commerce call goes through the ADR-0016 fail-closed guard.
+// `commerceIsLive` is a capability marker from the composition root (model.ts): false for
+// MockCommerceAdapter (a tested no-op), true for the live CAA adapter, at which point every read/write
+// below automatically requires a verified shopper principal (bound per-request via withRequestPrincipal
+// in the /chat handler). MOVED INSIDE `buildServer` (it used to be constructed here, at module scope):
+// the live adapter needs `grantStore` (needs `store`/`secrets`) and the registry-first shop-domain
+// resolver (`merchants.shopDomainFor`), neither of which exists until inside `buildServer` — see the
+// composition site right after `grantStore` is built, below.
 
 // ADR-0018 task 5 — the callback landing page. Hands the one-time code to the widget via an
 // exact-origin postMessage (never the token, never "*"), then closes. The payload is base64url/enum only
@@ -520,6 +522,47 @@ export async function buildServer(opts?: {
   // separation) that needs nothing extra to provision today.
   const SHOPPER_TOKEN_SECRET = process.env.SHOPPER_TOKEN_SECRET;
   const AUDIT_HMAC_SECRET = process.env.AUDIT_HMAC_SECRET || SHOPPER_TOKEN_SECRET;
+  // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
+  // F4 (startup precondition): SHOPPER_AUTH is only ever HONORED when WIDGET_AUTH_REQUIRED is ALSO on —
+  // it needs a VERIFIED widget tenant to cross-check the shopper's tenant against (F1); under the
+  // unauthenticated RUNTIME_TENANT fallback that check would be vacuous. Misconfiguration (flag on,
+  // precondition unmet) degrades to "shoppers are anonymous", never to an unchecked cross-tenant bypass.
+  //
+  // HOISTED HERE (Wave-1 E): this used to be declared much later, alongside `shopperIdentity`. Moved up
+  // because the commerce-port composition below (also new to Wave-1 E) needs `SHOPPER_AUTH_ENABLED` to
+  // compute `CAA_ENABLED`, and that composition must run before `brainFor` is DEFINED (it closes over
+  // `commerce`) — in particular before `brainFor`'s own eager prewarm call further down. Nothing between
+  // the old and new position reads `SHOPPER_AUTH_ENABLED` before this point.
+  const SHOPPER_AUTH_FLAG = process.env.SHOPPER_AUTH === "true";
+  if (SHOPPER_AUTH_FLAG && !WIDGET_AUTH_REQUIRED) {
+    console.warn("[config] SHOPPER_AUTH=true requires WIDGET_AUTH_REQUIRED=true (ADR-0017 F4) — shoppers will be treated as anonymous until both are set.");
+  }
+  const SHOPPER_AUTH_ENABLED = SHOPPER_AUTH_FLAG && WIDGET_AUTH_REQUIRED;
+  // ADR-0018 — Customer Account API OAuth (shopper sign-in that yields a token to read their own orders/
+  // subscriptions). Gated by the SAME SHOPPER_AUTH_ENABLED posture (so it's inert exactly when App-Proxy
+  // identity is) PLUS a configured redirect_uri PLUS a shopper-token secret to mint. Per-shop client creds
+  // (per-shop client model, ADR-0018 spike) come from the tenant-scoped SecretsPort. When off ⇒ 404 (inert).
+  //
+  // HOISTED HERE too (Wave-1 E), for the same reason as `SHOPPER_AUTH_ENABLED` above: the commerce-port
+  // composition needs `CAA_ENABLED` + `grantStore` + `caaFetch` before `brainFor` is defined.
+  const CAA_REDIRECT_URI = process.env.CAA_REDIRECT_URI;
+  const CAA_SCOPE = process.env.CAA_SCOPE || "openid email customer-account-api:full";
+  const CAA_ENABLED = SHOPPER_AUTH_ENABLED && typeof CAA_REDIRECT_URI === "string" && CAA_REDIRECT_URI.length > 0 && typeof SHOPPER_TOKEN_SECRET === "string" && SHOPPER_TOKEN_SECRET.length > 0;
+  const caaFetch = opts?.caaFetch ?? globalThis.fetch;
+  const grantStore = createCustomerGrantStore(store, secrets);
+  // Wave-1 E (revenue-flywheel) — wire the LIVE CAA commerce READ adapter behind the exact same
+  // `CAA_ENABLED` posture as the OAuth routes below. Default (no SHOPPER_AUTH / no CAA config) ⇒
+  // `createCommercePort()`'s `caaEnabled:false` branch returns the mock unchanged — ships dark, pinned by
+  // commerce-fixture-marker.test.ts (calls `createCommercePort()` with NO ARGS) and
+  // commerce-port-caa-wiring.test.ts (explicit off case). `guardCommercePort`'s ADR-0016 fail-closed
+  // check auto-activates the moment `commerceIsLive` is true — unchanged from the pre-Wave-1-E wiring.
+  const { port: rawCommerce, isLive: commerceIsLive } = createCommercePort({
+    grants: grantStore,
+    shopDomainForTenant: (t) => merchants.shopDomainFor(t),
+    caaEnabled: CAA_ENABLED,
+    fetchFn: caaFetch,
+  });
+  const commerce = guardCommercePort(rawCommerce, commerceIsLive);
   // M3 — telemetry (cost/latency measurement). The metering decorator wraps the model port so every
   // model call's tokens + latency are recorded under the request tenant; fail-open, so it can never
   // break serving. Built here because the store-backed telemetry adapter needs the store.
@@ -863,15 +906,8 @@ export async function buildServer(opts?: {
     return anonId;
   };
   // ADR-0017 — shopper identity, default OFF ⇒ byte-identical to today (every shopper stays anonymous).
-  // F4 (startup precondition): SHOPPER_AUTH is only ever HONORED when WIDGET_AUTH_REQUIRED is ALSO on —
-  // it needs a VERIFIED widget tenant to cross-check the shopper's tenant against (F1); under the
-  // unauthenticated RUNTIME_TENANT fallback that check would be vacuous. Misconfiguration (flag on,
-  // precondition unmet) degrades to "shoppers are anonymous", never to an unchecked cross-tenant bypass.
-  const SHOPPER_AUTH_FLAG = process.env.SHOPPER_AUTH === "true";
-  if (SHOPPER_AUTH_FLAG && !WIDGET_AUTH_REQUIRED) {
-    console.warn("[config] SHOPPER_AUTH=true requires WIDGET_AUTH_REQUIRED=true (ADR-0017 F4) — shoppers will be treated as anonymous until both are set.");
-  }
-  const SHOPPER_AUTH_ENABLED = SHOPPER_AUTH_FLAG && WIDGET_AUTH_REQUIRED;
+  // `SHOPPER_AUTH_FLAG`/`SHOPPER_AUTH_ENABLED` are now declared much earlier, alongside `AUDIT_HMAC_SECRET`
+  // (Wave-1 E hoist — see that comment for why).
   // ADR-0016 — SUBSCRIPTION_SELFSERVE has no effect at all unless shoppers can actually BE verified
   // (SHOPPER_AUTH_ENABLED); without it `signals.shopperId` is never set, so support.ts's own
   // shopperVerified gate is always false and skip/pause stays human-routed regardless of this flag. This
@@ -967,11 +1003,8 @@ export async function buildServer(opts?: {
   // subscriptions). Gated by the SAME SHOPPER_AUTH_ENABLED posture (so it's inert exactly when App-Proxy
   // identity is) PLUS a configured redirect_uri PLUS a shopper-token secret to mint. Per-shop client creds
   // (per-shop client model, ADR-0018 spike) come from the tenant-scoped SecretsPort. When off ⇒ 404 (inert).
-  const CAA_REDIRECT_URI = process.env.CAA_REDIRECT_URI;
-  const CAA_SCOPE = process.env.CAA_SCOPE || "openid email customer-account-api:full";
-  const CAA_ENABLED = SHOPPER_AUTH_ENABLED && typeof CAA_REDIRECT_URI === "string" && CAA_REDIRECT_URI.length > 0 && typeof SHOPPER_TOKEN_SECRET === "string" && SHOPPER_TOKEN_SECRET.length > 0;
-  const caaFetch = opts?.caaFetch ?? globalThis.fetch;
-  const grantStore = createCustomerGrantStore(store, secrets);
+  // `CAA_REDIRECT_URI`/`CAA_SCOPE`/`CAA_ENABLED`/`caaFetch`/`grantStore` are now declared much earlier,
+  // alongside `AUDIT_HMAC_SECRET` (Wave-1 E hoist — the live commerce-port composition there needs them).
   // Exact-origin target for the callback→widget handoff postMessage (never "*"). The widget iframe is
   // served by THIS backend, so its origin equals the redirect_uri's origin.
   const CAA_WIDGET_ORIGIN = (() => {
