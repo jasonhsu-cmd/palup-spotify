@@ -670,6 +670,9 @@ export async function buildServer(opts?: {
   const PRODUCT_CITATIONS = process.env.PRODUCT_CITATIONS === "true";
   const PRODUCT_CARDS = process.env.PRODUCT_CARDS === "true";
   const CART_LINE_ITEMS = process.env.CART_LINE_ITEMS === "true";
+  // WS6 — the first-touch greeting posture flag (§5 run-time agent-behaviour change; default OFF ⇒ the
+  // greeting trigger is inert and the brain is byte-identical). Threaded into every brain like every flag.
+  const GREETING_PROACTIVE = process.env.GREETING_PROACTIVE === "true";
   // T1 phase 2 — SERVER_GUARD_SIGNALS: run the server-side language-agnostic guard classifier per turn and
   // thread its result into signals (the brain merges it most-conservative-wins with its keyword floor).
   // Same governed posture-flag discipline as the Wave 4 flags: env-read here, default OFF, and turning it
@@ -748,7 +751,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK })
+  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -802,6 +805,9 @@ export async function buildServer(opts?: {
         // TURN_EMBED_AGENT_TYPE (constructed unconditionally above). Consulted by the brain at
         // decide()-time only on the clean sales path, and only when a consumer would actually use it.
         turnEmbedder,
+        // Position 24 — WS6 GREETING_PROACTIVE. Default OFF ⇒ the greeting trigger is inert; when ON the
+        // greeting rung returns pitch:"none" and never calls selectPitch (no money pitch, no budget spend).
+        GREETING_PROACTIVE,
       );
       brains.set(key, b);
     }

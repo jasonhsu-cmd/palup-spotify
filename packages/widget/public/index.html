@@ -1082,6 +1082,32 @@
     sendProactive("exit_intent");
   });
 
+  // WS6 — first-touch greeting. Fires AT MOST once per session, when the embedded panel is first opened.
+  // AGENT-INITIATED (empty message + proactiveTrigger:"greeting"); the SERVER decides whether any greeting
+  // is emitted (GREETING_PROACTIVE flag). Flag OFF (production default) or any failure ⇒ empty reply ⇒ the
+  // static welcome already in the log stands — the chat is never left empty and this adds nothing.
+  const GREET_KEY = "palup.widget.greeted.v1";
+  function greetedThisSession(){ try { return sessionStorage.getItem(GREET_KEY) === "1"; } catch { return false; } }
+  async function sendGreeting(){
+    if (greetedThisSession()) return;                     // once per session; never re-fires
+    try { sessionStorage.setItem(GREET_KEY, "1"); } catch {}   // mark BEFORE the request so it can never double-fire
+    const signals = { ...demoSignals(), proactiveTrigger: "greeting", pageContext: currentPageContext(), ...cartSignal() };
+    const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
+    try {
+      await ensureToken(false);
+      if (memoryEnabled) await ensureGuestToken(false);
+      const headers = { "content-type": "application/json" };
+      if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      if (shopperToken) headers["x-shopper-token"] = shopperToken;
+      if (memoryEnabled && memState.guestToken) headers["x-guest-token"] = memState.guestToken;
+      const r = await fetch("/chat", { method:"POST", headers, body: JSON.stringify({ message: "", signals, sessionId, idempotencyKey, history: recentHistory() }) });
+      if (!r.ok) return;
+      const d = await r.json();
+      // Only a real, non-empty server greeting is shown (flag ON). Flag OFF ⇒ empty reply ⇒ nothing added.
+      if (d && d.reply){ add(d.reply, "agent", d); if (d.escalate) enterHandoff(); }
+    } catch { /* best-effort — the static welcome remains */ }
+  }
+
   // Continue the conversation across a reload: re-render the persisted transcript; otherwise greet.
   if (transcript.length){
     for (const t of transcript){ add(t.content, t.role === "agent" ? "agent" : "user"); }
@@ -1115,7 +1141,7 @@
       if (e.source !== window.parent) return; // only trust our own parent frame — never e.origin alone, per the loader's own comment on this exact tradeoff
       const d = e.data;
       if (!d || typeof d.type !== "string") return;
-      if (d.type === "palup:open"){ unreadCount = 0; setOpen(true); }
+      if (d.type === "palup:open"){ unreadCount = 0; setOpen(true); sendGreeting(); } // WS6 — greet on first embedded open (server-gated; once/session)
       // WS4 — the loader forwards the host storefront's cart + page context here. Re-whitelist on THIS side
       // too (defense in depth — the loader already whitelisted, but the panel must not trust the message
       // shape): only {productId, quantity} and a bounded pageContext survive into hostCtx, which

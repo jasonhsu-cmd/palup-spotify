@@ -635,6 +635,12 @@ function sessionFallbackPersonaStyle(sessionDisposition: Signals["sessionDisposi
 const EXIT_INTENT_PROMPT =
   "The shopper is leaving the page with items still in their cart. Offer ONE brief, genuinely helpful reason to complete the order now - for example shipping or returns reassurance from the POLICY. Warm and low-pressure: no false urgency, no scarcity, and no discount.";
 
+// WS6 — first-touch acquisition greeting. Deliberately NON-COMMERCIAL: one warm sentence, no product pitch,
+// no discount/promotion, no invented facts. The greeting rung returns pitch:"none" and never calls
+// selectPitch, so this prompt can never become a sales pitch.
+const GREETING_PROMPT =
+  "The shopper just opened the chat. Greet them with ONE warm, brief, on-brand welcome and invite them to ask about a product or their order. Do NOT recommend or pitch a product, do NOT mention or offer any discount or promotion, and do NOT invent facts. A single friendly sentence.";
+
 /**
  * THE NUMBER OF CANDIDATES retrieval puts in the prompt, and the argument for it.
  *
@@ -949,6 +955,13 @@ export function createBrain(
   // retrieval falls back to its own internal embed exactly as today, and memory recall falls back to
   // list-all exactly as today (T7) — never a throw.
   turnEmbedder?: ModelPort,
+  // WS6 — the GREETING_PROACTIVE posture flag (operator/deploy-time, threaded exactly like every posture
+  // flag above; never hardcoded on, never read from process.env inside this package). A new server-driven
+  // proactive path reaching shoppers is a run-time agent-behaviour change needing the eval gate → shadow →
+  // canary → named-human approval (HITL §5). Default OFF ⇒ the greeting trigger is inert and every existing
+  // call site is byte-identical. Even when ON, the greeting rung returns pitch:"none", never calls
+  // selectPitch, spends no INV-E budget, and emits no offer — it cannot become a commercial pitch.
+  greetingProactiveEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -1476,6 +1489,36 @@ export function createBrain(
       }
 
       // 4. Sales / smalltalk — reactive answer always; proactive pitch is gated.
+
+      // 4a-greeting. PROACTIVE FIRST-TOUCH GREETING (WS6 / acquire), behind greetingProactiveEnabled
+      // (default OFF ⇒ inert). AGENT-INITIATED (empty shopper turn) and reached only on the CLEAN path —
+      // every guardrail/brake rung already returned above, so a greeting CANNOT override a brake. It is
+      // NON-COMMERCIAL BY CONSTRUCTION: it NEVER calls selectPitch and always returns pitch:"none", so it
+      // spends no INV-E budget (session.ts decrements only on pitch!=="none") and can emit no money-gated
+      // pitch; it surfaces no offer/cards. At cap (§8a inv-14: no proactive model spend at cap) it stays
+      // QUIET (empty reply — the client keeps its own static welcome). Gate on an EMPTY shopper turn so a
+      // real message can never be hijacked by a stray greeting flag.
+      if (signals.proactiveTrigger === "greeting" && text.trim() === "") {
+        flags.push("proactive:greeting");
+        // Flag OFF (inert) or at cap (§8a inv-14: no proactive model spend at cap) → QUIET: surface nothing
+        // (empty reply); the client keeps its own static welcome. Handled on THIS empty-turn path so an empty
+        // greeting request can never fall through to the reactive sales model.
+        if (!greetingProactiveEnabled || signals.atCap) {
+          flags.push(greetingProactiveEnabled ? "at_cap" : "greeting_disabled", "no_greeting");
+          return { mode: "smalltalk", reply: "", pitch: "none", escalateToHuman: false, outbound: false, safetyClass: "none", flags, model: "guardrail" };
+        }
+        // `relationship` is server-derived ("new" only for a verified shopper, else "anonymous"); it only
+        // TONES the greeting — there is no pitch for it to gate.
+        const rel = signals.relationship === "new" ? "new" : "anonymous";
+        const greet = await model.complete({
+          messages: await groundedMessages(GREETING_PROMPT, tenantId, `RELATIONSHIP: ${rel}. One warm sentence.`, history, signals.pageContext),
+          temperature: 0,
+          tenantId,
+        });
+        // Money-guard defence in depth (a greeting must never smuggle a discount, though it never pitches).
+        if (await offersUngroundedDiscount(greet.text, tenantId)) return discountGuardrail();
+        return { mode: "smalltalk", reply: greet.text, pitch: "none", escalateToHuman: false, outbound: false, safetyClass: "none", flags, model: greet.model };
+      }
 
       // 4a. PROACTIVE trigger (§4 Behavioral: exit-intent; §5 Timing). AGENT-INITIATED, not a shopper
       // message: it is never run through the intent classifiers (they key off the shopper's text, which

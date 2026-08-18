@@ -395,7 +395,7 @@ export interface Signals {
    * never run through the shopper-message intent classifiers; the shopper turn on a proactive trigger
    * is empty. Sentinel-valued.
    */
-  proactiveTrigger?: "exit_intent";
+  proactiveTrigger?: "exit_intent" | "greeting";
   /**
    * §8a invariant 14 — the merchant (or the platform) has reached its cost/billing cap, so the agent runs
    * in BASIC MODE: no proactive/outbound initiation, while live chat continues to be answered normally.

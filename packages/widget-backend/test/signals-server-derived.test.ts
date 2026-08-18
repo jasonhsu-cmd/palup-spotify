@@ -32,6 +32,14 @@ describe("deriveServingSignals — client signals are untrusted", () => {
     expect(out.kill).toBeUndefined(); // ctx.kill is false → not armed by the client
   });
 
+  // WS6: proactiveTrigger is a non-trust-bearing UI enum — accepted for the two known values, anything
+  // else (a made-up trigger trying to reach a different rung) is dropped to undefined.
+  it("WS6: accepts proactiveTrigger 'greeting'/'exit_intent', drops any other value", () => {
+    expect(deriveServingSignals({ proactiveTrigger: "greeting" } as Signals, ctx).proactiveTrigger).toBe("greeting");
+    expect(deriveServingSignals({ proactiveTrigger: "exit_intent" } as Signals, ctx).proactiveTrigger).toBe("exit_intent");
+    expect(deriveServingSignals({ proactiveTrigger: "buy_now" } as unknown as Signals, ctx).proactiveTrigger).toBeUndefined();
+  });
+
   // ADR-0015 T12: the memory consent tiers are server/CMP-derived, never the client's — and an
   // anonId-that-fails-validation must never be trusted as a vector-namespace component (Inv 2/8).
   it("ADR-0015 T12: consent.memoryOrdinary/memorySpecial are always 'unknown' and a bad anonId is dropped", () => {
