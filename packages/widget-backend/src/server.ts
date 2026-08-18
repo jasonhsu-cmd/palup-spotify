@@ -32,7 +32,19 @@ import {
   createInMemoryProductFactsStore,
   createInMemoryQueue,
 } from "@palup/platform-ports";
-import { createMemoryService, isMemoryEnabled, validateAnonId, memorySubjectId, eraseSubject, classifyFact, sweepExpired, mergeAccountConsent, decideMemoryWrite } from "@palup/widget-memory";
+import {
+  createMemoryService,
+  isMemoryEnabled,
+  validateAnonId,
+  memorySubjectId,
+  eraseSubject,
+  classifyFact,
+  sweepExpired,
+  mergeAccountConsent,
+  decideMemoryWrite,
+  ERASURE_TOMBSTONE_COLLECTION,
+  tombstoneKey,
+} from "@palup/widget-memory";
 import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -119,6 +131,10 @@ const MAX_ID_CHARS = posInt("MAX_ID_CHARS", 200); // sessionId / idempotencyKey
 // Rate limits (T6) — fixed-window, env-tunable; token-bucket-ish caps to stop denial-of-wallet.
 const RL_SESSION = posInt("RL_SESSION_PER_MIN", 30); // ~1 turn / 2s per conversation
 const RL_IP = posInt("RL_IP_PER_MIN", 60);
+// MEMORY-GO-LIVE-CHECKLIST.md §E4 — the memory-write Pub/Sub push route needs its OWN limit, dedicated
+// from `RL_IP`: pushes arrive from shared Google source IP ranges, so sharing the 60/min public-traffic
+// limit risks a 429 → Pub/Sub retry → dead-letter for a route with no other caller to compete with.
+const RL_PUBSUB_PUSH = posInt("RL_PUBSUB_PUSH_PER_MIN", 600);
 const RL_TENANT = posInt("RL_TENANT_PER_MIN", 2_000); // per-tenant ceiling (≈5× expected)
 const RL_WINDOW = posInt("RL_WINDOW_SECONDS", 60);
 // Widget tenant identity (T2/T3): the tenant is derived from a verified widget token. WIDGET_AUTH_REQUIRED
@@ -223,6 +239,13 @@ export function assertMemoryAuthCoupling(memoryEnabled: boolean, widgetAuthRequi
   }
 }
 const IDEM_TTL_SECONDS = posInt("IDEM_TTL_SECONDS", 86_400); // 24h
+// MEMORY-GO-LIVE-CHECKLIST.md §E2 — the memory-write push route's consume-side idempotency dedup: once a
+// message's deterministic `id` (memory-write-queue.ts) has been successfully `remember`-ed, a redelivery
+// is ack + dropped rather than re-running the distiller call. TTL must exceed the queue's own message
+// lifetime (infra/terraform/pubsub-memory.tf's `message_retention_duration`, 1h) with headroom — 48h,
+// matching the §E1 erasure tombstone's TTL.
+const MEMORY_DEDUP_COLLECTION = "mem:dedup";
+const MEMORY_DEDUP_TTL_SECONDS = 172_800; // 48h
 // 48h sliding (reset each turn): this is conversation-scoped CONTROL state (safety latch / open issues
 // / pitch budget), not customer memory — it shouldn't outlive a conversation. Cross-visit shopper
 // memory is a separate, consent-gated, identified-customer subsystem with its own retention policy.
@@ -1235,7 +1258,26 @@ export async function buildServer(opts?: {
       verify: memoryVerify,
       expectedServiceAccount: MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT!,
       remember: (ctx, turn) => memoryService!.remember(ctx, turn),
-      checkRateLimit: (ip) => underLimit(store, { tenantId: "__mint__" }, `ip:${ip}`, RL_IP, RL_WINDOW),
+      // §E4 (security-review MED-2) — a DEDICATED limit AND a dedicated COUNTER KEY. `underLimit` keys the
+      // fixed-window counter by (tenantId, key) only — the limit value is just the threshold, NOT part of
+      // the key — so reusing `ip:${ip}` would share ONE counter with the catalog push route and all public
+      // `ip:` traffic (both arrive from shared Google source IPs), starving this route and defeating the
+      // isolation E4 requires. The `pubsub-mem:` namespace gives this route its own window. NOTE: pushes
+      // share a Google source IP, so this is effectively ONE global aggregate bucket (RL_PUBSUB_PUSH/min
+      // across all tenants + instances) — size RL_PUBSUB_PUSH_PER_MIN against peak aggregate turn volume
+      // before enabling the queue (it fails toward the DLQ, i.e. silent memory loss, not over-admission).
+      checkRateLimit: (ip) => underLimit(store, { tenantId: "__mint__" }, `pubsub-mem:${ip}`, RL_PUBSUB_PUSH, RL_WINDOW),
+      // §E1 — erasure tombstone: subject-level, covers both the main and floor namespaces (a class-specific
+      // withdrawal conservatively also drops any in-flight write for the whole subject — erasure.ts).
+      wasErasedAfter: async (tenantId, anonId, publishedAtMs) => {
+        const t = await store.get<{ erasedAtMs: number }>({ tenantId }, ERASURE_TOMBSTONE_COLLECTION, tombstoneKey(anonId));
+        return !!t && publishedAtMs <= t.erasedAtMs;
+      },
+      // §E2 — consume-side idempotency dedup, keyed off the message's deterministic id.
+      alreadyProcessed: async (tenantId, id) => (await store.get({ tenantId }, MEMORY_DEDUP_COLLECTION, id)) !== null,
+      markProcessed: async (tenantId, id) => {
+        await store.put({ tenantId }, MEMORY_DEDUP_COLLECTION, id, { done: true }, { ttlSeconds: MEMORY_DEDUP_TTL_SECONDS });
+      },
     });
     console.warn(
       "[config] memory-write Pub/Sub OIDC push route registered (consume side) — its OIDC verify (signature + " +

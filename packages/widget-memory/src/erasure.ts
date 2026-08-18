@@ -27,6 +27,23 @@ const PAGE_LIMIT = 500;
 // subject is a safe, never-worse outcome) rather than loop unbounded or silently truncate the purge.
 const MAX_PAGES = 2000;
 
+// MEMORY-GO-LIVE-CHECKLIST.md §E1 (raw-turn PII in Pub/Sub) — the async memory-write queue's erasure
+// path does not reach Pub/Sub, so a withdrawal/erasure request during the queue's retention window would
+// otherwise leave an in-flight or DLQ'd raw turn to be written AFTER the shopper asked to be forgotten.
+// Every withdrawal/erasure entry point below writes a subject-level TOMBSTONE here; the queue consumer
+// (widget-backend's pubsub-push-memory.ts) checks it before calling `remember` and drops (ack, no write)
+// any message published at or before the tombstone's `erasedAtMs`.
+export const ERASURE_TOMBSTONE_COLLECTION = "mem:erasure-tombstone";
+/** Subject-level (not per-class) — one tombstone covers both the main and floor namespaces for this
+ *  anonId, since a message dropped by the queue was never written to either. */
+export function tombstoneKey(anonId: string): string {
+  return anonId;
+}
+// 48h — must exceed the max queue message lifetime (Pub/Sub `message_retention_duration`, currently 1h
+// per infra/terraform/pubsub-memory.tf) so the tombstone can never expire while a message it must catch
+// is still deliverable.
+export const ERASURE_TOMBSTONE_TTL_SECONDS = 172_800;
+
 /** Thrown by `enumerateSubject` when a namespace isn't exhausted within `MAX_PAGES` pages. Carries the
  *  partial page-walk so a WITHDRAWAL caller can escalate deliberately (see `withdrawConsent1`/
  *  `withdrawConsent2`) rather than resolve with a silently incomplete purge. */
@@ -71,6 +88,8 @@ export interface ErasureDeps {
    * `AUDIT_HMAC_SECRET`), which is required for a low-entropy `acct:` subject's ref to be genuinely
    * pseudonymous rather than brute-forceable. */
   hmacKey?: string;
+  /** Testable clock for the erasure tombstone (§E1 above). Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 /** Identifies one subject (a guest anon id, or an account id post sign-up merge) under one tenant. */
@@ -83,6 +102,22 @@ function classOf(item: VectorListItem): FactClass | undefined {
   return (item.metadata as Partial<FactMetadata> | undefined)?.class;
 }
 
+/** Writes the §E1 erasure tombstone for one subject. Called by `eraseSubject`, `withdrawConsent1`, AND
+ *  `withdrawConsent2` — a class-specific withdrawal (Consent 1 or 2 alone) conservatively ALSO drops any
+ *  in-flight write for the whole subject, not just the withdrawn class: the queue message carries a full
+ *  turn, not a single fact, so there is no narrower thing to tombstone. This is safe (never worse than
+ *  leaving the in-flight write to land) — see this module's header. */
+async function writeErasureTombstone(deps: ErasureDeps, ctx: SubjectRef): Promise<void> {
+  const nowMs = (deps.now ?? Date.now)();
+  await deps.audit.put(
+    { tenantId: ctx.tenantId },
+    ERASURE_TOMBSTONE_COLLECTION,
+    tombstoneKey(ctx.anonId),
+    { erasedAtMs: nowMs },
+    { ttlSeconds: ERASURE_TOMBSTONE_TTL_SECONDS },
+  );
+}
+
 /**
  * Full, audited right-to-erasure for one subject (ADR-0015 Inv 5): deletes their ENTIRE namespace —
  * every ordinary and special-category fact — via the vector port's `deleteNamespace`. Under Option B a
@@ -91,6 +126,13 @@ function classOf(item: VectorListItem): FactClass | undefined {
  * whole-tenant case, which Option B does not yet support).
  */
 export async function eraseSubject(deps: ErasureDeps, ctx: SubjectRef): Promise<void> {
+  // §E1 (security-review MED-1) — write the tombstone FIRST, before any delete: an in-flight queued
+  // message for this subject was published before this erasure request (publishedAt < erasedAtMs), so the
+  // consumer drops it regardless of when the deletes land — closing the resurrect-between-delete-and-
+  // tombstone window (a message consumed after the deletes but before a tombstone-last write would
+  // otherwise re-create the just-erased fact, with eraseSubject still returning success). Writing it first
+  // is strictly safer: even if a delete below throws, the in-flight protection is already in place.
+  await writeErasureTombstone(deps, ctx);
   await deps.vector.deleteNamespace(subjectNamespace(ctx.tenantId, ctx.anonId));
   // #125 — safety-floor rows (special-category facts) now live in a SEPARATE per-subject namespace
   // (identity.ts's `floorNamespace`), so a full subject erasure must delete THIS namespace too — otherwise
@@ -151,6 +193,8 @@ async function idsForClassOrEscalate(
  * facts is purged completely, and the audited `count` is the TRUE total purged, not a capped estimate.
  */
 export async function withdrawConsent2(deps: ErasureDeps, ctx: SubjectRef): Promise<{ purged: number }> {
+  // §E1 (security-review MED-1) — tombstone FIRST, before any delete (see eraseSubject).
+  await writeErasureTombstone(deps, ctx);
   // #125 — special-category facts now live in the dedicated FLOOR namespace (identity.ts), not the main
   // subject namespace, so this purge must enumerate/delete THERE — the main namespace no longer holds any
   // `class: "special"` row to find (write-side routing in service.ts's `remember()` is unconditional).
@@ -187,6 +231,8 @@ export async function withdrawConsent2(deps: ErasureDeps, ctx: SubjectRef): Prom
  * facts is purged completely, and the audited `count` is the TRUE total purged, not a capped estimate.
  */
 export async function withdrawConsent1(deps: ErasureDeps, ctx: SubjectRef): Promise<{ purged: number }> {
+  // §E1 (security-review MED-1) — tombstone FIRST, before any delete (see eraseSubject).
+  await writeErasureTombstone(deps, ctx);
   const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
   const ordinaryIds = await idsForClassOrEscalate(deps, ctx, namespace, "ordinary");
 

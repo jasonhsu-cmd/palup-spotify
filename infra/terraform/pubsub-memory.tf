@@ -12,6 +12,11 @@
 # `terraform plan` be clean against them. PRODUCTION sets a real key ⇒ CMEK on both topics + the KMS IAM grant
 # below (which is `count`-gated on the key being set).
 #
+# MEMORY-GO-LIVE-CHECKLIST.md §E1 (raw-turn PII in Pub/Sub) — `message_retention_duration` on both topics is
+# 1h (was 24h): near-real-time memory writes don't need a day-long replayable backlog, and shortening it
+# bounds how long raw-PII-at-rest can sit undelivered/dead-lettered. The §E1 erasure TOMBSTONE (48h TTL,
+# widget-memory's erasure.ts) is sized with generous headroom over this 1h ceiling, not the reverse.
+#
 # NEVER auto-applied; `terraform apply` is a human action (§3/§5). The env the backend reads to switch onto
 # this path (MEMORY_PUBSUB_TOPIC / MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT / MEMORY_PUBSUB_PUSH_AUDIENCE) is set
 # on the Cloud Run service SEPARATELY at deploy (deploy-staging.yml's MEMORY_PUBSUB_AUDIENCE-gated block) —
@@ -26,7 +31,7 @@ resource "google_pubsub_topic" "memory_write" {
   kms_key_name = var.memory_pubsub_kms_key_name != "" ? var.memory_pubsub_kms_key_name : null
   # PII/Art-9 in flight — bound how long an unacked/backlogged message can sit, unlike the non-PII
   # catalog-reconcile topic (which has no retention override, i.e. the 31-day API default).
-  message_retention_duration = "86400s" # 24h
+  message_retention_duration = "3600s" # 1h — §E1 above
 }
 
 # Dead-letter topic: a message that fails `max_delivery_attempts` times lands here instead of retrying
@@ -36,7 +41,7 @@ resource "google_pubsub_topic" "memory_write" {
 resource "google_pubsub_topic" "memory_write_dlq" {
   name                       = "memory-write-dlq"
   kms_key_name               = var.memory_pubsub_kms_key_name != "" ? var.memory_pubsub_kms_key_name : null
-  message_retention_duration = "86400s"
+  message_retention_duration = "3600s" # 1h — §E1 above
 }
 
 # The identity Pub/Sub PUSHES AS for this route. The route accepts a token ONLY from this SA

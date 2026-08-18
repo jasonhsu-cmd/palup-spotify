@@ -34,7 +34,15 @@ export type { RetentionDeps, SweepAllResult } from "./retention.js";
 export { recordSubject, listSubjects, retireSubject, MEMORY_SUBJECTS } from "./subject-index.js";
 export type { SubjectIndexEntry } from "./subject-index.js";
 
-export { eraseSubject, withdrawConsent1, withdrawConsent2, eraseTenant } from "./erasure.js";
+export {
+  eraseSubject,
+  withdrawConsent1,
+  withdrawConsent2,
+  eraseTenant,
+  ERASURE_TOMBSTONE_COLLECTION,
+  ERASURE_TOMBSTONE_TTL_SECONDS,
+  tombstoneKey,
+} from "./erasure.js";
 export type { ErasureDeps, SubjectRef } from "./erasure.js";
 
 export { mergeGuestIntoAccount } from "./merge.js";
