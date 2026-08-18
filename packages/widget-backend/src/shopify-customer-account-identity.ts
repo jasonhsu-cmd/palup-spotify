@@ -17,15 +17,13 @@ const b64url = (buf: Buffer): string => buf.toString("base64url");
 
 // The DISCOVERY doc is fetched from the merchant's store host (SSRF guard). Mirrors shopify-grounding.ts.
 const SHOP_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
-// The identity ENDPOINTS the discovery doc names (issuer/authorize/token/jwks) MUST live on Shopify's
-// identity host — pinned to `shopify.com` / `*.shopify.com`, NOT merely "any https URL". The whole trust
-// chain (jwks_uri = the id_token trust anchor; token_endpoint = where the confidential client_secret is
-// sent) comes from ONE discovery document, and verifyIdToken's `iss` pin gives NO protection against a
-// spoofed doc because expectedIssuer is derived from that same doc. Without this pin, a spoofed doc could
-// aim jwks_uri at an attacker (forge a verified shopper) or token_endpoint at an attacker (exfiltrate the
-// client_secret). (security-reviewer BLOCK, ADR-0018 task 3.)
+// The id_token ISSUER never moves off Shopify's own identity host — pinned to `shopify.com` /
+// `*.shopify.com` (the `iss` a store with a BRANDED customer-account domain still returns, e.g.
+// `https://shopify.com/authentication/<shop-id>`; verified live against Allbirds, 2026-08-18). This pin
+// alone gives NO protection against a spoofed discovery doc, because verifyIdToken's expectedIssuer is
+// derived from that same doc — see isTrustedEndpointUrl below for the endpoint-host trust model.
 const SHOPIFY_IDENTITY_HOST = /^([a-z0-9-]+\.)*shopify\.com$/i;
-/** An endpoint is trusted only if it is https AND its host is Shopify's identity host. */
+/** True iff `u` is https AND its host is Shopify's own identity host. Used ONLY for the issuer pin. */
 const isShopifyIdentityUrl = (u: string): boolean => {
   try {
     const url = new URL(u);
@@ -33,6 +31,41 @@ const isShopifyIdentityUrl = (u: string): boolean => {
   } catch {
     return false;
   }
+};
+
+/** https hostname of `u`, lowercased, or null if `u` isn't a valid https URL. */
+const httpsHost = (u: string): string | null => {
+  try {
+    const url = new URL(u);
+    return url.protocol === "https:" ? url.hostname.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * True iff `u` is a TRUSTED OIDC endpoint (authorize/token/jwks — NOT the issuer, which stays pinned to
+ * shopify.com always). Trusted means https AND its host is EITHER:
+ *  (a) Shopify's own identity host (`*.shopify.com`) — the default `*.myshopify.com` store case, OR
+ *  (b) a store's own BRANDED customer-account domain (e.g. `accounts.allbirds.com`) — accepted only when
+ *      `cfg`'s authorization_endpoint, token_endpoint, AND jwks_uri all agree on that SAME single host.
+ * Case (b)'s trust anchor is `cfg` itself, per discoverOidc: `cfg` only ever comes from ONE HTTPS fetch of
+ * `https://{shopDomain}/.well-known/openid-configuration`, made against the shop's OWN SSRF-guarded
+ * `*.myshopify.com` host (never an attacker-chosen host — see SHOP_HOST above). Whatever that ONE document
+ * consistently names for all three endpoints is authoritative for that shop; a document (or a since-
+ * tampered cfg) that names a DIFFERENT host for even one of the three endpoints fails this check and is
+ * rejected — so this is NOT "accept any https URL", it is "accept only what this shop's own discovery
+ * doc named, and only when it named it consistently."
+ */
+const isTrustedEndpointUrl = (u: string, cfg?: Pick<OidcConfig, "authorization_endpoint" | "token_endpoint" | "jwks_uri">): boolean => {
+  const host = httpsHost(u);
+  if (!host) return false;
+  if (SHOPIFY_IDENTITY_HOST.test(host)) return true;
+  if (!cfg) return false;
+  const authHost = httpsHost(cfg.authorization_endpoint);
+  const tokenHost = httpsHost(cfg.token_endpoint);
+  const jwksHost = httpsHost(cfg.jwks_uri);
+  return authHost === host && tokenHost === host && jwksHost === host;
 };
 
 // --- PKCE (RFC 7636, S256) --------------------------------------------------------------------------
@@ -60,10 +93,12 @@ export interface OidcConfig {
 /**
  * Fetch + validate a shop's OIDC discovery doc from `https://{shopDomain}/.well-known/openid-configuration`.
  * The returned `issuer` is the per-shop `https://shopify.com/authentication/<shop-id>` used to PIN
- * id_token `iss` to THIS shop (ADR-0018 hardening #2). Every named endpoint MUST be https AND host-pinned
- * to shopify.com (`isShopifyIdentityUrl`) — not merely https — so a spoofed discovery doc cannot name
- * attacker endpoints for the id_token trust anchor (jwks) or the client_secret-bearing token exchange.
- * Returns null on any failure — the caller fails closed to anonymous.
+ * id_token `iss` to THIS shop (ADR-0018 hardening #2) — the issuer MUST be host-pinned to shopify.com
+ * (`isShopifyIdentityUrl`), even for a branded-domain store (#127). The authorize/token/jwks endpoints
+ * MUST be https AND trusted (`isTrustedEndpointUrl`): either shopify.com-pinned (default `*.myshopify.com`
+ * stores), or — for a store with its own branded customer-account domain (e.g. `accounts.allbirds.com`) —
+ * the ONE host this doc consistently names for all three. Returns null on any failure, including a doc
+ * that names an inconsistent/untrusted host for any endpoint — the caller fails closed to anonymous.
  */
 export async function discoverOidc(
   shopDomain: string,
@@ -72,7 +107,10 @@ export async function discoverOidc(
 ): Promise<OidcConfig | null> {
   if (!SHOP_HOST.test(shopDomain)) return null;
   try {
-    const res = await fetchFn(`https://${shopDomain}/.well-known/openid-configuration`, { signal: AbortSignal.timeout(timeoutMs) });
+    // This fetch is the TRUST ANCHOR for the branded endpoint hosts below (#127 security review, M1) — a
+    // 3xx bounce off the pinned *.myshopify.com host (open redirect / interception) must not be allowed to
+    // hand back a doc naming attacker endpoints, so redirect:"error" here mirrors the token/jwks fetches.
+    const res = await fetchFn(`https://${shopDomain}/.well-known/openid-configuration`, { redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     const j = (await res.json()) as Partial<OidcConfig>;
     const cfg: OidcConfig = {
@@ -81,8 +119,10 @@ export async function discoverOidc(
       token_endpoint: j.token_endpoint as string,
       jwks_uri: j.jwks_uri as string,
     };
-    // Every named endpoint MUST be https AND host-pinned to shopify.com — not merely https (BLOCK fix).
-    if (![cfg.issuer, cfg.authorization_endpoint, cfg.token_endpoint, cfg.jwks_uri].every((v) => typeof v === "string" && isShopifyIdentityUrl(v))) return null;
+    // Issuer stays pinned to shopify.com — it never moves to a branded domain (#127).
+    if (typeof cfg.issuer !== "string" || !isShopifyIdentityUrl(cfg.issuer)) return null;
+    // Endpoints: shopify.com OR this shop's own single, self-consistent branded account domain.
+    if (![cfg.authorization_endpoint, cfg.token_endpoint, cfg.jwks_uri].every((v) => typeof v === "string" && isTrustedEndpointUrl(v, cfg))) return null;
     return cfg;
   } catch {
     return null;
@@ -134,8 +174,9 @@ export async function exchangeCode(
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
   timeoutMs = 4000,
 ): Promise<TokenResponse | null> {
-  // Re-assert the host pin here (defense in depth — this fn takes a raw cfg) BEFORE sending the secret.
-  if (!isShopifyIdentityUrl(cfg.token_endpoint)) return null;
+  // Re-assert the host trust here (defense in depth — this fn takes a raw cfg) BEFORE sending the secret.
+  // Shopify.com OR this shop's own branded domain, IFF cfg's endpoints agree on it (isTrustedEndpointUrl).
+  if (!isTrustedEndpointUrl(cfg.token_endpoint, cfg)) return null;
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code: params.code,
@@ -178,7 +219,7 @@ export async function exchangeRefreshToken(
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
   timeoutMs = 4000,
 ): Promise<RefreshResponse | null> {
-  if (!isShopifyIdentityUrl(cfg.token_endpoint)) return null;
+  if (!isTrustedEndpointUrl(cfg.token_endpoint, cfg)) return null;
   const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: params.refreshToken, client_id: params.clientId });
   const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
   if (params.clientSecret) headers["authorization"] = "Basic " + Buffer.from(`${params.clientId}:${params.clientSecret}`).toString("base64");
@@ -214,10 +255,20 @@ export interface IdTokenClaims {
   nonce?: string;
 }
 
-/** Fetch the shop's JWKS (https only). Null on failure → caller fails closed (never verifies open). */
-export async function fetchJwks(jwksUri: string, fetchFn: typeof globalThis.fetch = globalThis.fetch, timeoutMs = 4000): Promise<Jwks | null> {
-  // The JWKS is the SOLE trust anchor for verifyIdToken — host-pin it, and refuse a 3xx bounce.
-  if (!isShopifyIdentityUrl(jwksUri)) return null;
+/**
+ * Fetch the shop's JWKS (https only). Null on failure → caller fails closed (never verifies open). The
+ * JWKS is the SOLE trust anchor for verifyIdToken — host-pin it (shopify.com OR, IFF `cfg` is passed and
+ * its endpoints agree, this shop's own branded domain — see isTrustedEndpointUrl), and refuse a 3xx bounce.
+ * `cfg` is optional ONLY for callers that pre-validated the host themselves; production callers pass the
+ * SAME `cfg` that named this `jwksUri`, so the trust check matches discoverOidc's decision for this shop.
+ */
+export async function fetchJwks(
+  jwksUri: string,
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  timeoutMs = 4000,
+  cfg?: Pick<OidcConfig, "authorization_endpoint" | "token_endpoint" | "jwks_uri">,
+): Promise<Jwks | null> {
+  if (!isTrustedEndpointUrl(jwksUri, cfg)) return null;
   try {
     const res = await fetchFn(jwksUri, { redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
