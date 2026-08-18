@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { themeStyleBlock, type ResolvedTheme } from "../widget-theme.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const LOADER_ENTRY = join(here, "..", "..", "..", "widget", "src", "loader-entry.ts");
@@ -52,6 +53,8 @@ export interface EmbedDeps {
   /** Async so it can call `MerchantResolver.primaryDomainForShop` (custom-domain CSP support) before
    *  composing the header — server.ts's own registry/env lookup, never a second client-supplied param. */
   frameAncestors: (shop: string | undefined) => Promise<string>;
+  /** WS10 — resolve the merchant brand theme for a shop (server-side; contrast-safe). */
+  resolveThemeFor: (shop: string | undefined) => Promise<ResolvedTheme>;
 }
 
 export function registerEmbedRoutes(app: FastifyInstance, deps: EmbedDeps): void {
@@ -65,6 +68,19 @@ export function registerEmbedRoutes(app: FastifyInstance, deps: EmbedDeps): void
     reply.header("content-type", "text/html; charset=utf-8");
     reply.header("content-security-policy", `frame-ancestors ${await deps.frameAncestors(shop)}`);
     reply.removeHeader("x-frame-options");
-    return deps.panelHtml;
+    // WS10 — inject the merchant brand theme FOUC-free at the panel's <!--PALUP_THEME--> marker. Values are
+    // validated hex (CSS) + JSON-escaped name/logo; a shop that doesn't resolve gets the default indigo theme.
+    const theme = await deps.resolveThemeFor(shop);
+    return deps.panelHtml.replace("<!--PALUP_THEME-->", themeStyleBlock(theme));
+  });
+  // WS10 — the loader's shadow-DOM launcher (on the merchant page, cross-origin) fetches this to recolour
+  // its bubble to the brand. JSON, cacheable, only the two colours the bubble needs — never a secret.
+  app.get("/embed/theme", async (req, reply) => {
+    const shop = (req.query as { shop?: string })?.shop;
+    const theme = await deps.resolveThemeFor(shop);
+    reply.header("content-type", "application/json; charset=utf-8");
+    reply.header("cache-control", "public, max-age=300");
+    reply.header("access-control-allow-origin", "*"); // read from the merchant page's origin; non-secret
+    return { brand: theme.brand, brandInk: theme.brandInk };
   });
 }

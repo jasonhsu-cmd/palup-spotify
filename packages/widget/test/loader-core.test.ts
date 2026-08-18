@@ -6,7 +6,7 @@
 // the Vitest per-file pragma (must be the very first line of the file). This lets
 // `pnpm test` (root runner, which globs packages/**/*.test.ts) exercise this file in jsdom
 // without a separate packages/widget/vitest.config.ts or a workspace split.
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { initWidgetLoader } from "../src/loader-core.js";
 
 const ORIGIN = "https://widget.example";
@@ -15,7 +15,15 @@ function cfg(over = {}) {
   document.body.appendChild(host);
   return { host, shop: "acme.myshopify.com", position: "bottom-right" as const, origin: ORIGIN, ...over };
 }
-beforeEach(() => { document.body.innerHTML = ""; });
+beforeEach(() => {
+  document.body.innerHTML = "";
+  // WS10 — the loader now fetches /embed/theme at mount. Stub it (rejecting by default) so no test makes a
+  // real network call; the themed-launcher tests below override it. Fail-safe path keeps the default bubble.
+  vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("no fetch in test"))));
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("initWidgetLoader", () => {
   it("runs in a real DOM (sanity check for the jsdom pragma)", () => {
@@ -251,6 +259,50 @@ describe("initWidgetLoader", () => {
       initWidgetLoader(c);
       (window as any).PALUP = { cart: [{ productId: "p3", quantity: 1 }] };
       expect(() => window.dispatchEvent(new CustomEvent("palup:contextchange"))).not.toThrow();
+    });
+  });
+
+  // WS10 — the launcher bubble recolours to the merchant brand via GET /embed/theme (contrast-safe values
+  // resolved server-side). Best-effort: any failure leaves the default indigo.
+  describe("WS10 — themed launcher", () => {
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+
+    it("recolours the launcher bubble from GET /embed/theme (brand + ink)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: true, json: async () => ({ brand: "#a44a34", brandInk: "#000000" }) })),
+      );
+      const c = cfg();
+      initWidgetLoader(c);
+      expect(fetch).toHaveBeenCalledWith(`${ORIGIN}/embed/theme?shop=acme.myshopify.com`);
+      const root = (c.host as any).__palupRoot as ShadowRoot;
+      const launcher = root.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement;
+      await flush();
+      // jsdom serialises to rgb(); accept either the hex or the rgb form of the terracotta brand.
+      expect(launcher.style.background).toMatch(/164|a44a34/i);
+    });
+
+    it("keeps the default indigo bubble when the theme fetch fails (fail-safe)", async () => {
+      // beforeEach already stubbed a rejecting fetch.
+      const c = cfg();
+      initWidgetLoader(c);
+      const root = (c.host as any).__palupRoot as ShadowRoot;
+      const launcher = root.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement;
+      await flush();
+      expect(launcher.style.background).toMatch(/79|4f46e5/i); // rgb(79,70,229) / #4f46e5 — unchanged
+    });
+
+    it("ignores a non-hex brand from the theme endpoint (never a broken/injected colour)", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({ ok: true, json: async () => ({ brand: "red; content:url(evil)", brandInk: "#fff" }) })),
+      );
+      const c = cfg();
+      initWidgetLoader(c);
+      const root = (c.host as any).__palupRoot as ShadowRoot;
+      const launcher = root.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement;
+      await flush();
+      expect(launcher.style.background).toMatch(/79|4f46e5/i); // rejected → default kept
     });
   });
 });

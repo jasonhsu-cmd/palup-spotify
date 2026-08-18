@@ -106,6 +106,26 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
     style.textContent = panelStyleSheet(position);
     root.appendChild(style);
 
+    // WS10 — recolour the launcher bubble to the merchant brand (contrast-safe values resolved server-side
+    // at /embed/theme). Best-effort and fail-safe: the default indigo stays until/unless the fetch succeeds,
+    // and any failure (no fetch, blocked, non-200, bad shape) leaves the default — the bubble never breaks.
+    const HEX6 = /^#[0-9a-f]{6}$/i;
+    (function themeLauncher(): void {
+      try {
+        fetch(`${origin}/embed/theme?shop=${encodeURIComponent(shop)}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((t: { brand?: unknown; brandInk?: unknown } | null) => {
+            if (t && typeof t.brand === "string" && HEX6.test(t.brand)) {
+              launcher.style.background = t.brand;
+              if (typeof t.brandInk === "string" && HEX6.test(t.brandInk)) launcher.style.color = t.brandInk;
+            }
+          })
+          .catch(() => {});
+      } catch {
+        /* no fetch available / blocked — keep the default indigo */
+      }
+    })();
+
     let iframe: HTMLIFrameElement | null = null;
     let destroyed = false;
 

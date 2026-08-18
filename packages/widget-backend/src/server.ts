@@ -53,6 +53,7 @@ import { createModelPort, createGroundingPort, createCommercePort } from "./mode
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
 import { registerEmbedRoutes, bundleLoader } from "./routes/embed.js";
+import { resolveTheme } from "./widget-theme.js";
 import { registerStorefrontCatalogRoutes } from "./routes/storefront-catalog.js";
 // E3 — both functions return `{}` unless the `Decision` already carries cited products, so they are inert
 // for any turn E2 did not cite on. They are no longer inert BY CONSTRUCTION: this composition root now
@@ -1432,6 +1433,12 @@ export async function buildServer(opts?: {
         return `${allow} http://127.0.0.1:${process.env.PORT}`;
       }
       return allow;
+    },
+    // WS10 — resolve the merchant brand theme by shop (server-side, contrast-safe). A shop that doesn't
+    // resolve gets the default indigo theme. Pure map lookup, so safe per panel/theme request.
+    resolveThemeFor: async (shop) => {
+      const r = shop ? await merchants.tenantForShopDomain(shop) : ({ kind: "unknown" } as const);
+      return resolveTheme(r.kind === "ok" ? r.tenantId : "");
     },
   });
 
