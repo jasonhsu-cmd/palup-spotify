@@ -10,6 +10,15 @@ import type { RuntimeStatePort } from "./runtime-state-port.js";
 // derived at read from a versioned, operator-provided price table (a drifting world fact), so a price
 // correction re-derives history instead of rewriting immutable measurements.
 
+/**
+ * The model-tier vocabulary docs/design/model-gateway.md §3 defines: `routine` (Gemini Flash, ~95% of
+ * calls) → `high_stakes` (Gemini Pro, ~4%) → `canary` (a gated candidate, ~1%). This is the tier mix the
+ * margin engine watches for a routing regression (cost-margin-telemetry.md §4 "Tier-mix protection").
+ * Nothing populates it yet — the model gateway itself is design-only (docs/design/model-gateway.md is not
+ * a built package) — so its absence on every event today is honest, not a gap this port is hiding.
+ */
+export type ModelTier = "routine" | "high_stakes" | "canary";
+
 export interface TelemetryEvent {
   /** "model_call" from the model-port metering decorator; "turn" from the /chat per-turn enrichment. */
   kind: "model_call" | "turn";
@@ -22,6 +31,16 @@ export interface TelemetryEvent {
   mode?: string;
   pitch?: string;
   escalate?: boolean;
+  /**
+   * Cost-attribution category — the 8-category admin cost stack (docs/design/cost-margin-telemetry.md
+   * §1: inference, agent-tax/background, infra, eval & training, media, messaging, growth/S&M, vendor
+   * stack). Free-form string, not a closed enum here: the category taxonomy is FinOps-owned and this port
+   * only carries whatever the caller states — it never infers or guesses one. Optional, and nothing
+   * populates it yet; existing producers (metering.ts, the /chat turn event) are unaffected.
+   */
+  category?: string;
+  /** Which ModelTier this call was routed to. Optional, caller-supplied — see ModelTier above. */
+  tier?: ModelTier;
   /**
    * E3 — RECOMMENDATION TELEMETRY: the merchant product ids this turn's reply actually CITED, in the
    * order it cited them (`Decision.recommendedProducts`, widget-brain). Present only on a `"turn"` event,
@@ -60,6 +79,13 @@ export interface TelemetryRollup {
   latencyP50Ms: number | null;
   latencyP95Ms: number | null;
   byModel: Record<string, { events: number; inputTokens: number; outputTokens: number }>;
+  /**
+   * The tier-mix (docs/design/cost-margin-telemetry.md §4): events/tokens aggregated by `ModelTier` for
+   * every event that carried one. Optional on the TYPE (so a hand-built rollup fixture from before this
+   * field existed still satisfies the interface); `rollupEvents` below always SETS it (as `{}` when no
+   * event in the window carried a tier — same convention as `byModel`, never omitted vs. fabricated).
+   */
+  byTier?: Record<string, { events: number; inputTokens: number; outputTokens: number }>;
 }
 
 export interface TelemetryPort {
@@ -82,6 +108,7 @@ function percentile(sortedAsc: number[], p: number): number | null {
 
 export function rollupEvents(tenantId: string, events: TelemetryEvent[]): TelemetryRollup {
   const byModel: Record<string, { events: number; inputTokens: number; outputTokens: number }> = {};
+  const byTier: Record<string, { events: number; inputTokens: number; outputTokens: number }> = {};
   let inputTokens = 0;
   let outputTokens = 0;
   const latencies: number[] = [];
@@ -95,6 +122,12 @@ export function rollupEvents(tenantId: string, events: TelemetryEvent[]): Teleme
       m.inputTokens += e.inputTokens ?? 0;
       m.outputTokens += e.outputTokens ?? 0;
     }
+    if (e.tier) {
+      const t = (byTier[e.tier] ??= { events: 0, inputTokens: 0, outputTokens: 0 });
+      t.events++;
+      t.inputTokens += e.inputTokens ?? 0;
+      t.outputTokens += e.outputTokens ?? 0;
+    }
   }
   latencies.sort((a, b) => a - b);
   return {
@@ -105,6 +138,7 @@ export function rollupEvents(tenantId: string, events: TelemetryEvent[]): Teleme
     latencyP50Ms: percentile(latencies, 50),
     latencyP95Ms: percentile(latencies, 95),
     byModel,
+    byTier,
   };
 }
 

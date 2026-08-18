@@ -1,5 +1,5 @@
 import type { EmbedRequest, EmbedResponse, ModelPort, ModelRequest, ModelResponse } from "./model-port.js";
-import type { TelemetryPort } from "./telemetry-port.js";
+import type { ModelTier, TelemetryPort } from "./telemetry-port.js";
 
 // Metering decorator for the ModelPort (mirrors createRedactingModelPort). This is the single choke
 // point for raw inference cost: it sees every model call's token usage + latency + model id, and no
@@ -17,7 +17,10 @@ import type { TelemetryPort } from "./telemetry-port.js";
 export function createMeteringModelPort(
   inner: ModelPort,
   telemetry: TelemetryPort,
-  opts: { agentType?: string; now?: () => number } = {},
+  // `tier` is OPTIONAL and construction-time, mirroring `agentType`: nothing wires a real value yet (the
+  // model gateway that would pick a tier per call is design-only — docs/design/model-gateway.md), so a
+  // caller that doesn't supply one gets byte-identical events to before this field existed.
+  opts: { agentType?: string; tier?: ModelTier; now?: () => number } = {},
 ): ModelPort {
   const now = opts.now ?? (() => Date.now());
   // Bound, so a class-based adapter (e.g. VertexModelAdapter) keeps its `this`.
@@ -35,6 +38,7 @@ export function createMeteringModelPort(
           {
             kind: "model_call",
             agentType: opts.agentType,
+            tier: opts.tier,
             model: res.model,
             inputTokens: res.usage?.inputTokens,
             outputTokens: res.usage?.outputTokens,
@@ -59,6 +63,7 @@ export function createMeteringModelPort(
           {
             kind: "model_call",
             agentType: opts.agentType,
+            tier: opts.tier,
             model: res.model,
             inputTokens: res.usage?.inputTokens,
             // No outputTokens: an embedding call produces no completion tokens, and a 0 here would be a
