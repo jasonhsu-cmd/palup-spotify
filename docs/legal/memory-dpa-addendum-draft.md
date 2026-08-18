@@ -105,6 +105,7 @@ All external capability access is through the **ports** in `packages/platform-po
 | Fact storage | `VectorPort` (`packages/platform-ports/src/vector-port.ts:43-53`) | **Corrected 2026-08-06: a durable adapter DOES exist and is live.** `PostgresVectorStore` (`packages/state-postgres/src/postgres-vector-store.ts`) is selected whenever `DATABASE_URL` is set (`vector-factory.ts`), and staging runs it. The in-memory reference adapter (`vector-port.ts:117-159`) remains the local/dev fallback only. **Cloud SQL (Postgres) is therefore a sub-processor for fact storage** — the superseded row said no durable/cloud adapter existed, which understated the exhibit. |
 | Model inference (distillation + serving) | `ModelPort` | Vertex AI (Gemini) when `GOOGLE_CLOUD_PROJECT` is configured, else a local mock (`packages/widget-backend/src/model.ts:12-17`); wrapped in card/SSN redaction (`server.ts:214`) |
 | Consent records, audit log, rate limits | `RuntimeStatePort` | Postgres (Cloud SQL via `DATABASE_URL`) or in-memory (`packages/state-postgres/src/postgres-runtime-store.ts`) |
+| Async memory-write transport (**CONDITIONAL** — only when `MEMORY_PUBSUB_*` is set) | queue port (`memory-write-queue.ts` → `routes/pubsub-push-memory.ts`) | **Google Cloud Pub/Sub** (#126), carrying the **raw shopper turn** (message + reply) in transit; CMEK-encrypted at rest on the `memory-write` topic + dead-letter queue with **24h** retention. **Ships dark** — nothing sets `MEMORY_PUBSUB_*` on any deployment today, so Pub/Sub is **not** a sub-processor unless and until the queue is enabled. Add it to the exhibit only for a deployment that enables the queue. |
 
 Consequences counsel should note:
 - **Corrected 2026-08-06 — this bullet said the opposite and was wrong.** Memory facts land in **Cloud SQL
@@ -292,6 +293,12 @@ Each item below was a gap in the code as of commit `fea7c0d`.
   (§0, §5). The superseded bullet asserted the reverse and, with it, that no retention or erasure statement
   here was a representation about durable data — which understated every obligation in §8 and §9.
 - Consent records and audit entries: unbounded (§7 item 10).
+- **Async write queue (CONDITIONAL — only if `MEMORY_PUBSUB_*` is enabled, #126).** When the queue is on,
+  the **raw shopper turn** (message + reply) sits in the Pub/Sub `memory-write` topic + dead-letter queue for
+  up to **24h** (`message_retention_duration`), CMEK-encrypted at rest. **Erasure does not reach Pub/Sub** —
+  a `POST /forget` / `eraseSubject` during that window does not purge in-flight or DLQ'd raw turns, so they
+  persist until they age out (≤24h). Dark today; see §5 and `memory-open-questions-for-counsel.md` **Q20** /
+  `MEMORY-GO-LIVE-CHECKLIST.md` **§E1**.
 - On termination/offboarding: no whole-tenant erasure exists (§7 item 3), so a "delete or return on
   termination" clause has no implementation behind it yet.
 

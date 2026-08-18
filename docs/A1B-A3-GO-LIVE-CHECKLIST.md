@@ -1,14 +1,18 @@
 # A1b + A3 (fresh-price serving) — go-live / promotion checklist
 
-> **Status: NOT READY — build preconditions P1–P4 are OPEN.** This is the single gate list for enabling
-> the ADR-0020 Workstream-A fresh-price pipeline in a real environment. Every flip is a **named-human
+> **Status (updated 2026-08-18): PROMOTED LIVE ON STAGING — prod still pending.** The build preconditions
+> P1 and P2 are **MET**; P3/P4 are code-met with the terraform apply / live-verify done for staging. The
+> fresh-price pipeline is enabled on the staging service (`PRODUCT_FACTS_HYDRATION` + `CATALOG_WEBHOOKS` +
+> `VECTOR_ANN` ON; `/chat` returns `hydration:applied`). This remains the single gate list for enabling the
+> ADR-0020 Workstream-A fresh-price pipeline in **prod**, which is still OFF. Every flip is a **named-human
 > promotion** (CLAUDE.md §3, HITL-POLICY §5): `PRODUCT_FACTS_HYDRATION` in particular changes the PRICE a
 > shopper is quoted (money/NN#1). No build agent performs a flip, and no amount of green CI substitutes for
 > the human approvals below.
 
-**What the flips actually do.** Everything is merged and **inert** — five posture flags default OFF and the
-serving path is byte-identical to before. Enabling them, in order, turns on: producing fresh Tier-2
-price/availability facts, then serving them in place of the 30-min-cached catalog price.
+**What the flips actually do.** The five posture flags are merged; **on staging they are now ON** (the
+serving path produces fresh Tier-2 price/availability facts and serves them in place of the 30-min-cached
+catalog price — `/chat` returns `hydration:applied`). In **prod** they default OFF and the serving path is
+byte-identical to before; enabling them there, in order, turns the same pipeline on.
 
 **How to read this list.** Each item is **MET** (with evidence), **OPEN** (with what's missing), or
 **ACCEPT** (a residual risk consciously signed off). "In a PR" is *not* met — merged and verified is met.

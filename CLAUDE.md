@@ -166,13 +166,17 @@ packages/           built: platform-ports, widget-brain, widget-backend, widget,
 palup-*.html        UI visual source of truth
 ```
 
-**Two "built" packages are deliberately not live — do not assume otherwise from their test coverage.**
-`widget-memory` (cross-visit shopper memory) is fully **INERT**: `isMemoryEnabled()` requires both
-`MEMORY_ENABLED` *and* the hardcoded `MEMORY_ADR_ACCEPTED` const, which is `false`
-(`packages/widget-memory/src/flag.ts`). Flipping it is a **human-only** step gated on
-`docs/MEMORY-GO-LIVE-CHECKLIST.md` — never a build agent's, and never as a side effect of other work. And
-`control-plane` is built and tested but **deployed nowhere**, so every operator surface it exposes is
-unreachable in staging; the CLI jobs (`pnpm kill:arm`, `pnpm cap:set`) are the working path today.
+**Two "built" packages have limited/no production reach — do not assume otherwise from their test coverage.**
+`widget-memory` (cross-visit shopper memory): `isMemoryEnabled()` requires both `MEMORY_ENABLED` *and* the
+hardcoded `MEMORY_ADR_ACCEPTED` const. That const is now **`true`** (accepted for internal staging only,
+legal deferred — flipped by the named owner, 2026-08-17; `packages/widget-memory/src/flag.ts`), so memory is
+**LIVE on the internal-only staging service** where `MEMORY_ENABLED=true`. `MEMORY_ENABLED` is now the
+load-bearing operator gate; memory is still **OFF in prod** (deployed nowhere, `MEMORY_ENABLED` unset).
+Flipping the const was, and any external/prod enablement remains, a **human-only** step gated on
+`docs/MEMORY-GO-LIVE-CHECKLIST.md` (legal §A open for external) — never a build agent's, and never as a side
+effect of other work. And `control-plane` is built and tested but **deployed nowhere**, so every operator
+surface it exposes is unreachable in staging; the CLI jobs (`pnpm kill:arm`, `pnpm cap:set`) are the working
+path today.
 
 ## 7. When you are unsure
 

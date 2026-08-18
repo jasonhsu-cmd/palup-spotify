@@ -560,3 +560,27 @@ before it ships, not just its intent.
   reading, safe by default.
 - Whether "if you later sign in" is specific enough, or the copy must name that the data moves to a
   *durable account record* under different retention. A copy question for A5.
+
+---
+
+## Q20 — The async write queue transits the raw shopper turn through Pub/Sub, and erasure does not reach it (CONDITIONAL — dark until the queue is enabled)
+
+> **CONDITIONAL — this question only bites once the async write queue is turned on.** The queue (#126) ships
+> **dark**: nothing sets `MEMORY_PUBSUB_*` on any deployment, so no turn transits Pub/Sub today. It is
+> post-`fea7c0d` code; references below are to files, not pinned line numbers.
+
+**What the code does.** When the async write queue is enabled, `remember()` may hand the write off to a
+Google Cloud **Pub/Sub** `memory-write` topic instead of running inline (`memory-write-queue.ts` publish →
+OIDC-verified push route `routes/pubsub-push-memory.ts` → the same `remember()`). The message body carries
+the **RAW shopper turn** — the `message` and the agent `reply`, i.e. the un-distilled text, which may contain
+special-category (Art-9) content — as application-plaintext. It is CMEK-encrypted at rest on both
+`memory-write` and its dead-letter queue (24h `message_retention_duration`), but `eraseSubject` / the
+`POST /forget` erasure path does **not** reach Pub/Sub: an erasure request during the ≤24h retention window
+leaves any in-flight or DLQ'd raw turns for that subject **unerased** until they age out.
+
+**The decision.** (a) Must this raw-turn-in-transit exposure be recorded in the DPIA (special-category data
+transiting a queue as app-plaintext) before the queue is enabled? (b) Is a bounded ≤24h gap where an
+erasure does not reach queued/DLQ'd raw turns acceptable, or must the erasure path also purge Pub/Sub (or the
+DLQ retention be shortened) before enablement? This is the legal half of the engineering precondition tracked
+at `MEMORY-GO-LIVE-CHECKLIST.md` **§E1**. The queue is optional transport — a memory-enabled deployment can
+run indefinitely on the inline-write path without ever raising this question.

@@ -218,3 +218,17 @@ memory-enabled deployment — separate from, and additional to, §A–§D above.
 **Note:** this section governs the memory-write *queue* going live once memory itself is already on
 (§A–§D). It does not shortcut, replace, or get shortcut by them — a memory-enabled deployment can run
 indefinitely on the pre-existing inline-write path without ever setting `MEMORY_PUBSUB_*`.
+
+---
+
+## F. #125 — pinned-fact floor namespace: cutover precondition (trigger = enabling MEMORY_SEMANTIC_RECALL on an environment that previously wrote special facts)
+
+#125 moved special/`mustRecall` facts into a separate per-subject `tenantId::anonId::floor` namespace, and
+the safety-floor recall now reads that floor namespace O(floor) instead of enumerating the whole subject
+namespace. There is **no migration and no dual-read**: recall no longer looks for `class:"special"` /
+`mustRecall` rows in the MAIN namespace, so any such row written under the old single-namespace layout would
+be **stranded** (still stored, never surfaced by the floor).
+
+| # | Condition | Status |
+|---|---|---|
+| F1 | **No pre-existing special/pinned rows in the main namespaces before enabling `MEMORY_SEMANTIC_RECALL`.** On any environment that previously ran the write path under the old single-namespace layout, verify **0** rows with `class:"special"` or `mustRecall:true` sit in the main `tenantId::anonId` namespaces — otherwise those facts are stranded (recall reads only the floor namespace). If any exist, migrate them into the floor namespace (or erase + re-capture) before enabling. | **MET for staging — 2026-08-18: verified 0 pre-existing special/`mustRecall` rows** (semantic recall was never live under the old layout on staging, so none were ever written). Re-verify per environment before enabling elsewhere. |

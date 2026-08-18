@@ -13,11 +13,16 @@
 - **approve** = the CLI path (`pnpm` jobs) while the Approval Center console is undeployed.
 - **rollback** = flip the flag off + the Kill Switch at the affected scope.
 
-## Current state (2026-08-09)
+## Current state (2026-08-18)
 
-All ADR-0020 flags OFF everywhere. Blocking **eval gates PASS on the real model** (gemini-3.5-flash):
-`OUTGOING_OFFER_CHECK` 14/14, `SERVER_GUARD_SIGNALS` 15/15, `PRODUCT_FACTS_HYDRATION` 7/7 (money-facts). P4
-consume route is live + OIDC-smoke-verified on staging (3/3). P3 producer alert applied (bar one re-apply).
+**Updated 2026-08-18 — flags are PROMOTED LIVE ON STAGING; prod still pending.** `VECTOR_ANN`,
+`CATALOG_WEBHOOKS`, `PRODUCT_FACTS_HYDRATION`, `SERVER_GUARD_SIGNALS`, and `OUTGOING_OFFER_CHECK` are ON on
+the staging service — catalog-retrieval (S1–S4) is promoted live against a 2151-SKU corpus and `/chat`
+returns `retrieval:applied` + `hydration:applied`. **Prod stays OFF everywhere** (deployed/unbuilt-dark).
+Blocking **eval gates PASS on the real model** (gemini-3.5-flash): `OUTGOING_OFFER_CHECK` 14/14,
+`SERVER_GUARD_SIGNALS` 15/15, `PRODUCT_FACTS_HYDRATION` 7/7 (money-facts). P4 consume route is live +
+OIDC-smoke-verified on staging (3/3). P3 producer alert applied (bar one re-apply). (Control plane / Approval
+Center is still **deployed nowhere** — promotion + rollback remain the CLI `pnpm` path.)
 
 ## Dependency graph
 
@@ -85,20 +90,20 @@ FULL-corpus pass per flag before promotion.
       agent declines coaxing robustly flag-off, check adds marginal catches; the offer oracle is noisy so it is
       informational (gate = no-regression). **All shadow evidence is now in hand for a promotion decision.**
 - [ ] A2. Kill-switch dry-run at the canary scope.
-- [ ] A3. Canary on 1–3 design-partner tenants; monitor; human approve; widen.
+- [x] A3. **DONE ON STAGING (2026-08-18):** `SERVER_GUARD_SIGNALS` + `OUTGOING_OFFER_CHECK` are ON on the
+      staging service. **Prod canary/widen still pending.**
 
 **Track B**
 - [x] B1. **`CATALOG_RETRIEVAL` eval corpus — DONE (#273).** Real index + retrieve paths, recall@k /
       no-wrong-product; **10/10 on real Vertex embeddings**. `pnpm eval:retrieval`.
-- [ ] B2. Promote `CATALOG_RETRIEVAL` (eval ✅ → shadow → canary → approve). **Shadow instance DONE (#277):
-      `pnpm shadow:retrieval`** (full catalog vs top-5; 0 violations). Remaining: full-corpus pass + canary.
-- [ ] B3. Enable `CATALOG_WEBHOOKS` producer in staging shadow (P4 consume route is ready); confirm facts
-      populate + the P3 alert stays quiet; do the push-SA 204 delivery check (grant tokenCreator or observe a
-      real push).
-      **Shadow instance DONE (#277): `pnpm shadow:hydration`** (both retrieval on; hydration off vs on over a
-      seeded fresh fact store; 0 violations). Remaining: full-corpus pass + canary.
-- [ ] B4. Promote `PRODUCT_FACTS_HYDRATION` (eval ✅ → shadow → canary → approve) — the money/NN#1 gate; tune
-      `PRODUCT_FACTS_MAX_AGE_MS` against D2's ≤15-min freshness target.
+- [x] B2. **DONE ON STAGING (2026-08-18):** `CATALOG_RETRIEVAL` (`VECTOR_ANN`) promoted live on staging
+      against a 2151-SKU corpus; `/chat` returns `retrieval:applied`. Shadow instance was DONE (#277,
+      `pnpm shadow:retrieval`, 0 violations). **Prod still pending.**
+- [x] B3. **DONE ON STAGING (2026-08-18):** `CATALOG_WEBHOOKS` producer enabled on staging; facts populate.
+      Shadow instance was DONE (#277, `pnpm shadow:hydration`, 0 violations). **Prod still pending.**
+- [x] B4. **DONE ON STAGING (2026-08-18):** `PRODUCT_FACTS_HYDRATION` promoted live on staging (`/chat`
+      returns `hydration:applied`) — the money/NN#1 gate; `PRODUCT_FACTS_MAX_AGE_MS` at D2's ≤15-min target.
+      **Prod still pending.**
 
 ## Open human decisions (still needed)
 
