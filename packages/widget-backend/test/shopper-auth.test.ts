@@ -98,9 +98,16 @@ describe("ADR-0017 shopper auth wiring (T4)", () => {
       payload: { sessionId: "s2", message: "where's my order #1042?", signals: { shopperId: "evil-injected-id" } },
     });
     expect(res.statusCode).toBe(200);
-    // If "evil-injected-id" had been honored as the shopper, order #1042 (owned by "shopper-demo" in the
-    // mock fixture) would fail ownership. It doesn't — proving the client value was never used.
-    expect(res.json().reply.toLowerCase()).toContain("on your account");
+    // signals.shopperId is server-ignored (invariant 4): the request is treated as anonymous. Since the
+    // commerce port is the fixture-marked mock, the account-data question gets the honest fixture-guard
+    // refusal — the SAME reply any anonymous shopper receives — and the injected id leaves no trace.
+    // (Before the isFixtureData honesty fix this asserted the fallback demo order #1042 was stated as
+    // fact; that fabrication now correctly refuses. The demo-order-stated path was the bug.)
+    const body = res.json();
+    expect(body.reply.toLowerCase()).toContain("can't look up your order or account details");
+    expect(body.flags).toContain("account_lookup_unavailable");
+    expect(body.escalate).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("evil-injected-id"); // client value never used
     await app.close();
   });
 

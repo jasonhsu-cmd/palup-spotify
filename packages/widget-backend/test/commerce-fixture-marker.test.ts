@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createCommercePort } from "../src/model.js";
+import { guardCommercePort } from "../src/commerce-guard.js";
 import { handleSupport } from "@palup/widget-brain";
 
 // THE BACKSTOP for the live fabrication fixed in this PR.
@@ -20,8 +21,18 @@ describe("production composition root — the commerce port cannot silently serv
     expect(isLive).toBe(false);
   });
 
-  it("END TO END: the port this deployment actually uses refuses to confirm a demo order", async () => {
-    const { port } = createCommercePort();
+  it("guardCommercePort forwards the fixture marker — the GUARDED port is what production wires in", () => {
+    const { port: raw, isLive } = createCommercePort();
+    // Production wires the GUARDED port into the brain, not the raw one; if the guard drops the marker
+    // the honesty suppression in support.ts never fires. Regression lock for the isFixtureData drop.
+    expect(guardCommercePort(raw, isLive).isFixtureData).toBe(true);
+  });
+
+  it("END TO END: the GUARDED port this deployment actually uses refuses to confirm a demo order", async () => {
+    const { port: raw, isLive } = createCommercePort();
+    // Wrap exactly as buildServer() does — testing the RAW port green-lit a path production doesn't run
+    // (the original illusory lock, which passed even while shoppers were told demo #1042 as fact).
+    const port = guardCommercePort(raw, isLive);
     // "shopper-demo" is the brain's fallback shopper id AND the owner of fixture #1042 — the exact
     // combination that made the ownership check pass against demo data.
     const r = await handleSupport(port, "shopper-demo", "where's my order #1042?");
