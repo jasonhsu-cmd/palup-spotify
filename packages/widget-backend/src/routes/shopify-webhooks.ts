@@ -29,6 +29,7 @@ import {
   parseWebhookBody,
   productIdOf,
   refundCurrencyOf,
+  refundIdOf,
   refundOrderIdOf,
   refundedAmountOf,
   singleHeader,
@@ -516,6 +517,7 @@ async function handleOrderWebhook(deps: ShopifyWebhookDeps, v: Verified, topic: 
 
   const isRefund = topic === REFUND_TOPIC;
   const orderId = isRefund ? refundOrderIdOf(v.body) : orderNumericIdOf(v.body);
+  const refundId = isRefund ? refundIdOf(v.body) : undefined;
   const amount = isRefund ? refundedAmountOf(v.body) : orderTotalOf(v.body);
   const currency = isRefund ? refundCurrencyOf(v.body) : orderCurrencyOf(v.body);
   const joinToken = isRefund ? undefined : joinTokenOf(v.body);
@@ -529,6 +531,7 @@ async function handleOrderWebhook(deps: ShopifyWebhookDeps, v: Verified, topic: 
       webhookId: v.webhookId,
       nowMs: deps.now(),
       ...(orderId !== undefined ? { orderId } : {}),
+      ...(refundId !== undefined ? { refundId } : {}),
       ...(joinToken !== undefined ? { joinToken } : {}),
       ...(amount !== undefined ? { amount } : {}),
       ...(currency !== undefined ? { currency } : {}),

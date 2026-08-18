@@ -68,6 +68,12 @@ export const ORDER_ARM_TTL_SECONDS = 180 * 24 * 60 * 60;
 export const ORDER_ATTRIBUTION_DEDUP_COLLECTION = "order_attribution_dedup";
 export const ORDER_ATTRIBUTION_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60;
 
+/** KV collection for the PER-REFUND idempotency claim (idempotency dimension 3), keyed on the Shopify
+ *  refund's OWN id. Distinct from the order-level `tallied` flag: that flag must STAY set so it can't
+ *  block a legitimate second partial refund of the same order, so each refund needs its own claim.
+ *  Shares the order→arm row's long TTL — a refund can only be attributed while that row still exists. */
+export const REFUND_CLAIM_COLLECTION = "holdout_refund_claim";
+
 export type OrderAttributionKind = "order" | "refund";
 
 /** The durable `orderId → arm` row. `tallied` is the order-level idempotency claim (dimension 2). */
@@ -91,6 +97,9 @@ export interface OrderAttributionPayload {
   /** Bare decimal order id (`orderNumericIdOf` for order topics, `refundOrderIdOf` for refunds — both
    *  produce the SAME key space, shopify-webhook-identity.ts). Absent ⇒ unattributed. */
   orderId?: string;
+  /** The refund's OWN bare decimal id (`refundIdOf`, refund topic only) — the per-refund idempotency
+   *  claim key `applyRefund` commits on. Absent on a refund ⇒ unattributed (never tallied unguarded). */
+  refundId?: string;
   /** The opaque join token (order topics only — a Refund body carries no note_attributes). */
   joinToken?: string;
   /** `total_price` for an order, the summed refund amount for a refund. Absent ⇒ unattributed (never
@@ -110,6 +119,7 @@ export function orderAttributionMessage(input: {
   webhookId: string | undefined;
   nowMs: number;
   orderId?: string;
+  refundId?: string;
   joinToken?: string;
   amount?: number;
   currency?: string;
@@ -119,6 +129,7 @@ export function orderAttributionMessage(input: {
     topic: input.topic,
     kind: input.kind,
     ...(input.orderId !== undefined ? { orderId: input.orderId } : {}),
+    ...(input.refundId !== undefined ? { refundId: input.refundId } : {}),
     ...(input.joinToken !== undefined ? { joinToken: input.joinToken } : {}),
     ...(input.amount !== undefined ? { amount: input.amount } : {}),
     ...(input.currency !== undefined ? { currency: input.currency } : {}),
@@ -183,26 +194,39 @@ async function applyOrder(store: RuntimeStatePort, payload: OrderAttributionPayl
  * row (order never resolved a token, or the row TTL'd out) ⇒ `"unattributed"` — never guessed.
  */
 async function applyRefund(store: RuntimeStatePort, payload: OrderAttributionPayload, now: () => number): Promise<AttributionOutcome> {
-  const { tenantId, orderId, amount } = payload;
-  if (!orderId || amount === undefined) return "unattributed";
+  const { tenantId, orderId, refundId, amount } = payload;
+  if (!orderId || !refundId || amount === undefined) return "unattributed";
 
   const row = await store.get<OrderArmRow>({ tenantId }, ORDER_ARM_COLLECTION, orderId);
   if (!row || !row.tallied) return "unattributed";
 
-  await store.audit(
-    { tenantId },
-    {
-      actor: "order-attribution",
-      action: "order_attribution.refund_tallied",
-      input: { topic: payload.topic, orderId, period: row.period, arm: row.arm },
-      decision: { revenue: -amount, currency: payload.currency ?? row.currency ?? null },
-      reversalPath:
-        `accumulate a compensating positive delta via accumulateArmTally for (tenantId:"${tenantId}", ` +
-        `play:"${row.play}", period:"${row.period}", arm:"${row.arm}") of {revenue:${amount}} if this refund ` +
-        "was recorded in error — the ledger is a running total and is never mutated in place.",
-    },
-    new Date(now()).toISOString(),
-  );
+  // Per-refund atomic claim (idempotency dimension 3) — keyed on the refund's OWN id, NOT the order's
+  // `tallied` flag (that flag stays set, so it must never gate a legitimate SECOND partial refund of
+  // the same order). Claim-then-act inside ONE tx (file header): a redelivered refund — or the same
+  // refund arriving under a different queue message id (e.g. the synthetic-id fallback, or a durable
+  // adapter's looser at-least-once redelivery) — can never double-apply its negative revenue delta.
+  const claimed = await store.tx({ tenantId }, async (t) => {
+    const existing = await t.get<{ at: string }>(REFUND_CLAIM_COLLECTION, refundId);
+    if (existing) return false;
+    const at = new Date(now()).toISOString();
+    await t.put(REFUND_CLAIM_COLLECTION, refundId, { at }, { ttlSeconds: ORDER_ARM_TTL_SECONDS });
+    await t.audit(
+      {
+        actor: "order-attribution",
+        action: "order_attribution.refund_tallied",
+        input: { topic: payload.topic, orderId, refundId, period: row.period, arm: row.arm },
+        decision: { revenue: -amount, currency: payload.currency ?? row.currency ?? null },
+        reversalPath:
+          `accumulate a compensating positive delta via accumulateArmTally for (tenantId:"${tenantId}", ` +
+          `play:"${row.play}", period:"${row.period}", arm:"${row.arm}") of {revenue:${amount}} if this refund ` +
+          "was recorded in error — the ledger is a running total and is never mutated in place.",
+      },
+      at,
+    );
+    return true;
+  });
+  if (!claimed) return "duplicate";
+
   await accumulateArmTally(store, { tenantId, play: row.play, period: row.period, arm: row.arm, revenue: -amount }, new Date(now()).toISOString());
   return "tallied";
 }

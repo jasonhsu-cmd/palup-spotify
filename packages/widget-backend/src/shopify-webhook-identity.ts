@@ -250,6 +250,18 @@ export function refundOrderIdOf(body: Record<string, unknown>): string | undefin
   return undefined;
 }
 
+/** A Refund body's OWN id (`id`), as a bare decimal string — distinct from `refundOrderIdOf` (the
+ *  PARENT `order_id`). It is the per-refund idempotency key `applyRefund` claims on, so a redelivered
+ *  refund (or one arriving under a different queue message id) cannot double-apply its negative delta,
+ *  while two DIFFERENT (e.g. partial) refunds of the same order still each tally once. `undefined` if
+ *  missing/malformed — a refund with no readable id is `"unattributed"`, never guessed. */
+export function refundIdOf(body: Record<string, unknown>): string | undefined {
+  const id = body.id;
+  if (typeof id === "number") return Number.isSafeInteger(id) && id >= 0 ? String(id) : undefined;
+  if (typeof id === "string" && /^\d+$/.test(id)) return id;
+  return undefined;
+}
+
 /**
  * The refunded amount: the sum of `transactions[].amount` on a Refund body (each a money-string per
  * `moneyAmountOf`). Malformed/non-numeric entries are skipped rather than aborting the whole sum — a
