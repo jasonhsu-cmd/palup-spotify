@@ -227,6 +227,22 @@
     var m = location.pathname.match(/\/product\/([^/]+)\/?$/);
     return m ? decodeURIComponent(m[1]) : "";
   }
+  // Resolve EXACTLY ONE product by handle server-side — durable for any catalog size. The grid pages, but a
+  // direct / SEO / ad PDP landing (no home→click stash) must resolve a product beyond page 1 too, which a
+  // page-1-only scan cannot. Returns null on any non-ok/absent so the caller falls back gracefully.
+  function fetchProductByHandle(handle) {
+    var url = "/storefront/product?shop=" + encodeURIComponent(SHOP) + "&handle=" + encodeURIComponent(handle);
+    return fetch(url)
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
+      .then(function (d) {
+        return d && d.product ? d.product : null;
+      })
+      .catch(function () {
+        return null;
+      });
+  }
   function renderProductInto(mount, p, brandName) {
     document.title = p.title + " — " + (brandName || "Store");
     mount.textContent = "";
@@ -274,31 +290,44 @@
       });
       return;
     }
-    // Direct URL (no prior click): search the first page (bounded — never crawl a huge catalog on a PDP).
-    fetchPage(null).then(function (data) {
-      setBrand(data.brandName);
-      setPolicy(data.policy);
-      var products = data.products || [];
-      var p =
-        products.filter(function (x) {
-          return x.handle === key;
-        })[0] ||
-        products.filter(function (x) {
-          return x.id === key;
-        })[0];
-      if (p) {
-        renderProductInto(mount, p, data.brandName);
-      } else {
-        mount.textContent = "";
-        mount.appendChild(el("p", "empty", "Sorry — we couldn't find that product from here."));
-        var back = document.createElement("a");
-        back.className = "btn btn-outline";
-        back.href = "/";
-        back.textContent = "Browse all products";
-        mount.appendChild(back);
-        mount.setAttribute("data-ready", "notfound");
-        mount.setAttribute("aria-busy", "false");
+    // Direct URL (no prior click): resolve the ONE product server-side by handle first (works for any
+    // catalog size, unlike a page-1-only scan). Fall back to the first-page scan if that endpoint is
+    // unavailable, then to the honest not-found.
+    fetchProductByHandle(key).then(function (product) {
+      if (product) {
+        renderProductInto(mount, product, null);
+        fetchPage(null).then(function (data) {
+          setBrand(data.brandName);
+          setPolicy(data.policy);
+          document.title = product.title + " — " + (data.brandName || "Store");
+        });
+        return;
       }
+      fetchPage(null).then(function (data) {
+        setBrand(data.brandName);
+        setPolicy(data.policy);
+        var products = data.products || [];
+        var p =
+          products.filter(function (x) {
+            return x.handle === key;
+          })[0] ||
+          products.filter(function (x) {
+            return x.id === key;
+          })[0];
+        if (p) {
+          renderProductInto(mount, p, data.brandName);
+        } else {
+          mount.textContent = "";
+          mount.appendChild(el("p", "empty", "Sorry — we couldn't find that product from here."));
+          var back = document.createElement("a");
+          back.className = "btn btn-outline";
+          back.href = "/";
+          back.textContent = "Browse all products";
+          mount.appendChild(back);
+          mount.setAttribute("data-ready", "notfound");
+          mount.setAttribute("aria-busy", "false");
+        }
+      });
     });
   }
 

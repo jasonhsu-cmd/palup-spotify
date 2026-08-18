@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { GroundingContext, StorePolicy } from "@palup/platform-ports";
+import type { GroundingContext, Product, StorePolicy } from "@palup/platform-ports";
 import { cartPermalink } from "../cart-permalink.js";
 import { productPermalink } from "../product-permalink.js";
 import { safeImageUrl } from "../shopify-grounding.js";
@@ -74,12 +74,11 @@ export const STOREFRONT_PAGE_LIMIT = 24;
  * variant + a real shop domain are present; `productUrl` only when a valid handle + shop domain are present;
  * both fail-safe to absent (cart-permalink.ts / product-permalink.ts return undefined on any bad input).
  */
-export function projectStorefrontCatalog(
-  context: GroundingContext,
-  shopDomain: string | undefined,
-  nextCursor?: string,
-): StorefrontCatalogWire {
-  const products: StorefrontProductWire[] = context.products.map((p) => ({
+/** One neutral Product → the storefront wire shape, building the platform-specific cart/product URLs
+ *  HERE in the wire layer (never across the neutral port). Shared by the catalog grid and the single
+ *  product-by-handle response so both project a product identically. */
+export function projectStorefrontProduct(p: Product, shopDomain: string | undefined): StorefrontProductWire {
+  return {
     id: p.id,
     title: p.title,
     price: p.price,
@@ -95,7 +94,15 @@ export function projectStorefrontCatalog(
     variantId: p.variantId,
     cartUrl: shopDomain && p.variantId ? cartPermalink(shopDomain, p.variantId) : undefined,
     productUrl: shopDomain && p.handle ? productPermalink(shopDomain, p.handle) : undefined,
-  }));
+  };
+}
+
+export function projectStorefrontCatalog(
+  context: GroundingContext,
+  shopDomain: string | undefined,
+  nextCursor?: string,
+): StorefrontCatalogWire {
+  const products: StorefrontProductWire[] = context.products.map((p) => projectStorefrontProduct(p, shopDomain));
   const policy: StorePolicy = {
     returns: toPlainText(context.policy.returns),
     shipping: toPlainText(context.policy.shipping),
@@ -117,6 +124,10 @@ export interface StorefrontCatalogDeps {
    *  closed to a safe-empty context. Unlike the assistant's whole-catalog getContext, this NEVER hits the
    *  1000-SKU ceiling, so it renders any catalog size (browsable subset + "load more"). */
   getCatalogPage(tenantId: string, first: number, after?: string): Promise<{ context: GroundingContext; nextCursor?: string }>;
+  /** Resolve ONE product by its handle (slug) — for a DIRECT PDP hit (SEO/ad/typed URL) on a catalog
+   *  larger than one grid page, where the client can't crawl every page. `null` when the handle resolves
+   *  to no product (→ uniform 404 → the storefront's honest not-found). Fails closed on any store error. */
+  getProductByHandle(tenantId: string, handle: string): Promise<{ context: GroundingContext } | null>;
   /** The tenant's *.myshopify.com domain (server-side config), for building cart/product URLs. */
   shopDomainFor(tenantId: string): Promise<string | undefined>;
   /** Per-IP rate check (public, unauthenticated). true = allowed. Fail-OPEN like /widget/token. */
@@ -201,5 +212,71 @@ export function registerStorefrontCatalogRoutes(app: FastifyInstance, deps: Stor
 
     reply.header("cache-control", "public, max-age=300, stale-while-revalidate=600");
     return page ? projectStorefrontCatalog(page.context, shopDomain, page.nextCursor) : EMPTY_CATALOG;
+  });
+
+  // Single product by handle — backs the PDP on a DIRECT hit (SEO/ad/typed URL, no home→click stash). The
+  // grid pages, but a shopper who lands straight on /product/<handle> for a product beyond page 1 must
+  // still get THAT product, not a false not-found — so this resolves exactly one product server-side.
+  // Same security posture as /storefront/catalog: uniform 404 (no oracle), per-IP fail-open + per-tenant
+  // fail-closed limits, public CORS, no secret/PII egress.
+  app.options("/storefront/product", async (_req, reply) => {
+    reply.header("access-control-allow-origin", CORS_ORIGIN);
+    reply.header("access-control-allow-methods", "GET, OPTIONS");
+    reply.header("access-control-max-age", "600");
+    reply.code(204);
+    return null;
+  });
+
+  app.get("/storefront/product", async (req, reply) => {
+    reply.header("access-control-allow-origin", CORS_ORIGIN);
+
+    const ipKey = deps.ipKeyFor(req);
+    try {
+      if (!(await deps.allowIp(ipKey))) {
+        reply.code(429);
+        return { error: "rate limited" };
+      }
+    } catch {
+      /* fail-open */
+    }
+
+    const q = (req.query as { shop?: string; handle?: string } | undefined) ?? {};
+    // Bound the handle (it is echoed to Shopify's `product(handle:)`); an over-long value is never a real slug.
+    const handle = typeof q.handle === "string" && q.handle.length > 0 && q.handle.length <= 256 ? q.handle : undefined;
+
+    let resolved: { ok: boolean; tenantId?: string };
+    try {
+      resolved = await deps.resolveTenant(q.shop);
+    } catch {
+      resolved = { ok: false };
+    }
+    // Uniform 404 for every non-ok tenant AND for a missing handle — never an existence oracle.
+    if (!resolved.ok || !resolved.tenantId || !handle) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    const tenantId = resolved.tenantId;
+
+    if (!(await deps.allowTenant(tenantId))) {
+      reply.code(429);
+      return { error: "rate limited" };
+    }
+
+    // A throw (cold store failure) or a null (unknown handle) both collapse to the SAME uniform 404 — the
+    // storefront treats any non-200 as its honest not-found state, so a bad/stale/typo handle reads correctly.
+    let found: { context: GroundingContext } | null = null;
+    try {
+      found = await deps.getProductByHandle(tenantId, handle);
+    } catch {
+      found = null;
+    }
+    const product = found?.context.products[0];
+    if (!product) {
+      reply.code(404);
+      return { error: "not found" };
+    }
+    const shopDomain = await deps.shopDomainFor(tenantId).catch(() => undefined);
+    reply.header("cache-control", "public, max-age=300, stale-while-revalidate=600");
+    return { product: projectStorefrontProduct(product, shopDomain) };
   });
 }
