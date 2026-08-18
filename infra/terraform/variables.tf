@@ -47,6 +47,7 @@ variable "memory_pubsub_push_endpoint" {
 }
 
 variable "memory_pubsub_kms_key_name" {
-  description = "Full resource name of an EXISTING Cloud KMS CryptoKey (e.g. projects/<p>/locations/<loc>/keyRings/<ring>/cryptoKeys/<key>) used as the CMEK key for the memory-write topic + its DLQ. Required (no default) because the message body carries a raw shopper turn (PII / potential Art-9 special-category data) — provisioning the key is a human, out-of-band step; this variable only wires it in."
+  description = "Full resource name of an EXISTING Cloud KMS CryptoKey (e.g. projects/<p>/locations/<loc>/keyRings/<ring>/cryptoKeys/<key>) used as the CMEK key for the memory-write topic + its DLQ. OPTIONAL — empty (\"\", the default) leaves the topics WITHOUT CMEK, the posture for internal STAGING (synthetic test traffic only). Set a real key for PRODUCTION, where the message body carries a raw shopper turn (PII / potential Art-9 special-category data). Provisioning the key is a human, out-of-band step; this variable only wires it in."
   type        = string
+  default     = ""
 }
