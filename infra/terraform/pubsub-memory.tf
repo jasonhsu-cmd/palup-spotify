@@ -7,6 +7,11 @@
 # data): CMEK encryption at rest (`kms_key_name`) on both topics, and a SHORT `message_retention_duration` so
 # a replayable backlog cannot sit around (encrypted or not) indefinitely once delivered and acked.
 #
+# CMEK is OPTIONAL per environment (`var.memory_pubsub_kms_key_name`): empty ("") = no CMEK, the posture for
+# internal STAGING (synthetic traffic) — this matches how the topics were actually provisioned there and lets
+# `terraform plan` be clean against them. PRODUCTION sets a real key ⇒ CMEK on both topics + the KMS IAM grant
+# below (which is `count`-gated on the key being set).
+#
 # NEVER auto-applied; `terraform apply` is a human action (§3/§5). The env the backend reads to switch onto
 # this path (MEMORY_PUBSUB_TOPIC / MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT / MEMORY_PUBSUB_PUSH_AUDIENCE) is set
 # on the Cloud Run service SEPARATELY at deploy (deploy-staging.yml's MEMORY_PUBSUB_AUDIENCE-gated block) —
@@ -16,8 +21,9 @@
 
 # The topic the backend publishes to. `MEMORY_PUBSUB_TOPIC` on the service = this topic's short name.
 resource "google_pubsub_topic" "memory_write" {
-  name         = "memory-write"
-  kms_key_name = var.memory_pubsub_kms_key_name
+  name = "memory-write"
+  # CMEK only when a key is supplied (prod); null ⇒ plaintext (staging), matching the live topic.
+  kms_key_name = var.memory_pubsub_kms_key_name != "" ? var.memory_pubsub_kms_key_name : null
   # PII/Art-9 in flight — bound how long an unacked/backlogged message can sit, unlike the non-PII
   # catalog-reconcile topic (which has no retention override, i.e. the 31-day API default).
   message_retention_duration = "86400s" # 24h
@@ -29,7 +35,7 @@ resource "google_pubsub_topic" "memory_write" {
 # is inspected operationally rather than auto-replayed.
 resource "google_pubsub_topic" "memory_write_dlq" {
   name                       = "memory-write-dlq"
-  kms_key_name               = var.memory_pubsub_kms_key_name
+  kms_key_name               = var.memory_pubsub_kms_key_name != "" ? var.memory_pubsub_kms_key_name : null
   message_retention_duration = "86400s"
 }
 
@@ -39,7 +45,7 @@ resource "google_pubsub_topic" "memory_write_dlq" {
 # forge deliveries to the other route. `MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT` on the service = this SA's email.
 resource "google_service_account" "pubsub_memory_push" {
   account_id   = "pubsub-memory-push"
-  display_name = "Pub/Sub → memory-write push identity"
+  display_name = "Pub/Sub -> memory-write push identity"
 }
 
 resource "google_pubsub_subscription" "memory_write_push" {
@@ -98,11 +104,26 @@ resource "google_service_account_iam_member" "pubsub_memory_agent_token_creator"
   member             = "serviceAccount:service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
 
+# Dead-lettering requires the Pub/Sub service agent to be able to PUBLISH to the DLQ topic and to
+# ACK (subscribe) on the subscription — otherwise a failed delivery cannot be dead-lettered and the
+# `dead_letter_policy` above is inert. GCP does not grant these automatically.
+resource "google_pubsub_topic_iam_member" "pubsub_memory_agent_dlq_publisher" {
+  topic  = google_pubsub_topic.memory_write_dlq.name
+  role   = "roles/pubsub.publisher"
+  member = "serviceAccount:service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+resource "google_pubsub_subscription_iam_member" "pubsub_memory_agent_sub_subscriber" {
+  subscription = google_pubsub_subscription.memory_write_push.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
 # The Pub/Sub service agent must also be granted use of the CMEK key on both topics above, or
 # `terraform apply` of the topics fails (Pub/Sub cannot encrypt/decrypt with a CMEK key it has no
-# grant on). Reuses `var.project_number` (already threaded in for the token-creator grant above)
-# rather than adding a second `data "google_project"` lookup for the same project number.
+# grant on). `count`-gated: only when a CMEK key is set (prod) — staging ("") uses plaintext topics,
+# so there is no key to grant on. Reuses `var.project_number` (already threaded in above).
 resource "google_kms_crypto_key_iam_member" "pubsub_memory_agent_kms" {
+  count         = var.memory_pubsub_kms_key_name != "" ? 1 : 0
   crypto_key_id = var.memory_pubsub_kms_key_name
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
   member        = "serviceAccount:service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"

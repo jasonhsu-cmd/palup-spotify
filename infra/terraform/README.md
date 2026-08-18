@@ -124,3 +124,40 @@ Token caveats (a USER operator, not a service account):
 
 The gate must pass in staging before `CATALOG_WEBHOOKS` is enabled in prod — the OIDC check is the sole
 control on this internet-reachable route.
+
+## `pubsub-memory.tf` — #126 durable memory-write queue
+
+Topic + DLQ + dedicated push SA + OIDC push subscription + IAM, mirroring `pubsub.tf`. **CMEK is optional
+per environment** via `memory_pubsub_kms_key_name`: `""` (default) ⇒ plaintext topics (STAGING, synthetic
+traffic); a real key ⇒ CMEK on both topics + the KMS encrypter/decrypter IAM grant (`count`-gated) for PROD,
+where the message body is a raw shopper turn. Var values live in `staging.tfvars.example` (copy to a
+gitignored `staging.tfvars`); a prod apply needs a `prod.tfvars` that sets `memory_pubsub_kms_key_name`.
+
+**Staging was created out-of-band via `gcloud` (no CMEK) and then IMPORTED into terraform state** (2026-08-18)
+so state == reality and `terraform plan -var-file=staging.tfvars` is clean for these resources. To reproduce
+the import on a fresh state (run from `infra/terraform/`, one binding must exist first):
+
+```bash
+gcloud run services add-iam-policy-binding palup-widget-staging --project=palup-jason --region=us-central1 \
+  --member="serviceAccount:pubsub-memory-push@palup-jason.iam.gserviceaccount.com" --role=roles/run.invoker
+AGENT=serviceAccount:service-270594351425@gcp-sa-pubsub.iam.gserviceaccount.com
+BACKEND=serviceAccount:270594351425-compute@developer.gserviceaccount.com
+terraform import -var-file=staging.tfvars google_pubsub_topic.memory_write     projects/palup-jason/topics/memory-write
+terraform import -var-file=staging.tfvars google_pubsub_topic.memory_write_dlq projects/palup-jason/topics/memory-write-dlq
+terraform import -var-file=staging.tfvars google_service_account.pubsub_memory_push projects/palup-jason/serviceAccounts/pubsub-memory-push@palup-jason.iam.gserviceaccount.com
+terraform import -var-file=staging.tfvars google_pubsub_subscription.memory_write_push projects/palup-jason/subscriptions/memory-write-push
+terraform import -var-file=staging.tfvars google_pubsub_topic_iam_member.backend_publish_memory "projects/palup-jason/topics/memory-write roles/pubsub.publisher $BACKEND"
+terraform import -var-file=staging.tfvars google_service_account_iam_member.pubsub_memory_agent_token_creator "projects/palup-jason/serviceAccounts/pubsub-memory-push@palup-jason.iam.gserviceaccount.com roles/iam.serviceAccountTokenCreator $AGENT"
+terraform import -var-file=staging.tfvars google_pubsub_topic_iam_member.pubsub_memory_agent_dlq_publisher "projects/palup-jason/topics/memory-write-dlq roles/pubsub.publisher $AGENT"
+terraform import -var-file=staging.tfvars google_pubsub_subscription_iam_member.pubsub_memory_agent_sub_subscriber "projects/palup-jason/subscriptions/memory-write-push roles/pubsub.subscriber $AGENT"
+terraform import -var-file=staging.tfvars google_cloud_run_v2_service_iam_member.memory_push_invoker "projects/palup-jason/locations/us-central1/services/palup-widget-staging roles/run.invoker serviceAccount:pubsub-memory-push@palup-jason.iam.gserviceaccount.com"
+terraform plan -var-file=staging.tfvars   # expect no memory-resource changes
+```
+
+**Prod:** `terraform apply -var-file=prod.tfvars` (with a real `memory_pubsub_kms_key_name`) creates the full
+CMEK-encrypted stack — this is the reproducible record of what to allocate. Then register the push route via
+the deploy pipeline (`MEMORY_PUBSUB_AUDIENCE` repo var), exactly like the catalog route above.
+
+> **State durability:** terraform state here is a **local, gitignored file** on one operator's machine — a
+> single point of loss. Moving it to a remote `backend "gcs"` (a versioned bucket + `terraform init
+> -migrate-state`) is the durable follow-up; it migrates the catalog state too, so it is an owner step.

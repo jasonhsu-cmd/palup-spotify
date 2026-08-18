@@ -1,0 +1,23 @@
+# Example tfvars for the STAGING apply/import of the infra/terraform module (palup-jason).
+# Copy to `staging.tfvars` (gitignored) and run e.g.:
+#   terraform plan  -var-file=staging.tfvars
+#   terraform apply -var-file=staging.tfvars
+# Values below are the live staging environment (project palup-jason, us-central1).
+
+project_id              = "palup-jason"
+region                  = "us-central1"
+project_number          = "270594351425"
+backend_service_account = "270594351425-compute@developer.gserviceaccount.com"
+cloud_run_service_name  = "palup-widget-staging"
+
+# Catalog-reconcile push endpoint (pubsub.tf).
+pubsub_push_endpoint = "https://palup-widget-staging-t7xp5lndiq-uc.a.run.app/internal/pubsub/catalog-reconcile"
+
+# #126 memory-write push endpoint (pubsub-memory.tf) — MUST byte-equal the service's MEMORY_PUBSUB_PUSH_AUDIENCE.
+memory_pubsub_push_endpoint = "https://palup-widget-staging-t7xp5lndiq-uc.a.run.app/internal/pubsub/memory-write"
+
+# CMEK for the memory-write topic + DLQ. STAGING = "" (no CMEK; synthetic test traffic).
+# PRODUCTION: set the full resource name of a real Cloud KMS CryptoKey, e.g.
+#   memory_pubsub_kms_key_name = "projects/<prod-project>/locations/us-central1/keyRings/palup/cryptoKeys/memory-write"
+# which turns on CMEK on both topics + the KMS encrypter/decrypter IAM grant.
+memory_pubsub_kms_key_name = ""
