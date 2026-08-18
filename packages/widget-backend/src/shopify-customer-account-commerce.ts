@@ -116,8 +116,14 @@ function mapSub(s: RawSub, shopperId: string): Subscription {
 
 export interface CaaCommerceDeps {
   grants: CustomerGrantStore;
-  /** tenant → its `*.myshopify.com` domain (from parseStoreDomains) — used to discover the CAA endpoint. */
-  shopDomainForTenant: (tenant: string) => string | undefined;
+  /**
+   * tenant → its `*.myshopify.com` domain — used to discover the CAA endpoint. Mirrors
+   * `MerchantResolver.shopDomainFor` (registry-first, `parseStoreDomains` env fallback), which is
+   * ASYNC, so this may return synchronously OR a Promise; `resolve()` below `await`s either. Every
+   * existing test double here returns a plain string synchronously, and `await`ing a non-Promise
+   * value resolves to it immediately, so this widening is not a breaking change for them.
+   */
+  shopDomainForTenant: (tenant: string) => string | undefined | Promise<string | undefined>;
   /** getPolicy + the ADR-0016 writes delegate here (shopper-agnostic / gated). */
   fallback: CommercePort;
   fetchFn?: typeof globalThis.fetch;
@@ -142,7 +148,7 @@ export function createCustomerAccountCommerceAdapter(deps: CaaCommerceDeps): Com
     if (!tenant) throw new CommerceReauthRequiredError(method);
     const grant = await deps.grants.get(tenant, p.shopperId);
     if (!grant || (grant.expiresAt !== undefined && grant.expiresAt <= now())) throw new CommerceReauthRequiredError(method); // absent/expired ⇒ reauth (refresh = task 7)
-    const shopDomain = deps.shopDomainForTenant(tenant);
+    const shopDomain = await deps.shopDomainForTenant(tenant);
     if (!shopDomain) throw new CommerceReauthRequiredError(method);
     const endpoint = await discoverCustomerApiEndpoint(shopDomain, fetchFn, timeoutMs);
     if (!endpoint) throw new CommerceReauthRequiredError(method);

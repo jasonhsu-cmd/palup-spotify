@@ -5,6 +5,8 @@ import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import type { MerchantCredentialRead } from "@palup/state-postgres";
 import { resolveStorefrontCredential } from "./merchant-store.js";
 import { createShopifyGroundingAdapter, type StorefrontFetch, type StorefrontShellFetch } from "./shopify-grounding.js";
+import { createCustomerAccountCommerceAdapter } from "./shopify-customer-account-commerce.js";
+import type { CustomerGrantStore } from "./customer-grant-store.js";
 
 // D2: the router refuses rather than silently falling back to fixtures when a custodied credential
 // exists but cannot be read back (undecryptable / malformed) — never serve a merchant's shoppers the
@@ -97,18 +99,55 @@ export function createGroundingPort(
   return createCachingGroundingPort(router, store);
 }
 
-// Commerce source: mock orders/policy/subscription for now; the Shopify adapter swaps in behind the port.
-// `isLive` (ADR-0017 T7 capability marker) tells the ADR-0016 fail-closed guard (commerce-guard.ts)
-// whether this IS a real/live adapter — false here, so the guard is a tested no-op for this slice. A
-// future live-adapter PR sets isLive:true and the guard's fail-closed check activates automatically.
-export function createCommercePort(): { port: CommercePort; isLive: boolean } {
+// Commerce source: mock orders/policy/subscription by default; the Shopify Customer Account API (CAA)
+// adapter (ADR-0018 task 8) swaps in behind the SAME port once a shopper has signed in AND the deployment
+// has CAA fully configured. `isLive` (ADR-0017 T7 capability marker) tells the ADR-0016 fail-closed guard
+// (commerce-guard.ts) whether this IS a real/live adapter — false for the mock (a tested no-op for that
+// slice), true for the CAA adapter, at which point the guard's fail-closed check activates automatically.
+//
+// Wave-1 E (revenue-flywheel) — DEFAULT-OFF, ships dark: `deps.caaEnabled` mirrors server.ts's own
+// `CAA_ENABLED` (SHOPPER_AUTH + WIDGET_AUTH_REQUIRED + a configured redirect_uri + shopper-token secret,
+// all individually load-bearing). No args (or `caaEnabled` false/absent, or `grants`/`shopDomainForTenant`
+// missing) ⇒ byte-identical to before this change — the mock, `isLive:false`. Regression-locked by
+// widget-backend/test/commerce-fixture-marker.test.ts (calls this with NO ARGS) and
+// widget-backend/test/commerce-port-caa-wiring.test.ts (explicit `caaEnabled:false`/omitted cases).
+export interface CommercePortDeps {
+  /** ADR-0018 task 8 — the custodied per-shopper OAuth grant store. Required (with `shopDomainForTenant`)
+   * to construct the live adapter; its absence alone is enough to stay on the mock. */
+  grants?: CustomerGrantStore;
+  /** tenant → its `*.myshopify.com` domain — mirrors `MerchantResolver.shopDomainFor` (async) or
+   * `parseStoreDomains` (sync); `createCustomerAccountCommerceAdapter` awaits either. */
+  shopDomainForTenant?: (tenant: string) => string | undefined | Promise<string | undefined>;
+  /** Mirrors server.ts's `CAA_ENABLED` posture. Default OFF ⇒ this stays the mock (ships dark). */
+  caaEnabled?: boolean;
+  /** Injectable outbound fetch for the live adapter's discovery + GraphQL calls (mirrors `caaFetch` in
+   * server.ts). Prod uses the live global fetch (the adapter's own default). */
+  fetchFn?: typeof globalThis.fetch;
+  /** Test seam: override the mock fallback. getPolicy + the ADR-0016 subscription WRITES always delegate
+   * here — on the live path too — because those stay human-routed until ADR-0016 enactment, a separate
+   * build. Defaults to a fresh fixture-marked MockCommerceAdapter, same as the pre-Wave-1-E behavior. */
+  fallback?: CommercePort;
+}
+
+export function createCommercePort(deps: CommercePortDeps = {}): { port: CommercePort; isLive: boolean } {
   // `fixtureData: true` is what stops the support path from stating DEMO order/account facts to real
   // shoppers. Without it this composition root was serving "I've confirmed order #1042 is on your
   // account" — a confident false claim about a real person's account — because the brain's fallback
   // shopper id is the very id that owns the fixtures, so the ownership check passed.
   //
-  // KEEP THIS SET for as long as this returns the mock. A live adapter should simply not pass the flag
-  // (it is not fixture data), at which point the guard in support.ts stops firing on its own.
-  // Regression-locked by widget-backend/test/commerce-fixture-marker.test.ts.
-  return { port: new MockCommerceAdapter({ fixtureData: true }), isLive: false };
+  // KEEP THIS SET for as long as this is the port shoppers are actually served by. A live adapter simply
+  // never passes the flag (it is not fixture data), at which point the guard in support.ts stops firing.
+  const fallback = deps.fallback ?? new MockCommerceAdapter({ fixtureData: true });
+  if (deps.caaEnabled && deps.grants && deps.shopDomainForTenant) {
+    return {
+      port: createCustomerAccountCommerceAdapter({
+        grants: deps.grants,
+        shopDomainForTenant: deps.shopDomainForTenant,
+        fallback,
+        fetchFn: deps.fetchFn,
+      }),
+      isLive: true,
+    };
+  }
+  return { port: fallback, isLive: false };
 }
