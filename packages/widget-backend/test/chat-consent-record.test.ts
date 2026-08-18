@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from "@palup/platform-ports";
 import type { ModelPort, ModelRequest } from "@palup/platform-ports";
 import { lookupConsent, armKill } from "@palup/state-postgres";
+import { subjectNamespace, ERASURE_TOMBSTONE_COLLECTION, tombstoneKey } from "@palup/widget-memory";
 import { buildServer } from "../src/server.js";
 import { guestTokenHeader } from "./helpers/guest-token.js";
 
@@ -382,5 +383,103 @@ describe("PR-11a — /consent + signals.ts wiring, end-to-end via /chat", () => 
       expect(got429).toBe(true);
       await app.close();
     });
+  });
+});
+
+// PART A (memory-safety follow-up to #332) — a /consent tier toggle-OFF is treated as "Forget me" for
+// THAT TIER ALONE (ADR-0015 "Withdrawal is symmetric" + Inv 9: Consent 1 and Consent 2 are independent —
+// turning off HEALTH memory must never wipe ORDINARY memory, and vice-versa). Erases + tombstones via
+// `withdrawConsent1`/`withdrawConsent2` (widget-memory/src/erasure.ts), mirroring `/forget`'s use of
+// `eraseSubject` above.
+describe("PART A — POST /consent tier toggle-OFF erases + tombstones that tier (Inv 9)", () => {
+  const GUEST_SECRET = "gsecret-part-a";
+  // floorNamespace (identity.ts) isn't part of widget-memory's public surface; it is the documented,
+  // stable `${subjectNamespace}::floor` composition (its own doc comment), reconstructed here the same
+  // way a direct-vector-seed test has to.
+  const floorNs = (tenantId: string, anonId: string) => `${subjectNamespace(tenantId, anonId)}::floor`;
+
+  afterEach(() => {
+    delete process.env.GUEST_TOKEN_SECRET;
+  });
+
+  it("memoryOrdinary='out' -> withdrawConsent1 erases the subject's ordinary facts and an erasure tombstone lands", async () => {
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const app = await buildServer({ store, vectorPort: vector });
+
+    await vector.upsert(subjectNamespace("demo", VALID_ANON_ID), [
+      { id: "f1", text: "prefers fragrance-free products", metadata: { class: "ordinary" } },
+    ]);
+    expect(await vector.query(subjectNamespace("demo", VALID_ANON_ID), { text: "", k: 10 })).toHaveLength(1);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { memoryOrdinary: "out", memorySpecial: "unknown" },
+    });
+    expect(res.statusCode).toBe(200);
+
+    expect(await vector.query(subjectNamespace("demo", VALID_ANON_ID), { text: "", k: 10 })).toEqual([]);
+    const tombstone = await store.get({ tenantId: "demo" }, ERASURE_TOMBSTONE_COLLECTION, tombstoneKey(VALID_ANON_ID));
+    expect(tombstone).not.toBeNull();
+    const log = await store.readAudit({ tenantId: "demo" });
+    expect(log.map((r) => r.action)).toContain("consent.withdrawn");
+    await app.close();
+  });
+
+  it("memorySpecial='out' -> withdrawConsent2 erases the floor-namespace facts + tombstones, and leaves a still-consented ordinary fact untouched (Inv 9 independence)", async () => {
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const app = await buildServer({ store, vectorPort: vector });
+
+    await vector.upsert(subjectNamespace("demo", VALID_ANON_ID), [
+      { id: "ord-1", text: "prefers fragrance-free products", metadata: { class: "ordinary" } },
+    ]);
+    await vector.upsert(floorNs("demo", VALID_ANON_ID), [
+      { id: "special-1", text: "has a tree-nut allergy", metadata: { class: "special" } },
+    ]);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { memoryOrdinary: "in", memorySpecial: "out" },
+    });
+    expect(res.statusCode).toBe(200);
+
+    expect(await vector.query(floorNs("demo", VALID_ANON_ID), { text: "", k: 10 })).toEqual([]);
+    // Inv 9 — withdrawing the HEALTH tier alone must not touch the still-consented ordinary fact.
+    expect(await vector.query(subjectNamespace("demo", VALID_ANON_ID), { text: "", k: 10 })).toHaveLength(1);
+    const tombstone = await store.get({ tenantId: "demo" }, ERASURE_TOMBSTONE_COLLECTION, tombstoneKey(VALID_ANON_ID));
+    expect(tombstone).not.toBeNull();
+    await app.close();
+  });
+
+  it("both tiers 'in' -> no withdraw is called and no erasure tombstone lands", async () => {
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const app = await buildServer({ store, vectorPort: vector });
+    const deleteById = vi.spyOn(vector, "deleteById");
+    const deleteNamespace = vi.spyOn(vector, "deleteNamespace");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/consent",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: { memoryOrdinary: "in", memorySpecial: "in" },
+    });
+    expect(res.statusCode).toBe(200);
+
+    expect(deleteById).not.toHaveBeenCalled();
+    expect(deleteNamespace).not.toHaveBeenCalled();
+    const tombstone = await store.get({ tenantId: "demo" }, ERASURE_TOMBSTONE_COLLECTION, tombstoneKey(VALID_ANON_ID));
+    expect(tombstone).toBeNull();
+    const log = await store.readAudit({ tenantId: "demo" });
+    expect(log.map((r) => r.action)).not.toContain("consent.withdrawn");
+    await app.close();
   });
 });
