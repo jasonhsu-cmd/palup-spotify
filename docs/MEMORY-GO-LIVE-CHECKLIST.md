@@ -18,7 +18,7 @@ and production behaviour is byte-identical to before the program.
 missing), or **ACCEPT** (a residual risk that must be consciously signed off rather than fixed). An item
 being "in a PR" is *not* met — merged and verified is met.
 
-_Last updated: 2026-08-17. Update the status column in the same PR that closes an item._
+_Last updated: 2026-08-18. Update the status column in the same PR that closes an item._
 
 _**2026-08-17 — RECONCILIATION: the code caught up to the docs; the residual rows below did NOT.**_
 _**What shipped.** ADR-0019 tasks 1–9 (server-issued signed guest identity) are **BUILT and merged to `main`**,
@@ -28,9 +28,20 @@ the client-`anonId` fallback — `signals.ts:240-247`), #230 (task 5, revocation
 `server.ts:760`). Consequence: the raw client-`anonId` bearer path the residual rows below describe **no longer
 exists in the recall/write code** — with no verified guest or shopper token, `memorySubject` is `undefined`,
 so there is no recall and no write._
-_**What did NOT ship (correctly).** Task 10 — the B12(b) guest→account carry-over — is **still UNBUILT**:
-`mergeGuestIntoAccount` has no production caller, and it remains gated on the LEGAL question (R2-2 Art-9,
-counsel Q19). `MEMORY_ADR_ACCEPTED` is still `false`._
+_**Task 10 — CORRECTED 2026-08-18 (this banner's original text below is now stale; #334 changed it).** The
+B12(b) guest→account carry-over ENGINE is now **BUILT + merged** (#334 `f2d2079`): `mergeGuestIntoAccount`
+HAS a production caller — the authenticated `POST /memory/merge` endpoint (`server.ts`) — and the R2-2
+(both-sides consent) + Q19(c) (health-disclosure) compound gate is implemented in `merge.ts`. Counsel's Q19
+answer was recorded as **(c)**: special-category/Art-9 facts carry only if BOTH the guest and the account
+recorded `memorySpecial="in"` AND the sign-in prompt named health data. It is **NOT enabled** and grants no
+sign-off — enablement remains gated on: (1) **R2-1** — the explicit "Yes, carry it over" widget prompt
+(`packages/widget/public/index.html`, `CARRY_OVER_PROMPT_ENABLED=false`, no caller wired); (2) **MED-1** —
+`healthDisclosed` is a client-asserted flag today and MUST become a SERVER-RECORDED disclosure event before
+enablement (security-review residual, documented at the `/memory/merge` route); and (3) the §A legal
+sign-offs below. `MEMORY_ADR_ACCEPTED` is **`true`** (flipped 2026-08-17 for internal staging,
+`packages/widget-memory/src/flag.ts:18`); memory is live ONLY where `MEMORY_ENABLED="true"` (staging) and is
+off in production (unset). (Original 2026-08-17 text, now superseded: "Task 10 … is still UNBUILT;
+`mergeGuestIntoAccount` has no production caller … `MEMORY_ADR_ACCEPTED` is still `false`.")_
 _**What this means for a signer — READ BEFORE SIGNING.** The rows below (C1, C8, C9, C10, C14, B12(b), F1)
 were written against the pre-ADR-0019 client-`anonId` posture and are now **stale in mechanism**. In
 particular, C1's 2026-08-04 named-owner decision that ACCEPTED the bearer-`anonId` and REJECTED a server-issued
