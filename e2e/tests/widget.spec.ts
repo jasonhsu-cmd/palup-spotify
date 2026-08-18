@@ -5,8 +5,8 @@ import { test, expect, type Page } from "@playwright/test";
 
 // The demo/operator surface (mood + cart + proactivity dials, the internal decision badge) is gated
 // behind `?palupDebug=1` — it is a build/demo affordance, never shopper-facing. Tests that assert on
-// the internal badge therefore load the DEBUG url; everything a REAL shopper sees loads "/".
-const DEBUG = "/?palupDebug=1";
+// the internal badge therefore load the DEBUG url; everything a REAL shopper sees loads "/widget" (the storefront now owns "/").
+const DEBUG = "/widget?palupDebug=1";
 
 // Classic exit-intent, as index.html listens for it: the pointer leaves the viewport toward the TOP
 // (relatedTarget null — the MouseEventInit default — and clientY at/above 0).
@@ -80,7 +80,7 @@ test.describe("shopper-facing default (no ?palupDebug)", () => {
       return route.continue();
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("tell me about the serum");
     await page.getByTestId("send").click();
     await expect.poll(() => bodies.length).toBe(1);
@@ -105,7 +105,7 @@ test.describe("shopper-facing default (no ?palupDebug)", () => {
   });
 
   test("AC2a — no internal decision badge reaches a shopper, and neither do the operator dials", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("tell me about the serum");
     await page.getByTestId("send").click();
     await expect(page.getByTestId("agent-msg").last()).toContainText("vitamin-C serum");
@@ -129,7 +129,7 @@ test.describe("shopper-facing default (no ?palupDebug)", () => {
   });
 
   test("AC4 — exit-intent with no cart signal stays QUIET: empty reply flagged no_cart/no_pitch", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/widget");
     const proactive = page.waitForResponse((r) => r.url().includes("/chat"));
     await fireExitIntent(page);
     const body = (await (await proactive).json()) as { reply: string; pitch: string; flags: string[] };
@@ -142,7 +142,7 @@ test.describe("shopper-facing default (no ?palupDebug)", () => {
   });
 
   test("AC5 — a clean first sales turn no longer returns pitch=cross_sell", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/widget");
     const chat = page.waitForResponse((r) => r.url().includes("/chat"));
     await page.getByTestId("chat-input").fill("tell me about the serum");
     await page.getByTestId("send").click();
@@ -154,7 +154,7 @@ test.describe("shopper-facing default (no ?palupDebug)", () => {
 });
 
 test("the surface carries its AI + PalUp disclosure on load", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/widget");
   // AI-disclosure mark: the widget presents itself as AI-generated on load (not a covert human).
   await expect(page.locator("#whStatus")).toContainText("AI-generated");
   // Third-party "Powered by PalUp" attribution stays visible on the surface.
@@ -169,7 +169,7 @@ test("the surface carries its AI + PalUp disclosure on load", async ({ page }) =
 // the DEMO drawer. It now lives in the always-present shopper tools row, so it works with no drawer at
 // all — asserted here by proving the gear does not even exist on a shopper's load.
 test("the sign-in control opens the Customer Account OAuth login via window.open", async ({ page, context }) => {
-  await page.goto("/");
+  await page.goto("/widget");
   await expect(page.locator("#gear")).toHaveCount(0);
   const [popup] = await Promise.all([context.waitForEvent("page"), page.getByTestId("signin-btn").click()]);
   expect(popup.url()).toContain("/auth/customer/login");
@@ -202,7 +202,7 @@ test.describe("PR-11b — memory OFF (default, real unmocked backend): fully ine
       return route.continue();
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("tell me about the serum");
     await page.getByTestId("send").click();
     // NOTE: the widget always shows a greeting `agent-msg` on load, so ".last().toBeVisible()" would be
@@ -263,7 +263,7 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
       await route.fulfill({ status: 200, contentType: "application/json", body: chatResponse() });
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("tell me about the serum");
     await page.getByTestId("send").click();
 
@@ -345,7 +345,7 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
       });
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
 
@@ -419,7 +419,7 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
       });
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
     await expect(page.locator('[data-testid="consent-prompt"]')).toBeVisible();
@@ -486,7 +486,7 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
       });
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
 
@@ -513,7 +513,7 @@ test.describe("PR-11c — memory OFF (default, real unmocked backend): the speci
       consentCalls++;
       return route.continue();
     });
-    await page.goto("/");
+    await page.goto("/widget");
     // The AI disclosure is asserted BEFORE the send, and the never-changing PalUp attribution after it.
     // Previously this asserted "AI-generated" on #whStatus AFTER the send — which only ever passed by
     // RACING the reply: "I'm allergic to tree nuts" is classified `safety:allergy` and escalates
@@ -558,7 +558,7 @@ test.describe("PR-11c — memory ON (mocked /chat seam): the special-consent pro
       });
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("I'm allergic to tree nuts");
     await page.getByTestId("send").click();
 
@@ -605,7 +605,7 @@ test.describe("PR-11c — memory ON (mocked /chat seam): the special-consent pro
       });
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("I'm allergic to tree nuts");
     await page.getByTestId("send").click();
     const prompt = page.locator('[data-testid="consent-prompt-special"]');
@@ -844,7 +844,7 @@ test.describe("P10 — conversation continuity across a closed tab (the safety l
       });
     });
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
     await expect.poll(() => bodies.length).toBe(1);
@@ -962,7 +962,7 @@ test.describe("P10 — conversation continuity across a closed tab (the safety l
 // disclosure disappeared.
 test.describe("P6 — the escalation banner claims only what escalation actually does", () => {
   test("an escalating turn flags a person WITHOUT claiming one is joining, and keeps the AI disclosure", async ({ page }) => {
-    await page.goto("/"); // the shopper's view, not ?palupDebug=1
+    await page.goto("/widget"); // the shopper's view, not ?palupDebug=1
     await page.getByTestId("chat-input").fill("my face is burning after using it");
     await page.getByTestId("send").click();
 
@@ -1029,7 +1029,7 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
     );
     await memoryOnChat(page);
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
     await expect(page.getByTestId("manage-memory")).toBeVisible();
@@ -1051,7 +1051,7 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
     await page.route("**/forget", (route) => route.fulfill(okJson));
     await memoryOnChat(page);
 
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
     await expect(page.getByTestId("manage-memory")).toBeVisible();
@@ -1066,7 +1066,7 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
   test("the panel does not claim to delete more than eraseSubject deletes", async ({ page }) => {
     await page.route("**/consent", (route) => route.fulfill(okJson));
     await memoryOnChat(page);
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
 
@@ -1110,7 +1110,7 @@ test.describe("E3 — product cards (mocked /chat seam)", () => {
     );
 
   const send = async (page: Page) => {
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("what do you recommend for dull skin?");
     await page.getByTestId("send").click();
   };
@@ -1247,7 +1247,7 @@ test.describe("E4 — cart line items are opt-in from the storefront, never inve
       bodies.push(route.request().postDataJSON());
       return route.continue();
     });
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("anything that pairs with the serum?");
     await page.getByTestId("send").click();
     await expect.poll(() => bodies.length).toBe(1);
@@ -1273,7 +1273,7 @@ test.describe("E4 — cart line items are opt-in from the storefront, never inve
         ],
       };
     });
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("does this go with what I already have?");
     await page.getByTestId("send").click();
     await expect.poll(() => bodies.length).toBe(1);
@@ -1296,7 +1296,7 @@ test.describe("E4 — cart line items are opt-in from the storefront, never inve
     await page.addInitScript(() => {
       (window as unknown as { PALUP: Record<string, unknown> }).PALUP = { cart: "serum-vc,moist-daily" };
     });
-    await page.goto("/");
+    await page.goto("/widget");
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
     await expect.poll(() => bodies.length).toBe(1);

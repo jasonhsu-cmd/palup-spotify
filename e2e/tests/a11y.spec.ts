@@ -160,7 +160,7 @@ async function expectAxeClean(page: Page, state: string) {
 
 /** A shopper's load: no `?palupDebug=1`, so no gear and no internal decision badge. */
 async function shopperLoad(page: Page) {
-  await page.goto("/");
+  await page.goto("/widget");
   await expect(page.getByTestId("agent-msg")).toHaveCount(1); // the on-load greeting
 }
 

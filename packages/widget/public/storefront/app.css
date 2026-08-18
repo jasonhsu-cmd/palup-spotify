@@ -1,0 +1,138 @@
+/* PalUp sample storefront — its OWN token set.
+ *
+ * Deliberately NOT the console evergreen design system (that governs the merchant/admin consoles) and NOT
+ * the widget's indigo (that is the shopper-embedded chat surface). This is a real, credible DTC skincare
+ * storefront: warm paper canvas, calm charcoal ink, one restrained terracotta accent. Theme-aware (a viewer
+ * in dark mode gets a dark palette). Every interactive control keeps a visible focus ring (WCAG 2.4.7) and
+ * text/background pairs clear AA contrast. */
+:root {
+  --bg: #faf8f4;         /* warm paper */
+  --surface: #ffffff;
+  --surface-2: #f3efe8;
+  --ink: #23201c;        /* ~13:1 on --bg */
+  --muted: #6a6157;      /* 4.8:1 on --bg — AA for secondary text */
+  --line: #e7e0d5;
+  --accent: #a44a34;     /* terracotta; 4.8:1 on white for text/links */
+  --accent-ink: #ffffff; /* on --accent fill (7:1+) */
+  --accent-soft: #f6e9e4;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow: 0 10px 30px rgba(35, 32, 28, 0.08);
+  --maxw: 1080px;
+  --ff: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #16130f;
+    --surface: #201c17;
+    --surface-2: #2a251f;
+    --ink: #f1ece4;
+    --muted: #b3a998;      /* AA on --bg */
+    --line: #352f27;
+    --accent: #e3846b;     /* lighter terracotta for AA on dark */
+    --accent-ink: #201c17;
+    --accent-soft: #33241f;
+    --shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  font-family: var(--ff);
+  color: var(--ink);
+  background: var(--bg);
+  line-height: 1.55;
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--accent); }
+img { max-width: 100%; display: block; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* Skip link (2.4.1) */
+.skip { position: absolute; left: -999px; top: 0; background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: 0 0 8px 0; z-index: 100; }
+.skip:focus { left: 0; }
+
+/* Header / nav */
+.site-header { border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 20; }
+.nav { max-width: var(--maxw); margin: 0 auto; padding: 14px 20px; display: flex; align-items: center; gap: 16px; }
+.brand { font-weight: 700; font-size: 20px; letter-spacing: -0.01em; color: var(--ink); text-decoration: none; }
+.brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.nav-sp { flex: 1; }
+.nav a { color: var(--ink); text-decoration: none; font-size: 14px; }
+.cart-link { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; }
+.cart-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cart-count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 700; display: inline-grid; place-items: center; }
+.cart-count[hidden] { display: none; }
+
+/* Layout */
+main { max-width: var(--maxw); margin: 0 auto; padding: 28px 20px 80px; }
+.hero { padding: 28px 0 8px; }
+.hero h1 { font-size: clamp(28px, 4vw, 40px); margin: 0 0 8px; letter-spacing: -0.02em; }
+.hero p { color: var(--muted); max-width: 60ch; margin: 0; }
+
+/* Product grid */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; margin-top: 26px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; display: flex; flex-direction: column; text-decoration: none; color: inherit; transition: box-shadow .15s ease, transform .15s ease; }
+.card:hover { box-shadow: var(--shadow); transform: translateY(-2px); }
+.card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card .thumb { aspect-ratio: 1 / 1; background: var(--surface-2); display: grid; place-items: center; overflow: hidden; }
+.card .thumb img { width: 100%; height: 100%; object-fit: cover; }
+.card .thumb .ph { color: var(--muted); font-size: 13px; letter-spacing: .04em; text-transform: uppercase; }
+.card .body { padding: 14px 15px 16px; display: flex; flex-direction: column; gap: 4px; }
+.card .title { font-weight: 600; font-size: 15px; }
+.card .price { color: var(--muted); font-size: 14px; }
+
+/* Product detail */
+.pdp { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-top: 20px; }
+@media (max-width: 720px) { .pdp { grid-template-columns: 1fr; gap: 22px; } }
+.pdp .media { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); aspect-ratio: 1 / 1; display: grid; place-items: center; overflow: hidden; }
+.pdp .media img { width: 100%; height: 100%; object-fit: cover; }
+.pdp h1 { font-size: clamp(24px, 3vw, 32px); margin: 0 0 6px; }
+.pdp .price { font-size: 20px; color: var(--ink); margin: 0 0 14px; }
+.pdp .desc { color: var(--ink); margin: 0 0 16px; }
+.pdp .avail { font-size: 14px; color: var(--muted); margin: 0 0 16px; }
+.pdp .ingredients { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; }
+.pdp .ingredients h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 6px; }
+.pdp .ingredients p { font-size: 13px; color: var(--muted); margin: 0; }
+.back { display: inline-block; margin-bottom: 14px; font-size: 14px; color: var(--muted); text-decoration: none; }
+.back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* Buttons */
+.btn { font: inherit; font-weight: 600; font-size: 15px; padding: 12px 20px; border-radius: 999px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
+.btn:hover { filter: brightness(1.05); }
+.btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+.btn-outline { background: transparent; color: var(--accent); }
+
+/* Cart page */
+.cart-list { list-style: none; margin: 22px 0 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.cart-row { display: grid; grid-template-columns: 72px 1fr auto; gap: 14px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
+.cart-row .thumb { width: 72px; height: 72px; border-radius: var(--radius-sm); background: var(--surface-2); overflow: hidden; }
+.cart-row .thumb img { width: 100%; height: 100%; object-fit: cover; }
+.cart-row .title { font-weight: 600; font-size: 15px; }
+.cart-row .price { color: var(--muted); font-size: 14px; }
+.qty { display: inline-flex; align-items: center; gap: 8px; margin-top: 6px; }
+.qty button { width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; font-size: 16px; line-height: 1; }
+.qty button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.qty span { min-width: 20px; text-align: center; font-variant-numeric: tabular-nums; }
+.remove { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; text-decoration: underline; padding: 4px; }
+.remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cart-foot { margin-top: 22px; display: flex; align-items: center; justify-content: flex-end; gap: 18px; flex-wrap: wrap; }
+.cart-total { font-size: 18px; font-weight: 700; }
+.empty { color: var(--muted); margin-top: 26px; }
+
+/* Footer */
+.site-footer { border-top: 1px solid var(--line); background: var(--surface); }
+.site-footer .inner { max-width: var(--maxw); margin: 0 auto; padding: 26px 20px 40px; color: var(--muted); font-size: 13px; display: grid; gap: 10px; }
+.site-footer h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0; }
+.assistant-note { color: var(--muted); font-size: 12.5px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .card { transition: none; }
+  .card:hover { transform: none; }
+}

@@ -276,6 +276,14 @@ const widgetHtml = readFileSync(
   join(here, "..", "..", "widget", "public", "index.html"),
   "utf8",
 );
+// WS3 — the sample storefront pages + assets (home / product / cart), read once at boot exactly like
+// widgetHtml (no build pipeline; served verbatim by explicit routes below).
+const STOREFRONT_DIR = join(here, "..", "..", "widget", "public", "storefront");
+const storefrontHome = readFileSync(join(STOREFRONT_DIR, "home.html"), "utf8");
+const storefrontProduct = readFileSync(join(STOREFRONT_DIR, "product.html"), "utf8");
+const storefrontCart = readFileSync(join(STOREFRONT_DIR, "cart.html"), "utf8");
+const storefrontCss = readFileSync(join(STOREFRONT_DIR, "app.css"), "utf8");
+const storefrontJs = readFileSync(join(STOREFRONT_DIR, "app.js"), "utf8");
 
 const { port: modelPort, name: modelName } = createModelPort();
 // ADR-0017 T7 — every commerce call goes through the ADR-0016 fail-closed guard. `commerceIsLive` is a
@@ -1350,7 +1358,32 @@ export async function buildServer(opts?: {
   // it names a mode, never a key, a tenant or a domain.
   app.get("/health", async () => ({ ok: true, model: modelName, store: runtimeResult.kind, vector: vectorResult.kind, merchants: merchants.resolutionMode }));
 
+  // WS3 — the sample storefront replaces the old inlined widget demo at the root. The widget is now embedded
+  // via the REAL loader (each storefront page carries the /embed/loader.js snippet → shadow-DOM launcher +
+  // /embed/panel iframe). The standalone widget harness moves to /widget (test/dev only; the panel HTML is
+  // also served at /embed/panel). `/storefront/catalog` (WS2) is registered separately above.
   app.get("/", async (_req, reply) => {
+    reply.type("text/html").send(storefrontHome);
+  });
+  app.get("/product/:handle", async (_req, reply) => {
+    reply.type("text/html").send(storefrontProduct);
+  });
+  app.get("/cart", async (_req, reply) => {
+    reply.type("text/html").send(storefrontCart);
+  });
+  app.get("/storefront/app.css", async (_req, reply) => {
+    reply
+      .header("content-type", "text/css; charset=utf-8")
+      .header("cache-control", "public, max-age=300")
+      .send(storefrontCss);
+  });
+  app.get("/storefront/app.js", async (_req, reply) => {
+    reply
+      .header("content-type", "application/javascript; charset=utf-8")
+      .header("cache-control", "public, max-age=300")
+      .send(storefrontJs);
+  });
+  app.get("/widget", async (_req, reply) => {
     reply.type("text/html").send(widgetHtml);
   });
 
