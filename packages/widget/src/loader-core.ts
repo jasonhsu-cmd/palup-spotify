@@ -128,6 +128,10 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
 
     let iframe: HTMLIFrameElement | null = null;
     let destroyed = false;
+    // The panel's message handler only exists after its document loads and posts `palup:ready`.
+    // `panelReady` gates every loader→panel message that the panel must actually receive (see open()).
+    let panelReady = false;
+    let openPending = false; // an open() that happened before the panel was ready — flushed on palup:ready
 
     function ensureIframe(): HTMLIFrameElement {
       if (iframe) return iframe;
@@ -186,9 +190,13 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       el.style.display = "block";
       dot.style.display = "none";
       launcher.setAttribute("aria-expanded", "true");
-      const send = () => el.contentWindow?.postMessage({ type: "palup:open" }, origin);
-      if (el.contentWindow) send();
-      else el.addEventListener("load", send, { once: true });
+      // Do NOT gate on `el.contentWindow`: a freshly-created iframe has a truthy contentWindow (its
+      // initial about:blank) BEFORE the panel document loads and registers its message handler, so
+      // posting palup:open now would be silently dropped — and the panel's first-touch greeting
+      // (sendGreeting on palup:open) would never fire. Post only once the panel has announced
+      // `palup:ready`; the ready handler flushes a pending open. Re-opens after readiness post at once.
+      if (panelReady) el.contentWindow?.postMessage({ type: "palup:open" }, origin);
+      else openPending = true;
     }
 
     function close(): void {
@@ -206,8 +214,15 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
 
       switch (data.type) {
         case "palup:ready":
+          panelReady = true;
           iframe.contentWindow?.postMessage({ type: "palup:host", shop, position }, origin);
           postContext(); // WS4 — send the host's cart + page context alongside the host handshake
+          if (openPending) {
+            // the shopper opened the panel before it finished loading — deliver the deferred open now,
+            // so the panel runs setOpen(true) + its first-touch greeting on this first open
+            openPending = false;
+            iframe.contentWindow?.postMessage({ type: "palup:open" }, origin);
+          }
           break;
         case "palup:resize":
           if (typeof data.height === "number") {
