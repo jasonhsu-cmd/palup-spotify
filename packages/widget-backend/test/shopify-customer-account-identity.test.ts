@@ -230,3 +230,66 @@ describe("fetchJwks", () => {
     expect(called).toBe(false);
   });
 });
+
+// --- #127: branded customer-account domain (issuer stays shopify.com; endpoints move to the shop's own
+// account domain — verified live against Allbirds, 2026-08-18: issuer=https://shopify.com/authentication/
+// 11044168, token_endpoint=https://accounts.allbirds.com/authentication/oauth/token). ---------------------
+describe("branded customer-account domain (#127)", () => {
+  const brandedCfg: OidcConfig = {
+    issuer: ISS,
+    authorization_endpoint: "https://accounts.brand.com/authentication/oauth/authorize",
+    token_endpoint: "https://accounts.brand.com/authentication/oauth/token",
+    jwks_uri: "https://accounts.brand.com/authentication/oauth/.well-known/jwks.json",
+  };
+
+  it("discoverOidc: issuer=shopify.com but authorize/token/jwks all on the shop's OWN branded domain ⇒ resolves (not null)", async () => {
+    expect(await discoverOidc("acme.myshopify.com", okFetch(brandedCfg))).toEqual(brandedCfg);
+  });
+
+  it("exchangeCode against the branded token_endpoint ⇒ allowed (sends the secret)", async () => {
+    let called = false;
+    const cap: FetchFn = (async () => { called = true; return { ok: true, status: 200, json: async () => ({ access_token: "at", id_token: "it" }) }; }) as unknown as FetchFn;
+    const res = await exchangeCode(brandedCfg, { code: "c", codeVerifier: "v", clientId: AUD, clientSecret: "s", redirectUri: "https://widget.palup.ai/cb" }, cap);
+    expect(res).toEqual({ access_token: "at", id_token: "it" });
+    expect(called).toBe(true);
+  });
+
+  it("exchangeRefreshToken against the branded token_endpoint ⇒ allowed", async () => {
+    const cap: FetchFn = okFetch({ access_token: "NAT" });
+    expect(await exchangeRefreshToken(brandedCfg, { refreshToken: "RT", clientId: AUD, clientSecret: "s" }, cap)).toEqual({ access_token: "NAT" });
+  });
+
+  it("fetchJwks against the branded jwks_uri, given the discovered cfg ⇒ allowed", async () => {
+    expect(await fetchJwks(brandedCfg.jwks_uri, okFetch(JWKS), undefined, brandedCfg)).toEqual(JWKS);
+  });
+
+  it("fetchJwks against a branded-domain jwks_uri WITHOUT the corroborating cfg ⇒ null (no anchor to trust it)", async () => {
+    expect(await fetchJwks(brandedCfg.jwks_uri, okFetch(JWKS))).toBeNull();
+  });
+
+  it("a custom-domain ISSUER (not shopify.com) ⇒ discoverOidc rejects — issuer never moves off shopify.com", async () => {
+    expect(await discoverOidc("acme.myshopify.com", okFetch({ ...brandedCfg, issuer: "https://accounts.brand.com/authentication/11044168" }))).toBeNull();
+  });
+
+  it("spoof still rejected: an endpoint host the shop's OWN discovery doc did NOT consistently name ⇒ null", async () => {
+    // token_endpoint diverges from the branded host the OTHER two endpoints agree on.
+    expect(await discoverOidc("acme.myshopify.com", okFetch({ ...brandedCfg, token_endpoint: "https://evil.example.com/token" }))).toBeNull();
+    // jwks_uri diverges instead.
+    expect(await discoverOidc("acme.myshopify.com", okFetch({ ...brandedCfg, jwks_uri: "https://evil.example.com/jwks.json" }))).toBeNull();
+    // a non-https endpoint on the (otherwise consistent) branded domain is still refused.
+    expect(await discoverOidc("acme.myshopify.com", okFetch({ ...brandedCfg, token_endpoint: "http://accounts.brand.com/authentication/oauth/token" }))).toBeNull();
+  });
+
+  it("exchangeCode refuses a token_endpoint the passed-in cfg does not itself corroborate (defense in depth)", async () => {
+    let called = false;
+    const spy: FetchFn = (async () => { called = true; return { ok: true, status: 200, json: async () => ({ access_token: "a", id_token: "b" }) }; }) as unknown as FetchFn;
+    const tamperedCfg: OidcConfig = { ...brandedCfg, token_endpoint: "https://evil.example.com/token" };
+    expect(await exchangeCode(tamperedCfg, { code: "c", codeVerifier: "v", clientId: AUD, clientSecret: "s", redirectUri: "x" }, spy)).toBeNull();
+    expect(called).toBe(false); // secret never left the process
+  });
+
+  it("default *.myshopify.com discovery is unaffected: all endpoints on shopify.com resolve exactly as before", async () => {
+    const good = { issuer: ISS, authorization_endpoint: `${ISS}/oauth/authorize`, token_endpoint: `${ISS}/oauth/token`, jwks_uri: `${ISS}/.well-known/jwks.json` };
+    expect(await discoverOidc("acme.myshopify.com", okFetch(good))).toEqual(good);
+  });
+});

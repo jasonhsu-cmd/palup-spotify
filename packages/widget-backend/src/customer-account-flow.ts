@@ -132,8 +132,9 @@ export async function completeCustomerCallback(deps: CallbackDeps, args: { code?
     const tokens = await exchangeCode(cfg, { code, codeVerifier, clientId, clientSecret, redirectUri: deps.redirectUri }, deps.fetchFn);
     if (!tokens) return { ok: false, reason: "error" };
 
-    // 6. Validate the id_token (issuer pinned to THIS shop) → Principal for THIS tenant.
-    const jwks = await fetchJwks(cfg.jwks_uri, deps.fetchFn);
+    // 6. Validate the id_token (issuer pinned to THIS shop) → Principal for THIS tenant. Pass `cfg` so a
+    //    branded customer-account domain's jwks_uri is trusted the same way discoverOidc trusted it (#127).
+    const jwks = await fetchJwks(cfg.jwks_uri, deps.fetchFn, undefined, cfg);
     if (!jwks) return { ok: false, reason: "error" };
     const principal: Principal = verifyIdTokenToPrincipal(tokens.id_token, tenant, {
       jwks,
