@@ -259,6 +259,32 @@ install* above ("Onboarding a merchant who installed the app themselves") and
 Shopify theme-editor render. `shopify app deploy` is the validation step — it may surface schema issues
 this repo cannot catch statically.
 
+## Sample storefront (staging demo)
+
+The staging root (`palup-widget-staging-…run.app/`) serves a **production-credible sample storefront** for the
+demo tenant (`palup-skincare-jason`), not a bare stand-in. Fastify serves it, read at boot from
+`packages/widget/public/storefront/`:
+
+- `GET /` → home (product grid), `GET /product/:handle` → PDP, `GET /cart` → cart; `GET /storefront/app.css|app.js`.
+- The pages render the SAME live catalog the assistant is grounded on, via `GET /storefront/catalog?shop=<domain>`
+  (`routes/storefront-catalog.ts`) — public, uniform-404 (no oracle), per-IP + fail-closed per-tenant
+  rate-limited, served behind the 30-min grounding cache. Storefront and assistant finally agree.
+- Each page embeds the widget through the **real loader** (`<script src="/embed/loader.js" data-shop=…>`); the
+  panel is framed same-origin (the panel's `frame-ancestors` now includes `'self'`), and the shopper's cart +
+  page context reach the widget via the loader's `palup:context` bridge (whitelisted to `{productId, quantity}`).
+- The widget is **brand-themed** per tenant (`widget-theme.ts`, server-injected into `/embed/panel`; launcher via
+  `GET /embed/theme?shop=`), contrast-safe by construction.
+- The standalone widget harness (the old inlined demo) moved to `GET /widget` (test/dev only).
+
+**Lighting up the sales-partner surfaces on this demo is a §5 human step** (not a build agent's). Set the
+GitHub Actions vars `PRODUCT_CITATIONS` + `PRODUCT_CARDS` + `CART_LINE_ITEMS` (product cards + one-tap cart
+deep-links + cart signals), `GREETING_PROACTIVE` (first-touch greeting — still a **draft PR**, needs
+agent-evolution-steward + §5 approval), and `MEMORY_ENABLED` (returning-shopper nurture — gated by
+`MEMORY-GO-LIVE-CHECKLIST.md`); run `pnpm catalog:enable --scope platform|tenant:<id> --on` if catalog
+retrieval is needed; and `pnpm grounding:invalidate <tenant>` at cutover so the first grounded turn carries
+the new product images/handles. Verify the live catalog actually has product images + working variant ids
+(`pnpm shopify:verify` / `pnpm model:smoke`) before relying on photos/cart deep-links.
+
 ## Per-merchant region (D2) — the setting that decides a consent regime
 
 `region` is not a label. It selects the **consent regime**: `consentPermits(region, "ordinary", value)` is

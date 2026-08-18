@@ -276,9 +276,16 @@ surface.
   1.4.11 is measured for the two focus rings only, not for input/control boundaries; and the
   one-character avatar monogram sits at 4.02:1 pending a logotype-exemption decision. See the PR for
   the full list of what axe structurally cannot see.
-- **Still open:** "Powered by PalUp" badge, appearance/theming, the **human
-  take-over handoff** UX, offline mode, and low-latency **transport (WebSocket, `<120ms` load)** —
-  see `comms-and-messaging.md` §10 for the transport starting point.
+- **Merchant-brand theming — now built (WS10, PR #340).** The widget adopts the merchant's brand (colour +
+  name/logo) so it reads as native to the storefront, **contrast-safe by construction**:
+  `widget-backend/src/widget-theme.ts`'s `deriveThemeVars` derives AA-clean CSS-variable values from any
+  brand hex (reusing the a11y suite's WCAG luminance math), server-injected FOUC-free into `/embed/panel`
+  with the launcher recoloured via `GET /embed/theme`. The safety bubble, handoff surface, muted text and the
+  "Powered by PalUp" mark stay on the fixed token set. Source is a curated per-tenant map today; Shopify
+  `Shop.brand`/a registry column are a follow-on behind the same `resolveTheme` seam.
+- **Still open:** the **human take-over handoff** UX (there is no live-agent channel — the widget honestly
+  says so), offline mode, and low-latency **transport (WebSocket, `<120ms` load)** — see
+  `comms-and-messaging.md` §10 for the transport starting point.
   **The widget no longer implies the handoff exists (PR-P6).** It used to latch into "Connecting you
   with a person… A team member is joining this chat … your messages are saved and they'll see the whole
   conversation" — three claims with no mechanism: `signals.handoff` (the only "a human took over" input)
