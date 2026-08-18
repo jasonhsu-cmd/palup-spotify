@@ -97,3 +97,12 @@ export {
   type RevokeGuestInput,
   type IsGuestRevokedInput,
 } from "./runtime-revocation-store.js";
+export {
+  accumulateArmTally,
+  readArmTally,
+  readArmAggPair,
+  listArmTallies,
+  appendOutcomeLedgerEntry,
+  readOutcomeLedger,
+  type AccumulateArmTallyInput,
+} from "./outcome-ledger-store.js";

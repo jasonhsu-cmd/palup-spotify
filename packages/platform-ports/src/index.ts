@@ -100,5 +100,16 @@ export type {
   InMemoryCommsOpts,
 } from "./comms-port.js";
 export { createInMemoryComms, CommsRejection } from "./comms-port.js";
+export type {
+  Play,
+  Arm,
+  OutcomeLedgerEntry,
+  UsageLedgerEntry,
+  ArmAgg,
+  ArmTally,
+  IncrementalLiftInput,
+  IncrementalLiftResult,
+} from "./outcome-ledger.js";
+export { EMPTY_ARM_AGG, MIN_EXPOSURES_PER_ARM, computeIncrementalLift } from "./outcome-ledger.js";
 // NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
 // into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.
