@@ -328,6 +328,22 @@ function isQuietHour(localHour: number | undefined): boolean {
   return localHour >= QUIET_START_HOUR || localHour < QUIET_END_HOUR;
 }
 
+// The product the shopper is viewing, as retrieval-query words — derived from a `pageContext` of the
+// form "product:<handle>" (the storefront/loader bridge's format). Turns the handle into a space-joined
+// phrase (a Shopify handle is essentially the slugified product title), e.g.
+// "parfums-de-marly-delina-shower-gel-1-6-oz" → "parfums de marly delina shower gel 1 6 oz". Returns ""
+// for a non-product page or a malformed value, so callers stay byte-identical off the product path.
+function productQueryFromPageContext(pageContext: string | undefined): string {
+  if (typeof pageContext !== "string") return "";
+  const m = /^product:(.+)$/.exec(pageContext.trim());
+  if (!m || !m[1]) return "";
+  return m[1]
+    .replace(/[-_/]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120); // client-supplied → bound the words we fold into the retrieval query (defense in depth)
+}
+
 
 function selectPitch(signals: Signals, policy: Policy, isObjection = false): PitchKind {
   const level = signals.proactivityLevel ?? policy.proactivityDefault;
@@ -1867,6 +1883,18 @@ export function createBrain(
       // E1 — the ONLY call site that passes a retrieval query, and it passes the SHOPPER'S OWN turn.
       // Reaching this line means every guardrail rung above already declined to return, so no
       // kill/safety/injection/support/uncertainty/b2b/proactive turn can ever spend an embedding call.
+      //
+      // pageContext must SEED retrieval, not merely decorate the prompt as fenced DATA. On a product page
+      // a vague "what can you tell me about this product?" turn names nothing, so retrieval on the raw
+      // message misses the viewed product entirely (in a >k catalog) and the model then wrongly denies the
+      // store carries it. Fold the viewed product's identity (handle → words) into the retrieval query so
+      // that product is retrieved. When augmented, do NOT reuse the shared message-only turn vector for
+      // retrieval — a vector of just the message would override the augmented text query and re-introduce
+      // the miss — so let the retriever embed the augmented text itself (queryVector omitted). Memory
+      // recall above keeps the shared vector, so its recall behaviour is byte-identical. Off a product
+      // page, `viewedProduct` is "" ⇒ query and vector are exactly as before.
+      const viewedProduct = productQueryFromPageContext(signals.pageContext);
+      const retrievalQuery = viewedProduct ? `${message} ${viewedProduct}`.trim() : message;
       const gen = await model.complete({
         messages: await groundedMessages(
           message,
@@ -1874,10 +1902,11 @@ export function createBrain(
           systemExtra + PITCH_PLAYBOOK[pitch],
           history,
           signals.pageContext,
-          // semantic-memory-v1, PR3, T8 — the SAME shared turn embedding memory recall just consumed
-          // above, so catalog retrieval spends no embed of its own this turn. Absent ⇒
-          // CatalogRetrieverPort's own internal-embed fallback (today's behavior).
-          { query: message, flags, enabled: catalogRetrievalOn, queryVector: turnQuery?.queryVector, pin: turnQuery?.pin },
+          // semantic-memory-v1, PR3, T8 — reuse the SAME shared turn embedding memory recall consumed above
+          // so catalog retrieval spends no embed of its own — EXCEPT when the query was augmented with the
+          // viewed product (then the message-only vector no longer matches; let the retriever re-embed).
+          // Absent queryVector ⇒ CatalogRetrieverPort's own internal-embed fallback.
+          { query: retrievalQuery, flags, enabled: catalogRetrievalOn, ...(viewedProduct ? {} : { queryVector: turnQuery?.queryVector, pin: turnQuery?.pin }) },
           citations,
           // E4 — the ONLY call site that passes cart line items, for the same reason E1's retrieval query
           // is passed only here: every guardrail rung above has already declined to return, so no

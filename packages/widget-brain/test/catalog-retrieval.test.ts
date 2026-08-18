@@ -122,6 +122,28 @@ describe("E1 — retrieval narrows the CATALOG block (flag ON)", () => {
     expect(r.calls).toEqual([{ tenantId: "acme", query: ASK, k: DEFAULT_CATALOG_RETRIEVAL_K }]);
   });
 
+  // GAP (pageContext-not-grounded): on a PDP, a vague "this product" turn names nothing, so retrieval on
+  // the raw message can miss the very product the shopper is looking at (in a >k catalog) and the model
+  // then wrongly says the store doesn't carry it. The viewed product's identity (from pageContext
+  // "product:<handle>") must SEED the retrieval query, not just reach the model as fenced DATA.
+  it("seeds the retrieval query with the product the shopper is viewing (pageContext)", async () => {
+    const model = new RecordingModelPort();
+    const r = fakeRetriever(["p1"]);
+    const onPdp: Signals = { tenantId: "acme", pageContext: "product:parfums-de-marly-delina-shower-gel-1-6-oz" };
+    await brainWith(model, groundingOf(bigCatalog()), r, true).decide(onPdp, "what can you tell me about this product?");
+    expect(r.calls).toHaveLength(1);
+    // the handle is folded in as words (dashes → spaces) alongside the shopper's message
+    expect(r.calls[0]!.query).toContain("parfums de marly delina shower gel");
+    expect(r.calls[0]!.query).toContain("what can you tell me about this product");
+  });
+
+  it("leaves the retrieval query byte-identical when the shopper is not on a product page", async () => {
+    const model = new RecordingModelPort();
+    const r = fakeRetriever(["p1"]);
+    await brainWith(model, groundingOf(bigCatalog()), r, true).decide({ tenantId: "acme", pageContext: "home" }, ASK);
+    expect(r.calls[0]!.query).toBe(ASK);
+  });
+
   it("renders ONLY the retrieved products, in retrieval order, and drops the rest", async () => {
     const model = new RecordingModelPort();
     const r = fakeRetriever(["p5", "p1"]);
