@@ -97,3 +97,13 @@ resource "google_service_account_iam_member" "pubsub_memory_agent_token_creator"
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
+
+# The Pub/Sub service agent must also be granted use of the CMEK key on both topics above, or
+# `terraform apply` of the topics fails (Pub/Sub cannot encrypt/decrypt with a CMEK key it has no
+# grant on). Reuses `var.project_number` (already threaded in for the token-creator grant above)
+# rather than adding a second `data "google_project"` lookup for the same project number.
+resource "google_kms_crypto_key_iam_member" "pubsub_memory_agent_kms" {
+  crypto_key_id = var.memory_pubsub_kms_key_name
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}

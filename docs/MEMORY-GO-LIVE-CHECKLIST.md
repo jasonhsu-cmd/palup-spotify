@@ -194,3 +194,27 @@ writing — silence is not acceptance.
 **Rollback:** the kill switch halts memory writes immediately at any scope. Reverting the flag const
 returns the system to fully inert. Neither undoes data already written — erasure (`/forget`, `erase.subject`)
 is the data-removal path, so verify B5/B6 *before* the first real write, not after.
+
+---
+
+## E. #126 — async memory-write queue: go-live preconditions (trigger = setting MEMORY_PUBSUB_* on a memory-enabled deployment)
+
+The queue (`memory-write-queue.ts` publish → `pubsub-push-memory.ts` OIDC-verified push → the SAME
+`memoryService.remember()` every inline caller uses) ships **dark**: it exists in `main` and in
+`infra/terraform/pubsub-memory.tf`, but nothing sets `MEMORY_PUBSUB_TOPIC` /
+`MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT` / `MEMORY_PUBSUB_PUSH_AUDIENCE` on any deployed service, so the
+push route never registers and no code path is exercised in staging or prod today. These are the
+preconditions surfaced by the security + code review, to close **before** those env vars are set on a
+memory-enabled deployment — separate from, and additional to, §A–§D above.
+
+| # | Condition | Status |
+|---|---|---|
+| E1 | **Raw-turn PII in Pub/Sub (DPIA/residency).** The queue message body carries the RAW shopper `message` + `reply` (potential Art-9 special-category data) as app-plaintext. It is encrypted at rest via CMEK on both `memory-write` and `memory-write-dlq` (24h `message_retention_duration`), but `eraseSubject` / the `/forget` erasure path does **not** reach Pub/Sub — an erasure request during the ≤24h retention window leaves raw turns sitting in-flight or in the DLQ, unerased. | **OPEN.** Record this exposure in the DPIA before go-live, and either shorten the DLQ retention or add a DLQ purge step to the erasure path. |
+| E2 | **Idempotency not enforced on the push consume path.** The message `id` (a deterministic, NUL-separated key — `memory-write-queue.ts`) rides in the Pub/Sub message attributes, but the memory push route does not dedup on it, and the subscription is at-least-once (no exactly-once — that mode is pull-only; a push subscription needs app-level dedup). A redelivery (an ack-deadline miss against the distiller's 120s window, or a 5xx-triggered retry) re-runs the full distiller model call; duplicate FACTS are prevented only by `remember()`'s own semantic dedup, not by the message id. | **OPEN.** Add consume-side id-dedup (an idempotency-key check on the push route) before go-live, or explicitly confirm the redelivery cost (extra model calls, and reliance on semantic dedup alone) is acceptable. |
+| E3 | **CMEK IAM.** The Pub/Sub service agent (`service-<project_number>@gcp-sa-pubsub.iam.gserviceaccount.com`) needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the CMEK key, or `terraform apply` of the topics fails outright. | **MET — added to `infra/terraform/pubsub-memory.tf`** (`google_kms_crypto_key_iam_member.pubsub_memory_agent_kms`, reusing the existing `var.project_number`). Verify it is actually applied before the topics are created in the target environment. |
+| E4 | **Per-IP limiter sizing.** The memory push route shares the catalog route's per-IP limiter (`RL_IP`, 60/min). Pub/Sub push requests arrive from shared Google source IP ranges, so a burst can 429 → Pub/Sub retries → exhausts `max_delivery_attempts` → lands in the DLQ → the fact is silently never remembered. | **OPEN.** Size (or dedicate) the limiter for the push route before go-live. |
+| E5 | **Staging smoke asymmetry.** The memory push route registers only when `memoryServiceEnabled && memoryPushConfigured` — unlike the catalog push route, it cannot be 401-probed on staging while memory stays dark (`MEMORY_ADR_ACCEPTED = false`). Do not expect a pre-enablement staging smoke test to exercise this route; there is nothing listening to probe. | **ACCEPT** — expected consequence of shipping dark; not a defect, just a gap in what staging smoke can prove ahead of the flip. |
+
+**Note:** this section governs the memory-write *queue* going live once memory itself is already on
+(§A–§D). It does not shortcut, replace, or get shortcut by them — a memory-enabled deployment can run
+indefinitely on the pre-existing inline-write path without ever setting `MEMORY_PUBSUB_*`.
