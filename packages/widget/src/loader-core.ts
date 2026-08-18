@@ -122,6 +122,44 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       return el;
     }
 
+    interface HostContext {
+      cart?: { productId: string; quantity: number }[];
+      pageContext?: string;
+    }
+    // WS4 — read the HOST page's cart + page context (window.PALUP), whitelisted to EXACTLY what /chat
+    // accepts. The loader is the trust boundary: the panel runs cross-origin and cannot read the host's
+    // window.PALUP, so it depends on this. Only productId + quantity ever leave the page (privacy +
+    // injection floor); the server re-derives every display string from the merchant catalog. pageContext
+    // is bounded to 400 chars (the server bounds it again in signals.ts).
+    function readHostContext(): HostContext {
+      const out: HostContext = {};
+      try {
+        const p = (window as unknown as { PALUP?: { cart?: unknown; pageContext?: unknown } }).PALUP || {};
+        if (Array.isArray(p.cart)) {
+          const items: { productId: string; quantity: number }[] = [];
+          for (const e of p.cart) {
+            if (!e || typeof e !== "object") continue;
+            const rec = e as { productId?: unknown; quantity?: unknown };
+            const pid = typeof rec.productId === "string" ? rec.productId.trim() : "";
+            const q = rec.quantity;
+            if (!pid || typeof q !== "number" || !Number.isInteger(q) || q < 1) continue;
+            items.push({ productId: pid, quantity: q });
+          }
+          if (items.length) out.cart = items;
+        }
+        if (typeof p.pageContext === "string" && p.pageContext) out.pageContext = p.pageContext.slice(0, 400);
+      } catch {
+        /* best-effort — no host context this turn */
+      }
+      return out;
+    }
+    // Post host context to the panel (loader→panel, targetOrigin=origin — NEVER "*"). No-op before the
+    // iframe exists; the panel re-requests it via palup:ready the first time it mounts.
+    function postContext(): void {
+      if (!iframe || !iframe.contentWindow) return;
+      iframe.contentWindow.postMessage(Object.assign({ type: "palup:context" }, readHostContext()), origin);
+    }
+
     function open(): void {
       if (destroyed) return;
       const el = ensureIframe();
@@ -149,6 +187,7 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       switch (data.type) {
         case "palup:ready":
           iframe.contentWindow?.postMessage({ type: "palup:host", shop, position }, origin);
+          postContext(); // WS4 — send the host's cart + page context alongside the host handshake
           break;
         case "palup:resize":
           if (typeof data.height === "number") {
@@ -170,12 +209,17 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
     }
 
     window.addEventListener("message", onMessage);
+    // WS4 — the host storefront dispatches `palup:contextchange` whenever its cart/page context changes;
+    // forward the updated context to the panel (no-op until the panel iframe has mounted).
+    const onContextChange = (): void => postContext();
+    window.addEventListener("palup:contextchange", onContextChange);
 
     launcher.addEventListener("click", open);
 
     function destroy(): void {
       destroyed = true;
       window.removeEventListener("message", onMessage);
+      window.removeEventListener("palup:contextchange", onContextChange);
       launcher.removeEventListener("click", open);
       host.remove();
     }

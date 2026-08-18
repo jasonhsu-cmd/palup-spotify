@@ -269,6 +269,11 @@
   const Q = new URLSearchParams(location.search);
   const SHOP = Q.get("shop");
   const PANEL_MODE = SHOP != null || window.parent !== window;
+  // WS4 — in panel (loader/iframe) mode this panel is cross-origin and CANNOT read the host storefront's
+  // window.PALUP. The loader forwards the host's cart + page context via a `palup:context` message (handled
+  // in the PANEL_MODE block at the end of this script) into this cache; cartSignal()/currentPageContext()
+  // read it in panel mode. Standalone (`/widget`), PANEL_MODE is false and window.PALUP is read directly.
+  let hostCtx = { cart: undefined, pageContext: undefined };
 
   // Merchant tenant identity: the publishable embed key ships in this snippet; the widget mints a
   // short-TTL token from it and sends it on /chat so the backend serves the right merchant's agent.
@@ -930,7 +935,9 @@
   // an empty array — `[]` is a positive statement that the cart is EMPTY, and claiming that because we
   // failed to parse the input would be a falsehood in the direction of suppressing help.
   function cartSignal(){
-    const raw = (window.PALUP && window.PALUP.cart);
+    // WS4 — panel mode reads the loader-forwarded cache (window.PALUP is undefined in the iframe); standalone
+    // reads window.PALUP directly. The whitelist loop below re-runs regardless (idempotent defense in depth).
+    const raw = PANEL_MODE ? hostCtx.cart : (window.PALUP && window.PALUP.cart);
     if (!Array.isArray(raw)) return {};
     const items = [];
     for (const e of raw){
@@ -942,6 +949,12 @@
       items.push({ productId: productId, quantity: quantity });
     }
     return items.length ? { cartItems: items } : {};
+  }
+  // WS4 — the merchant page's current context ("home" / "product:<handle>" / "cart"), read from the
+  // loader-forwarded cache in panel mode and from window.PALUP standalone.
+  function currentPageContext(){
+    const pc = PANEL_MODE ? hostCtx.pageContext : (window.PALUP && window.PALUP.pageContext);
+    return pc || undefined;
   }
 
   $("#f").addEventListener("submit", (e) => {
@@ -957,7 +970,7 @@
     // live and consented) their anonId.
     // ADR-0019 task 8 / invariant 4 — the widget NEVER sends a client anonId in signals; the guest subject
     // is derived server-side from the verified `x-guest-token` header (added in doFetch below).
-    const signals = { ...demoSignals(), pageContext: (window.PALUP && window.PALUP.pageContext) || undefined, ...cartSignal() };
+    const signals = { ...demoSignals(), pageContext: currentPageContext(), ...cartSignal() };
     // Stable idempotency key per turn, REUSED on retry, so a replayed request the server already
     // processed is de-duplicated (never double-counts the pitch budget or double-audits).
     const idempotencyKey = (isRetry && lastSend && lastSend.idempotencyKey)
@@ -1018,7 +1031,7 @@
     if (exitIntentFired()) return;                        // at most once per session; never re-fires
     markExitIntentFired();                                // mark BEFORE the request so it can never double-fire
     // ADR-0019 task 8 / invariant 4 — no client anonId in signals; identity comes from the x-guest-token header.
-    const signals = { ...demoSignals(), proactiveTrigger: trigger, pageContext: (window.PALUP && window.PALUP.pageContext) || undefined, ...cartSignal() };
+    const signals = { ...demoSignals(), proactiveTrigger: trigger, pageContext: currentPageContext(), ...cartSignal() };
     const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
     try {
       await ensureToken(false);
@@ -1080,9 +1093,30 @@
       const d = e.data;
       if (!d || typeof d.type !== "string") return;
       if (d.type === "palup:open"){ unreadCount = 0; setOpen(true); }
+      // WS4 — the loader forwards the host storefront's cart + page context here. Re-whitelist on THIS side
+      // too (defense in depth — the loader already whitelisted, but the panel must not trust the message
+      // shape): only {productId, quantity} and a bounded pageContext survive into hostCtx, which
+      // cartSignal()/currentPageContext() read on the next /chat turn.
+      if (d.type === "palup:context"){ hostCtx = readPanelContext(d); }
       // `palup:host` {shop,position} carries nothing this panel needs to act on: it already knows its
       // own shop from SHOP above, and `position` only matters to the loader's OWN bubble placement.
     });
+    function readPanelContext(d){
+      const out = { cart: undefined, pageContext: undefined };
+      if (Array.isArray(d.cart)){
+        const items = [];
+        for (const e of d.cart){
+          if (!e || typeof e !== "object") continue;
+          const pid = typeof e.productId === "string" ? e.productId.trim() : "";
+          const q = e.quantity;
+          if (!pid || typeof q !== "number" || !Number.isInteger(q) || q < 1) continue;
+          items.push({ productId: pid, quantity: q });
+        }
+        if (items.length) out.cart = items;
+      }
+      if (typeof d.pageContext === "string" && d.pageContext) out.pageContext = d.pageContext.slice(0, 400);
+      return out;
+    }
     // Close-from-inside and new-message-while-closed both funnel through the two existing single entry
     // points (`setOpen`/`add`) rather than each call site, so this covers every path that closes the
     // panel (minimize button, Escape key) or adds an agent message (a normal reply, a proactive nudge)

@@ -187,4 +187,70 @@ describe("initWidgetLoader", () => {
       expect(dot.style.display).toBe("block");
     });
   });
+
+  // WS4 — the loader forwards the HOST storefront's cart + page context to the panel over a new
+  // `palup:context` message (loader→panel, targetOrigin=origin). The loader is the trust boundary: it
+  // whitelists to {productId, quantity} + a bounded pageContext, because the cross-origin panel cannot read
+  // the host's window.PALUP itself.
+  describe("WS4 — host cart/pageContext bridge (palup:context)", () => {
+    beforeEach(() => {
+      delete (window as any).PALUP;
+    });
+
+    it("palup:ready → posts palup:host AND palup:context with the host's cart + pageContext", () => {
+      (window as any).PALUP = { cart: [{ productId: "p1", quantity: 2 }], pageContext: "product:serum" };
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:ready" } }),
+      );
+      expect(fakeWindow.postMessage).toHaveBeenCalledWith(
+        { type: "palup:host", shop: c.shop, position: c.position },
+        ORIGIN,
+      );
+      expect(fakeWindow.postMessage).toHaveBeenCalledWith(
+        { type: "palup:context", cart: [{ productId: "p1", quantity: 2 }], pageContext: "product:serum" },
+        ORIGIN,
+      );
+    });
+
+    it("strips non-whitelisted cart fields — only productId + quantity leave the page", () => {
+      (window as any).PALUP = { cart: [{ productId: "p1", quantity: 1, title: "secret", price: "$99" }] };
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:ready" } }),
+      );
+      const ctxCall = fakeWindow.postMessage.mock.calls.find((call: any[]) => call[0]?.type === "palup:context");
+      expect(ctxCall).toBeTruthy();
+      expect(ctxCall![0]).toEqual({ type: "palup:context", cart: [{ productId: "p1", quantity: 1 }] });
+    });
+
+    it("palup:contextchange re-posts palup:context once the panel iframe exists", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      (window as any).PALUP = { cart: [{ productId: "p2", quantity: 3 }], pageContext: "cart" };
+      window.dispatchEvent(new CustomEvent("palup:contextchange"));
+      expect(fakeWindow.postMessage).toHaveBeenCalledWith(
+        { type: "palup:context", cart: [{ productId: "p2", quantity: 3 }], pageContext: "cart" },
+        ORIGIN,
+      );
+    });
+
+    it("palup:contextchange before the panel opens is a no-op (no iframe yet, never throws)", () => {
+      const c = cfg();
+      initWidgetLoader(c);
+      (window as any).PALUP = { cart: [{ productId: "p3", quantity: 1 }] };
+      expect(() => window.dispatchEvent(new CustomEvent("palup:contextchange"))).not.toThrow();
+    });
+  });
 });

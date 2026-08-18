@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Product — {brand}</title>
+  <link rel="stylesheet" href="/storefront/app.css" />
+</head>
+<body data-page="product" data-page-context="product">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="nav" aria-label="Primary">
+      <a class="brand" href="/"><span data-brand>Auria</span></a>
+      <span class="nav-sp"></span>
+      <a class="cart-link" href="/cart" aria-label="Cart">
+        Cart <span class="cart-count" data-cart-count hidden>0</span>
+      </a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <a class="back" href="/">&larr; Back to all products</a>
+    <div id="pdp" class="pdp" aria-busy="true"></div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <h2>Shipping &amp; returns</h2>
+      <p data-policy-shipping>Free US shipping over $75.</p>
+      <p data-policy-returns>30-day returns on unopened items.</p>
+      <p class="assistant-note">The chat assistant is AI, grounded in this store's live catalog. Replies are AI-generated.</p>
+    </div>
+  </footer>
+
+  <script src="/embed/loader.js" data-shop="palup-skincare-jason.myshopify.com" data-position="bottom-right" async></script>
+  <script src="/storefront/app.js"></script>
+</body>
+</html>

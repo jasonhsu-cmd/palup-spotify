@@ -11,7 +11,7 @@ export default defineConfig({
   // mock-mode app E2E only; live-model runs via playwright.live.config.ts. a11y.spec.ts rides this
   // same config (and so the same blocking `Application E2E` CI step) rather than adding a CI step:
   // it needs exactly this server and this mock-mode determinism.
-  testMatch: /(widget|a11y)\.spec\.ts/,
+  testMatch: /(widget|a11y|storefront)\.spec\.ts/,
   timeout: 30_000,
   fullyParallel: false,
   use: { baseURL: `http://127.0.0.1:${PORT}` },
