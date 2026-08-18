@@ -1,7 +1,8 @@
 # ADR-0021: Semantic cross-visit memory recall (v1) — relevance-ranked recall, safety floor, Art-9 no-embed boundary
 
 - **Status:** Proposed — 2026-08-17 (owner: jason.hsu@framy.co). Design recorded; the implementation is
-  **shipped dark** (PRs #319 `VectorPort.list`+pagination, #320 write path, #321 read path) behind a new
+  **shipped dark** (PRs #319 `VectorPort.list`+pagination, #320 write path, #321 read path, #125 pinned-fact
+  floor namespace, #126 async write queue) behind a new
   default-off posture flag `MEMORY_SEMANTIC_RECALL` — flag off ⇒ recall is byte-identical to the FAST-V1
   list-all baseline and no embedding is written. **This ADR enables nothing.** Turning it on is a future
   human step gated on BOTH (a) the run-time evolution pipeline — eval gate → shadow(0%) → canary(1–5%) →
@@ -9,8 +10,9 @@
   and D4 below. **Internal-staging enablement (owner: jason.hsu, 2026-08-17):** the owner has enabled
   semantic memory on the internal-only staging service (`palup-skincare-jason`) with **D3 and D4 DEFERRED**
   as an accepted internal-only risk — the same posture ADR-0015 takes for legal (internal users, not real
-  external-shopper data at scale). D3/D4 (and the D6 pinned-index + latency check) **remain REQUIRED before
-  any production / external enablement**; this internal-staging decision does not grant them. This ADR
+  external-shopper data at scale). D3/D4 (and the D6 latency check — the pinned-fact floor index it depended
+  on is now LANDED, #125) **remain REQUIRED before any production / external enablement**; this
+  internal-staging decision does not grant them. This ADR
   **extends ADR-0015** (which governs whether cross-visit memory runs at all, and is
   Accepted for internal staging only, legal deferred): ADR-0015 owns enablement; this ADR owns the
   recall-semantics and embedding sub-decisions.
@@ -95,21 +97,28 @@ sent, Cloud Run throttles the container's CPU to ~0, so a write kicked off AFTER
 `server.ts`): this keeps it inside the request, where Cloud Run guarantees CPU, at the cost of adding the
 distiller round-trip back to the shopper-visible turn latency — trading back part of the win this decision
 originally claimed. Fail-open is unchanged: a `remember()` failure is caught and logged, never breaking the
-reply. **Follow-up (not yet built):** a durable async write queue (Cloud Tasks / Pub/Sub, mirroring the
-catalog-webhook path) is the correct way to reclaim the latency — hand the write off durably instead of
-racing it against a container whose CPU may be reclaimed at any moment. Recall **reuses the one turn
+reply. **Follow-up (BUILT, ships dark — #126):** a durable async write queue now exists — `remember()` can
+hand the write off to a **Pub/Sub** `memory-write` topic (OIDC-verified push route
+`routes/pubsub-push-memory.ts` re-invokes the same `remember()`), with an inline-synchronous fallback on
+publish failure so a turn is never dropped. It is **dark until `MEMORY_PUBSUB_*` env is set** on a
+memory-enabled deployment; its go-live preconditions (raw-turn-in-transit exposure, idempotency, CMEK IAM,
+limiter sizing) are tracked in `MEMORY-GO-LIVE-CHECKLIST.md §E`. This is the correct way to reclaim the
+latency — hand the write off durably instead of racing it against a container whose CPU may be reclaimed at
+any moment. Recall **reuses the one turn
 embedding** the catalog retriever already computes (metered `TURN_EMBED_AGENT_TYPE`), computed once on the
 clean-sales path only (zero embeds on a guardrail-short-circuited turn) — so semantic recall adds no new
 per-turn model call; this part of the original posture is unaffected. **Pre-promotion follow-up (recall
-side, unaffected by the write-path fix above):** the safety-floor enumerate is O(N)/recall at
-thousands-scale (no server-side metadata filter); a pinned-fact index (separate per-subject namespace or a
-subject-pinned index) must land before promotion so the floor is O(pinned). A latency check must accompany
-that optimization before promotion — the PR4 eval suite measures recall *quality* (relevance / safety-floor
-/ dedup), not latency.
+side, unaffected by the write-path fix above):** the safety-floor enumerate WAS O(N)/recall at
+thousands-scale (no server-side metadata filter). The pinned-fact index is now **LANDED (dark) — #125**
+writes special/`mustRecall` facts into a separate per-subject `tenantId::anonId::floor`
+namespace, so recall reads the floor in O(floor) rather than enumerating the whole subject namespace
+(erasure/retention/merge handle both namespaces; no migration — 0 pre-existing special rows verified on
+staging). Only the **latency check** remains before promotion — the PR4 eval suite measures recall *quality*
+(relevance / safety-floor / dedup), not latency.
 
 ## Consequences / promotion gate
-- **Enablement requires, in order:** the D3 + D4 owner+legal sign-offs recorded here; the D6 pinned-index
-  optimization + a latency check; the recall-quality eval gate passing — `pnpm eval:memory-recall` (a
+- **Enablement requires, in order:** the D3 + D4 owner+legal sign-offs recorded here; the D6 latency check
+  (the pinned-index optimization it paired with is now LANDED, #125); the recall-quality eval gate passing — `pnpm eval:memory-recall` (a
   dedicated gating script mirroring `eval:retrieval`, with null→block discipline; recall@k relevance +
   safety-floor + dedup suites); then shadow(0%) → canary → named-human promotion. Flipping
   `MEMORY_SEMANTIC_RECALL` on any real environment is human-gated (a build agent may not). **A promotion

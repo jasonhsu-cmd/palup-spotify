@@ -433,6 +433,7 @@ appended only when set, so an unset one never produces an empty env pair:
 | `SHOPIFY_INSTALL_SCOPES`, `SHOPIFY_DELEGATE_SCOPES` | optional overrides of the code defaults |
 | `AUDIT_HMAC_SECRET_NAME` | the **name of an existing Secret Manager secret**, which is then mounted as `AUDIT_HMAC_SECRET` |
 | `GUEST_TOKEN_SECRET_NAME` | the **name of an existing Secret Manager secret**, mounted as `GUEST_TOKEN_SECRET` (ADR-0019 R2-4). Unset ⇒ not mounted ⇒ guest tokens cannot be minted — three-step procedure below, right after `AUDIT_HMAC_SECRET`'s |
+| `MEMORY_PUBSUB_TOPIC`, `MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT`, `MEMORY_PUBSUB_PUSH_AUDIENCE` | the #126 async memory-write **Pub/Sub** queue env block (dark until provisioned — the push route registers only when all three are set on a memory-enabled service; `memoryPushConfigured`, `server.ts:1216-1219`). Unset on every deployment today, so `remember()` writes inline. Preconditions before enabling: `MEMORY-GO-LIVE-CHECKLIST.md §E`; infra `infra/terraform/pubsub-memory.tf` |
 
 **What an operator must create before any of this does anything.** These are *not* provisioned by this
 change and the deploy does not create them:
@@ -1004,7 +1005,10 @@ This is the operator procedure for the per-tenant `CATALOG_RETRIEVAL` promotion 
 — nothing here is run by a build agent, and no step flips a flag on its own; each step is deliberate.
 
 **Preconditions — verify ALL before starting (each is a real gate, not a nicety):**
-- [ ] **§3-rule-4 erasure decision resolved (Step 0 below).** Do not enable `CATALOG_WEBHOOKS` until it is.
+- [x] **§3-rule-4 erasure decision RESOLVED = Decision A** (catalog corpus erasure runs unconditionally on
+      `shop/redact` + `app/uninstalled`), recorded in `docs/HITL-POLICY.md §8` (owner jason.hsu, 2026-08-16).
+      The former "do not enable `CATALOG_WEBHOOKS` until resolved" gate is **lifted** — `CATALOG_WEBHOOKS` is
+      already live on staging. See Step 0 below.
 - [ ] **`VECTOR_ANN=true`** on the serving service — required for any corpus >5000 SKUs (the brute-force
       store silently truncates at 5000); it selects the pgvector engine the corpus lives in.
 - [ ] **`PRODUCT_FACTS_HYDRATION=true`** + `PRODUCT_FACTS_MAX_AGE_MS` (default 900_000 = 15 min) — so a
@@ -1020,11 +1024,12 @@ This is the operator procedure for the per-tenant `CATALOG_RETRIEVAL` promotion 
       fail-closes to no cart block and flags `cart:byid_unavailable` (audited), never a wrong cart. Enabling
       `CART_LINE_ITEMS` for a tenant remains a per-tenant §5 step like any serving flag.
 
-0. **Resolve the §3-rule-4 statutory-erasure decision (OPEN — see HITL-POLICY §8).** As built, `shop/redact`
-   + `app/uninstalled` erase the catalog corpus **unconditionally** (design A); the alternative (B) is to
-   defer it under an armed kill like the memory/traffic erasure. This is a named-owner values call
-   (statutory-erasure-first vs a strict "no code path an operator can't stop" reading). Pick one and record
-   it in HITL-POLICY §8 **before** `CATALOG_WEBHOOKS` is enabled. No live exposure until then (dark).
+0. **§3-rule-4 statutory-erasure decision — RESOLVED = Decision A (see HITL-POLICY §8, owner jason.hsu,
+   2026-08-16).** As built, `shop/redact` + `app/uninstalled` erase the catalog corpus **unconditionally**
+   (Decision A); the alternative (B) — deferring it under an armed kill like the memory/traffic erasure — was
+   **not** taken. The named-owner values call (statutory-erasure-first vs a strict "no code path an operator
+   can't stop" reading) landed on statutory-erasure-first and is recorded in HITL-POLICY §8. `CATALOG_WEBHOOKS`
+   is therefore no longer gated on this decision and is already live on staging.
 1. **Deploy / enable the infra (gcloud + env — owner applies).** Deploy the scheduled backstop
    (`palup-catalog-index`, the runbook above), and set on the serving service `VECTOR_ANN=true`,
    `CATALOG_WEBHOOKS=true`, `PRODUCT_FACTS_HYDRATION=true` (+ `PRODUCT_FACTS_MAX_AGE_MS` if not the 15-min

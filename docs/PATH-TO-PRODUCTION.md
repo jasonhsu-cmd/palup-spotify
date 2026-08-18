@@ -84,19 +84,21 @@ the repo substitutes it automatically (verified: no script, CI step, or pnpm tas
 
 ## Phase 2 — quality, freshness, scale (mostly already built, gated behind promotion)
 
-This is the ADR-0020 catalog-retrieval-at-scale work — now **entirely merged to `main`, all dark**: S1 pgvector
-engine #297 (`85e6d24`) → S2 serving-unlock #299 (`cb44919`) → S3 freshness #302 (`fe6a2c4`) → S4 safe-promotion
-#303 (`b9f6450`), plus the §5 promotion runbook #304 (`11bc5d4`). What remains is the human **per-tenant**
-promotion path (canary → approve) per `docs/DEPLOY.md` §5 and `docs/ADR-0020-PROMOTION-PLAN.md`.
+This is the ADR-0020 catalog-retrieval-at-scale work — **entirely merged to `main`** and, **as of 2026-08-18,
+PROMOTED LIVE ON STAGING (prod still dark)**: S1 pgvector engine #297 (`85e6d24`) → S2 serving-unlock #299
+(`cb44919`) → S3 freshness #302 (`fe6a2c4`) → S4 safe-promotion #303 (`b9f6450`), plus the §5 promotion
+runbook #304 (`11bc5d4`). On staging `VECTOR_ANN` + both enablement gates are ON against a 2151-SKU corpus
+and `/chat` returns `retrieval:applied` + `hydration:applied`. What remains is the same human **per-tenant**
+promotion path (canary → approve) **in prod** per `docs/DEPLOY.md` §5 and `docs/ADR-0020-PROMOTION-PLAN.md`.
 
 | Item | Owner | Status | Note |
 |------|-------|--------|------|
-| Enable per-tenant catalog retrieval (two-gate: platform master + per-tenant opt-in, both default OFF) | BIZ(approve)+INFRA | **merged (dark)** | the global `CATALOG_RETRIEVAL` env was **RETIRED** (S4 §B); enablement is now `pnpm catalog:enable` — `catalog-retrieval-enablement.ts:31-34`, read `server.ts:2129-2133`. Needed once a catalog exceeds the 1000-SKU serving fetch (`MAX_CATALOG_PRODUCTS`=1000) |
-| Enable `CATALOG_WEBHOOKS` producer (A3) + `terraform apply` (P3 alert, P4) | INFRA | in_progress | P4 route smoke-verified; env + apply are human — `server.ts:946` |
-| Promote `PRODUCT_FACTS_HYDRATION` (A1b, money/NN#1) | BIZ(approve) | in_progress | inert until retrieval + a producer populate facts — `server.ts:527` |
-| Promote `SERVER_GUARD_SIGNALS` (safety routing) | BIZ(approve) | in_progress | eliciting: catches injection/distress evasions the floor misses; SUP-06 money-safe |
-| Promote `OUTGOING_OFFER_CHECK` (money guard) | BIZ(approve) | in_progress | additive over the always-on floor |
-| pgvector-HNSW ANN adapter (replace brute-force scan) | BUILD | **merged (dark)** | S1 #297 `85e6d24`; `VECTOR_ANN` default off (`vector-factory.ts:28`). Scale, not launch — a corpus >5000 SKUs *requires* it; indexing ceiling `MAX_INDEXED_PRODUCTS`=50000 |
+| Enable per-tenant catalog retrieval (two-gate: platform master + per-tenant opt-in, both default OFF) | BIZ(approve)+INFRA | **live on staging; prod dark** | the global `CATALOG_RETRIEVAL` env was **RETIRED** (S4 §B); enablement is now `pnpm catalog:enable` — `catalog-retrieval-enablement.ts:31-34`, read `server.ts:2129-2133`. Both gates ON on staging (2151-SKU corpus). Needed once a catalog exceeds the 1000-SKU serving fetch (`MAX_CATALOG_PRODUCTS`=1000) |
+| Enable `CATALOG_WEBHOOKS` producer (A3) + `terraform apply` (P3 alert, P4) | INFRA | **live on staging; prod pending** | ON on staging; P4 route smoke-verified; prod env + apply are human — `server.ts:946` |
+| Promote `PRODUCT_FACTS_HYDRATION` (A1b, money/NN#1) | BIZ(approve) | **live on staging; prod pending** | ON on staging (`/chat` returns `hydration:applied`); inert until retrieval + a producer populate facts — `server.ts:527` |
+| Promote `SERVER_GUARD_SIGNALS` (safety routing) | BIZ(approve) | **live on staging; prod pending** | eliciting: catches injection/distress evasions the floor misses; SUP-06 money-safe |
+| Promote `OUTGOING_OFFER_CHECK` (money guard) | BIZ(approve) | **live on staging; prod pending** | additive over the always-on floor |
+| pgvector-HNSW ANN adapter (replace brute-force scan) | BUILD | **live on staging; prod dark** | S1 #297 `85e6d24`; `VECTOR_ANN` default off in code (`vector-factory.ts:28`) but **ON on staging**. Scale, not launch — a corpus >5000 SKUs *requires* it; indexing ceiling `MAX_INDEXED_PRODUCTS`=50000 |
 | `catalog-index` scheduler (Cloud Run Job + Cloud Scheduler) | INFRA | **built; deploy is the owner's** | hourly freshness backstop (S3 §E); runbook `docs/DEPLOY.md` *Scheduled catalog-index backstop* (`palup-catalog-index`) — job `jobs/catalog-index.ts` |
 
 Each promotion is: eval ✅ → shadow ✅ (done) → **canary on the pilot merchant** → your approval. The pilot IS
@@ -110,7 +112,7 @@ the canary population.
 | Shopify Billing API + pricing model | BUILD+BIZ | pending — none in `packages/` | to charge merchants (vs manual invoicing) |
 | Shopper identity: App Proxy (0017) / CAA OAuth (0018) / guest (0019) | BUILD(built)+INFRA | in_progress | per-shop provisioning + security re-review — `server.ts:696,794,1111` |
 | GDPR: `customers/data_request` EXPORT (erasure now DONE) | BUILD+LEGAL | export **pending** — no export path exists anywhere in the repo (`shopify-webhooks.ts:65`); catalog corpus+ledger **erasure** on `shop/redact` + `app/uninstalled` is **DONE** (S4 §F, `95ec8fd`; owner chose DECISION A, HITL §8) | required before an EU merchant |
-| Cross-visit memory go-live | BIZ/LEGAL | in_progress (inert) | `MEMORY_ADR_ACCEPTED` false + §A legal gate all OPEN — `widget-memory/src/flag.ts:12` |
+| Cross-visit memory go-live | BIZ/LEGAL | **live on internal staging; prod pending** | `MEMORY_ADR_ACCEPTED` flipped `true` (accepted for internal staging only, legal deferred — #318, 2026-08-17) + `MEMORY_ENABLED=true` on staging, so memory is LIVE there — `widget-memory/src/flag.ts`. §A legal gate stays OPEN for EXTERNAL/prod (D3/D4 deferred); prod is OFF (deployed nowhere, `MEMORY_ENABLED` unset) |
 | Merchant/admin consoles | BUILD | pending | operator CLI is the only config path today — `CLAUDE.md §6` |
 | Multi-merchant self-serve onboarding (beyond manual) | BUILD | in_progress — `merchant-store.ts:54-78` | scale beyond hand-provisioned pilots |
 

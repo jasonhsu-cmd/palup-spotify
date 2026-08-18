@@ -1,10 +1,13 @@
-# ADR-0018: Shopper authorization via the Shopify Customer Account API (OAuth) — Proposed
+# ADR-0018: Shopper authorization via the Shopify Customer Account API (OAuth) — Accepted for internal staging only
 
-- **Status: Proposed.** Add the Shopify **Customer Account API (CAA) OAuth** as an additive, third
+- **Status: Accepted for internal staging only, legal/external deferred (2026-08-18).** Add the Shopify
+  **Customer Account API (CAA) OAuth** as an additive, third
   shopper-identity adapter behind the vendor-neutral `IdentityPort` (ADR-0001), so the widget can read a
   shopper's **own** orders + subscriptions with a **per-shopper, least-privilege** token. **Hybrid** with
-  the App-Proxy adapter (ADR-0017) — not a replacement. **INERT** behind `SHOPPER_AUTH` (default off,
-  honored only with `WIDGET_AUTH_REQUIRED` per ADR-0017 F4) until built and a live cutover.
+  the App-Proxy adapter (ADR-0017) — not a replacement. The adapter is **BUILT and LIVE on the internal-only
+  staging service** behind `SHOPPER_AUTH` (default off in code, honored only with `WIDGET_AUTH_REQUIRED` per
+  ADR-0017 F4; `SHOPPER_AUTH` is ON on staging). Production stays OFF pending a live cutover + external
+  sign-off.
 - **Owner (named):** jason.hsu@framy.co. **Plane:** run-time (shopper identity/authorization).
 - **Governance-touching** (customer data + a durable server-side credential). `security-reviewer`
   required; **human-merged.** Ships **NO new autonomy**; preserves ADR-0016 human-routed skip/pause.
