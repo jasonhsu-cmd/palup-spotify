@@ -38,6 +38,8 @@ import {
   validateAnonId,
   memorySubjectId,
   eraseSubject,
+  withdrawConsent1,
+  withdrawConsent2,
   classifyFact,
   sweepExpired,
   mergeAccountConsent,
@@ -134,7 +136,16 @@ const RL_IP = posInt("RL_IP_PER_MIN", 60);
 // MEMORY-GO-LIVE-CHECKLIST.md §E4 — the memory-write Pub/Sub push route needs its OWN limit, dedicated
 // from `RL_IP`: pushes arrive from shared Google source IP ranges, so sharing the 60/min public-traffic
 // limit risks a 429 → Pub/Sub retry → dead-letter for a route with no other caller to compete with.
-const RL_PUBSUB_PUSH = posInt("RL_PUBSUB_PUSH_PER_MIN", 600);
+// SCALE CEILING (does not scale, by construction — do not raise this to "fix" a future capacity problem):
+// because every Pub/Sub push egresses from ONE shared Google source IP, this per-IP fixed-window limiter
+// is really a GLOBAL AGGREGATE bucket — one counter shared across every tenant and every Cloud Run
+// instance, not a per-caller cap. It cannot scale to the target of millions of merchants / hundreds of
+// millions of customers (peak memory writes are estimated in the thousands/sec). At real scale this
+// per-IP limit must be REMOVED entirely for this route — it is OIDC-gated (internal, not public), so the
+// real controls are the OIDC gate itself, the per-tenant `RL_TENANT` ceiling, Cloud Run autoscaling, and
+// the durable queue's own retry/DLQ, not a global IP bucket. 6000/min is only an interim runaway-loop
+// backstop for early/low volume, not a sized capacity limit.
+const RL_PUBSUB_PUSH = posInt("RL_PUBSUB_PUSH_PER_MIN", 6000);
 const RL_TENANT = posInt("RL_TENANT_PER_MIN", 2_000); // per-tenant ceiling (≈5× expected)
 const RL_WINDOW = posInt("RL_WINDOW_SECONDS", 60);
 // Widget tenant identity (T2/T3): the tenant is derived from a verified widget token. WIDGET_AUTH_REQUIRED
@@ -1835,6 +1846,23 @@ export async function buildServer(opts?: {
     // guest-merge write on /chat (Finding 2). Required, so no call site can silently misattribute.
     await recordConsent(store, { tenantId, anonId: subject, memoryOrdinary: body.memoryOrdinary, memorySpecial: body.memorySpecial, hmacKey: AUDIT_HMAC_SECRET, source: "shopper" });
 
+    // Memory-safety follow-up to #332 — "treat turning off the consent toggle as Forget me", PER TIER
+    // (ADR-0015 "Withdrawal is symmetric" + Inv 9: Consent 1 and Consent 2 are independent, so toggling
+    // one tier OFF must erase ONLY that tier's facts, never the other). `withdrawConsent1`/`withdrawConsent2`
+    // (widget-memory/src/erasure.ts) each write the §E1 erasure tombstone FIRST, before deleting anything —
+    // so an in-flight async memory-write-queue message for this subject can never resurrect the
+    // just-withdrawn fact after this call returns. A throw here must FAIL the request (mirrors /forget's
+    // own `eraseSubject` call below, which is likewise uncaught): the shopper opted OUT, so a swallowed
+    // error would silently leave their data in place. A client retry is safe — both withdraw functions are
+    // idempotent (re-deleting an already-empty tier is a no-op that still tombstones + audits), exactly
+    // like recordConsent's own idempotent overwrite above.
+    if (body.memoryOrdinary === "out") {
+      await withdrawConsent1({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: subject });
+    }
+    if (body.memorySpecial === "out") {
+      await withdrawConsent2({ vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET }, { tenantId, anonId: subject });
+    }
+
     // BLOCK-A (governance review round 6) — DELIBERATELY NOT FIXED HERE. Recorded as checklist residual
     // C14; the real fix is B12's server-side guest->account link, which does not exist.
     //
@@ -2619,15 +2647,22 @@ export async function buildServer(opts?: {
       // adapter (state-postgres) removes that safety net, so an expired fact could otherwise sit in
       // durable storage indefinitely.
       //
-      // NOT closed by this sweep (security review, Finding 4 — corrected from an earlier overclaim):
-      // (a) the sweep's ONLY predicate is EXPIRY (retention.ts) — a consent-WITHDRAWN Art-9 fact that
-      // has not yet expired is not touched here; it merely stops being renewed (service.ts recall) and
-      // survives up to its remaining TTL (up to 30 more days). Symmetric erasure-first withdrawal
-      // (ADR-0015 Inv 9) is NOT enforced by POST /consent today — `withdrawConsent1`/`withdrawConsent2`
-      // (widget-memory/src/erasure.ts) have no production caller; that remains a go-live gap. (b) the
-      // sweep is itself capped at retention.ts's SWEEP_QUERY_LIMIT (500) per call, so it cannot
-      // GUARANTEE bringing a namespace back under erasure.ts's own enumeration cap — it only deletes
-      // what expiry finds among the first 500 records it queries.
+      // NOT closed by this sweep (security review, Finding 4 — corrected from an earlier overclaim, and
+      // now UPDATED again — see below): (a) the sweep's ONLY predicate is EXPIRY (retention.ts) — a fact
+      // whose consent has not been explicitly withdrawn but has not yet expired either is not touched
+      // here; it merely stops being renewed (service.ts recall) and survives up to its remaining TTL (up
+      // to 30 more days). CORRECTED: this comment previously said symmetric erasure-first withdrawal
+      // (ADR-0015 Inv 9) was "NOT enforced by POST /consent today" because `withdrawConsent1`/
+      // `withdrawConsent2` (widget-memory/src/erasure.ts) had no production caller. That residual is now
+      // CLOSED for the /consent path: POST /consent calls `withdrawConsent1`/`withdrawConsent2` per tier
+      // the instant a shopper toggles that tier to `"out"` (see the route above), so an Art-9/ordinary
+      // fact is erased + tombstoned at withdrawal time, not left to age out via this sweep. What remains
+      // true is narrower: a fact that is merely EXPIRED (never explicitly withdrawn) still relies on this
+      // TTL sweep, and a consent record set by any path OTHER than POST /consent (there is none today)
+      // would not go through the withdrawal call. (b) the sweep is itself capped at retention.ts's
+      // SWEEP_QUERY_LIMIT (500) per call, so it cannot GUARANTEE bringing a namespace back under
+      // erasure.ts's own enumeration cap — it only deletes what expiry finds among the first 500 records
+      // it queries.
       //
       // Deliberately scoped to ONLY the subject already being served THIS turn (`memorySubject`) — never
       // an enumeration of every subject for the tenant (that would be an unbounded scan on the serving

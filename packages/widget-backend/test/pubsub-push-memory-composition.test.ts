@@ -86,9 +86,9 @@ describe("#126 — memory-write push-route registration requires MEMORY_PUBSUB_*
 // `registerMemoryWritePushRoute` DIRECTLY (as pubsub-push-memory.test.ts's own unit tests do, with an
 // injected `verify`) but composes `checkRateLimit` EXACTLY the way server.ts does: the real `underLimit`
 // helper over a real `InMemoryRuntimeStore`, keyed `ip:${ip}`, limited by `RL_PUBSUB_PUSH_PER_MIN` (falling
-// back to server.ts's own 600/min default when unset) and `RL_WINDOW_SECONDS` (default 60) — the same two
+// back to server.ts's own 6000/min default when unset) and `RL_WINDOW_SECONDS` (default 60) — the same two
 // env knobs server.ts reads. This proves the composed dedicated-limiter property end to end without
-// needing a live/mocked OIDC verifier: 600/min (or any value > 3) would never 429 three requests in one
+// needing a live/mocked OIDC verifier: 6000/min (or any value > 3) would never 429 three requests in one
 // window, so a regression back to sharing the 60/min-but-still->3 RL_IP limit is not what's being guarded
 // here — the low `RL_PUBSUB_PUSH_PER_MIN=2` override is what makes the 3rd request's 429 possible at all.
 describe("MEMORY-GO-LIVE-CHECKLIST.md §E4 — the memory push route uses its OWN dedicated rate limit", () => {
