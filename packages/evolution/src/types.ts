@@ -11,10 +11,15 @@ export interface PolicyMetrics {
   qualityScore: number;
   /**
    * Counter-metrics that must NOT worsen — an engagement/quality lift can never promote on its own if it
-   * regresses these (ADR-0014 #5). returnRate/complaintRate/optOutRate are lower-is-better; escalationRecall
-   * is HIGHER-is-better (recall of required escalations). Populated by the live grader
-   * (control-plane/counter-metrics.ts). Fields stay optional for back-compat; a follow-up makes the gate
-   * fail CLOSED when they are absent (today engine.gate only checks return/complaint and treats absent as 0).
+   * regresses these (ADR-0014 #5). returnRate/optOutRate are lower-is-better; escalationRecall is
+   * HIGHER-is-better (recall of required escalations). These three are REQUIRED — absent/NaN/out-of-range
+   * on either side fails the gate CLOSED (never fail-open). `complaintRate` (lower is better) is the one
+   * counter-metric that stays OPTIONAL: no honest deterministic pre-promotion proxy for it exists yet
+   * (control-plane/counter-metrics.ts) — Phase 1's canary/live-rate wiring is what will populate it. It is
+   * still a FIRST-CLASS GATED metric (revenue-flywheel Wave-1 C): whenever it IS present on BOTH the
+   * candidate and the champion, a malformed value (NaN/out-of-range) or a worsened rate fails the gate the
+   * SAME fail-closed way as the three required metrics above (see engine.ts `gate`). Populated by the
+   * live grader (control-plane/counter-metrics.ts).
    *
    * `personaPriceInvariance` / `personaLeakRate` (shopper-disposition governance floor, PR-1 — see
    * `docs/design/shopper-widget.md` invariant #9 "no persona price-discrimination" + memory Inv 9): the
@@ -47,6 +52,27 @@ export interface PolicyMetrics {
    * candidate and champion share this (a mid-run rotation scores them over DIFFERENT sets, so the
    * comparison would be apples-to-oranges). */
   holdoutSeed?: string;
+  /**
+   * Revenue-flywheel Wave-1 (D) — the MEASURED-OUTCOME seam. `qualityScore` (and `holdoutScore`) are
+   * judge-graded PROXIES for value; `measuredOutcome` is the real thing — the treated-vs-holdout
+   * INCREMENTAL business signal from a live experiment (e.g. incremental revenue/conversion lift of
+   * shoppers served this policy vs. a held-out control). Absent today: nothing populates this yet, so
+   * every existing caller is byte-identical and the gate decides on `qualityScore` exactly as before.
+   * `engine.gate` treats it as an ADDITIONAL, never-a-substitute requirement: when the candidate carries
+   * it, its `incrementalLift` must be non-regressive vs. the champion's own `measuredOutcome` (same
+   * fail-closed idiom as the holdout anti-overfit check — see engine.ts), on top of every other check.
+   * This is the seam Phase 1's measured lift will feed; until then the proxy (`qualityScore`) is what
+   * actually gates every promotion.
+   */
+  measuredOutcome?: {
+    /** HIGHER is better — the incremental lift (e.g. fractional revenue/conversion delta) of the
+     * treated arm over its holdout. Compared candidate-vs-champion, same direction as qualityScore. */
+    incrementalLift: number;
+    /** Optional statistical power/confidence of the measurement (0..1) — informational only today; the
+     * gate does not yet enforce a minimum (a documented future seam, not a silent gap: Phase 1 owns
+     * deciding the power bar). */
+    power?: number;
+  };
   /**
    * Whether this grade may GATE a promotion. `false` = ADVISORY ONLY — it came from a same-family
    * judge (proposer≠evaluator unmet, e.g. Gemini grading a Gemini agent) or no cross-family judge was

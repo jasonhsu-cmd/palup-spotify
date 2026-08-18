@@ -130,6 +130,106 @@ describe("EvolutionEngine gate", () => {
   });
 });
 
+// Revenue-flywheel Wave-1 (C) — complaintRate hard-gate #1: OPTIONAL (no deterministic pre-promotion
+// proxy exists — control-plane/counter-metrics.ts) but, once present on BOTH sides, enforced fail-closed
+// exactly like returnRate/optOutRate/escalationRecall — never fail-open, never forced required.
+describe("EvolutionEngine gate — complaintRate hard-gate (Wave-1 C)", () => {
+  it("BLOCKS a candidate whose complaintRate worsens vs. the champion baseline (fail-closed, present on both)", async () => {
+    const rec = await evalOne(
+      { c: { ...GOOD, policyId: "c", qualityScore: 0.95, counterMetrics: { ...BASE_CM, complaintRate: 0.2 } } },
+      "c",
+    );
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("counter-metrics-worsened");
+  });
+
+  it("PASSES a candidate whose complaintRate is no worse than the champion's (present on both, not worse)", async () => {
+    const rec = await evalOne(
+      { c: { ...GOOD, policyId: "c", qualityScore: 0.95, counterMetrics: { ...BASE_CM, complaintRate: BASE_CM.complaintRate } } },
+      "c",
+    );
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
+  });
+
+  it("does NOT block when complaintRate is ABSENT on the candidate — never forced required (unchanged behavior)", async () => {
+    const { complaintRate, ...withoutComplaint } = BASE_CM;
+    void complaintRate;
+    const rec = await evalOne({ c: { ...GOOD, policyId: "c", qualityScore: 0.95, counterMetrics: withoutComplaint } }, "c");
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
+  });
+
+  it("BLOCKS a candidate with a malformed complaintRate (NaN) — fail-closed, not fail-open", async () => {
+    const rec = await evalOne(
+      { c: { ...GOOD, policyId: "c", qualityScore: 0.95, counterMetrics: { ...BASE_CM, complaintRate: NaN } } },
+      "c",
+    );
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("complaint-rate-invalid");
+  });
+});
+
+// Revenue-flywheel Wave-1 (D) — the measured-outcome seam: `measuredOutcome` is OPTIONAL (nothing
+// populates it today; every existing caller is byte-identical), and when present it ADDITIONALLY requires
+// a non-regressive incrementalLift vs. the champion's own measuredOutcome, on top of every other check.
+describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
+  const champWithMO = (incrementalLift: number) => ({
+    policy: DEFAULT_POLICY,
+    metrics: { ...champion.metrics, measuredOutcome: { incrementalLift } } as PolicyMetrics,
+  });
+
+  it("gates IDENTICALLY to the baseline case when measuredOutcome is absent (no behavior change)", async () => {
+    const baseline = await evalOne({ good: GOOD }, "good");
+    const rec = await evalOne({ good2: { ...GOOD, policyId: "good2" } }, "good2");
+    expect(rec.gate).toEqual(baseline.gate);
+  });
+
+  it("BLOCKS a candidate whose measuredOutcome REGRESSES vs. the champion's (present on both)", async () => {
+    const e = new EvolutionEngine({
+      champion: champWithMO(0.05),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-regressed");
+  });
+
+  it("PASSES a candidate whose measuredOutcome IMPROVES on the champion's (present on both, non-regressive)", async () => {
+    const e = new EvolutionEngine({
+      champion: champWithMO(0.05),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.08 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
+  });
+
+  it("FAILS CLOSED — a candidate whose measuredOutcome.incrementalLift is NON-FINITE (NaN) blocks (never silently passes)", async () => {
+    const e = new EvolutionEngine({
+      champion: champWithMO(0.05),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: NaN } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-invalid");
+  });
+
+  it("FAILS CLOSED — a candidate WITH a measuredOutcome but a champion baseline WITHOUT one blocks (no baseline to compare)", async () => {
+    const e = new EvolutionEngine({
+      champion, // no measuredOutcome
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.5 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-baseline-absent");
+  });
+});
+
 // PR-1 governance floor (shopper-disposition program) — fairness/leak/escalation guarantees as
 // DETERMINISTIC gate floors, mirroring the counterMetricsComplete fail-closed pattern above EXACTLY, so no
 // later persona/memory capability can land ungoverned. Two independent reasons: "fairness-regressed"
