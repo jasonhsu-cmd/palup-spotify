@@ -171,16 +171,21 @@ describe("/embed/panel CSP — custom-domain support (server-resolved ONLY, neve
     const app = await server(); // registry present but empty, and no SHOPIFY_PRIMARY_DOMAINS
     const res = await app.inject({ method: "GET", url: "/embed/panel?shop=acme.myshopify.com" });
     const csp = String(res.headers["content-security-policy"] || "");
-    expect(csp).toBe("frame-ancestors https://acme.myshopify.com https://*.myshopify.com");
+    // WS5 — `'self'` is prepended so the PalUp-hosted sample storefront (same origin as the panel) can frame
+    // it; cross-origin framing is still restricted to the shop's own myshopify domain(s).
+    expect(csp).toBe("frame-ancestors 'self' https://acme.myshopify.com https://*.myshopify.com");
+    expect(csp).toContain("'self'");
     await app.close();
   });
 
-  it("F1 — a missing/malformed ?shop= now denies framing ('none'), not the old permissive 'https:'", async () => {
+  it("F1/WS5 — a missing/malformed ?shop= allows ONLY the panel's own origin ('self'), nothing cross-origin", async () => {
     const app = await server();
     const res = await app.inject({ method: "GET", url: "/embed/panel" });
-    expect(String(res.headers["content-security-policy"] || "")).toBe("frame-ancestors 'none'");
+    // Was `'none'`; WS5 makes it `'self'` — the demo storefront (panel's own origin) may frame it, but no
+    // merchant/cross-origin host is admitted when the shop can't be resolved.
+    expect(String(res.headers["content-security-policy"] || "")).toBe("frame-ancestors 'self'");
     const res2 = await app.inject({ method: "GET", url: "/embed/panel?shop=not-a-shop" });
-    expect(String(res2.headers["content-security-policy"] || "")).toBe("frame-ancestors 'none'");
+    expect(String(res2.headers["content-security-policy"] || "")).toBe("frame-ancestors 'self'");
     await app.close();
   });
 
@@ -197,7 +202,7 @@ describe("/embed/panel CSP — custom-domain support (server-resolved ONLY, neve
     const res = await app.inject({ method: "GET", url: "/embed/panel?shop=acme.myshopify.com" });
     const csp = String(res.headers["content-security-policy"] || "");
     expect(csp).toBe(
-      "frame-ancestors https://acme.myshopify.com https://*.myshopify.com https://shop.acme-brand.com http://127.0.0.1:8888",
+      "frame-ancestors 'self' https://acme.myshopify.com https://*.myshopify.com https://shop.acme-brand.com http://127.0.0.1:8888",
     );
     await app.close();
   });
