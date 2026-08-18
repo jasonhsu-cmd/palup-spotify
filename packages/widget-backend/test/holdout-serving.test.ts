@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryRuntimeStore, type TelemetryEvent } from "@palup/platform-ports";
+import { InMemoryRuntimeStore, type TelemetryEvent, type RuntimeStateCtx } from "@palup/platform-ports";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { listArmTallies, readArmAggPair } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
@@ -180,6 +180,47 @@ describe("holdout ON at fraction 0.2 — stable per identity, arm-appropriate se
     try {
       const body = await chat(app, "sess-killed-control");
       expect(body.flags).toContain("no_autonomous_action");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// A store whose ONLY injected fault is the holdout arm-assignment read (collection "holdout_assignment",
+// the first store op inside `assignHoldoutArm`). Every other collection — the holdout config, the
+// champion, the session, the ledger tally — behaves normally, so this isolates the ASSIGNMENT-write path
+// exactly as a transient store/tx failure would, without disturbing the rest of the turn.
+class AssignFailingStore extends InMemoryRuntimeStore {
+  override async get<T>(ctx: RuntimeStateCtx, collection: string, key: string): Promise<T | null> {
+    if (collection === "holdout_assignment") throw new Error("injected store failure (holdout assignment)");
+    return super.get<T>(ctx, collection, key);
+  }
+}
+
+describe("holdout ON but the arm-assignment write fails — F1 fail-open (security-review)", () => {
+  it("serves the normal policy, leaves the turn UNMEASURED for both arms, and never breaks the reply", async () => {
+    const store = new AssignFailingStore();
+    await store.put(TENANT, "champion", "active", { policy: CHAMPION_POLICY });
+    // fraction:1 WOULD force every shopper into control — proving the fail-open, since the assignment
+    // never lands, the shopper is instead served the normal champion policy (unbiased), not control.
+    await store.put(TENANT, "holdout", "config", { enabled: true, fraction: 1 });
+    const app = await buildServer({ store });
+    try {
+      const body = await chat(app, "sess-assign-fail");
+      // The reply is intact — NOT the generic model-error fallback the outer handler would produce
+      // if the assignment throw propagated.
+      expect((body.flags as string[] | undefined) ?? []).not.toContain("model_error");
+      expect(typeof body.reply).toBe("string");
+      expect((body.reply as string).length).toBeGreaterThan(0);
+      // Served the normal champion policy (not control, not a crash) — the unbiased degradation.
+      expect(body.servedBy).toBe(CHAMPION_POLICY.id);
+      expect(Object.keys(body)).not.toContain("arm");
+      // Left UNMEASURED for BOTH arms — no ledger write when the assignment couldn't be established.
+      expect(await listArmTallies(store, "demo")).toEqual([]);
+      // No telemetry "turn" row carries an arm either.
+      const events = await turnEvents(store);
+      expect(events.length).toBeGreaterThan(0);
+      for (const e of events) expect(Object.keys(e)).not.toContain("arm");
     } finally {
       await app.close();
     }

@@ -14,7 +14,7 @@ import {
 import { DEFAULT_POLICY, normalizeHistory, OFFER_CHECK_AGENT_TYPE } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
 import { classifyGuardSignals, GUARD_CLASSIFIER_AGENT_TYPE } from "./guard-classifier.js";
-import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort } from "@palup/platform-ports";
+import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort, Arm } from "@palup/platform-ports";
 import {
   createWidgetTokenIdentity,
   mintWidgetToken,
@@ -2825,15 +2825,27 @@ export async function buildServer(opts?: {
       // periods.
       const holdoutConfig = await readHoldoutConfig(store, tenantId);
       const holdoutPeriodValue = holdoutPeriod();
-      const holdoutArm = holdoutConfig.enabled
-        ? await assignHoldoutArm(
+      // F1 (W2-B security review): the arm-assignment WRITE (a `store.tx`) sits on the turn's critical
+      // path, so — exactly like the exposure tally further down — it is fail-OPEN. A store/tx write fails
+      // more readily than the canary/champion READs beside it, so if it throws we leave `holdoutArm`
+      // undefined: the turn serves the normal canary/champion policy and is simply left UNMEASURED for
+      // BOTH arms this period. That is the unbiased degradation — never break the shopper's reply, and
+      // never silently fall back to `treated` (which would undercount control and bias the comparison).
+      let holdoutArm: Arm | undefined;
+      if (holdoutConfig.enabled) {
+        try {
+          holdoutArm = await assignHoldoutArm(
             store,
             tenantId,
             holdoutConfig,
             holdoutIdentity({ verifiedShopperId, sessionId }),
             holdoutPeriodValue,
-          )
-        : undefined;
+          );
+        } catch (e) {
+          console.error(`[/chat] holdout arm_assign error tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e}`);
+          holdoutArm = undefined;
+        }
+      }
 
       // Canary split: a sticky fraction of THIS tenant's sessions is served by that tenant's canary
       // policy; the rest by champion. Keyed by the server-derived tenantId, so one merchant's canary can
