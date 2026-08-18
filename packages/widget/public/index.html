@@ -178,6 +178,7 @@
     #launcher:active{ transform:none }
   }
 </style>
+<!--PALUP_THEME--><!-- WS10: server injects the merchant brand <style>/<script> here at /embed/panel (FOUC-free). Absent (a plain comment) at /widget → default indigo. -->
 </head>
 <body>
   <div class="store" aria-hidden="true">
@@ -274,6 +275,28 @@
   // in the PANEL_MODE block at the end of this script) into this cache; cartSignal()/currentPageContext()
   // read it in panel mode. Standalone (`/widget`), PANEL_MODE is false and window.PALUP is read directly.
   let hostCtx = { cart: undefined, pageContext: undefined };
+  // WS10 — merchant brand. The brand COLOUR is applied FOUC-free by the injected <style> (see the
+  // PALUP_THEME marker in the head); this reads the injected name/logo for the header + greeting. Defaults to
+  // "Auria" when no theme is injected (the /widget harness), so standalone behaviour is byte-unchanged.
+  const THEME = (window.PALUP && window.PALUP.theme) || {};
+  const BRAND_NAME = (typeof THEME.brandName === "string" && THEME.brandName) || "Auria";
+  (function applyBrand(){
+    try {
+      // Query by class (NOT an id) so axe's contrast target for the monogram stays `.avatar` — the
+      // a11y suite's KNOWN_INCOMPLETE allow-lists the one-char brand mark by that exact target.
+      const b = document.querySelector(".wh .t b"); if (b) b.textContent = BRAND_NAME + " Assistant";
+      const av = document.querySelector(".wh .avatar");
+      if (av){
+        if (typeof THEME.logoUrl === "string" && THEME.logoUrl){
+          av.textContent = ""; const img = document.createElement("img");
+          img.src = THEME.logoUrl; img.alt = ""; img.style.cssText = "width:100%;height:100%;object-fit:cover;border-radius:50%";
+          av.appendChild(img);
+        } else {
+          av.textContent = BRAND_NAME.slice(0, 1).toUpperCase();
+        }
+      }
+    } catch {}
+  })();
 
   // Merchant tenant identity: the publishable embed key ships in this snippet; the widget mints a
   // short-TTL token from it and sends it on /chat so the backend serves the right merchant's agent.
@@ -1063,7 +1086,7 @@
   if (transcript.length){
     for (const t of transcript){ add(t.content, t.role === "agent" ? "agent" : "user"); }
   } else {
-    add("Hi! I'm Auria's assistant — ask me about a product or your order.", "agent");
+    add("Hi! I'm " + BRAND_NAME + "'s assistant — ask me about a product or your order.", "agent");
   }
   // Stamp the sessionId now, so a reload OR a closed tab before the first turn still continues this
   // conversation rather than opening a second one the server can't connect to the first.
