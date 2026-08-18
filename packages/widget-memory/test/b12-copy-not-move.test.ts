@@ -57,8 +57,12 @@ const idsIn = async (vector: VectorPort, ns: string) =>
 function fixture() {
   const vector = createInMemoryVectorStore();
   const audit = new InMemoryRuntimeStore();
-  const merge = (consent2: "in" | "out" | "unknown" = "unknown") =>
-    mergeGuestIntoAccount({ vector, audit, hmacKey: "k" }, { tenantId: TENANT, anonId: GUEST, accountId: ACCOUNT, consent2 });
+  // R2-2/Q19(c) — this file's own describe block below ("Inv 9 still governs special-category facts")
+  // exercises ONLY the account-side `consent2` variable, exactly as it did before the compound gate
+  // existed; `consent2Source`/`healthDisclosed` default to already-satisfied ("in"/true) so varying
+  // `consent2` alone still isolates that one leg. merge.test.ts's own new cases cover the other two legs.
+  const merge = (consent2: "in" | "out" | "unknown" = "unknown", consent2Source: "in" | "out" | "unknown" = "in", healthDisclosed = true) =>
+    mergeGuestIntoAccount({ vector, audit, hmacKey: "k" }, { tenantId: TENANT, anonId: GUEST, accountId: ACCOUNT, consent2, consent2Source, healthDisclosed });
   const mergeRows = async () =>
     (await audit.readAudit({ tenantId: TENANT }, { limit: 100 })).filter((a) => (a as { action?: string }).action === "merge");
   return { vector, audit, merge, mergeRows };
