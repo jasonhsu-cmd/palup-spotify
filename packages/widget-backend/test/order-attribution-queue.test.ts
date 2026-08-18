@@ -128,6 +128,7 @@ describe("applyOrderAttribution — refunds/create", () => {
       topic: "refunds/create",
       kind: "refund",
       orderId: "2001",
+      refundId: "r-2001-a",
       amount: 50,
       currency: "USD",
       at: new Date().toISOString(),
@@ -145,6 +146,7 @@ describe("applyOrderAttribution — refunds/create", () => {
       topic: "refunds/create",
       kind: "refund",
       orderId: "no-such-order",
+      refundId: "r-none",
       amount: 50,
       at: new Date().toISOString(),
     });
@@ -168,6 +170,7 @@ describe("applyOrderAttribution — refunds/create", () => {
       topic: "refunds/create",
       kind: "refund",
       orderId: "2002",
+      refundId: "r-2002",
       amount: 30,
       at: new Date().toISOString(),
     };
@@ -176,6 +179,44 @@ describe("applyOrderAttribution — refunds/create", () => {
 
     const tally = await readArmTally(store, TENANT, PLAY, PERIOD, arm);
     expect(tally).toMatchObject({ orders: 1, revenue: 170 }); // 200 - 30, once
+  });
+
+  it("the SAME refund id redelivered under a DIFFERENT message id is still refunded only once (per-refund claim)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const { token, arm } = await mintedToken(store, 0);
+    await applyOrderAttribution(store, "create-msg", {
+      tenantId: TENANT, topic: "orders/create", kind: "order",
+      orderId: "2003", joinToken: token, amount: 200, at: new Date().toISOString(),
+    });
+    const refund = (): OrderAttributionPayload => ({
+      tenantId: TENANT, topic: "refunds/create", kind: "refund",
+      orderId: "2003", refundId: "r-2003", amount: 30, at: new Date().toISOString(),
+    });
+    // Two DIFFERENT message ids (defeats the message-level dedup, dimension 1) but the SAME refund id —
+    // the per-refund atomic claim (dimension 3) must still collapse them to a single negative tally.
+    expect(await applyOrderAttribution(store, "refund-mA", refund())).toBe("tallied");
+    expect(await applyOrderAttribution(store, "refund-mB", refund())).toBe("duplicate");
+    const tally = await readArmTally(store, TENANT, PLAY, PERIOD, arm);
+    expect(tally).toMatchObject({ orders: 1, revenue: 170 }); // 200 - 30, once
+  });
+
+  it("two DIFFERENT partial refunds of the same order EACH tally (the claim is per-refund, not per-order)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const { token, arm } = await mintedToken(store, 0);
+    await applyOrderAttribution(store, "create-msg", {
+      tenantId: TENANT, topic: "orders/create", kind: "order",
+      orderId: "2004", joinToken: token, amount: 200, at: new Date().toISOString(),
+    });
+    expect(await applyOrderAttribution(store, "rm-1", {
+      tenantId: TENANT, topic: "refunds/create", kind: "refund",
+      orderId: "2004", refundId: "r-2004-part1", amount: 30, at: new Date().toISOString(),
+    })).toBe("tallied");
+    expect(await applyOrderAttribution(store, "rm-2", {
+      tenantId: TENANT, topic: "refunds/create", kind: "refund",
+      orderId: "2004", refundId: "r-2004-part2", amount: 20, at: new Date().toISOString(),
+    })).toBe("tallied");
+    const tally = await readArmTally(store, TENANT, PLAY, PERIOD, arm);
+    expect(tally).toMatchObject({ orders: 1, revenue: 150 }); // 200 - 30 - 20
   });
 });
 
