@@ -1,4 +1,4 @@
-export { EvolutionEngine, verifyAuditChain } from "./engine.js";
+export { EvolutionEngine, verifyAuditChain, MEASURED_OUTCOME_POWER_FLOOR } from "./engine.js";
 export type { EngineOptions } from "./engine.js";
 export { EngineRegistry } from "./engine-registry.js";
 export { MockGrader } from "./mock-grader.js";

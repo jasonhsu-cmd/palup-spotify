@@ -183,7 +183,9 @@ export async function rollbackServing(
 
 export interface MonitorServingResult {
   rolledBack: boolean;
-  /** "quality-regression" | "safety-regression" | "no-revert-target", or absent when healthy. */
+  /** "quality-regression" | "safety-regression" | "measured-outcome-regression" | "no-revert-target",
+   * or absent when healthy. "measured-outcome-regression" (Revenue-flywheel Wave-2 D) fires only when
+   * the caller supplied a trustworthy, comparable `observed.measuredOutcome` — see `monitorServing`. */
   reason?: string;
   /** True when the revert used the durable known-good baseline because the engine's depth-1
    * prevChampion was already spent. */
@@ -213,16 +215,21 @@ export interface MonitorServingResult {
  * "survived its observation window" confirmation `recordKnownGood` was written for, and what makes (2)
  * above reachable at all. Serving is never touched on a healthy observation.
  *
- * HONEST LIMITATION: `observed` is supplied by the caller. The wired route takes it from the request
- * body, so this reacts to a REPORTED regression, not a measured one. Measuring live quality is the
- * auto-optimize orchestrator's job and it is dormant. This wiring is what makes a regression signal
- * actually reach shoppers once something real produces it.
+ * HONEST LIMITATION: `observed.qualityScore` is supplied by the caller. The wired route takes it from
+ * the request body, so absent a measured signal this reacts to a REPORTED regression, not a measured
+ * one. Measuring live quality is the auto-optimize orchestrator's job and it is dormant. This wiring is
+ * what makes a regression signal actually reach shoppers once something real produces it.
+ *
+ * Revenue-flywheel Wave-2 (D): `observed.measuredOutcome`, when supplied by the caller (e.g. from
+ * `readMeasuredOutcomeSignal` over the live outcome ledger), is PREFERRED over the caller-attested
+ * `qualityScore` — see `EvolutionEngine.regressionVerdict` for the exact trust/comparability
+ * conditions. Absent (every caller today) ⇒ byte-identical to the qualityScore-only verdict above.
  */
 export async function monitorServing(
   engine: EvolutionEngine,
   store: RuntimeStatePort,
   tenantId: string,
-  observed: { qualityScore: number; safetyPass: boolean },
+  observed: { qualityScore: number; safetyPass: boolean; measuredOutcome?: { incrementalLift: number; power?: number } },
   at = new Date().toISOString(),
 ): Promise<MonitorServingResult> {
   const verdict = engine.regressionVerdict(observed);

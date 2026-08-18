@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
-import { EvolutionEngine, MockGrader, type PolicyMetrics } from "../src/index.js";
+import { EvolutionEngine, MockGrader, MEASURED_OUTCOME_POWER_FLOOR, type PolicyMetrics } from "../src/index.js";
 
 // A complete counter-metrics baseline (ADR-0014 #5): both the champion AND a passing candidate must
 // carry the measured counter-metrics, or the gate fails closed. escalationRecall higher=better;
@@ -230,6 +230,100 @@ describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
   });
 });
 
+// Revenue-flywheel Wave-2 (D) — the power-floor ENFORCEMENT on top of the Wave-1 (D) seam above. `power`
+// absent (every test above) preserves Wave-1's unconditional enforcement exactly; these tests exercise
+// the NEW behavior that only activates when a caller EXPLICITLY supplies `power`.
+describe("EvolutionEngine gate — measured-outcome POWER FLOOR (Wave-2 D)", () => {
+  const champPowered = (incrementalLift: number, power: number) => ({
+    policy: DEFAULT_POLICY,
+    metrics: { ...champion.metrics, measuredOutcome: { incrementalLift, power } } as PolicyMetrics,
+  });
+
+  it("(b) present + POWERED + POSITIVE lift vs. a powered champion baseline ⇒ gate allows", async () => {
+    const e = new EvolutionEngine({
+      champion: champPowered(0.05, 0.95),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.08, power: 0.95 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
+  });
+
+  it("(c) present + POWERED + NEGATIVE lift vs. a powered champion baseline ⇒ gate BLOCKS", async () => {
+    const e = new EvolutionEngine({
+      champion: champPowered(0.05, 0.95),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, power: 0.95 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-regressed");
+  });
+
+  it("(d) present but UNDERPOWERED (candidate side) ⇒ does NOT block on the regressed lift — falls back to the proxy, which passes", async () => {
+    const e = new EvolutionEngine({
+      champion: champPowered(0.05, 0.95),
+      // The lift itself REGRESSES (0.02 < 0.05), but the candidate's OWN measurement is far below the
+      // floor — too noisy to trust in EITHER direction, so the gate must not block on it.
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, power: 0.1 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
+    expect(rec.gate?.reasons).not.toContain("measured-outcome-regressed");
+    expect(rec.gate?.reasons).toContain("measured-outcome-underpowered-fallback-to-proxy");
+  });
+
+  it("(d) present but UNDERPOWERED (champion baseline side) ⇒ also falls back to the proxy", async () => {
+    const e = new EvolutionEngine({
+      champion: champPowered(0.05, 0.2), // champion's OWN baseline measurement is underpowered
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, power: 0.95 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
+    expect(rec.gate?.reasons).not.toContain("measured-outcome-regressed");
+  });
+
+  it("(d) a NON-FINITE lift still BLOCKS even though `power` is present and adequate — malformed is never merely 'underpowered'", async () => {
+    const e = new EvolutionEngine({
+      champion: champPowered(0.05, 0.95),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: NaN, power: 0.99 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-invalid");
+  });
+
+  it("underpowered ALSO bypasses the baseline-absent check (no champion measuredOutcome at all)", async () => {
+    const e = new EvolutionEngine({
+      champion, // no measuredOutcome whatsoever
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.5, power: 0.05 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
+    expect(rec.gate?.reasons).not.toContain("measured-outcome-baseline-absent");
+  });
+
+  it("power exactly AT the floor is adequate (>=, not >)", async () => {
+    const e = new EvolutionEngine({
+      champion: champPowered(0.05, MEASURED_OUTCOME_POWER_FLOOR),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, power: MEASURED_OUTCOME_POWER_FLOOR } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    // at-floor is adequate ⇒ trusted ⇒ the regressed lift (0.02 < 0.05) BLOCKS, same as (c).
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-regressed");
+  });
+});
+
 // PR-1 governance floor (shopper-disposition program) — fairness/leak/escalation guarantees as
 // DETERMINISTIC gate floors, mirroring the counterMetricsComplete fail-closed pattern above EXACTLY, so no
 // later persona/memory capability can land ungoverned. Two independent reasons: "fairness-regressed"
@@ -308,6 +402,53 @@ describe("EvolutionEngine gate — PR-1 governance floor (fairness / leak / disp
     const rec = await evalOne({ styled: { ...GOOD, policyId: "styled", qualityScore: 0.95 } }, "styled");
     expect(rec.status).toBe("awaiting_approval");
     expect(rec.gate?.pass).toBe(true);
+  });
+});
+
+// Revenue-flywheel Wave-2 (D) — `regressionVerdict` PREFERS a trustworthy, comparable measured lift over
+// the caller-attested qualityScore. This is the pure engine half of item (e); the control-plane half
+// (monitorServing actually reverting serving on this verdict) is covered in control-plane's test suite.
+describe("EvolutionEngine.regressionVerdict — measured-outcome preference (Wave-2 D)", () => {
+  const champWithMO = (incrementalLift: number, power?: number) => ({
+    policy: DEFAULT_POLICY,
+    metrics: { ...champion.metrics, measuredOutcome: power === undefined ? { incrementalLift } : { incrementalLift, power } } as PolicyMetrics,
+  });
+
+  it("(a) measuredOutcome absent on the observation ⇒ byte-identical to the qualityScore-only verdict", () => {
+    const e = engineWith({ good: GOOD });
+    expect(e.regressionVerdict({ qualityScore: 0.5, safetyPass: true })).toEqual({ regressed: true, reason: "quality-regression" });
+    expect(e.regressionVerdict({ qualityScore: 0.9, safetyPass: true })).toEqual({ regressed: false });
+  });
+
+  it("(e) PREFERS a trustworthy measured-lift regression over a HEALTHY caller-attested qualityScore", () => {
+    const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
+    // qualityScore looks great (0.99 >> champion's 0.75) — the OLD proxy-only verdict would say healthy.
+    const verdict = e.regressionVerdict({ qualityScore: 0.99, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, power: 0.95 } });
+    expect(verdict).toEqual({ regressed: true, reason: "measured-outcome-regression" });
+  });
+
+  it("a trustworthy measured lift that did NOT regress reports healthy even if isolated from qualityScore", () => {
+    const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
+    const verdict = e.regressionVerdict({ qualityScore: 0.01, safetyPass: true, measuredOutcome: { incrementalLift: 0.08, power: 0.95 } });
+    expect(verdict).toEqual({ regressed: false });
+  });
+
+  it("underpowered measured lift ⇒ falls back to the caller-attested qualityScore ('else keep attested')", () => {
+    const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
+    const verdict = e.regressionVerdict({ qualityScore: 0.5, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, power: 0.1 } });
+    expect(verdict).toEqual({ regressed: true, reason: "quality-regression" });
+  });
+
+  it("no baseline measuredOutcome to compare against ⇒ falls back to qualityScore", () => {
+    const e = engineWith({ good: GOOD }); // champion carries no measuredOutcome
+    const verdict = e.regressionVerdict({ qualityScore: 0.9, safetyPass: true, measuredOutcome: { incrementalLift: -5, power: 0.95 } });
+    expect(verdict).toEqual({ regressed: false });
+  });
+
+  it("a safety failure always regresses regardless of a positive measured lift", () => {
+    const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
+    const verdict = e.regressionVerdict({ qualityScore: 0.99, safetyPass: false, measuredOutcome: { incrementalLift: 100, power: 0.99 } });
+    expect(verdict).toEqual({ regressed: true, reason: "safety-regression" });
   });
 });
 
