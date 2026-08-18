@@ -27,6 +27,7 @@ describe("memoryWriteMessage", () => {
       consent2: "out",
       message: turn.message,
       reply: turn.reply,
+      publishedAt: 1_700_000_000_000,
     });
   });
 
@@ -34,6 +35,19 @@ describe("memoryWriteMessage", () => {
     const m1 = memoryWriteMessage(ctx, turn, 1);
     const m2 = memoryWriteMessage(ctx, turn, 999_999); // nowMs must NOT affect the idempotency key
     expect(m1.id).toBe(m2.id);
+  });
+
+  it("E1 — the payload carries publishedAt = the nowMs passed in", () => {
+    const m = memoryWriteMessage(ctx, turn, 1_700_000_000_000);
+    expect((m.payload as { publishedAt?: number }).publishedAt).toBe(1_700_000_000_000);
+  });
+
+  it("E1 — two builds of the SAME turn with DIFFERENT nowMs still produce the SAME id (publishedAt must not join the idempotency key)", () => {
+    const m1 = memoryWriteMessage(ctx, turn, 1);
+    const m2 = memoryWriteMessage(ctx, turn, 999_999);
+    expect(m1.id).toBe(m2.id);
+    expect((m1.payload as { publishedAt?: number }).publishedAt).toBe(1);
+    expect((m2.payload as { publishedAt?: number }).publishedAt).toBe(999_999);
   });
 
   it("produces a different id when the message differs", () => {

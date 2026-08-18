@@ -26,6 +26,9 @@ interface MemoryWritePayload {
   consent2?: unknown;
   message?: unknown;
   reply?: unknown;
+  /** §E1 — the publish-side clock (memory-write-queue.ts's `nowMs`), used to check against an erasure
+   *  tombstone written AFTER this message was published. */
+  publishedAt?: unknown;
 }
 
 export interface MemoryWritePushDeps {
@@ -39,6 +42,17 @@ export interface MemoryWritePushDeps {
   remember: (ctx: MemoryCtx, turn: MemoryTurn) => Promise<unknown>;
   /** Same per-IP limiter every public route uses. `false` ⇒ refuse (fail-closed). Optional. */
   checkRateLimit?: (ip: string) => Promise<boolean>;
+  /** §E2 (consume-side idempotency dedup) — has this message's deterministic `id` (Pub/Sub message
+   *  attribute, set by memory-write-queue.ts) already been written? Optional: omitted means no dedup
+   *  check runs (the pre-#331 dark path), so existing callers/tests are unaffected. */
+  alreadyProcessed?: (tenantId: string, id: string) => Promise<boolean>;
+  /** §E2 — marks `id` processed. Called ONLY after `remember` resolves, never before/instead of it, so a
+   *  throwing `remember` (⇒ 500, Pub/Sub retries) is never mistaken for a completed write. Optional. */
+  markProcessed?: (tenantId: string, id: string) => Promise<void>;
+  /** §E1 (erasure tombstone) — was this subject erased/withdrawn at or after `publishedAtMs`? `true` ⇒
+   *  ack + drop (the shopper asked to be forgotten before or as this message was published; writing it
+   *  now would silently re-create the erased fact). Optional. */
+  wasErasedAfter?: (tenantId: string, anonId: string, publishedAtMs: number) => Promise<boolean>;
 }
 
 function isNonBlankString(v: unknown): v is string {
@@ -67,7 +81,7 @@ export function registerMemoryWritePushRoute(app: FastifyInstance, deps: MemoryW
     verify: deps.verify,
     expectedServiceAccount: deps.expectedServiceAccount,
     checkRateLimit: deps.checkRateLimit,
-    handle: async (_attributes, data) => {
+    handle: async (attributes, data) => {
       if (typeof data !== "string" || data.length === 0) return; // no body to write from — ack + drop
 
       let p: MemoryWritePayload;
@@ -83,6 +97,26 @@ export function registerMemoryWritePushRoute(app: FastifyInstance, deps: MemoryW
         return;
       }
 
+      const id = typeof attributes.id === "string" ? attributes.id : undefined;
+      // §E1 (security-review LOW-1) — fail CLOSED on a missing/invalid publishedAt: treat it as 0 (the
+      // oldest possible publish time) so ANY existing tombstone (0 <= erasedAtMs) still drops the message.
+      // Our publishers always set it and the OIDC gate limits the sender to our own backend, but for an
+      // erasure control the safe direction is to still consult the tombstone, never to bypass it.
+      const publishedAt = typeof p.publishedAt === "number" ? p.publishedAt : 0;
+
+      // §E1 — erasure tombstone: a withdrawal/erasure request that lands AFTER this message was
+      // published but BEFORE it is delivered must still win — ack + drop rather than write a fact the
+      // shopper already asked to have forgotten.
+      if (deps.wasErasedAfter && (await deps.wasErasedAfter(p.tenantId, p.anonId, publishedAt))) {
+        return;
+      }
+
+      // §E2 — consume-side idempotency dedup: a redelivery of an already-written message is ack + dropped
+      // rather than re-running the distiller call.
+      if (deps.alreadyProcessed && id && (await deps.alreadyProcessed(p.tenantId, id))) {
+        return;
+      }
+
       const ctx: MemoryCtx = {
         tenantId: p.tenantId,
         anonId: p.anonId,
@@ -92,8 +126,12 @@ export function registerMemoryWritePushRoute(app: FastifyInstance, deps: MemoryW
       };
       const turn: MemoryTurn = { message: p.message, reply: p.reply };
 
-      // A throw propagates so the core returns 500 (Pub/Sub retries, then dead-letters).
+      // A throw propagates so the core returns 500 (Pub/Sub retries, then dead-letters) — and, critically,
+      // is never marked processed below, so the retry is not silently swallowed.
       await deps.remember(ctx, turn);
+
+      // Mark-AFTER-success only: if this throws it does WITHOUT marking, exactly like `remember` throwing.
+      if (deps.markProcessed && id) await deps.markProcessed(p.tenantId, id);
     },
   });
 }

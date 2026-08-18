@@ -1,7 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createInMemoryVectorStore, InMemoryRuntimeStore, createEnvSecrets, type SecretsPort } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
-import { eraseSubject, withdrawConsent1, withdrawConsent2, eraseTenant } from "../src/erasure.js";
+import {
+  eraseSubject,
+  withdrawConsent1,
+  withdrawConsent2,
+  eraseTenant,
+  ERASURE_TOMBSTONE_COLLECTION,
+  ERASURE_TOMBSTONE_TTL_SECONDS,
+  tombstoneKey,
+} from "../src/erasure.js";
 import { subjectNamespace, floorNamespace } from "../src/identity.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
@@ -271,5 +279,86 @@ describe("erasure — works on ENCRYPTED records too (ADR-0015 Inv 9, go-live bl
     );
     expect(result.purged).toBe(1);
     expect(await service.recall(ctx)).toEqual([]);
+  });
+});
+
+// MEMORY-GO-LIVE-CHECKLIST.md §E1 (raw-turn PII in Pub/Sub) — a subject's erasure request must be able
+// to drop an in-flight/DLQ'd async memory-write for that subject even though the erasure path itself
+// never reaches Pub/Sub. Each of the three withdrawal/erasure entry points now writes a subject-level
+// tombstone (RuntimeStatePort KV, TTL-bounded) that the queue CONSUMER (pubsub-push-memory.ts) checks
+// before writing: any message published for this subject at or before `erasedAtMs` is dropped rather
+// than remembered.
+describe("erasure — E1 tombstone: eraseSubject / withdrawConsent1 / withdrawConsent2 each write an erasure tombstone", () => {
+  it("eraseSubject writes a tombstone under tombstoneKey(anonId) with the injected now and the fixed TTL", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const now = () => 1_700_000_000_000;
+
+    await eraseSubject({ vector, audit: runtimeStore, now }, { tenantId: "acme", anonId: "guest-tomb-erase" });
+
+    const tombstone = await runtimeStore.get<{ erasedAtMs: number }>(
+      { tenantId: "acme" },
+      ERASURE_TOMBSTONE_COLLECTION,
+      tombstoneKey("guest-tomb-erase"),
+    );
+    expect(tombstone).toEqual({ erasedAtMs: 1_700_000_000_000 });
+  });
+
+  it("withdrawConsent1 writes the same subject-level tombstone", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const now = () => 1_700_000_001_000;
+
+    await withdrawConsent1({ vector, audit: runtimeStore, now }, { tenantId: "acme", anonId: "guest-tomb-c1" });
+
+    const tombstone = await runtimeStore.get<{ erasedAtMs: number }>(
+      { tenantId: "acme" },
+      ERASURE_TOMBSTONE_COLLECTION,
+      tombstoneKey("guest-tomb-c1"),
+    );
+    expect(tombstone).toEqual({ erasedAtMs: 1_700_000_001_000 });
+  });
+
+  it("withdrawConsent2 writes the same subject-level tombstone", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const now = () => 1_700_000_002_000;
+
+    await withdrawConsent2({ vector, audit: runtimeStore, now }, { tenantId: "acme", anonId: "guest-tomb-c2" });
+
+    const tombstone = await runtimeStore.get<{ erasedAtMs: number }>(
+      { tenantId: "acme" },
+      ERASURE_TOMBSTONE_COLLECTION,
+      tombstoneKey("guest-tomb-c2"),
+    );
+    expect(tombstone).toEqual({ erasedAtMs: 1_700_000_002_000 });
+  });
+
+  it("without an injected `now`, the tombstone still lands (defaults to Date.now) and TTL is the fixed 48h constant", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const putSpy = vi.spyOn(runtimeStore, "put");
+
+    await eraseSubject({ vector, audit: runtimeStore }, { tenantId: "acme", anonId: "guest-tomb-default" });
+
+    const tombstoneCall = putSpy.mock.calls.find((c) => c[1] === ERASURE_TOMBSTONE_COLLECTION);
+    expect(tombstoneCall).toBeDefined();
+    expect(tombstoneCall?.[4]).toEqual({ ttlSeconds: ERASURE_TOMBSTONE_TTL_SECONDS });
+    putSpy.mockRestore();
+  });
+
+  it("MED-1 — writes the tombstone BEFORE any deleteNamespace (no resurrect-between-delete-and-tombstone window)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const order: string[] = [];
+    vi.spyOn(vector, "deleteNamespace").mockImplementation(async () => { order.push("delete"); });
+    vi.spyOn(runtimeStore, "put").mockImplementation(async () => { order.push("tombstone"); });
+
+    await eraseSubject({ vector, audit: runtimeStore, now: () => 1 }, { tenantId: "acme", anonId: "guest-order" });
+
+    // The tombstone must land first; any in-flight message was published before this erasure so it is
+    // dropped regardless of when the (later) deletes run.
+    expect(order[0]).toBe("tombstone");
+    expect(order).toContain("delete");
   });
 });
