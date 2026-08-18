@@ -107,7 +107,10 @@ export async function discoverOidc(
 ): Promise<OidcConfig | null> {
   if (!SHOP_HOST.test(shopDomain)) return null;
   try {
-    const res = await fetchFn(`https://${shopDomain}/.well-known/openid-configuration`, { signal: AbortSignal.timeout(timeoutMs) });
+    // This fetch is the TRUST ANCHOR for the branded endpoint hosts below (#127 security review, M1) — a
+    // 3xx bounce off the pinned *.myshopify.com host (open redirect / interception) must not be allowed to
+    // hand back a doc naming attacker endpoints, so redirect:"error" here mirrors the token/jwks fetches.
+    const res = await fetchFn(`https://${shopDomain}/.well-known/openid-configuration`, { redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     const j = (await res.json()) as Partial<OidcConfig>;
     const cfg: OidcConfig = {

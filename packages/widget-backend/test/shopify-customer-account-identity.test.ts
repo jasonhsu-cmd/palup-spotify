@@ -164,6 +164,24 @@ describe("discoverOidc", () => {
   it("non-2xx ⇒ null", async () => {
     expect(await discoverOidc("acme.myshopify.com", errFetch(404))).toBeNull();
   });
+  // #127 security review, M1: the discovery fetch is the trust anchor for the branded endpoint hosts —
+  // it must be redirect-disciplined (redirect:"error"), same as the token/jwks fetches, so a 3xx bounce
+  // off the pinned *.myshopify.com host can never hand back a doc naming attacker endpoints.
+  it("the discovery fetch requests redirect:\"error\" (no 3xx bounce off the pinned myshopify host)", async () => {
+    let captured: RequestInit | undefined;
+    const cap: FetchFn = (async (_url: unknown, o: unknown) => {
+      captured = o as RequestInit;
+      return { ok: true, status: 200, json: async () => good };
+    }) as unknown as FetchFn;
+    await discoverOidc("acme.myshopify.com", cap);
+    expect(captured?.redirect).toBe("error");
+  });
+  it("a redirect encountered during discovery (fetch throws under redirect:\"error\") ⇒ null, fails closed", async () => {
+    const redirecting: FetchFn = (async () => {
+      throw new TypeError("fetch failed: unexpected redirect");
+    }) as unknown as FetchFn;
+    expect(await discoverOidc("acme.myshopify.com", redirecting)).toBeNull();
+  });
 });
 
 describe("exchangeCode", () => {
