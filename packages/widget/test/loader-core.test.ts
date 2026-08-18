@@ -154,6 +154,45 @@ describe("initWidgetLoader", () => {
       );
     });
 
+    // Regression: the first open() races the panel's document load. A freshly-created iframe already has
+    // a truthy `contentWindow` (its initial about:blank) BEFORE the panel script runs and registers its
+    // message handler, so posting palup:open at open() time drops it silently — and the panel's
+    // first-touch greeting (sendGreeting on palup:open) never fires. The loader must defer palup:open
+    // until the panel announces palup:ready, then flush it.
+    it("defers palup:open until the panel signals palup:ready, then flushes it (first-open greeting race)", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open(); // panel document not loaded yet — palup:open must NOT be posted to it now
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      expect(fakeWindow.postMessage).not.toHaveBeenCalled(); // nothing posted before the panel is ready
+
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:ready" } }),
+      );
+
+      // ready flushes BOTH the host handshake and the pending open, so the panel greets on first open
+      expect(fakeWindow.postMessage).toHaveBeenCalledWith({ type: "palup:host", shop: c.shop, position: c.position }, ORIGIN);
+      expect(fakeWindow.postMessage).toHaveBeenCalledWith({ type: "palup:open" }, ORIGIN);
+    });
+
+    it("posts palup:open immediately on a re-open once the panel is already ready", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:ready" } }),
+      );
+      fakeWindow.postMessage.mockClear();
+
+      api.close();
+      api.open(); // panel already ready → no need to wait, post at once
+
+      expect(fakeWindow.postMessage).toHaveBeenCalledWith({ type: "palup:open" }, ORIGIN);
+    });
+
     it("palup:close → hides the panel iframe", () => {
       const c = cfg();
       const api = initWidgetLoader(c)!;
