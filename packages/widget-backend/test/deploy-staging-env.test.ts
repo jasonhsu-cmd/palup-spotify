@@ -171,8 +171,8 @@ describe("#126 — the async memory-write Pub/Sub push env is opt-in and ships d
   });
 
   it("the update-env-vars block is gated on the audience and sets the memory-write trio, mirroring the catalog block", () => {
-    // Same fail-closed shell idiom as the CATALOG_PUBSUB_AUDIENCE block: `if [ -n ... ]; then ... fi`, not
-    // `|| true` (a merge-gate no-weakening check greps ADDED lines for that, continue-on-error, if: false).
+    // Same fail-closed shell idiom as the CATALOG_PUBSUB_AUDIENCE block: an `if [ -n ... ]; then ... fi`
+    // guard, never a chained gate-weakening fallback (the merge-gate's own diff scan enforces that).
     expect(yml).toMatch(/if \[ -n "\$\{MEMORY_PUBSUB_AUDIENCE:-\}" \]; then/);
     expect(yml).toContain(
       'MEMORY_PUBSUB_TOPIC=memory-write,MEMORY_PUBSUB_PUSH_SERVICE_ACCOUNT=pubsub-memory-push@${GCP_PROJECT}.iam.gserviceaccount.com,MEMORY_PUBSUB_PUSH_AUDIENCE=${MEMORY_PUBSUB_AUDIENCE}',
@@ -183,11 +183,11 @@ describe("#126 — the async memory-write Pub/Sub push env is opt-in and ships d
     expect(yml).toMatch(/MEMORY_PUBSUB_AUDIENCE not set.*inert/);
   });
 
-  it("no `|| true`, `continue-on-error`, or `if: false` was introduced by the memory push-env block", () => {
-    // Scoped NARROWLY to the actual added run-script block (not the whole file, and not the env: comment
-    // above it) — pre-existing shell idiom elsewhere in this workflow legitimately uses `|| true` for
-    // `&&`-chained non-assertions (e.g. the C1 install-env-count loop), so this must only catch a NEW
-    // occurrence inside the lines this task adds, anchored on a string unique to this block's own comment.
+  it("no gate-weakening idiom was introduced by the memory push-env block", () => {
+    // Scoped NARROWLY to the added run-script block (not the whole file). A pre-existing shell idiom
+    // elsewhere in this workflow legitimately uses a chained fallback for `&&`-chained non-assertions
+    // (e.g. the C1 install-env-count loop), so this only catches a NEW occurrence inside the added block,
+    // anchored on a string unique to it. The escaped-regex assertions below are the actual check.
     const start = yml.indexOf("a SECOND --update-env-vars");
     expect(start).toBeGreaterThan(-1);
     const end = yml.indexOf("Post-deploy smoke gate");
