@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken } from "@palup/platform-ports";
-import type { ModelPort, ModelRequest, VectorPort } from "@palup/platform-ports";
+import type { ModelPort, ModelRequest, QueueMessage, QueuePort, VectorPort } from "@palup/platform-ports";
 import { armKill } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
+import { MEMORY_WRITE_TOPIC } from "../src/memory-write-queue.js";
 import { guestTokenHeader } from "./helpers/guest-token.js";
 
 // semantic-memory-v1, PR2 (write path), T6 — REVERTED (live-staging finding, 2026-08-18). T6 made the
@@ -134,6 +135,66 @@ describe("POST /chat — memory write is synchronous (T6 reverted)", () => {
     const log = await store.readAudit({ tenantId: "demo" });
     expect(log.map((r) => r.action)).not.toContain("write.ordinary");
     expect(log.map((r) => r.action)).not.toContain("write.special");
+    await app.close();
+  });
+});
+
+// #126 W1.5 — when a QueuePort is injected via the opts.memoryWriteQueue test seam (mirrors opts.store/
+// opts.vectorPort/opts.memoryEnabled), the /chat call site hands the write off through dispatchMemoryWrite
+// instead of calling memoryService.remember() inline: the publish spy is called, the vector port's upsert
+// (remember()'s ONLY persistence op — see the header comment above) is NOT, and the reply is still 200.
+// This is a DIFFERENT config from every other test in this file (which all leave memoryWriteQueue undefined
+// and therefore exercise the inline branch); it proves the enqueue branch without touching that inline
+// coverage at all.
+describe("POST /chat — memoryWriteQueue seam hands the write off to the async queue (dark, opt-in via test seam)", () => {
+  it("publishes to MEMORY_WRITE_TOPIC and does NOT call the inline remember path; /chat still returns 200", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.GUEST_TOKEN_SECRET = GUEST_SECRET;
+
+    const store = new InMemoryRuntimeStore();
+    const realVector = createInMemoryVectorStore();
+    let upsertCalls = 0;
+    const vector: VectorPort = {
+      ...realVector,
+      upsert: (...args: Parameters<VectorPort["upsert"]>) => {
+        upsertCalls++;
+        return realVector.upsert(...args);
+      },
+    };
+    const modelPort = distillingModel([{ text: "prefers fragrance-free products" }]);
+
+    const publishedTopics: string[] = [];
+    const publishedMessages: QueueMessage[] = [];
+    const spyQueue: QueuePort = {
+      publish: async (topic, msg) => {
+        publishedTopics.push(topic);
+        publishedMessages.push(msg);
+      },
+      subscribe: () => {
+        throw new Error("not used by dispatchMemoryWrite");
+      },
+      deadLettered: () => [],
+    };
+
+    const app = await buildServer({ store, vectorPort: vector, modelPort, memoryEnabled: true, memoryWriteQueue: spyQueue });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      headers: guestTokenHeader(GUEST_SECRET, "demo", VALID_ANON_ID),
+      payload: {
+        sessionId: "async-write-queue-1",
+        message: "I like fragrance-free stuff",
+        signals: { cart: "empty" },
+        widgetToken: DEMO_WIDGET_TOKEN,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(publishedTopics).toContain(MEMORY_WRITE_TOPIC);
+    // The enqueue branch never calls remember(), so vector.upsert (the op remember() persists through) is
+    // never reached — this is the inverse of the inline-path assertion this file otherwise makes.
+    expect(upsertCalls).toBe(0);
     await app.close();
   });
 });

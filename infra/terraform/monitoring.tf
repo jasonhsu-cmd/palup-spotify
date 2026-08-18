@@ -34,7 +34,7 @@ resource "google_logging_metric" "product_facts_producer_failures" {
     labels {
       key         = "failure_kind"
       value_type  = "STRING"
-      description  = "upsert or audit"
+      description = "upsert or audit"
     }
   }
   # Pull the failure kind out of the marker so the alert/dashboard can distinguish an unwritten refresh

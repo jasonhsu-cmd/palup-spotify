@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { registerOidcPushRoute, type OidcVerifier } from "./oidc-push-route.js";
 
 // P4 — the Pub/Sub PUSH endpoint for catalog reconciles. Pub/Sub POSTs each queued message here as an
 // HTTPS request bearing a Google-signed OIDC token; this route is the ONLY consumer of the durable queue
@@ -16,13 +17,15 @@ import type { FastifyInstance } from "fastify";
 //
 // **UNVERIFIED-LIVE.** The OIDC-verify + envelope-parse + fail-closed logic is unit-tested with an injected
 // verifier; a real Pub/Sub push is verified in STAGING before CATALOG_WEBHOOKS is enabled (go-live P4).
+//
+// W1.2 — this is now a thin wrapper over the shared `registerOidcPushRoute` core (oidc-push-route.ts): the
+// rate-limit → OIDC → expected-SA gate lives there (byte-for-byte the same as before this refactor); this
+// module only supplies the route path and the catalog-specific `handle` (tenantKey attribute → tenantId,
+// 204-drop if absent, decode `{productIds,reason}` for targeting, call `reconcile`).
 
 export const PUBSUB_PUSH_ROUTE = "/internal/pubsub/catalog-reconcile" as const;
 
-/** Verifies a Pub/Sub push OIDC token. Returns the token's service-account email on success, or null on
- *  ANY failure (bad signature, wrong audience, expired). Injected so the route is testable without the
- *  network; the production impl wraps google-auth-library's OAuth2Client.verifyIdToken (see server.ts). */
-export type OidcVerifier = (bearerToken: string) => Promise<{ email: string } | null>;
+export type { OidcVerifier };
 
 export interface PubSubPushDeps {
   verify: OidcVerifier;
@@ -38,84 +41,46 @@ export interface PubSubPushDeps {
   checkRateLimit?: (ip: string) => Promise<boolean>;
 }
 
-interface PushEnvelope {
-  message?: { attributes?: Record<string, unknown>; data?: string };
-}
-
 /** Registers the OIDC-gated Pub/Sub push route. Ack semantics: a valid delivery that reconciles ⇒ 204; a
  *  reconcile failure ⇒ 500 so Pub/Sub retries (then dead-letters, server-side); a well-formed but
  *  tenant-less message ⇒ 204 (ack + drop; retrying will never make it valid); bad/absent OIDC ⇒ 401. The
  *  response never distinguishes WHY (no oracle), mirroring the Shopify routes. */
 export function registerPubSubPushRoute(app: FastifyInstance, deps: PubSubPushDeps): void {
-  app.post(PUBSUB_PUSH_ROUTE, async (req, reply) => {
-    reply.header("cache-control", "no-store");
+  registerOidcPushRoute(app, {
+    routePath: PUBSUB_PUSH_ROUTE,
+    verify: deps.verify,
+    expectedServiceAccount: deps.expectedServiceAccount,
+    checkRateLimit: deps.checkRateLimit,
+    handle: async (attributes, data) => {
+      // The tenant rides as a signed-gated attribute (set by the publish adapter); no product data is
+      // trusted — the worker re-fetches current state.
+      const tenantId = attributes["tenantKey"];
+      if (typeof tenantId !== "string" || !tenantId.trim()) {
+        return; // ack + drop: a message with no usable tenant can never succeed; don't retry forever
+      }
 
-    // 1. Rate-limit before any crypto work (fail-closed if the limiter is unavailable).
-    if (deps.checkRateLimit) {
-      let ok = false;
+      // Decode `data` for TARGETING only (S3 §C) — which ids to re-fetch, never trusted for product
+      // CONTENT. A malformed/absent body is fail-safe: `opts` stays `undefined`, so `reconcile` takes its
+      // no-opts (full-catalog) path rather than silently doing nothing or acting on unparsed data.
+      let opts: { productIds?: string[]; reason?: "product" | "inventory" | "full" } | undefined;
       try {
-        ok = await deps.checkRateLimit(req.ip);
+        if (typeof data === "string" && data.length > 0) {
+          const p = JSON.parse(data) as { productIds?: unknown; reason?: unknown };
+          const productIds = Array.isArray(p.productIds) ? p.productIds.filter((x): x is string => typeof x === "string") : undefined;
+          const reason = p.reason === "product" || p.reason === "inventory" || p.reason === "full" ? p.reason : undefined;
+          opts = { ...(productIds && productIds.length > 0 ? { productIds } : {}), ...(reason ? { reason } : {}) };
+        }
       } catch {
-        ok = false;
+        opts = undefined; // fall back to a full reconcile
       }
-      if (!ok) {
-        reply.code(429);
-        return { error: "rate limited" };
+
+      // Reconcile. A failure propagates so the core returns 500 (Pub/Sub retries, then dead-letters).
+      try {
+        await deps.reconcile(tenantId, opts);
+      } catch (e) {
+        console.error(`[pubsub-push] ALERT catalog_reconcile_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
+        throw e;
       }
-    }
-
-    // 2. OIDC OR NOTHING. Bearer token, verified signature+audience, and the SA must be the expected one.
-    const auth = req.headers["authorization"];
-    const bearer = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (!bearer) {
-      reply.code(401);
-      return { error: "unauthorized" };
-    }
-    let identity: { email: string } | null;
-    try {
-      identity = await deps.verify(bearer);
-    } catch {
-      identity = null;
-    }
-    if (!identity || identity.email !== deps.expectedServiceAccount) {
-      reply.code(401);
-      return { error: "unauthorized" };
-    }
-
-    // 3. Only now read the body. The tenant rides as a signed-gated attribute (set by the publish adapter);
-    // no product data is trusted — the worker re-fetches current state.
-    const body = req.body as PushEnvelope | undefined;
-    const tenantId = body?.message?.attributes?.["tenantKey"];
-    if (typeof tenantId !== "string" || !tenantId.trim()) {
-      reply.code(204); // ack + drop: a message with no usable tenant can never succeed; don't retry forever
-      return null;
-    }
-
-    // 4. Decode `message.data` for TARGETING only (S3 §C) — which ids to re-fetch, never trusted for
-    // product CONTENT. A malformed/absent body is fail-safe: `opts` stays `undefined`, so `reconcile` takes
-    // its no-opts (full-catalog) path rather than silently doing nothing or acting on unparsed data.
-    let opts: { productIds?: string[]; reason?: "product" | "inventory" | "full" } | undefined;
-    try {
-      const raw = body?.message?.data;
-      if (typeof raw === "string" && raw.length > 0) {
-        const p = JSON.parse(Buffer.from(raw, "base64").toString("utf8")) as { productIds?: unknown; reason?: unknown };
-        const productIds = Array.isArray(p.productIds) ? p.productIds.filter((x): x is string => typeof x === "string") : undefined;
-        const reason = p.reason === "product" || p.reason === "inventory" || p.reason === "full" ? p.reason : undefined;
-        opts = { ...(productIds && productIds.length > 0 ? { productIds } : {}), ...(reason ? { reason } : {}) };
-      }
-    } catch {
-      opts = undefined; // fall back to a full reconcile
-    }
-
-    // 5. Reconcile. A failure returns 500 so Pub/Sub retries (and eventually dead-letters, server-side).
-    try {
-      await deps.reconcile(tenantId, opts);
-    } catch (e) {
-      console.error(`[pubsub-push] ALERT catalog_reconcile_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
-      reply.code(500);
-      return { error: "reconcile failed" };
-    }
-    reply.code(204);
-    return null;
+    },
   });
 }
