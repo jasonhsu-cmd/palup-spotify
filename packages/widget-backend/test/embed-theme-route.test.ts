@@ -51,6 +51,9 @@ describe("WS10 — /embed/panel theme injection", () => {
     expect(res.body).toMatch(/:root\{--brand:#[0-9a-f]{6}/i);
     expect(res.body).toContain("window.PALUP");
     expect(res.body).toContain('"brandName":"Auria"'); // curated brand name for this tenant
+    // the embedded chat is pinned light-toned (owner directive) so it matches the light storefront and
+    // never darkens on a dark-OS shopper; the /widget a11y harness (below) stays theme-aware.
+    expect(res.body).toContain('<html lang="en" data-theme="light">');
     await app.close();
   });
 
@@ -68,6 +71,9 @@ describe("WS10 — /embed/panel theme injection", () => {
     // /widget serves the raw widgetHtml — no server-side theme injection; the marker stays a plain comment.
     expect(res.body).toContain("<!--PALUP_THEME-->");
     expect(res.body).not.toContain('id="palup-theme"');
+    // the harness stays theme-aware (no forced-light pin on <html>) so the a11y suite can still exercise
+    // dark mode. (The CSS guard `:root:not([data-theme="light"])` contains the substring — assert the tag.)
+    expect(res.body).not.toContain('<html lang="en" data-theme="light">');
     await app.close();
   });
 });

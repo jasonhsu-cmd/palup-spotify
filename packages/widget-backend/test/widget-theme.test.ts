@@ -64,6 +64,9 @@ describe("themeStyleBlock — safe injection", () => {
     expect(block).toMatch(/--brand:#[0-9a-f]{6}/i);
     expect(block).toMatch(/--brand-ink:#[0-9a-f]{6}/i);
     expect(block).toContain("prefers-color-scheme: dark");
+    // the dark override is opt-out-able so a panel pinned to data-theme="light" keeps the light brand
+    // text (brandTextDark is tuned for the dark panel and would under-contrast on the light one).
+    expect(block).toContain(':root:not([data-theme="light"])');
     expect(block).toContain("window.PALUP");
   });
 
