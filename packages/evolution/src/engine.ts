@@ -573,9 +573,10 @@ function isRate01(v: unknown): v is number {
  * seams and must not be confused: `DEFAULT_CANARY_POWER` gates the canary's judge-graded QUALITY-delta
  * traffic volume/window (n + elapsedMs); this floor gates the measured-outcome LIFT's own statistical
  * confidence (0..1 — `computeIncrementalLift`'s `confidence`, fed in by control-plane as
- * `measuredOutcome.power`). Both need an owner sign-off before enablement (docs "Open questions" — the
- * real floor is a business decision, not an engineering guess); 0.8 here is an engineering default
- * (an "80% confidence" rule-of-thumb), nothing more.
+ * `measuredOutcome.power`). Both need an owner sign-off (a recorded business decision, not an
+ * engineering guess) before this seam is ever fed a live signal — see the flywheel plan / HARD GATE #3
+ * (per-merchant statistical-power gate). 0.8 here is an engineering default (an "80% confidence"
+ * rule-of-thumb), nothing more.
  */
 export const MEASURED_OUTCOME_POWER_FLOOR = 0.8;
 
