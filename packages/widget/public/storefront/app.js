@@ -1,19 +1,18 @@
 /* PalUp sample storefront — shared client logic (home / product / cart).
  *
- * Fetches the SAME live catalog the assistant is grounded on (GET /storefront/catalog?shop=), renders it,
- * runs a real localStorage cart, and — crucially for the demo — publishes the shopper's cart + page context
- * to `window.PALUP` so the PalUp widget (embedded via the loader) can act on them (cross-sell, cart
- * recovery). ALL merchant-authored text is rendered via textContent (never innerHTML): the JSON is data, and
- * this is the render-side XSS control the catalog endpoint documented. Image URLs were host-validated
- * server-side; we still only ever set them as an <img src>. */
+ * Fetches the live catalog PAGE BY PAGE from GET /storefront/catalog?shop=&cursor= (durable for any catalog
+ * size — the assistant grounds on the same catalog via retrieval). Runs a real localStorage cart and
+ * publishes the shopper's cart + page context to `window.PALUP` so the embedded PalUp widget can act on them.
+ * ALL merchant text is rendered via textContent (never innerHTML) — the render-side XSS control. Image URLs
+ * were host-validated server-side; we still only ever set them as an <img src>. */
 (function () {
   "use strict";
   var SHOP =
     (document.querySelector("script[data-shop]") &&
       document.querySelector("script[data-shop]").getAttribute("data-shop")) ||
     "palup-skincare-jason.myshopify.com";
-  var CATALOG_KEY = "palup.storefront.catalog.v1." + SHOP;
   var CART_KEY = "palup.storefront.cart.v1." + SHOP;
+  var STASH_PREFIX = "palup.storefront.product.v1.";
   var SHOP_HOST = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
   var NUMERIC_VARIANT = /^[0-9]{1,20}$/;
 
@@ -76,18 +75,16 @@
     );
   }
 
-  // ---------- window.PALUP bridge (WS4 host side) ----------
+  // ---------- window.PALUP bridge (host side; loader forwards to the widget) ----------
   function pageContext() {
     var base = document.body.getAttribute("data-page-context") || "home";
     if (base === "product") {
-      var h = currentHandle(); // hoisted function declaration
+      var h = currentHandle();
       return h ? "product:" + h : "product";
     }
     return base;
   }
   function publishContext() {
-    // Whitelist to {productId, quantity} — the loader re-whitelists too, and the server re-derives every
-    // display string from the catalog, so nothing else needs to (or should) leave the page.
     var cart = readCart().map(function (i) {
       return { productId: i.productId, quantity: i.quantity };
     });
@@ -97,25 +94,31 @@
     } catch (e) {}
   }
 
-  // ---------- catalog fetch (cached per visit) ----------
-  function loadCatalog() {
-    try {
-      var cached = sessionStorage.getItem(CATALOG_KEY);
-      if (cached) return Promise.resolve(JSON.parse(cached));
-    } catch (e) {}
-    return fetch("/storefront/catalog?shop=" + encodeURIComponent(SHOP))
+  // ---------- catalog paging (cursor-based, durable for any size) ----------
+  function fetchPage(cursor) {
+    var url = "/storefront/catalog?shop=" + encodeURIComponent(SHOP);
+    if (cursor) url += "&cursor=" + encodeURIComponent(cursor);
+    return fetch(url)
       .then(function (r) {
         return r.ok ? r.json() : { brandName: "this store", policy: {}, products: [] };
-      })
-      .then(function (data) {
-        try {
-          sessionStorage.setItem(CATALOG_KEY, JSON.stringify(data));
-        } catch (e) {}
-        return data;
       })
       .catch(function () {
         return { brandName: "this store", policy: {}, products: [] };
       });
+  }
+  // Stash a product so a home→PDP click always resolves without re-crawling the catalog.
+  function stash(p) {
+    try {
+      sessionStorage.setItem(STASH_PREFIX + (p.handle || p.id), JSON.stringify(p));
+    } catch (e) {}
+  }
+  function readStash(key) {
+    try {
+      var raw = sessionStorage.getItem(STASH_PREFIX + key);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
   }
 
   // ---------- DOM helpers (textContent only) ----------
@@ -141,7 +144,6 @@
   function productHref(p) {
     return "/product/" + encodeURIComponent(p.handle || p.id);
   }
-
   function setBrand(brandName) {
     var name = brandName || "this store";
     document.querySelectorAll("[data-brand]").forEach(function (n) {
@@ -156,55 +158,78 @@
     if (r && p.returns) r.textContent = p.returns;
     if (s && p.shipping) s.textContent = p.shipping;
   }
-
-  // ---------- per-page renderers ----------
-  function renderHome(cat) {
-    var grid = document.getElementById("grid");
-    if (!grid) return;
-    grid.textContent = "";
-    var products = cat.products || [];
-    if (!products.length) {
-      grid.appendChild(el("p", "empty", "No products are available right now."));
-      grid.setAttribute("data-ready", "1");
-      return;
-    }
-    products.forEach(function (p) {
-      var a = document.createElement("a");
-      a.className = "card";
-      a.href = productHref(p);
-      a.appendChild(thumb(p.imageUrl, p.title));
-      var body = el("div", "body");
-      body.appendChild(el("span", "title", p.title));
-      body.appendChild(el("span", "price", p.price || ""));
-      a.appendChild(body);
-      grid.appendChild(a);
+  function productCard(p) {
+    var a = document.createElement("a");
+    a.className = "card";
+    a.href = productHref(p);
+    a.addEventListener("click", function () {
+      stash(p);
     });
-    grid.setAttribute("data-ready", "1");
+    a.appendChild(thumb(p.imageUrl, p.title));
+    var body = el("div", "body");
+    body.appendChild(el("span", "title", p.title));
+    body.appendChild(el("span", "price", p.price || ""));
+    a.appendChild(body);
+    return a;
   }
 
+  // ---------- home (paginated grid + load more) ----------
+  function renderHome() {
+    var grid = document.getElementById("grid");
+    if (!grid) return;
+    var moreBtn = null;
+    var cursor = null;
+    var loading = false;
+
+    function appendPage(data) {
+      var products = data.products || [];
+      products.forEach(function (p) {
+        grid.appendChild(productCard(p));
+      });
+      cursor = data.nextCursor || null;
+      if (!grid.children.length) grid.appendChild(el("p", "empty", "No products are available right now."));
+      grid.setAttribute("data-ready", "1");
+      grid.setAttribute("aria-busy", "false");
+      if (moreBtn) moreBtn.hidden = !cursor;
+    }
+    function loadMore() {
+      if (loading || !cursor) return;
+      loading = true;
+      moreBtn.disabled = true;
+      moreBtn.textContent = "Loading…";
+      fetchPage(cursor).then(function (data) {
+        appendPage(data);
+        loading = false;
+        moreBtn.disabled = false;
+        moreBtn.textContent = "Load more";
+      });
+    }
+
+    fetchPage(null).then(function (data) {
+      setBrand(data.brandName);
+      setPolicy(data.policy);
+      // build the "Load more" control after the grid, shown only when there is a next page
+      var wrap = document.getElementById("grid-more");
+      if (wrap) {
+        moreBtn = el("button", "btn btn-outline", "Load more");
+        moreBtn.type = "button";
+        moreBtn.setAttribute("data-testid", "load-more");
+        moreBtn.hidden = true;
+        moreBtn.addEventListener("click", loadMore);
+        wrap.appendChild(moreBtn);
+      }
+      appendPage(data);
+    });
+  }
+
+  // ---------- product detail ----------
   function currentHandle() {
     var m = location.pathname.match(/\/product\/([^/]+)\/?$/);
     return m ? decodeURIComponent(m[1]) : "";
   }
-  function renderProduct(cat) {
-    var mount = document.getElementById("pdp");
-    if (!mount) return;
-    var key = currentHandle();
-    var products = cat.products || [];
-    var p =
-      products.filter(function (x) {
-        return x.handle === key;
-      })[0] ||
-      products.filter(function (x) {
-        return x.id === key;
-      })[0];
+  function renderProductInto(mount, p, brandName) {
+    document.title = p.title + " — " + (brandName || "Store");
     mount.textContent = "";
-    if (!p) {
-      mount.appendChild(el("p", "empty", "Sorry — we couldn't find that product."));
-      mount.setAttribute("data-ready", "notfound");
-      return;
-    }
-    document.title = p.title + " — " + (cat.brandName || "Store");
     mount.appendChild(thumb(p.imageUrl, p.title, "media"));
     var info = el("div", "info");
     info.appendChild(el("h1", null, p.title));
@@ -232,8 +257,52 @@
     }
     mount.appendChild(info);
     mount.setAttribute("data-ready", "1");
+    mount.setAttribute("aria-busy", "false");
+  }
+  function renderProduct() {
+    var mount = document.getElementById("pdp");
+    if (!mount) return;
+    var key = currentHandle();
+    var stashed = readStash(key);
+    if (stashed) {
+      // brand may not be set yet; fetch page 1 only for brand/policy chrome, render immediately from stash
+      renderProductInto(mount, stashed, null);
+      fetchPage(null).then(function (data) {
+        setBrand(data.brandName);
+        setPolicy(data.policy);
+        document.title = stashed.title + " — " + (data.brandName || "Store");
+      });
+      return;
+    }
+    // Direct URL (no prior click): search the first page (bounded — never crawl a huge catalog on a PDP).
+    fetchPage(null).then(function (data) {
+      setBrand(data.brandName);
+      setPolicy(data.policy);
+      var products = data.products || [];
+      var p =
+        products.filter(function (x) {
+          return x.handle === key;
+        })[0] ||
+        products.filter(function (x) {
+          return x.id === key;
+        })[0];
+      if (p) {
+        renderProductInto(mount, p, data.brandName);
+      } else {
+        mount.textContent = "";
+        mount.appendChild(el("p", "empty", "Sorry — we couldn't find that product from here."));
+        var back = document.createElement("a");
+        back.className = "btn btn-outline";
+        back.href = "/";
+        back.textContent = "Browse all products";
+        mount.appendChild(back);
+        mount.setAttribute("data-ready", "notfound");
+        mount.setAttribute("aria-busy", "false");
+      }
+    });
   }
 
+  // ---------- cart ----------
   function checkoutUrl(items) {
     var parts = items
       .filter(function (i) {
@@ -258,6 +327,7 @@
       browse.textContent = "Browse products";
       mount.appendChild(browse);
       mount.setAttribute("data-ready", "empty");
+      mount.setAttribute("aria-busy", "false");
       return;
     }
     var list = el("ul", "cart-list");
@@ -307,6 +377,7 @@
     co.setAttribute("data-testid", "checkout");
     co.textContent = "Checkout on Shopify";
     co.rel = "noopener";
+    co.target = "_blank";
     if (href) {
       co.href = href;
     } else {
@@ -317,6 +388,7 @@
     foot.appendChild(co);
     mount.appendChild(foot);
     mount.setAttribute("data-ready", "1");
+    mount.setAttribute("aria-busy", "false");
   }
 
   function renderCartCount() {
@@ -328,18 +400,16 @@
   }
 
   // ---------- boot ----------
-  publishContext(); // set window.PALUP before the loader script reads it on palup:ready
+  publishContext(); // set window.PALUP before the loader reads it
   renderCartCount();
-  loadCatalog().then(function (cat) {
-    setBrand(cat.brandName);
-    setPolicy(cat.policy);
-    var page = document.body.getAttribute("data-page");
-    if (page === "home") renderHome(cat);
-    else if (page === "product") renderProduct(cat);
-    else if (page === "cart") renderCart();
-    // Rendering is done — clear the loading state so assistive tech isn't left told the region is busy.
-    document.querySelectorAll('[aria-busy="true"]').forEach(function (n) {
-      n.setAttribute("aria-busy", "false");
+  var page = document.body.getAttribute("data-page");
+  if (page === "home") renderHome();
+  else if (page === "product") renderProduct();
+  else if (page === "cart") {
+    renderCart();
+    fetchPage(null).then(function (data) {
+      setBrand(data.brandName);
+      setPolicy(data.policy);
     });
-  });
+  }
 })();
