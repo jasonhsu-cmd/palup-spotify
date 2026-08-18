@@ -43,7 +43,12 @@ export interface StorefrontCatalogWire {
   brandName: string;
   policy: StorePolicy;
   products: StorefrontProductWire[];
+  /** Cursor for the next page; absent when there are no more products (drives the grid's "Load more"). */
+  nextCursor?: string;
 }
+
+/** Products per grid page. A browsable subset — the grid pages, so any catalog size renders. */
+export const STOREFRONT_PAGE_LIMIT = 24;
 
 /**
  * Pure projection: a tenant's GroundingContext → the storefront wire shape, building the platform-specific
@@ -54,6 +59,7 @@ export interface StorefrontCatalogWire {
 export function projectStorefrontCatalog(
   context: GroundingContext,
   shopDomain: string | undefined,
+  nextCursor?: string,
 ): StorefrontCatalogWire {
   const products: StorefrontProductWire[] = context.products.map((p) => ({
     id: p.id,
@@ -72,7 +78,7 @@ export function projectStorefrontCatalog(
     cartUrl: shopDomain && p.variantId ? cartPermalink(shopDomain, p.variantId) : undefined,
     productUrl: shopDomain && p.handle ? productPermalink(shopDomain, p.handle) : undefined,
   }));
-  return { brandName: context.brandName, policy: context.policy, products };
+  return { brandName: context.brandName, policy: context.policy, products, nextCursor };
 }
 
 const EMPTY_CATALOG: StorefrontCatalogWire = {
@@ -84,8 +90,10 @@ const EMPTY_CATALOG: StorefrontCatalogWire = {
 export interface StorefrontCatalogDeps {
   /** Registry/env tenant resolution by shop domain. Non-ok (unknown/revoked/region-unset/error) → uniform 404. */
   resolveTenant(shop: string | undefined): Promise<{ ok: boolean; tenantId?: string }>;
-  /** The cached grounding port; fails closed to a safe-empty context (never a wrong tenant's catalog). */
-  getContext(tenantId: string): Promise<GroundingContext>;
+  /** Paginated grid fetch — ONE page of products (+ brand/policy) and a cursor for the next page. Fails
+   *  closed to a safe-empty context. Unlike the assistant's whole-catalog getContext, this NEVER hits the
+   *  1000-SKU ceiling, so it renders any catalog size (browsable subset + "load more"). */
+  getCatalogPage(tenantId: string, first: number, after?: string): Promise<{ context: GroundingContext; nextCursor?: string }>;
   /** The tenant's *.myshopify.com domain (server-side config), for building cart/product URLs. */
   shopDomainFor(tenantId: string): Promise<string | undefined>;
   /** Per-IP rate check (public, unauthenticated). true = allowed. Fail-OPEN like /widget/token. */
@@ -131,7 +139,8 @@ export function registerStorefrontCatalogRoutes(app: FastifyInstance, deps: Stor
     // oracle. One uniform 404 body for every non-ok outcome. The resolver swallows its own errors today,
     // but guard a throw too (security-review LOW) so a future throwing resolver can't create a 500-vs-404
     // oracle (error distinguishable from unknown) — every failure collapses to the same 404.
-    const shop = (req.query as { shop?: string } | undefined)?.shop;
+    const q = (req.query as { shop?: string; cursor?: string } | undefined) ?? {};
+    const shop = q.shop;
     let resolved: { ok: boolean; tenantId?: string };
     try {
       resolved = await deps.resolveTenant(shop);
@@ -153,17 +162,21 @@ export function registerStorefrontCatalogRoutes(app: FastifyInstance, deps: Stor
       return { error: "rate limited" };
     }
 
-    // The cached grounding port already fails closed to safe-empty; guard a genuine throw too so a cold
-    // Shopify failure degrades to an honest empty catalog (200) rather than a 500.
-    let context: GroundingContext | null = null;
+    // Opaque cursor from the client, bounded (it is echoed back to Shopify's `after`; a length cap keeps a
+    // hostile value from bloating the request). Absent ⇒ first page.
+    const cursor = typeof q.cursor === "string" && q.cursor.length > 0 && q.cursor.length <= 512 ? q.cursor : undefined;
+
+    // Fetch ONE page. Guard a genuine throw so a cold Shopify failure degrades to an honest empty catalog
+    // (200) rather than a 500 — and, unlike the assistant's getContext, this never fails on a >1000-SKU store.
+    let page: { context: GroundingContext; nextCursor?: string } | null = null;
     try {
-      context = await deps.getContext(tenantId);
+      page = await deps.getCatalogPage(tenantId, STOREFRONT_PAGE_LIMIT, cursor);
     } catch {
-      context = null;
+      page = null;
     }
     const shopDomain = await deps.shopDomainFor(tenantId).catch(() => undefined);
 
     reply.header("cache-control", "public, max-age=300, stale-while-revalidate=600");
-    return context ? projectStorefrontCatalog(context, shopDomain) : EMPTY_CATALOG;
+    return page ? projectStorefrontCatalog(page.context, shopDomain, page.nextCursor) : EMPTY_CATALOG;
   });
 }

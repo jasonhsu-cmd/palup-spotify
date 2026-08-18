@@ -35,7 +35,7 @@ const CTX: GroundingContext = {
 
 const baseDeps = (over: Partial<StorefrontCatalogDeps> = {}): StorefrontCatalogDeps => ({
   resolveTenant: async (shop) => (shop === "acme.myshopify.com" ? { ok: true, tenantId: "demo" } : { ok: false }),
-  getContext: async () => CTX,
+  getCatalogPage: async () => ({ context: CTX }),
   shopDomainFor: async () => "acme.myshopify.com",
   allowIp: async () => true,
   allowTenant: async () => true,
@@ -120,7 +120,7 @@ describe("GET /storefront/catalog (route unit)", () => {
       tenantId: "demo", brandName: "Auria", policy: { returns: "", shipping: "" },
       products: [{ id: "p1", title: "X", price: "$1", description: "d", imageUrl: "javascript:alert(1)" }],
     };
-    const a = await app({ getContext: async () => bad });
+    const a = await app({ getCatalogPage: async () => ({ context: bad }) });
     const res = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com" });
     expect(JSON.parse(res.body).products[0].imageUrl).toBeUndefined();
     await a.close();
@@ -128,7 +128,7 @@ describe("GET /storefront/catalog (route unit)", () => {
 
   it("a resolvable-but-empty tenant returns 200 with products:[] (honest 'no products', not a 404)", async () => {
     const empty: GroundingContext = { tenantId: "demo", brandName: "Auria", policy: { returns: "", shipping: "" }, products: [] };
-    const a = await app({ getContext: async () => empty });
+    const a = await app({ getCatalogPage: async () => ({ context: empty }) });
     const res = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com" });
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).products).toEqual([]);
@@ -136,7 +136,7 @@ describe("GET /storefront/catalog (route unit)", () => {
   });
 
   it("a cold grounding failure degrades to 200 empty catalog (never a 500)", async () => {
-    const a = await app({ getContext: async () => { throw new Error("shopify down"); } });
+    const a = await app({ getCatalogPage: async () => { throw new Error("shopify down"); } });
     const res = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com" });
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
@@ -151,6 +151,23 @@ describe("GET /storefront/catalog (route unit)", () => {
     const body = JSON.parse(res.body);
     expect(body.products[0].cartUrl).toBeUndefined();
     expect(body.products[0].productUrl).toBeUndefined();
+    await a.close();
+  });
+
+  it("paginates: returns nextCursor and forwards ?cursor= to the reader's `after` (durable for any size)", async () => {
+    let seenAfter: string | undefined = "UNSET";
+    const a = await app({
+      getCatalogPage: async (_t, _first, after) => {
+        seenAfter = after;
+        return { context: CTX, nextCursor: "CURSOR_2" };
+      },
+    });
+    const first = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com" });
+    expect(JSON.parse(first.body).nextCursor).toBe("CURSOR_2");
+    expect(seenAfter).toBeUndefined(); // first page: no cursor
+    const next = await a.inject({ method: "GET", url: "/storefront/catalog?shop=acme.myshopify.com&cursor=CURSOR_2" });
+    expect(next.statusCode).toBe(200);
+    expect(seenAfter).toBe("CURSOR_2"); // the client's cursor is forwarded to Shopify's `after`
     await a.close();
   });
 

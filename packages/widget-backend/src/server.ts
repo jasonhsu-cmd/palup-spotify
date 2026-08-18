@@ -77,8 +77,9 @@ import {
   CAA_CLIENT_SECRET_NAME,
   type CallbackResult,
 } from "./customer-account-flow.js";
-import { parseStoreDomains, parsePrimaryDomains } from "./merchant-store.js";
+import { parseStoreDomains, parsePrimaryDomains, resolveStorefrontCredential } from "./merchant-store.js";
 import type { StorefrontFetch } from "./shopify-grounding.js";
+import { storefrontCatalogPageFetch, mapStorefrontToContext } from "./shopify-grounding.js";
 import { createMerchantResolver, consentModeFor } from "./merchant-resolver.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE, DELEGATE_SCOPES_DEFAULT } from "./shopify-install-identity.js";
 import {
@@ -1454,12 +1455,34 @@ export async function buildServer(opts?: {
   // /widget/token mint) AND per-tenant (fail-CLOSED cost backstop — security-review MEDIUM: the per-IP
   // limiter is XFF-spoofable, so the unspoofable per-tenant ceiling is what stops a cold-fetch stampede on
   // a merchant's private Shopify token). Uniform 404 for every non-ok tenant (no existence oracle).
+  // WS-storefront — the paginated grid reader (a browsable subset + cursor). Resolves the tenant's creds the
+  // SAME way grounding does, then fetches ONE page — never the whole-catalog ceiling — so the storefront
+  // renders even the >1000-SKU stores where the assistant's getContext fails closed to empty. A non-live
+  // tenant (dev/fixtures) falls back to the grounding port's own catalog, bounded to one page.
+  const storefrontPageFetch = storefrontCatalogPageFetch();
+  const getCatalogPage = async (tenantId: string, first: number, after?: string) => {
+    const outcome = await resolveStorefrontCredential(tenantId, {
+      secrets,
+      credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
+      readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
+      shopDomainFor: (t) => merchants.shopDomainFor(t),
+    });
+    if (outcome.status === "live") {
+      const data = await storefrontPageFetch(outcome.creds, first, after);
+      const ctx = mapStorefrontToContext(tenantId, data);
+      const pi = data.products?.pageInfo;
+      return { context: ctx, nextCursor: pi?.hasNextPage && pi?.endCursor ? pi.endCursor : undefined };
+    }
+    if (outcome.status === "refuse") throw new Error("storefront credential unreadable");
+    const ctx = await grounding.getContext(tenantId);
+    return { context: { ...ctx, products: ctx.products.slice(0, first) }, nextCursor: undefined };
+  };
   registerStorefrontCatalogRoutes(app, {
     resolveTenant: async (shop) => {
       const r = await merchants.tenantForShopDomain(shop ?? "");
       return { ok: r.kind === "ok", tenantId: r.kind === "ok" ? r.tenantId : undefined };
     },
-    getContext: (tenantId) => grounding.getContext(tenantId),
+    getCatalogPage,
     shopDomainFor: (tenantId) => merchants.shopDomainFor(tenantId),
     allowIp: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
     allowTenant: async (tenantId) => {

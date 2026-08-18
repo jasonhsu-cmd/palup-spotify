@@ -525,6 +525,59 @@ export type StorefrontByIdFetch = (creds: ShopifyStoreCreds, ids: string[]) => P
  * UNCHANGED by chunking — a null (or non-Product) node in any slice is still simply absent from the merged
  * result, same as a single-call fetch.
  */
+/**
+ * Storefront GRID fetch — a SINGLE page + cursor, for the sample storefront's browsable product grid.
+ *
+ * Unlike `storefrontFetch` (whole-catalog-or-nothing — it THROWS past the 1000-SKU ceiling, so the
+ * assistant is honestly grounded on the whole catalog or none), a browsable grid is not making a
+ * "we don't carry X" claim; it just shows a page and offers "load more". So this returns ONE page
+ * (`first`, `after` cursor) and never throws a ceiling — it works for ANY catalog size, including the
+ * >1000-SKU stores where `getContext` fails closed to empty. Same host guard + private-token header;
+ * the token is never logged. Bounded `first` at `STOREFRONT_PAGE_SIZE` (250).
+ */
+export type StorefrontPageFetch = (creds: ShopifyStoreCreds, first: number, after?: string) => Promise<StorefrontData>;
+export function storefrontCatalogPageFetch(
+  fetchFn: typeof globalThis.fetch = globalThis.fetch,
+  opts: { version?: string; timeoutMs?: number; log?: (info: StorefrontEgressLog) => void } = {},
+): StorefrontPageFetch {
+  const version = opts.version ?? STOREFRONT_API_VERSION;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PAGE_TIMEOUT_MS;
+  const log = opts.log ?? ((info: StorefrontEgressLog) => console.log("[grounding.shopify] " + JSON.stringify(info)));
+  return async (creds, first, after) => {
+    if (!SHOP_HOST.test(creds.shopDomain)) {
+      throw new Error("refusing Shopify fetch: shopDomain is not a *.myshopify.com host"); // never leak the token
+    }
+    const url = `https://${creds.shopDomain}/api/${version}/graphql.json`;
+    const pageSize = Math.max(1, Math.min(Math.floor(first), STOREFRONT_PAGE_SIZE));
+    const start = Date.now();
+    let status = 0;
+    let ok = false;
+    let nodeCount: number | undefined;
+    try {
+      const res = await fetchFn(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Shopify-Storefront-Private-Token": creds.accessToken },
+        body: JSON.stringify({ query: STOREFRONT_QUERY, variables: { first: pageSize, after: after ?? null } }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      status = res.status;
+      ok = res.ok;
+      if (!res.ok) throw new Error("Shopify Storefront API request failed"); // static (F1)
+      const json = (await res.json()) as { data?: StorefrontData; errors?: Array<{ message?: string }> };
+      if (Array.isArray(json.errors) && json.errors.length) throw new Error("Shopify Storefront GraphQL error");
+      const data = json.data ?? {};
+      nodeCount = data.products?.nodes?.length ?? 0;
+      return data;
+    } finally {
+      try {
+        log({ host: creds.shopDomain, status, ok, ms: Date.now() - start, page: 1, nodes: nodeCount });
+      } catch {
+        /* ignore logging errors */
+      }
+    }
+  };
+}
+
 export function storefrontFetchByIds(
   fetchFn: typeof globalThis.fetch = globalThis.fetch,
   opts: { version?: string; timeoutMs?: number; log?: (info: StorefrontEgressLog) => void } = {},
