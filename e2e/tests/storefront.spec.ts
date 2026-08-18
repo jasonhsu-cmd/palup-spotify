@@ -50,3 +50,97 @@ test.describe("sample storefront", () => {
     await expect(note).not.toContainText(/human/i);
   });
 });
+
+/**
+ * The cart page renders entirely from localStorage (app.js readCart → renderCart) — it does NOT need the
+ * catalog API — so the POPULATED cart flow (rows, qty +/-, remove, badge sync, checkout permalink) is fully
+ * deterministic in the mock CI backend and belongs here, not only on staging. This closes the audit gaps
+ * "cart-line-items-render-and-mutate" and "checkout-permalink-handoff": before this, only the EMPTY cart was
+ * covered, so a regression in the money-adjacent checkout link or the qty/remove math would ship green.
+ * Cart key mirrors app.js: `palup.storefront.cart.v1.<shop>` with the storefront's default shop. */
+const CART_KEY = "palup.storefront.cart.v1.palup-skincare-jason.myshopify.com";
+async function seedCart(page: import("@playwright/test").Page, items: unknown[]): Promise<void> {
+  // addInitScript runs before app.js on every navigation, so the boot-time readCart() sees the seed.
+  await page.addInitScript(
+    ({ key, items }) => window.localStorage.setItem(key, JSON.stringify(items)),
+    { key: CART_KEY, items },
+  );
+}
+
+test.describe("sample storefront — populated cart (localStorage-driven, deterministic in mock)", () => {
+  const LINES = [
+    { productId: "gid://p1", variantId: "111", handle: "alpha", title: "Alpha Serum", price: "$20.0", imageUrl: "https://cdn.shopify.com/s/files/1/x.jpg", quantity: 2 },
+    { productId: "gid://p2", variantId: "222", handle: "beta", title: "Beta Cream", price: "$35.0", quantity: 1 }, // no imageUrl → placeholder, no <img>
+  ];
+
+  test("renders seeded lines (titles, prices, thumb only when imageUrl present) and a synced badge", async ({ page }) => {
+    await seedCart(page, LINES);
+    await page.goto("/cart");
+    await expect(page.locator("#cart")).toHaveAttribute("data-ready", "1");
+    const rows = page.locator('[data-testid="cart-list"] > li');
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText("Alpha Serum");
+    await expect(rows.nth(0)).toContainText("$20.0");
+    await expect(rows.nth(0).locator("img")).toHaveAttribute("src", "https://cdn.shopify.com/s/files/1/x.jpg");
+    await expect(rows.nth(1).locator("img")).toHaveCount(0); // no imageUrl → "No image" placeholder, never a broken <img>
+    await expect(page.locator("[data-cart-count]").first()).toHaveText("3"); // 2 + 1
+  });
+
+  test("qty +/- and remove mutate the cart, splice a line at zero, and sync the badge", async ({ page }) => {
+    await seedCart(page, LINES);
+    await page.goto("/cart");
+    const rows = page.locator('[data-testid="cart-list"] > li');
+    const alpha = rows.filter({ hasText: "Alpha Serum" });
+    await alpha.getByRole("button", { name: "Increase quantity of Alpha Serum" }).click();
+    await expect(alpha.locator(".qty > span")).toHaveText("3");
+    await expect(page.locator("[data-cart-count]").first()).toHaveText("4"); // 3 + 1
+
+    // decrement Beta 1 → 0 → the line splices out
+    await rows.filter({ hasText: "Beta Cream" }).getByRole("button", { name: "Decrease quantity of Beta Cream" }).click();
+    await expect(rows).toHaveCount(1);
+
+    // remove the last line → the honest empty state returns and the badge hides
+    await page.getByRole("button", { name: "Remove Alpha Serum" }).click();
+    await expect(page.locator("#cart")).toHaveAttribute("data-ready", "empty");
+    await expect(page.locator("[data-cart-count]").first()).toBeHidden();
+  });
+
+  test("checkout permalink is enabled for numeric variants and clamps quantity to 99", async ({ page }) => {
+    await seedCart(page, [{ productId: "gid://p1", variantId: "987654", title: "X", price: "$1", quantity: 250 }]);
+    await page.goto("/cart");
+    const checkout = page.locator('[data-testid="checkout"]');
+    await expect(checkout).toHaveAttribute("href", "https://palup-skincare-jason.myshopify.com/cart/987654:99");
+    await expect(checkout).toHaveAttribute("target", "_blank");
+    await expect(checkout).toHaveAttribute("rel", /noopener/);
+  });
+
+  test("checkout permalink is disabled (no navigable href) when no line has a numeric variant", async ({ page }) => {
+    await seedCart(page, [{ productId: "gid://p1", variantId: "not-a-number", title: "X", price: "$1", quantity: 1 }]);
+    await page.goto("/cart");
+    const checkout = page.locator('[data-testid="checkout"]');
+    await expect(checkout).toHaveAttribute("aria-disabled", "true");
+    expect(await checkout.getAttribute("href")).toBeNull();
+  });
+
+  test("populated cart is WCAG 2.2 AA clean", async ({ page }) => {
+    await seedCart(page, LINES);
+    await page.goto("/cart");
+    await expect(page.locator("#cart")).toHaveAttribute("data-ready", "1");
+    const results = await new AxeBuilder({ page }).withTags(WCAG22AA).analyze();
+    expect(results.violations).toEqual([]);
+  });
+});
+
+test.describe("sample storefront — product not-found (soft-404)", () => {
+  // No test previously visited /product/:handle at all. In the mock backend the catalog resolves empty, so
+  // every direct PDP falls into the not-found path — which is exactly the honest state we must guarantee is
+  // reachable, readable, and accessible (a bad/stale/typo URL, or SEO/ad landing on a removed product).
+  test("an unknown handle renders the honest not-found state with a browse link, WCAG 2.2 AA clean", async ({ page }) => {
+    await page.goto("/product/this-handle-does-not-exist");
+    await expect(page.locator("#pdp")).toHaveAttribute("data-ready", "notfound");
+    await expect(page.locator("#pdp")).toContainText("Sorry — we couldn't find that product from here.");
+    await expect(page.locator('#pdp a[href="/"]')).toBeVisible();
+    const results = await new AxeBuilder({ page }).withTags(WCAG22AA).analyze();
+    expect(results.violations).toEqual([]);
+  });
+});
