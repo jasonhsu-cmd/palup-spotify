@@ -1,5 +1,5 @@
 import type { RuntimeStatePort, VectorListItem, VectorPort } from "@palup/platform-ports";
-import { subjectNamespace } from "./identity.js";
+import { subjectNamespace, floorNamespace } from "./identity.js";
 import { buildMemoryAudit } from "./audit.js";
 import type { FactClass } from "./classifier.js";
 import type { FactMetadata } from "./types.js";
@@ -92,6 +92,12 @@ function classOf(item: VectorListItem): FactClass | undefined {
  */
 export async function eraseSubject(deps: ErasureDeps, ctx: SubjectRef): Promise<void> {
   await deps.vector.deleteNamespace(subjectNamespace(ctx.tenantId, ctx.anonId));
+  // #125 — safety-floor rows (special-category facts) now live in a SEPARATE per-subject namespace
+  // (identity.ts's `floorNamespace`), so a full subject erasure must delete THIS namespace too — otherwise
+  // a "forget me" request would silently leave every floor row behind. `deleteNamespace` on an
+  // unknown/empty namespace is a documented no-op (vector-port.ts), so this is safe even for a subject
+  // that never wrote a special-category fact at all.
+  await deps.vector.deleteNamespace(floorNamespace(ctx.tenantId, ctx.anonId));
   await deps.audit.audit(
     { tenantId: ctx.tenantId },
     buildMemoryAudit({ action: "erase.subject", tenantId: ctx.tenantId, anonId: ctx.anonId, hmacKey: deps.hmacKey }),
@@ -145,7 +151,10 @@ async function idsForClassOrEscalate(
  * facts is purged completely, and the audited `count` is the TRUE total purged, not a capped estimate.
  */
 export async function withdrawConsent2(deps: ErasureDeps, ctx: SubjectRef): Promise<{ purged: number }> {
-  const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
+  // #125 — special-category facts now live in the dedicated FLOOR namespace (identity.ts), not the main
+  // subject namespace, so this purge must enumerate/delete THERE — the main namespace no longer holds any
+  // `class: "special"` row to find (write-side routing in service.ts's `remember()` is unconditional).
+  const namespace = floorNamespace(ctx.tenantId, ctx.anonId);
   const specialIds = await idsForClassOrEscalate(deps, ctx, namespace, "special");
 
   if (specialIds.length > 0) await deps.vector.deleteById(namespace, specialIds);

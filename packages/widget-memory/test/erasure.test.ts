@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createInMemoryVectorStore, InMemoryRuntimeStore, createEnvSecrets, type SecretsPort } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
 import { eraseSubject, withdrawConsent1, withdrawConsent2, eraseTenant } from "../src/erasure.js";
-import { subjectNamespace } from "../src/identity.js";
+import { subjectNamespace, floorNamespace } from "../src/identity.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
@@ -167,7 +167,9 @@ describe("erasure — completeness at the OLD 500-record boundary (semantic-memo
   it("withdrawConsent2 no longer fails closed at the old 500-record boundary — a subject with EXACTLY 500 special facts is purged COMPLETELY, not rejected", async () => {
     const vector = createInMemoryVectorStore();
     const runtimeStore = new InMemoryRuntimeStore();
-    const namespace = subjectNamespace("acme", "guest-boundary-500");
+    // #125 — withdrawConsent2 now enumerates/deletes special-category facts from the dedicated FLOOR
+    // namespace, not the main subject namespace.
+    const namespace = floorNamespace("acme", "guest-boundary-500");
     const records = Array.from({ length: 500 }, (_, i) => ({
       id: `s-${String(i).padStart(3, "0")}`,
       text: `special ${i}`,
@@ -235,15 +237,19 @@ describe("erasure — works on ENCRYPTED records too (ADR-0015 Inv 9, go-live bl
     const ctx: MemoryCtx = { tenantId: "acme-erase-enc", anonId: "guest-erase-enc", region: "us", consent1: "in", consent2: "in" };
     await service.remember(ctx, { message: "m", reply: "r" });
 
-    // Confirm it really is stored encrypted before erasing it.
-    const raw = await vector.query(subjectNamespace("acme-erase-enc", "guest-erase-enc"), { text: "", k: 10 });
+    // Confirm it really is stored encrypted before erasing it. #125 — special-category records now live in
+    // the dedicated FLOOR namespace.
+    const raw = await vector.query(floorNamespace("acme-erase-enc", "guest-erase-enc"), { text: "", k: 10 });
     expect(raw[0]?.metadata?.encrypted).toBe(true);
     expect(await service.recall(ctx)).toHaveLength(1);
 
     await eraseSubject({ vector, audit: runtimeStore }, { tenantId: "acme-erase-enc", anonId: "guest-erase-enc" });
 
     expect(await service.recall(ctx)).toEqual([]);
+    // eraseSubject deletes BOTH the main and floor namespaces (#125) — a full subject erasure must not
+    // leave the floor namespace behind.
     expect(await vector.query(subjectNamespace("acme-erase-enc", "guest-erase-enc"), { text: "", k: 10 })).toEqual([]);
+    expect(await vector.query(floorNamespace("acme-erase-enc", "guest-erase-enc"), { text: "", k: 10 })).toEqual([]);
   });
 
   it("withdrawConsent2 purges an encrypted special-category fact by id, exactly like a plaintext one", async () => {

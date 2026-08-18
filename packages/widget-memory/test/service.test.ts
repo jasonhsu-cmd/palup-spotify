@@ -8,7 +8,7 @@ import {
   type CryptoPort,
 } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
-import { subjectNamespace } from "../src/identity.js";
+import { subjectNamespace, floorNamespace } from "../src/identity.js";
 import { withdrawConsent2 } from "../src/erasure.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
@@ -309,7 +309,8 @@ describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live bl
     // Inspect the RAW stored record directly via the vector port — bypassing the service entirely, the
     // way a DBA/disk-snapshot/log-shipping path (the exact threat the durable Postgres adapter's own
     // go-live-gap note flagged) would see it.
-    const raw = await vector.query(subjectNamespace("acme-enc", "guest-enc"), { text: "", k: 10 });
+    // #125 — special-category records now live in the dedicated FLOOR namespace.
+    const raw = await vector.query(floorNamespace("acme-enc", "guest-enc"), { text: "", k: 10 });
     expect(raw).toHaveLength(1);
     const rawStr = JSON.stringify(raw);
     expect(rawStr).not.toContain("tree-nut");
@@ -457,7 +458,8 @@ describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live bl
 
     await service.remember(ctx, { message: "m", reply: "r" });
 
-    const raw = await vector.query(subjectNamespace("acme-dispval", "guest-dispval"), { text: "", k: 10 });
+    // #125 — special-category records now live in the dedicated FLOOR namespace, not the main subject one.
+    const raw = await vector.query(floorNamespace("acme-dispval", "guest-dispval"), { text: "", k: 10 });
     expect(raw[0]?.metadata?.encrypted).toBe(true);
     // The raw stored disposition.value must NOT be the plaintext "gift" — it's a CryptoPort envelope.
     const upserted = upsertSpy.mock.calls[0]?.[1] as Array<{ metadata?: { disposition?: Array<{ value?: string }> } }>;
@@ -627,7 +629,8 @@ describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live bl
       const resultB = await serviceB.remember(ctxB, { message: "m", reply: "r" });
       expect(resultB.written).toEqual(["special"]); // NOT "ordinary"
 
-      const rawB = await vectorB.query(subjectNamespace("acme-q2-keyed", "guest-q2-keyed"), { text: "", k: 10 });
+      // #125 — special-category records now live in the dedicated FLOOR namespace.
+      const rawB = await vectorB.query(floorNamespace("acme-q2-keyed", "guest-q2-keyed"), { text: "", k: 10 });
       expect(rawB[0]?.metadata?.class).toBe("special");
       expect(rawB[0]?.metadata?.encrypted).toBe(true);
       expect(JSON.stringify(rawB)).not.toContain("tretinoin");
@@ -670,7 +673,9 @@ describe("createMemoryService — encryption at rest (ADR-0015 Inv 9, go-live bl
     const ctx: MemoryCtx = { tenantId: "acme-relocate", anonId: "guest-relocate", region: "us", consent1: "in", consent2: "in" };
     await service.remember(ctx, { message: "m", reply: "r" });
 
-    const ns = subjectNamespace("acme-relocate", "guest-relocate");
+    // #125 — this record is special-category, so it lives in the dedicated FLOOR namespace, not the main
+    // subject one; the relocation attack below must target the namespace the record actually lives in.
+    const ns = floorNamespace("acme-relocate", "guest-relocate");
     const raw = await vector.query(ns, { text: "", k: 10 });
     expect(raw).toHaveLength(1);
     const stolenCiphertext = (raw[0]!.metadata as { text: string }).text;

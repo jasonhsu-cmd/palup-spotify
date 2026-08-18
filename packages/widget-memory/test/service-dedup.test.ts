@@ -9,7 +9,7 @@ import {
   type EmbedResponse,
 } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
-import { subjectNamespace } from "../src/identity.js";
+import { subjectNamespace, floorNamespace } from "../src/identity.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
@@ -160,7 +160,9 @@ describe("createMemoryService — write-time dedup, SPECIAL facts (exact-match k
     });
     await service2.remember(ctx, { message: "m2", reply: "r2" });
 
-    const ns = subjectNamespace("acme-dedup-special", "guest-dedup-special");
+    // #125 — special-category records now live in the dedicated FLOOR namespace, not the main subject
+    // namespace.
+    const ns = floorNamespace("acme-dedup-special", "guest-dedup-special");
     const listed = await vector.list(ns, { limit: 10 });
     expect(listed).toHaveLength(1); // ONE record, not two
     // The dedup mechanism for special facts is a keyed-HMAC tag stamped on the metadata (types.ts's new
@@ -191,7 +193,8 @@ describe("createMemoryService — write-time dedup, SPECIAL facts (exact-match k
     });
     await service2.remember(ctx, { message: "m2", reply: "r2" });
 
-    const ns = subjectNamespace("acme-dedup-special-2", "guest-dedup-special-2");
+    // #125 — special-category records now live in the dedicated FLOOR namespace.
+    const ns = floorNamespace("acme-dedup-special-2", "guest-dedup-special-2");
     const listed = await vector.list(ns, { limit: 10 });
     expect(listed).toHaveLength(2); // two genuinely different special facts, both retained
   });
@@ -230,8 +233,9 @@ describe("createMemoryService — special-category dedupTag is CROSS-TENANT ISOL
     });
     await serviceB.remember(ctxB, { message: "m1", reply: "r1" });
 
-    const listedA = await vectorA.list(subjectNamespace("tenant-a-shared-key", "guest-a"), { limit: 10 });
-    const listedB = await vectorB.list(subjectNamespace("tenant-b-shared-key", "guest-b"), { limit: 10 });
+    // #125 — special-category records now live in the dedicated FLOOR namespace.
+    const listedA = await vectorA.list(floorNamespace("tenant-a-shared-key", "guest-a"), { limit: 10 });
+    const listedB = await vectorB.list(floorNamespace("tenant-b-shared-key", "guest-b"), { limit: 10 });
     expect(listedA).toHaveLength(1);
     expect(listedB).toHaveLength(1);
 

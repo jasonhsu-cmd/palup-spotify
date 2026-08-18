@@ -58,6 +58,24 @@ export function subjectNamespace(tenantId: string, anonId: string): string {
   return `${tenantId}${NAMESPACE_SEPARATOR}${anonId}`;
 }
 
+/**
+ * The per-subject FLOOR namespace: `${subjectNamespace(tenantId, anonId)}::floor` — a dedicated vector-
+ * port namespace holding ONLY safety-floor rows (special-category facts, `mustRecall === true`) for this
+ * subject. Composes the already-validated `subjectNamespace` (so the `::`-injection guard above still
+ * applies to both components) rather than re-validating tenantId/anonId itself.
+ *
+ * WHY: `enumerateFloor` (service.ts) used to page the subject's ENTIRE namespace — ordinary facts and
+ * all — just to find the handful of special rows, an O(N) read per recall in the size of the WHOLE
+ * corpus. Routing special writes here instead makes that same enumeration O(floor): the floor namespace
+ * holds nothing else, so reading it to exhaustion costs proportional to the floor's own (small) size,
+ * never the subject's ordinary-fact count. The completeness guarantee (a special/`mustRecall` fact must
+ * ALWAYS surface in recall) is preserved BY CONSTRUCTION: every special row lives here, and recall reads
+ * this namespace to exhaustion.
+ */
+export function floorNamespace(tenantId: string, anonId: string): string {
+  return `${subjectNamespace(tenantId, anonId)}${NAMESPACE_SEPARATOR}floor`;
+}
+
 // Charset + length bound for a CLIENT-SUPPLIED anon id before it is trusted as a namespace component.
 // Generated ids are base32, ~26 chars for 128 bits; bounded generously (10-64) so a legitimately
 // generated id always validates while an oversized/adversarial string never does.
