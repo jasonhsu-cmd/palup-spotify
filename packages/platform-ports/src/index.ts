@@ -57,7 +57,7 @@ export { createWidgetTokenIdentity, mintWidgetToken } from "./widget-token-ident
 export { createShopperTokenIdentity, mintShopperToken } from "./shopper-token-identity.js";
 export { createGuestTokenIdentity, mintGuestToken, renewGuestToken, type GuestClaims } from "./guest-token-identity.js";
 export { redactPII, createRedactingModelPort } from "./redaction.js";
-export type { TelemetryPort, TelemetryEvent, TelemetryRollup } from "./telemetry-port.js";
+export type { TelemetryPort, TelemetryEvent, TelemetryRollup, ModelTier } from "./telemetry-port.js";
 export { createStoreTelemetry, rollupEvents } from "./telemetry-port.js";
 export { createMeteringModelPort } from "./metering.js";
 export type { ModelPrice, ModelPriceTable, CostBreakdown } from "./telemetry-cost.js";

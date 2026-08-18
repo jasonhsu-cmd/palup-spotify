@@ -149,7 +149,30 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
     if (kill) throw new Error(`run-time kill switch is ON (scope "${kill.scope}") — promotion to the live shopper agent is halted`);
   };
 
-  app.get("/api/state", async () => state());
+  // GET-route operator gate (W1-B / security review): the global onRequest hook above deliberately
+  // leaves ALL GET requests open (so the dashboard's plain reads work without wiring auth through every
+  // fetch) — that posture was fine while every GET was non-sensitive, but /api/state and /api/timeline
+  // both return governance-sensitive data (approval/audit history, the durable champion) and were
+  // reachable by ANY caller with no token at all. This is the same self-authenticating shape
+  // /api/telemetry and /api/canary already use (defined once here, reused everywhere a read needs it),
+  // moved above the routes so /api/state is never accidentally left off. FAIL-CLOSED: if OPERATOR_TOKEN
+  // (and OPERATOR_TOKENS) are both unset, operatorIdentity.authenticate has no way to mint a valid
+  // principal, so authorize() denies every caller — a read stays refused, not silently open.
+  const requireOperatorRead = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
+    const auth = req.headers["authorization"];
+    const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+    const principal = await operatorIdentity.authenticate(token);
+    if (!operatorIdentity.authorize(principal, "operator:read")) {
+      await reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
+      return false;
+    }
+    return true;
+  };
+
+  app.get("/api/state", async (req, reply) => {
+    if (!(await requireOperatorRead(req, reply))) return;
+    return state();
+  });
   app.get("/health", async () => ({ ok: true, mode }));
 
   // M3 — cost/latency telemetry read (ADR-0013). EXPLICITLY operator-gated: cost data is sensitive and
@@ -158,23 +181,25 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // the price table; an unpriced (real) model is flagged, never guessed; margin is unavailable until the
   // ADR-0007 revenue ledger exists.
   app.get("/api/telemetry", async (req, reply) => {
-    const auth = req.headers["authorization"];
-    const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
-    const principal = await operatorIdentity.authenticate(token);
-    if (!operatorIdentity.authorize(principal, "operator:read")) {
-      await reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
-      return;
-    }
+    if (!(await requireOperatorRead(req, reply))) return;
     const q = (req.query as { tenantId?: unknown })?.tenantId;
     const tenantId = typeof q === "string" && q ? q : "demo"; // coerce odd/array/missing → default
     // Bound the read (review Finding 1): roll up the most recent N events, independent of stream-trim
     // status, so an operator read can never load an unbounded stream into memory.
     const rollup = await createStoreTelemetry(runtimeStore).query({ tenantId }, { limit: 10_000 });
     const cost = deriveCostUsd(rollup, loadModelPrices());
+    // W1-A — tier-mix (docs/design/cost-margin-telemetry.md §4): surfaced ONLY when at least one recorded
+    // event actually carried a ModelTier. Nothing wires a real tier yet (the model gateway that would pick
+    // one is design-only), so today this key is absent on every tenant — honest, not a fabricated 0/0 mix.
+    const tierMix =
+      rollup.byTier && Object.keys(rollup.byTier).length > 0
+        ? { byTier: rollup.byTier, totalTieredEvents: Object.values(rollup.byTier).reduce((n, t) => n + t.events, 0) }
+        : undefined;
     return {
       tenantId,
       rollup,
       cost,
+      ...(tierMix ? { tierMix } : {}),
       margin: { status: "unavailable", reason: "revenue attribution (ADR-0007 outcome ledger) not yet built — showing COGS + latency only" },
     };
   });
@@ -323,12 +348,15 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   const store = new FileStore(".palup-state");
   let evolving = false;
 
-  app.get("/api/timeline", async () => ({
-    timeline: await store.readLog("improvement-timeline"),
-    champion: await store.read("champion"),
-    scenarios: SCENARIOS.length,
-    evolving,
-  }));
+  app.get("/api/timeline", async (req, reply) => {
+    if (!(await requireOperatorRead(req, reply))) return;
+    return {
+      timeline: await store.readLog("improvement-timeline"),
+      champion: await store.read("champion"),
+      scenarios: SCENARIOS.length,
+      evolving,
+    };
+  });
 
   // Run the full loop fresh (baseline → propose → evaluate → gate → promote) on the LIVE model, writing
   // the improvement timeline to disk. Background + a flag so the dashboard can poll while it runs.
@@ -365,21 +393,12 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // config — never a cross-tenant __system__ bucket. Mirrors the /api/telemetry tenant coercion.
   const canaryTenant = (v: unknown): string => (typeof v === "string" && v ? v : "demo");
   // Security review B1 — the canary READ returns a caller-named tenant's stats/config; the global hook
-  // leaves GET open, so this route self-authenticates `operator:read` (mirrors /api/telemetry), else an
-  // anonymous caller could read ANY merchant's canary data via ?tenantId=<victim>. The POST paths
-  // (start/stop/shadow) are already operator:mutate-gated by the onRequest hook and stay platform-
-  // operator-scoped (the shared OPERATOR_TOKEN — no per-tenant authz yet; acceptable while this is the
-  // PalUp operator/admin plane, NOT merchant-facing).
-  const requireOperatorRead = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
-    const auth = req.headers["authorization"];
-    const token = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
-    const principal = await operatorIdentity.authenticate(token);
-    if (!operatorIdentity.authorize(principal, "operator:read")) {
-      await reply.code(401).send({ error: "operator authentication required (Authorization: Bearer <OPERATOR_TOKEN>)" });
-      return false;
-    }
-    return true;
-  };
+  // leaves GET open, so this route self-authenticates `operator:read` via the shared `requireOperatorRead`
+  // defined above (mirrors /api/telemetry / /api/state / /api/timeline), else an anonymous caller could
+  // read ANY merchant's canary data via ?tenantId=<victim>. The POST paths (start/stop/shadow) are already
+  // operator:mutate-gated by the onRequest hook and stay platform-operator-scoped (the shared
+  // OPERATOR_TOKEN — no per-tenant authz yet; acceptable while this is the PalUp operator/admin plane, NOT
+  // merchant-facing).
   app.get("/api/canary", async (req, reply) => {
     if (!(await requireOperatorRead(req, reply))) return;
     const tenantId = canaryTenant((req.query as { tenantId?: unknown })?.tenantId);
@@ -439,9 +458,13 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
 const invoked = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (invoked === import.meta.url) {
   const port = Number(process.env.PORT ?? 8990);
+  // Deploy-prep (W1-B): a Cloud Run deploy needs to bind 0.0.0.0 to accept traffic; the default stays the
+  // safe loopback-only posture (dev/CI never accidentally expose the dashboard), so an operator must opt
+  // in explicitly via HOST rather than the code silently widening its own bind address.
+  const host = process.env.HOST ?? "127.0.0.1";
   buildServer()
-    .then((app) => app.listen({ port, host: "127.0.0.1" }))
-    .then(() => console.log(`control plane on http://127.0.0.1:${Number(process.env.PORT ?? 8990)}  (mode=${process.env.CP_MODE === "live" ? "live" : "mock"})`))
+    .then((app) => app.listen({ port, host }))
+    .then(() => console.log(`control plane on http://${host}:${Number(process.env.PORT ?? 8990)}  (mode=${process.env.CP_MODE === "live" ? "live" : "mock"})`))
     .catch((e) => {
       console.error(e);
       process.exit(1);

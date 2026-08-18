@@ -33,7 +33,7 @@ describe("control-plane wires REAL operator identities into approval", () => {
     const app = await buildServer({ store });
     try {
       await stageAndApprove(app, "tok-a");
-      const s = JSON.parse((await app.inject({ method: "GET", url: "/api/state" })).body);
+      const s = JSON.parse((await app.inject({ method: "GET", url: "/api/state", headers: bearer("tok-a") })).body);
       const rec = s.candidates.find((c: { policy: { id: string } }) => c.policy.id === CAND);
       expect(rec.approvedBy).toBe("alice"); // not the literal "operator"
     } finally { await app.close(); }
@@ -62,7 +62,7 @@ describe("control-plane wires REAL operator identities into approval", () => {
     delete process.env.OPERATOR_TOKEN;
     const app = await buildServer({ store: new InMemoryRuntimeStore() });
     try {
-      const s = JSON.parse((await app.inject({ method: "GET", url: "/api/state" })).body);
+      const s = JSON.parse((await app.inject({ method: "GET", url: "/api/state", headers: bearer("tok-a") })).body);
       expect(s.twoPersonPromote).toBe(true);
       expect(s.operatorCount).toBe(2);
     } finally { await app.close(); }
@@ -74,7 +74,7 @@ describe("control-plane wires REAL operator identities into approval", () => {
     const store = new InMemoryRuntimeStore();
     const app = await buildServer({ store });
     try {
-      const s = JSON.parse((await app.inject({ method: "GET", url: "/api/state" })).body);
+      const s = JSON.parse((await app.inject({ method: "GET", url: "/api/state", headers: bearer("solo") })).body);
       expect(s.twoPersonPromote).toBe(false);
       expect(s.operatorCount).toBe(1);
 

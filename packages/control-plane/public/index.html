@@ -125,7 +125,13 @@
       return await r.json();
     } finally{ busy=false; }
   }
-  async function getState(){ const r=await fetch("/api/state"); return r.json(); }
+  // W1-B: GET /api/state now requires the operator token (it used to be an open read), so this sends the
+  // same Bearer the mutating post() helper already does — otherwise a configured deployment shows nothing.
+  async function getState(){
+    const tok = opToken();
+    const r = await fetch("/api/state", tok ? { headers:{ authorization:"Bearer "+tok } } : undefined);
+    return r.json();
+  }
 
   let lastState = null;
   function pct(x){ return (x*100).toFixed(0)+"%"; }
@@ -206,7 +212,14 @@
     }).join("");
     $("#timeline").innerHTML = `<div class="metric" style="margin-bottom:6px">net quality change: <b class="${net>=0?'up':'down'}">${net>=0?"+":""}${net} pts</b> across ${tl.filter(e=>e.event==='promoted').length} promotion(s)</div>${rows}`;
   }
-  async function refreshTimeline(){ try{ renderTimeline(await (await fetch("/api/timeline")).json()); }catch{} }
+  // W1-B: GET /api/timeline is now operator-gated too — same Bearer as getState() above.
+  async function refreshTimeline(){
+    try{
+      const tok = opToken();
+      const r = await fetch("/api/timeline", tok ? { headers:{ authorization:"Bearer "+tok } } : undefined);
+      renderTimeline(await r.json());
+    }catch{}
+  }
   let shadowHtml = "";
   function renderCanary(c){
     const cfg = c.config, stats = c.stats || {};

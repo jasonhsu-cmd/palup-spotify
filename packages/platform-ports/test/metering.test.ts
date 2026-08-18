@@ -35,6 +35,20 @@ describe("createMeteringModelPort", () => {
     expect(events[0].event.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
+  it("threads an OPTIONAL construction-time tier onto the model_call event when the caller supplies one", async () => {
+    const { events, port: telemetry } = spyTelemetry();
+    const port = createMeteringModelPort(inner, telemetry, { agentType: "shopper", tier: "high_stakes" });
+    await port.complete({ messages: [], tenantId: "acme" });
+    expect(events[0].event.tier).toBe("high_stakes");
+  });
+
+  it("omits tier when the caller doesn't supply one (no fabricated default)", async () => {
+    const { events, port: telemetry } = spyTelemetry();
+    const port = createMeteringModelPort(inner, telemetry, { agentType: "shopper" });
+    await port.complete({ messages: [], tenantId: "acme" });
+    expect(events[0].event.tier).toBeUndefined();
+  });
+
   it("attributes a missing tenant to 'unknown', never cross-tenant", async () => {
     const { events, port: telemetry } = spyTelemetry();
     const port = createMeteringModelPort(inner, telemetry);
