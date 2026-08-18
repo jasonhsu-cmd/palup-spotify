@@ -120,7 +120,7 @@
   {
     "id": "support-order",
     "status": 200,
-    "body": "{\"reply\":\"I've confirmed order #1042 is on your account — it's in transit — arriving in about 2 days.\",\"mode\":\"support\",\"pitch\":\"none\",\"escalate\":false,\"outbound\":false,\"flags\":[\"mode_support\",\"no_pitch\",\"support:order_status\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
+    "body": "{\"reply\":\"I can't look up your order or account details here yet — I don't have access to them, and I won't guess. Let me bring in a member of our team who can pull that up for you right away.\",\"mode\":\"support\",\"pitch\":\"none\",\"escalate\":true,\"outbound\":false,\"flags\":[\"mode_support\",\"no_pitch\",\"support:order_status\",\"account_lookup_unavailable\",\"escalate\"],\"servedBy\":\"champion-v0\",\"memoryEnabled\":false,\"consentMode\":\"opt_out\"}",
     "telemetry": [
       {
         "kind": "turn",
@@ -128,7 +128,7 @@
         "servedBy": "champion-v0",
         "mode": "support",
         "pitch": "none",
-        "escalate": false
+        "escalate": true
       }
     ]
   },

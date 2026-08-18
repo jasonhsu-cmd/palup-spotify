@@ -60,6 +60,14 @@ export function guardCommercePort(port: CommercePort, isLive: boolean, getPrinci
     if (shopperId !== undefined && p.shopperId !== shopperId) throw new CommerceGuardRefusalError(method);
   }
   return {
+    // Forward the wrapped port's fixture marker (security review). The GUARDED port is what production
+    // wires into the brain (server.ts → brainFor → support.ts), and support.ts suppresses demo-account
+    // facts ONLY when `commerce.isFixtureData === true`. Dropping it here meant that on the default mock
+    // path the guarded port reported `undefined`, the honesty guard never fired, and a real shopper could
+    // be told a DEMO order as real. Forwarding it restores that suppression.
+    get isFixtureData() {
+      return port.isFixtureData;
+    },
     async getOrder(orderId) {
       check("getOrder");
       return port.getOrder(orderId);
