@@ -47,6 +47,23 @@ describe("control-plane operator auth (default-deny on mutations)", () => {
     }
   });
 
+  // The bind-via-HOST change in this PR makes a non-loopback deploy possible, so the two remaining open
+  // GET reads — /api/runtime-kill (which agents/tenants are halted) and /api/cost-cap (budget scope) —
+  // would become live governance-data leaks. Gate them like /api/state (security review MED).
+  it("GET /api/runtime-kill and GET /api/cost-cap now require the operator token", async () => {
+    process.env.OPERATOR_TOKEN = "test-op";
+    const app = await buildServer();
+    try {
+      for (const url of ["/api/runtime-kill", "/api/cost-cap"]) {
+        expect((await app.inject({ method: "GET", url })).statusCode, `${url} unauth`).toBe(401);
+        expect((await app.inject({ method: "GET", url, headers: { authorization: "Bearer nope" } })).statusCode, `${url} wrong`).toBe(401);
+        expect((await app.inject({ method: "GET", url, headers: { authorization: "Bearer test-op" } })).statusCode, `${url} ok`).toBe(200);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   it("FAILS CLOSED: with no OPERATOR_TOKEN configured, every mutation is denied", async () => {
     delete process.env.OPERATOR_TOKEN;
     const app = await buildServer();

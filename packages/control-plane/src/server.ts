@@ -295,7 +295,10 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // instance (prod: both this plane and the backend point at the same Cloud SQL via DATABASE_URL).
   // Distinct from /api/kill above — this stops the product, not the promotion pipeline. Arm/disarm is
   // audited on the immutable log inside the store.
-  app.get("/api/runtime-kill", async () => ({ scopes: await killStatus(runtimeStore) }));
+  app.get("/api/runtime-kill", async (req, reply) => {
+    if (!(await requireOperatorRead(req, reply))) return;
+    return { scopes: await killStatus(runtimeStore) };
+  });
   app.post("/api/runtime-kill", async (req) => {
     const b = (req.body ?? {}) as { scope?: KillScope; reason?: string };
     await armKill(runtimeStore, b.scope ?? "global", b.reason ?? "operator");
@@ -313,7 +316,10 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // clause. These are the routes the registry's audit `reversalPath` names, so the reversal an immutable
   // record promises is one an operator can actually run (NN#5 — the same discipline PR #166 applied after
   // finding the kill switch's reversalPath pointing at an undeployed route).
-  app.get("/api/cost-cap", async () => ({ scopes: await costCapStatus(runtimeStore) }));
+  app.get("/api/cost-cap", async (req, reply) => {
+    if (!(await requireOperatorRead(req, reply))) return;
+    return { scopes: await costCapStatus(runtimeStore) };
+  });
   app.post("/api/cost-cap", async (req) => {
     const b = (req.body ?? {}) as { scope?: CostCapScope; reason?: string };
     // Default `global` matches /api/runtime-kill's default: the platform-wide COGS cap is the one an
