@@ -51,4 +51,11 @@ describe("memoryWriteMessage", () => {
   it("MEMORY_WRITE_TOPIC is the stable topic name", () => {
     expect(MEMORY_WRITE_TOPIC).toBe("memory.write");
   });
+
+  it("a boundary shift between message and reply produces a DIFFERENT id (no false dedup)", () => {
+    // "x" + "y z"  vs  "x y" + "z" — a space-joined preimage would hash both to "...x y z".
+    const a = memoryWriteMessage(ctx, { message: "x", reply: "y z" }, 1);
+    const b = memoryWriteMessage(ctx, { message: "x y", reply: "z" }, 1);
+    expect(a.id).not.toBe(b.id);
+  });
 });

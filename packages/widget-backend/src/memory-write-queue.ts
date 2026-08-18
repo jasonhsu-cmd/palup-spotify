@@ -25,7 +25,12 @@ export const MEMORY_WRITE_TOPIC = "memory.write";
  */
 export function memoryWriteMessage(ctx: MemoryCtx, turn: MemoryTurn, nowMs: number): QueueMessage {
   void nowMs; // accepted for symmetry with other message builders; not part of the idempotency key
-  const id = createHash("sha256").update(`${ctx.tenantId} ${ctx.anonId} ${turn.message} ${turn.reply}`).digest("hex");
+  // NUL-separated (not space-separated): free shopper text can itself contain a space, so a space-joined
+  // preimage lets a boundary shift between fields produce the SAME hash for two DIFFERENT turns (e.g.
+  // message="x"/reply="y z" vs message="x y"/reply="z" both join to "...x y z") — the queue would then
+  // dedup them as "already processed" and silently drop a real fact. `\0` cannot occur in ordinary
+  // shopper/model text, so each field's boundary is unambiguous.
+  const id = createHash("sha256").update(`${ctx.tenantId}\0${ctx.anonId}\0${turn.message}\0${turn.reply}`).digest("hex");
   return {
     id,
     type: MEMORY_WRITE_TOPIC,
