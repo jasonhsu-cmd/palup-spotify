@@ -102,20 +102,30 @@ export class EvolutionEngine {
     // NEVER promote on its own without proof it did not worsen the outcomes that matter. This closes the
     // old vacuity where absent counter-metrics defaulted to 0 and `0 > 0` never blocked. (complaintRate is
     // a LIVE-TRAFFIC metric that ADR-0014 #10's delayed-signal measurement WILL compute in the canary
-    // window — that is not built yet, so complaintRate is enforced nowhere today; it is optional here, and
-    // when BOTH sides do carry it a rise still blocks.)
+    // window, and control-plane/counter-metrics.ts does not populate it yet — see the Wave-1 (C) comment
+    // below for exactly how it is enforced once it IS present.)
     const candCm = counterMetricsComplete(cand.counterMetrics);
     const champCm = counterMetricsComplete(champ.counterMetrics);
     if (!candCm) reasons.push("counter-metrics-absent");
     else if (!champCm) reasons.push("counter-metrics-baseline-absent"); // no baseline ⇒ can't prove not-worse
+    // Revenue-flywheel Wave-1 (C) — hard-gate #1: complaintRate stays OPTIONAL (no honest deterministic
+    // pre-promotion proxy exists; control-plane/counter-metrics.ts) but is now a FIRST-CLASS GATED metric:
+    // once EITHER side reports it, a malformed value (NaN/out-of-range) fails closed exactly like the
+    // three required metrics above (`isRate01`, shared with the fairness/leak floors below) rather than
+    // silently comparing as "not worse". Absent on either side stays a no-op — never forced required
+    // (that live/canary wiring is Phase 1), so every caller today (none of which set it) is unaffected.
+    const candComplaint = cand.counterMetrics?.complaintRate;
+    const champComplaint = champ.counterMetrics?.complaintRate;
+    const complaintRateMalformed =
+      (candComplaint !== undefined && !isRate01(candComplaint)) ||
+      (champComplaint !== undefined && !isRate01(champComplaint));
+    if (complaintRateMalformed) reasons.push("complaint-rate-invalid");
     const worseCounters =
       candCm && champCm &&
       (cand.counterMetrics!.returnRate! > champ.counterMetrics!.returnRate! ||
         cand.counterMetrics!.optOutRate! > champ.counterMetrics!.optOutRate! ||
         cand.counterMetrics!.escalationRecall! < champ.counterMetrics!.escalationRecall! ||
-        (cand.counterMetrics!.complaintRate !== undefined &&
-          champ.counterMetrics!.complaintRate !== undefined &&
-          cand.counterMetrics!.complaintRate > champ.counterMetrics!.complaintRate));
+        (isRate01(candComplaint) && isRate01(champComplaint) && candComplaint > champComplaint));
     if (worseCounters) reasons.push("counter-metrics-worsened");
     // PR-1 governance floor (shopper-disposition program) — fairness/leak as DETERMINISTIC gate floors,
     // checked FAIL-CLOSED exactly like the counter-metrics above, so no persona/memory capability can ever
@@ -149,6 +159,23 @@ export class EvolutionEngine {
     if (holdoutSeedMismatch) reasons.push("holdout-seed-mismatch");
     if (holdoutRegressed) reasons.push("holdout-regressed");
     const holdoutOk = !holdoutAbsent && !holdoutBaselineAbsent && !holdoutSeedMismatch && !holdoutRegressed;
+    // Revenue-flywheel Wave-1 (D) — the MEASURED-OUTCOME seam: `qualityScore`/`holdoutScore` are
+    // judge-graded PROXIES; `measuredOutcome` is the real treated-vs-holdout INCREMENTAL business signal
+    // Phase 1 will feed once it wires a live experiment. ABSENT today (nothing populates it yet) ⇒ this
+    // block is a pure no-op and the gate decides on the proxy exactly as before — every existing caller is
+    // byte-identical. PRESENT ⇒ additionally required to be non-regressive vs. the champion's own
+    // measuredOutcome, on top of (never instead of) every check above, mirroring the holdout anti-overfit
+    // idiom exactly: no baseline to compare against ⇒ fail closed (can't prove not-worse), same-direction
+    // regression ⇒ fail closed. Still proxy-gated until Phase 1 lands: a measured win can never override a
+    // safety/floor/counter-metric/fairness/holdout failure above, it can only ADD a requirement.
+    const candMO = cand.measuredOutcome;
+    const champMO = champ.measuredOutcome;
+    const measuredOutcomeBaselineAbsent = candMO !== undefined && champMO === undefined;
+    const measuredOutcomeRegressed =
+      candMO !== undefined && champMO !== undefined && candMO.incrementalLift < champMO.incrementalLift;
+    if (measuredOutcomeBaselineAbsent) reasons.push("measured-outcome-baseline-absent");
+    if (measuredOutcomeRegressed) reasons.push("measured-outcome-regressed");
+    const measuredOutcomeOk = !measuredOutcomeBaselineAbsent && !measuredOutcomeRegressed;
     // Fail-CLOSED cross-family gate (ADR-0014): a grade the grader marked ADVISORY (gating === false —
     // a same-family judge, e.g. Gemini grading the Gemini agent, or no cross-family judge available) can
     // NEVER pass. It may still be recorded/observed, but proposer≠evaluator is unmet so it must not gate
@@ -159,7 +186,8 @@ export class EvolutionEngine {
       fairnessOk(cand.counterMetrics, champ.counterMetrics) && leakOk(cand.counterMetrics, champ.counterMetrics);
     const pass =
       cand.safetyPass && cand.floorPass && cand.qualityScore >= champ.qualityScore && improved &&
-      candCm && champCm && !worseCounters && holdoutOk && cand.gating !== false && fairnessAndLeakOk;
+      candCm && champCm && !worseCounters && !complaintRateMalformed && holdoutOk && measuredOutcomeOk &&
+      cand.gating !== false && fairnessAndLeakOk;
     if (pass) reasons.push("passed: safe + no-regression + improved + counter-metrics + fairness/leak ok");
     else if (reasons.length === 0 && !improved) reasons.push("no-improvement-over-champion");
     return { pass, reasons, delta };

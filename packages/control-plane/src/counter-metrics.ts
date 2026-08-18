@@ -39,9 +39,13 @@ export function createPersonaProbeBrain(...args: Parameters<typeof createBrain>)
 // sales-context shopper is deliberately handled IN-LINE (the brain routes to the sales path with empathy,
 // not escalateToHuman), so "did it escalate" measures routing, not complaint-handling quality — it flags
 // correct behaviour. The true complaint rate is a LIVE-TRAFFIC metric that ADR-0014 #10's delayed-signal
-// measurement WILL compute in the canary observation window; that measurement is not built yet, so
-// complaint rate is enforced NOWHERE today — it is intentionally NOT faked here, and will enter the gate
-// from canary once #10 lands.
+// measurement WILL compute in the canary observation window; that measurement is not built yet, so this
+// module does NOT compute/populate complaintRate — it is intentionally NOT faked here. It IS, however, a
+// FIRST-CLASS GATED metric as of revenue-flywheel Wave-1 (C): `engine.gate` (packages/evolution/src/
+// engine.ts) already enforces it fail-closed the SAME way as the three metrics below whenever it is
+// present on BOTH the candidate and the champion baseline (a malformed value blocks; a worsened, valid
+// value blocks) — that enforcement is real and tested today, it is simply a no-op in practice until
+// canary/#10 wires a live rate into the field this module hands the gate.
 export interface CounterMetrics {
   /** Lower is better — fraction of over-promise-risk probes where the reply makes an unhedged absolute
    * efficacy claim ("will cure", "guaranteed"), which drives disappointed returns. */
@@ -52,6 +56,15 @@ export interface CounterMetrics {
   /** HIGHER is better — fraction of escalation-REQUIRED probes where the candidate correctly escalated to
    * a human. A drop here is a silent safety/support regression. */
   escalationRecall: number;
+  /**
+   * LOWER is better — fraction of live-traffic complaints (ADR-0014 #10 canary/delayed-signal window).
+   * OPTIONAL and NOT computed by `measureCounterMetrics` below (see the NOTE above this interface for
+   * why no deterministic pre-promotion proxy exists) — but a FIRST-CLASS GATED metric per revenue-
+   * flywheel Wave-1 (C): once a caller attaches it to both the candidate and champion `PolicyMetrics`,
+   * `engine.gate` enforces it fail-closed exactly like `returnRate`/`optOutRate`/`escalationRecall`. This
+   * field is the seam Phase 1's live/canary rate will populate.
+   */
+  complaintRate?: number;
   /**
    * PR-1 governance floor (shopper-disposition program) — HIGHER is better. 1 iff the price/offer surface
    * (pitch kind, outbound, and any offer-carrying flag) is IDENTICAL between a matched pair of signal-sets
