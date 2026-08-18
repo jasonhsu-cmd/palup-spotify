@@ -10,7 +10,7 @@ import {
   type EmbedResponse,
 } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
-import { subjectNamespace } from "../src/identity.js";
+import { subjectNamespace, floorNamespace } from "../src/identity.js";
 import { writeMemoryManifest } from "../src/manifest.js";
 import type { MemoryCtx, RecalledFact } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
@@ -174,7 +174,9 @@ describe("T7 — recall() semantic top-K + safety floor (MEMORY_SEMANTIC_RECALL)
     process.env[SEMANTIC_FLAG] = "true";
     await service.remember(ctx, { message: "m", reply: "r" });
 
-    const ns = subjectNamespace(tenantId, anonId);
+    // #125 — special-category rows now live in the dedicated per-subject FLOOR namespace, not the main
+    // subject namespace; a hand-seeded special row must be placed there for recall's floor read to find it.
+    const ns = floorNamespace(tenantId, anonId);
     const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
     await vector.upsert(ns, [
       {
@@ -361,7 +363,11 @@ describe("T7 — security-review fix: the safety floor must never silently drop 
     // Simulate a special-category fact written BEFORE MEMORY_SEMANTIC_RECALL existed on this tenant:
     // `class: "special"` but deliberately NO `mustRecall` key at all — `mustRecall` is only ever stamped
     // by the flag-gated write path in `remember()`, so a pre-existing special fact never carries it.
-    const ns = subjectNamespace(tenantId, anonId);
+    // #125 — special-category rows route to the dedicated FLOOR namespace (write-side routing keys on the
+    // durable `class` marker, not `mustRecall` — see service.ts's `isSafetyFloorRow`), so this legacy-shaped
+    // row must be seeded there for recall's floor read (which no longer dual-reads the main namespace) to
+    // find it.
+    const ns = floorNamespace(tenantId, anonId);
     const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
     await vector.upsert(ns, [
       {
@@ -389,23 +395,30 @@ describe("T7 — security-review fix: the safety floor must never silently drop 
     const runtimeStore = new InMemoryRuntimeStore();
     const tenantId = "acme-floor-paginate";
     const anonId = "guest-floor-paginate";
-    const ns = subjectNamespace(tenantId, anonId);
+    // #125 — the floor is a DEDICATED namespace now, read on its own (`enumerateFloor(floorNs, ...)`, no
+    // dual-read of the main namespace) — so proving pagination completeness means seeding a floor
+    // namespace with more rows than one page, not the main one.
+    const ns = floorNamespace(tenantId, anonId);
 
     // A small cap so a modest fixture (well under the production default of 500) still forces multiple
     // pages. The in-memory store's `list` returns ids in ASCENDING lexicographic order (vector-port.ts),
-    // so 12 ordinary rows with ids that sort strictly BEFORE the special row's id will fully occupy the
-    // first two pages at cap=5, and the special row (id "zzz-special-1") only turns up on page 3 — dropped
-    // entirely by a single-page floor, surfaced only if the floor paginates to exhaustion.
+    // so 12 filler floor rows with ids that sort strictly BEFORE the special row's id will fully occupy
+    // the first two pages at cap=5, and the special row (id "zzz-special-1") only turns up on page 3 —
+    // dropped entirely by a single-page floor, surfaced only if the floor paginates to exhaustion.
     process.env[FLOOR_CAP_ENV] = "5";
-    const ORDINARY_COUNT = 12;
+    const FILLER_COUNT = 12;
     const future = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString();
-    const ordinaryRows = Array.from({ length: ORDINARY_COUNT }, (_, i) => ({
+    // Filler rows deliberately do NOT carry `class: "special"`/`mustRecall` — they stand in for whatever
+    // else might occupy floor-namespace id-space ahead of the real safety fact; `isSafetyFloorRow`
+    // filters them back out of the union at the consuming site in `recall()`, so their PRESENCE (forcing
+    // pagination) is what this test proves, not their content.
+    const fillerRows = Array.from({ length: FILLER_COUNT }, (_, i) => ({
       id: `row-${String(i).padStart(2, "0")}`, // "row-00".."row-11" — sorts before "zzz-special-1"
-      text: `ordinary fact number ${i}`,
+      text: `filler fact number ${i}`,
       vector: basis(2 + i),
-      metadata: { text: `ordinary fact number ${i}`, class: "ordinary" as const, expiresAt: future, encrypted: false },
+      metadata: { text: `filler fact number ${i}`, class: "ordinary" as const, expiresAt: future, encrypted: false },
     }));
-    await vector.upsert(ns, ordinaryRows);
+    await vector.upsert(ns, fillerRows);
     await vector.upsert(ns, [
       {
         id: "zzz-special-1",

@@ -3,7 +3,7 @@ import { createInMemoryVectorStore, InMemoryRuntimeStore, createEnvSecrets, type
 import { createBrain, createSession, MockModelAdapter } from "@palup/widget-brain";
 import { createMemoryService } from "../src/service.js";
 import { mergeGuestIntoAccount } from "../src/merge.js";
-import { subjectNamespace, accountSubjectId } from "../src/identity.js";
+import { subjectNamespace, floorNamespace, accountSubjectId } from "../src/identity.js";
 import { subjectRef } from "../src/audit.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
@@ -128,6 +128,16 @@ describe("merge — mergeGuestIntoAccount", () => {
 
     const acctCtx: MemoryCtx = { tenantId: "acme", anonId: "acct:acct-4", region: "us", consent1: "in", consent2: "in" };
     expect(await service.recall(acctCtx)).toEqual([{ text: "shopper has a tree-nut allergy", class: "special" }]);
+
+    // #125 — recall() above unions main+floor, so it would ALSO pass if merge had wrongly written the
+    // special fact to the account's MAIN namespace. Assert directly, mirroring service-dedup.test.ts's
+    // vector.list(...) pattern, that the merged row lands in the account's FLOOR namespace specifically —
+    // and is ABSENT from the account's MAIN namespace.
+    const destAnonId = accountSubjectId("acct-4");
+    const floorListed = await vector.list(floorNamespace("acme", destAnonId), { limit: 10 });
+    expect(floorListed).toHaveLength(1);
+    const mainListed = await vector.list(subjectNamespace("acme", destAnonId), { limit: 10 });
+    expect(mainListed).toHaveLength(0);
   });
 
   it("emits a merge audit", async () => {

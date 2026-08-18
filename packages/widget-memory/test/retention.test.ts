@@ -1,8 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { createInMemoryVectorStore, InMemoryRuntimeStore } from "@palup/platform-ports";
 import { createMemoryService } from "../src/service.js";
-import { subjectNamespace } from "../src/identity.js";
-import { ORDINARY_TTL_DAYS, SPECIAL_TTL_DAYS, ttlForClass, sweepExpired, RENEW_MIN_GAP_MS } from "../src/retention.js";
+import { subjectNamespace, floorNamespace } from "../src/identity.js";
+import { recordSubject } from "../src/subject-index.js";
+import {
+  ORDINARY_TTL_DAYS,
+  SPECIAL_TTL_DAYS,
+  ttlForClass,
+  sweepExpired,
+  sweepAllSubjects,
+  RENEW_MIN_GAP_MS,
+} from "../src/retention.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
@@ -349,4 +357,145 @@ describe("retention — PAGINATED sweep at scale (semantic-memory-v1 foundation,
       ).toBe(true);
     },
   );
+});
+
+// #125 — retention.ts gap closed: special-category facts now live in the dedicated per-subject FLOOR
+// namespace (identity.ts's `floorNamespace`), not the main subject namespace, so `sweepExpired` must
+// reclaim BOTH namespaces — otherwise an expired special fact's TTL would never be physically swept from
+// storage (TTL-on-read in service.ts's `recall` would still hide it from being served, but it would sit
+// in the floor namespace forever). `sweepAllSubjects`'s retire check must likewise require BOTH
+// namespaces confirmed empty, or it either orphans live floor rows (retiring too early) or never retires
+// an ordinary-only subject (gating on a floor namespace that is always empty for them).
+describe("retention — sweepExpired ALSO sweeps the floor namespace (#125)", () => {
+  it("an expired floor row (special-category fact) IS swept — deleted from the floor namespace, not just the main one", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const tenantId = "acme";
+    const anonId = "guest-floor-sweep";
+    const floorNs = floorNamespace(tenantId, anonId);
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+
+    await vector.upsert(floorNs, [
+      { id: "special-expired-1", text: "tree-nut allergy", metadata: { text: "tree-nut allergy", class: "special", expiresAt: past } },
+    ]);
+
+    const deleted = await sweepExpired({ vector, audit: runtimeStore }, tenantId, [anonId], now);
+    expect(deleted).toBe(1);
+
+    const remainingFloor = await vector.list(floorNs, { limit: 10 });
+    expect(remainingFloor).toEqual([]);
+  });
+
+  it("a LIVE floor row is left untouched by the sweep", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const tenantId = "acme";
+    const anonId = "guest-floor-live";
+    const floorNs = floorNamespace(tenantId, anonId);
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const future = new Date("2030-01-01T00:00:00.000Z").toISOString();
+
+    await vector.upsert(floorNs, [
+      { id: "special-live-1", text: "tree-nut allergy", metadata: { text: "tree-nut allergy", class: "special", expiresAt: future } },
+    ]);
+
+    const deleted = await sweepExpired({ vector, audit: runtimeStore }, tenantId, [anonId], now);
+    expect(deleted).toBe(0);
+
+    const remainingFloor = await vector.list(floorNs, { limit: 10 });
+    expect(remainingFloor.map((r) => r.id)).toEqual(["special-live-1"]);
+  });
+
+  it("combines the main + floor expired counts into ONE returned total and ONE ttl_sweep audit entry (not two)", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const tenantId = "acme";
+    const anonId = "guest-floor-combined";
+    const ns = subjectNamespace(tenantId, anonId);
+    const floorNs = floorNamespace(tenantId, anonId);
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+
+    await vector.upsert(ns, [
+      { id: "ordinary-expired-1", text: "a", metadata: { text: "a", class: "ordinary", expiresAt: past } },
+    ]);
+    await vector.upsert(floorNs, [
+      { id: "special-expired-1", text: "b", metadata: { text: "b", class: "special", expiresAt: past } },
+    ]);
+
+    const deleted = await sweepExpired({ vector, audit: runtimeStore }, tenantId, [anonId], now);
+    expect(deleted).toBe(2); // combined: 1 main + 1 floor
+
+    expect(await vector.list(ns, { limit: 10 })).toEqual([]);
+    expect(await vector.list(floorNs, { limit: 10 })).toEqual([]);
+
+    const sweepAudits = (await runtimeStore.readAudit({ tenantId })).filter((r) => r.action === "ttl_sweep");
+    expect(sweepAudits).toHaveLength(1); // ONE combined audit, not one per namespace
+  });
+});
+
+describe("retention — sweepAllSubjects retires a subject only when BOTH namespaces are empty (#125)", () => {
+  it("a subject with an empty main namespace but a LIVE floor row is NOT retired", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const tenantId = "acme";
+    const anonId = "guest-floor-only";
+    const floorNs = floorNamespace(tenantId, anonId);
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const future = new Date("2030-01-01T00:00:00.000Z").toISOString();
+
+    // Main namespace is empty (no ordinary facts) — only a live floor row exists.
+    await vector.upsert(floorNs, [
+      { id: "special-live-1", text: "tree-nut allergy", metadata: { text: "tree-nut allergy", class: "special", expiresAt: future } },
+    ]);
+    await recordSubject(runtimeStore, { tenantId, subject: anonId, now });
+
+    const result = await sweepAllSubjects({ vector, audit: runtimeStore }, tenantId, { now });
+    expect(result.retired).toBe(0);
+
+    // still indexed — never dropped while the floor namespace still holds a live row
+    const rows = await runtimeStore.list({ tenantId }, "memory_subjects");
+    expect(rows.map((r) => (r.value as { subject: string }).subject)).toContain(anonId);
+  });
+
+  it("a subject is retired once BOTH the main and floor namespaces are confirmed empty", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const tenantId = "acme";
+    const anonId = "guest-both-empty";
+    const ns = subjectNamespace(tenantId, anonId);
+    const floorNs = floorNamespace(tenantId, anonId);
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+
+    // Both namespaces hold only an EXPIRED row — the sweep clears both, leaving both empty.
+    await vector.upsert(ns, [{ id: "ordinary-expired-1", text: "a", metadata: { text: "a", class: "ordinary", expiresAt: past } }]);
+    await vector.upsert(floorNs, [{ id: "special-expired-1", text: "b", metadata: { text: "b", class: "special", expiresAt: past } }]);
+    await recordSubject(runtimeStore, { tenantId, subject: anonId, now });
+
+    const result = await sweepAllSubjects({ vector, audit: runtimeStore }, tenantId, { now });
+    expect(result.deleted).toBe(2);
+    expect(result.retired).toBe(1);
+
+    const rows = await runtimeStore.list({ tenantId }, "memory_subjects");
+    expect(rows.map((r) => (r.value as { subject: string }).subject)).not.toContain(anonId);
+  });
+
+  it("an ordinary-only subject (never wrote a special fact, floor namespace always empty) is still retired once its main namespace empties out", async () => {
+    const vector = createInMemoryVectorStore();
+    const runtimeStore = new InMemoryRuntimeStore();
+    const tenantId = "acme";
+    const anonId = "guest-ordinary-only";
+    const ns = subjectNamespace(tenantId, anonId);
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    const past = new Date("2020-01-01T00:00:00.000Z").toISOString();
+
+    // No floor namespace write at all for this subject.
+    await vector.upsert(ns, [{ id: "ordinary-expired-1", text: "a", metadata: { text: "a", class: "ordinary", expiresAt: past } }]);
+    await recordSubject(runtimeStore, { tenantId, subject: anonId, now });
+
+    const result = await sweepAllSubjects({ vector, audit: runtimeStore }, tenantId, { now });
+    expect(result.retired).toBe(1); // an always-empty floor namespace never blocks retirement
+  });
 });

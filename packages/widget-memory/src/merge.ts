@@ -1,5 +1,5 @@
 import type { RuntimeStatePort, VectorListItem, VectorPort, VectorRecord } from "@palup/platform-ports";
-import { subjectNamespace, accountSubjectId } from "./identity.js";
+import { subjectNamespace, floorNamespace, accountSubjectId } from "./identity.js";
 import { buildMemoryAudit } from "./audit.js";
 import type { MemoryConsent } from "./consent.js";
 import type { FactMetadata } from "./types.js";
@@ -135,8 +135,14 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
     );
   }
   const anonNamespace = subjectNamespace(ctx.tenantId, ctx.anonId);
+  // #125 — special-category facts now live in a dedicated per-subject FLOOR namespace, guest side and
+  // account side alike. The merge must carry THAT namespace over too (gated on Inv 9, exactly like the
+  // legacy in-main-namespace case below) — otherwise a guest's allergy/health facts would never follow
+  // them to their account at all, even with Consent 2 granted.
+  const anonFloorNamespace = floorNamespace(ctx.tenantId, ctx.anonId);
   const destAnonId = accountSubjectId(ctx.accountId);
   const accountNamespace = subjectNamespace(ctx.tenantId, destAnonId);
+  const accountFloorNamespace = floorNamespace(ctx.tenantId, destAnonId);
 
   // F-8/C9 (ADR-0019 Revision 2 task 7) — every call below this point audits exactly once, carrying BOTH
   // subject refs, whatever `count` turns out to be. The querying of `anonNamespace` a few lines down is
@@ -157,9 +163,13 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
     );
 
   const matches = await listAll(deps.vector, anonNamespace);
-  // No guest facts: nothing to migrate, but the guest namespace was still READ under an account
-  // principal — that cross-subject read is recorded (count 0), never silently skipped.
-  if (matches.length === 0) {
+  // #125 — read to exhaustion just like the main namespace; NO dual-read (the main namespace is never
+  // re-scanned for floor rows — a row written after this PR only ever lives in one place).
+  const floorMatches = await listAll(deps.vector, anonFloorNamespace);
+  // No guest facts anywhere (main OR floor): nothing to migrate, but the guest namespace(s) were still
+  // READ under an account principal — that cross-subject read is recorded (count 0), never silently
+  // skipped.
+  if (matches.length === 0 && floorMatches.length === 0) {
     await recordMerge(0);
     return { merged: 0 };
   }
@@ -168,28 +178,48 @@ export async function mergeGuestIntoAccount(deps: MergeDeps, ctx: MergeCtx): Pro
   // to come from CONTENT: migrate only ids the account does not already hold. Without this, every turn
   // would re-upsert the same facts and write a fresh `merge` audit row into an append-only log.
   const alreadyHeld = new Set((await listAll(deps.vector, accountNamespace)).map((m) => m.id));
+  const alreadyHeldFloor = new Set((await listAll(deps.vector, accountFloorNamespace)).map((m) => m.id));
 
   const toMigrate: VectorRecord[] = [];
   for (const match of matches) {
     const meta = match.metadata as Partial<FactMetadata> | undefined;
+    // Defense-in-depth: post-#125 a `class:"special"` row should never appear in the MAIN namespace (it
+    // routes to the floor at write time), but Inv 9's gate still applies here in case one does — a
+    // pre-existing row seeded directly at the port layer, or written before this PR ever shipped.
     if (meta?.class === "special" && ctx.consent2 !== "in") continue; // Inv 9 — dropped, never promoted
     if (alreadyHeld.has(match.id)) continue;
     toMigrate.push({ id: match.id, text: meta?.text, metadata: match.metadata });
   }
 
-  // Nothing new to move (already held, or dropped by Inv 9) — still a cross-subject read of a
+  // #125 — every row in the FLOOR namespace IS a safety-floor (special-category) fact by construction, so
+  // Inv 9's gate applies unconditionally here: it migrates to the account's OWN floor namespace only when
+  // Consent 2 is explicitly granted for the account, otherwise it is dropped from THIS migration exactly
+  // like the legacy in-main-namespace case above (never removed from the guest's own floor namespace —
+  // copy-not-move, same as the rest of this function).
+  const toMigrateFloor: VectorRecord[] = [];
+  for (const match of floorMatches) {
+    if (ctx.consent2 !== "in") continue; // Inv 9 — dropped, never promoted onto sign-up ToS alone
+    if (alreadyHeldFloor.has(match.id)) continue;
+    const meta = match.metadata as Partial<FactMetadata> | undefined;
+    toMigrateFloor.push({ id: match.id, text: meta?.text, metadata: match.metadata });
+  }
+
+  // Nothing new to move anywhere (already held, or dropped by Inv 9) — still a cross-subject read of a
   // non-empty guest namespace, so it is still recorded (count 0), not skipped.
-  if (toMigrate.length === 0) {
+  if (toMigrate.length === 0 && toMigrateFloor.length === 0) {
     await recordMerge(0);
     return { merged: 0 };
   }
 
-  await deps.vector.upsert(accountNamespace, toMigrate);
-  // THE GUEST NAMESPACE IS DELIBERATELY LEFT ALONE — see this module's header. It is not orphaned: it
-  // stops being written to once the shopper is signed in, so the scheduled retention sweep (B4) reclaims
-  // it on the ordinary TTL. Minimisation by expiry, with no deletion primitive for an attacker to reach.
+  if (toMigrate.length > 0) await deps.vector.upsert(accountNamespace, toMigrate);
+  if (toMigrateFloor.length > 0) await deps.vector.upsert(accountFloorNamespace, toMigrateFloor);
+  // THE GUEST NAMESPACE(S) ARE DELIBERATELY LEFT ALONE — see this module's header. Neither is orphaned:
+  // both stop being written to once the shopper is signed in, so the scheduled retention sweep (B4)
+  // reclaims them on the ordinary TTL. Minimisation by expiry, with no deletion primitive for an attacker
+  // to reach.
 
-  await recordMerge(toMigrate.length);
+  const totalMerged = toMigrate.length + toMigrateFloor.length;
+  await recordMerge(totalMerged);
 
-  return { merged: toMigrate.length };
+  return { merged: totalMerged };
 }

@@ -11,7 +11,7 @@ import type {
 } from "@palup/platform-ports";
 import { createAesGcmCrypto, createEnvSecrets, canEmbed, requireEmbedInputs, requireEmbedAlignment, deriveKey } from "@palup/platform-ports";
 import { isMemoryEnabled } from "./flag.js";
-import { subjectNamespace } from "./identity.js";
+import { subjectNamespace, floorNamespace } from "./identity.js";
 import { decideMemoryWrite } from "./consent.js";
 import { consentPermitsFactClass } from "@palup/widget-brain";
 import { classifyFact, type FactClass } from "./classifier.js";
@@ -477,6 +477,11 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     const capability = decideMemoryWrite({ region: ctx.region, consent1: ctx.consent1, consent2: ctx.consent2 });
     const candidates = await distiller.distill(turn);
     const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
+    // "Pinned floor namespace" (#125) — a dedicated per-subject namespace holding ONLY safety-floor rows
+    // (special-category facts), so `recall()`'s floor enumeration is O(floor) instead of O(whole corpus).
+    // Every write this function classifies as `isSafetyFloorRow` (see below) lands here, never in
+    // `namespace` — the SAME predicate `recall()` uses, so write-routing and read-routing can't drift.
+    const floorNs = floorNamespace(ctx.tenantId, ctx.anonId);
     const now = clock().getTime();
 
     // T4 — this tenant's memory-corpus embed pin, read AT MOST ONCE per `remember()` call and cached
@@ -567,7 +572,9 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
           // T5 — special-category dedup: EXACT-MATCH ONLY, via a keyed-HMAC over the sanitized plaintext
           // (pre-encryption). NEVER a vector similarity computation over health/Art-9 text.
           dedupTag = await specialDedupTag(secrets, ctx.tenantId, sanitized);
-          if (dedupTag) dedupTargetId = await findByDedupTag(deps.vector, namespace, dedupTag);
+          // #125 — special rows live in the FLOOR namespace, not `namespace`; the dedup scan must look
+          // where they actually are, or every special candidate would (wrongly) mint a fresh id forever.
+          if (dedupTag) dedupTargetId = await findByDedupTag(deps.vector, floorNs, dedupTag);
         } else if (deps.model && canEmbed(deps.model)) {
           try {
             const embedReq: EmbedRequest = { texts: [sanitized], purpose: "document", tenantId: ctx.tenantId };
@@ -695,7 +702,9 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // one — either way it is `undefined` whenever `semanticRecallEnabled` is off, exactly as before.
       const record: VectorRecord = { id: recordId, text: encryptedFact.value, metadata, vector: candidateVector };
       written.push(effectiveClass);
-      (effectiveClass === "special" ? specialRecords : ordinaryRecords).push(record);
+      // #125 — routed by the SAME `isSafetyFloorRow` predicate `recall()` uses to find the floor, so the
+      // write side and the read side can never drift apart on "what counts as a floor row".
+      (isSafetyFloorRow(metadata) ? specialRecords : ordinaryRecords).push(record);
     }
 
     if (ordinaryRecords.length > 0) {
@@ -713,7 +722,8 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       );
     }
     if (specialRecords.length > 0) {
-      await deps.vector.upsert(namespace, specialRecords);
+      // #125 — the floor namespace, not `namespace`: this is the ONLY write site for a special/floor row.
+      await deps.vector.upsert(floorNs, specialRecords);
       await deps.audit.audit(
         { tenantId: ctx.tenantId },
         buildMemoryAudit({
@@ -784,7 +794,18 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     if (!enabled) return []; // INERT — no vector call, no audit, nothing touched
 
     const namespace = subjectNamespace(ctx.tenantId, ctx.anonId);
+    // #125 — the dedicated per-subject namespace `remember()` now routes every safety-floor row to (the
+    // SAME `isSafetyFloorRow` predicate governs both sides). Reading it ALONE for the floor (no dual-read
+    // of `namespace`) is what turns the floor enumeration from O(whole corpus) into O(floor).
+    const floorNs = floorNamespace(ctx.tenantId, ctx.anonId);
     const now = clock().getTime();
+
+    // #125 — a re-stamped (sliding-retention) row must be upserted back to the namespace it CAME FROM
+    // (main vs floor), never blindly to `namespace` — a floor row upserted to the main namespace would
+    // silently re-fragment the very namespace this feature exists to keep the floor out of. Populated as
+    // `matches` is built below (both the semantic and fallback branches), consulted only in the renewal
+    // loop further down.
+    const originOf = new Map<string, string>();
 
     // T7 (semantic-memory-v1, PR3) — semantic ranked-set + safety-floor UNION, gated on
     // MEMORY_SEMANTIC_RECALL AND a `queryVector`/`pin` that matches this TENANT's own memory-corpus
@@ -804,21 +825,28 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // ordinary fact sitting just behind an excluded one, THEN cap to `recallTopK()`, nearest-first.
       const rankedRaw = await deps.vector.query(namespace, { vector: opts!.queryVector, k: RECALL_LIMIT });
       const ranked = rankedRaw
-        // A safety-floor row (see `isSafetyFloorRow`'s own doc comment) NEVER ranks — its vector is a
-        // content-independent random placeholder (T4), so scoring it against a query is meaningless — and
-        // it always surfaces via the floor below instead, regardless of similarity.
+        // #125 — post-#125, every special/`isSafetyFloorRow` fact lives ONLY in `floorNs`, so in steady
+        // state this filter removes nothing from the ranked `namespace` result. If a special row somehow
+        // still sits in the MAIN namespace (a pre-#125 legacy row, or one seeded directly at the port,
+        // bypassing write-side routing), this filter EXCLUDES it from the ranked result here — and since
+        // it's absent from `floorNs` too, it does NOT surface via this SEMANTIC branch at all; only the
+        // fallback/list-all branch below (which unions main+floor with no such filter) would surface it.
+        // #125 verified zero such rows exist in the live (staging) main namespace, so this edge is not
+        // live today — the filter is retained as a guard for the invariant "the ranked main query never
+        // yields a floor row."
         .filter((m) => !isSafetyFloorRow(m.metadata as { mustRecall?: boolean; class?: FactClass } | undefined))
         .slice(0, recallTopK());
+      for (const m of ranked) originOf.set(m.id, namespace);
 
-      // The safety floor: EVERY row matching `isSafetyFloorRow` for this subject — `mustRecall === true`
-      // OR the durable `class === "special"` marker, the SAME predicate the ranked exclusion above uses,
-      // so the floor's inclusion set is a guaranteed superset of whatever ranking excluded (a `class:
-      // "special"` row written before MEMORY_SEMANTIC_RECALL existed carries no `mustRecall` but still
-      // surfaces here) — regardless of similarity to the query. Paginated to EXHAUSTION (`enumerateFloor`,
-      // mirroring erasure.ts's own completeness discipline), not a single bounded page: a subject with more
-      // total facts than one page's `recallFloorCap()` must not have a safety fact silently fall past the
-      // page boundary. Deduped by id against the ranked half above.
-      const floorPage = await enumerateFloor(deps.vector, namespace, recallFloorCap(), subjectRef(ctx.tenantId, ctx.anonId, deps.hmacKey));
+      // The safety floor: EVERY row in the dedicated floor namespace (#125) — `enumerateFloor` now walks
+      // `floorNs` ALONE (O(floor), not O(whole corpus)) to EXHAUSTION, mirroring erasure.ts's own
+      // completeness discipline: a subject with more floor rows than one page's `recallFloorCap()` must
+      // not have a safety fact silently fall past the page boundary. NO dual-read of `namespace` for floor
+      // rows — the floor namespace is the floor's ONLY source of truth by construction (write-side routing
+      // above). `isSafetyFloorRow` is still applied per-item as a defense-in-depth filter (a non-floor row
+      // should never land in `floorNs`, but this guards against one that somehow did). Deduped by id
+      // against the ranked half above.
+      const floorPage = await enumerateFloor(deps.vector, floorNs, recallFloorCap(), subjectRef(ctx.tenantId, ctx.anonId, deps.hmacKey));
       const seenIds = new Set(ranked.map((m) => m.id));
       matches = [...ranked];
       for (const item of floorPage) {
@@ -826,6 +854,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
         if (isSafetyFloorRow(meta) && !seenIds.has(item.id)) {
           matches.push(item);
           seenIds.add(item.id);
+          originOf.set(item.id, floorNs);
         }
       }
     } else {
@@ -846,7 +875,26 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       // adapter's sort) — byte-identical order, same cap. Deliberately NOT the exhaustive
       // `enumerateFloor` page-walk: the OLD call was itself a single unpaginated `k: RECALL_LIMIT`
       // fetch, never a multi-page enumerate, so matching it is a single bounded `list`, not exhaustion.
-      matches = await deps.vector.list(namespace, { limit: RECALL_LIMIT });
+      //
+      // #125 — this fallback ALSO reads the floor namespace and unions it in. Necessary, not optional:
+      // `remember()`'s write-side floor routing is unconditional on `effectiveClass`/`isSafetyFloorRow`,
+      // NOT gated on MEMORY_SEMANTIC_RECALL (`semanticRecallOn()`), so a special-category fact lands in
+      // `floorNs` regardless of whether THIS recall takes the semantic branch above or falls through to
+      // this baseline — the single most common case in practice, since this branch also serves every
+      // subject with no manifest pin yet (including a special-ONLY subject that has never made an
+      // ordinary/embedded write — the "placeholder dimension edge" `remember()`'s own T4 note describes).
+      // Preserving the completeness guarantee (a special/mustRecall fact must ALWAYS surface in recall)
+      // here is what keeps this baseline byte-identical in OUTCOME (never silently drops a safety fact),
+      // even though it is no longer byte-identical in SOURCE (two namespace reads, not one) to the pre-#125
+      // call. The floor half is read to EXHAUSTION (`enumerateFloor`), the same completeness discipline the
+      // semantic branch's floor gets — a two-tier guarantee (exhaustive only when semantic recall is on)
+      // would be a silent regression for exactly the subjects this baseline serves. NO dual-read: `namespace`
+      // is never re-scanned for floor rows — the floor namespace is read once, here.
+      const mainMatches = await deps.vector.list(namespace, { limit: RECALL_LIMIT });
+      const floorMatches = await enumerateFloor(deps.vector, floorNs, recallFloorCap(), subjectRef(ctx.tenantId, ctx.anonId, deps.hmacKey));
+      for (const m of mainMatches) originOf.set(m.id, namespace);
+      for (const m of floorMatches) originOf.set(m.id, floorNs);
+      matches = [...mainMatches, ...floorMatches];
     }
 
     const facts: RecalledFact[] = [];
@@ -932,7 +980,18 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     // stays truthfully "read-only". So the immutable log shows exactly when, and how many, facts had their
     // retention extended, and by which subject.
     if (renewed.length > 0) {
-      await deps.vector.upsert(namespace, renewed);
+      // #125 — a re-stamp must land back in the namespace the row CAME FROM: upserting a floor row's
+      // re-stamp to `namespace` would silently re-fragment the floor this feature exists to keep separate
+      // (a duplicate/stray copy in the main namespace), and the reverse would relocate an ordinary fact
+      // into the floor namespace. `originOf` was populated above from whichever branch (semantic or
+      // fallback) actually built `matches`, so every renewed id has a known origin; `namespace` is the
+      // safe default for the (never expected) case a match's origin wasn't recorded.
+      const renewedMain = renewed.filter((r) => (originOf.get(r.id) ?? namespace) === namespace);
+      const renewedFloor = renewed.filter((r) => originOf.get(r.id) === floorNs);
+      if (renewedMain.length > 0) await deps.vector.upsert(namespace, renewedMain);
+      if (renewedFloor.length > 0) await deps.vector.upsert(floorNs, renewedFloor);
+      // The `ttl_renew` audit count stays the COMBINED total across both halves — a single, honest
+      // "how many facts slid forward this recall" number, regardless of which namespace each lived in.
       await deps.audit.audit(
         { tenantId: ctx.tenantId },
         buildMemoryAudit({ action: "ttl_renew", tenantId: ctx.tenantId, anonId: ctx.anonId, count: renewed.length, hmacKey: deps.hmacKey }),

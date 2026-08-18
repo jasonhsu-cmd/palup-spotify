@@ -3,7 +3,7 @@ import { InMemoryRuntimeStore, createEnvSecrets, type SecretsPort, type ModelPor
 import { PgVectorStore, type Sql } from "@palup/state-postgres";
 import { startPgvectorContainer, PGVECTOR_AVAILABLE } from "@palup/state-postgres/test/helpers/pgvector-container";
 import { createMemoryService } from "../src/service.js";
-import { subjectNamespace } from "../src/identity.js";
+import { subjectNamespace, floorNamespace } from "../src/identity.js";
 import type { MemoryCtx } from "../src/types.js";
 import type { FactDistiller } from "../src/distiller.js";
 
@@ -138,12 +138,17 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("createMemoryService over a REAL pgvector/H
       expect(result.written).toContain("ordinary");
       expect(result.written).toContain("special");
 
-      // THE FLOOR: `list` (a plain keyset scan, no vector op at all) sees BOTH records, regardless of
-      // what either one's vector looks like.
+      // #125 — the special-category record now lives in the dedicated per-subject FLOOR namespace, not
+      // the main subject namespace: `list` (a plain keyset scan, no vector op at all) against EACH
+      // namespace sees exactly the record that belongs there, regardless of what either one's vector
+      // looks like.
       const listed = await vector.list(ns, { limit: 10 });
-      expect(listed).toHaveLength(2);
-      const classes = listed.map((r) => (r.metadata as { class?: string }).class).sort();
-      expect(classes).toEqual(["ordinary", "special"]);
+      expect(listed).toHaveLength(1);
+      expect((listed[0]!.metadata as { class?: string }).class).toBe("ordinary");
+
+      const floorListed = await vector.list(floorNamespace(tenantId, anonId), { limit: 10 });
+      expect(floorListed).toHaveLength(1);
+      expect((floorListed[0]!.metadata as { class?: string }).class).toBe("special");
 
       // A query vector aimed squarely at the ORDINARY fact's real content — the special placeholder
       // (content-independent by construction — T4's whole point is it is NEVER derived from embedding
@@ -153,6 +158,48 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("createMemoryService over a REAL pgvector/H
       const top = await vector.query(ns, { vector: alignedWithOrdinary, k: 1 });
       expect(top).toHaveLength(1);
       expect((top[0]!.metadata as { class?: string }).class).toBe("ordinary");
+    },
+    60_000,
+  );
+
+  it(
+    "#125 real-pgvector RECALL parity: a special fact written to the floor namespace is surfaced by recall() over PgVectorStore, matching the in-memory floor behavior",
+    async () => {
+      await sql.query("TRUNCATE vp_ann");
+      const vector = new PgVectorStore(sql, { dimension: DIMENSION });
+      const runtimeStore = new InMemoryRuntimeStore();
+      const tenantId = "acme-pgv-floor-recall";
+      const anonId = "guest-pgv-floor-recall";
+      const ns = subjectNamespace(tenantId, anonId);
+
+      const DOCUMENT_VECTOR = [1, 0, 0, 0];
+      const model = tableEmbedModel({ "prefers fragrance-free products": DOCUMENT_VECTOR });
+      const service = createMemoryService({
+        vector,
+        audit: runtimeStore,
+        distiller: distillerReturning("prefers fragrance-free products", "shopper has a tree-nut allergy"),
+        model,
+        enabled: true,
+        secrets: keyedSecrets(tenantId), // the special write must not be refused for lack of a key
+      });
+      const ctx: MemoryCtx = { tenantId, anonId, region: "us", consent1: "in", consent2: "in" };
+
+      const result = await service.remember(ctx, { message: "m", reply: "r" });
+      expect(result.written).toContain("ordinary");
+      expect(result.written).toContain("special");
+
+      // Confirms the WRITE landed in the dedicated floor namespace on the real engine (same proof as the
+      // sibling test above), before exercising the actual READ path this test is about.
+      expect(await vector.list(floorNamespace(tenantId, anonId), { limit: 10 })).toHaveLength(1);
+
+      // THE PARITY CLAIM: recall() — no queryVector/pin supplied, so this exercises the pgvector-safe
+      // list-all fallback branch (service.ts) that unions the main namespace with `enumerateFloor` over
+      // `floorNs` — must surface BOTH facts against the REAL PgVectorStore, exactly as it already does
+      // against the in-memory adapter (service-recall tests elsewhere in this package).
+      const recalled = await service.recall(ctx);
+      const texts = recalled.map((f) => f.text);
+      expect(texts).toContain("prefers fragrance-free products");
+      expect(texts).toContain("shopper has a tree-nut allergy"); // the floor row — served, not silently dropped
     },
     60_000,
   );

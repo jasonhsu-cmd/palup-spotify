@@ -1,5 +1,5 @@
 import type { RuntimeStatePort, VectorPort } from "@palup/platform-ports";
-import { subjectNamespace } from "./identity.js";
+import { subjectNamespace, floorNamespace } from "./identity.js";
 import { buildMemoryAudit, subjectRef } from "./audit.js";
 import type { FactClass } from "./classifier.js";
 import type { FactMetadata } from "./types.js";
@@ -70,6 +70,35 @@ export class SweepPageCeilingExceeded extends Error {
   }
 }
 
+/**
+ * Pages `namespace` to exhaustion via `VectorPort.list` (T2 pattern — see the module-level note above)
+ * and returns the ids of every record whose `expiresAt` is already `<= nowMs`. Shared by `sweepExpired`
+ * for BOTH a subject's main namespace and its `floorNamespace` (#125 — safety-floor/special-category
+ * facts live there now, so their TTL expiry must be swept from the same place `remember()` writes them,
+ * not from the main namespace where they no longer live).
+ */
+async function enumerateExpiredIds(vector: VectorPort, namespace: string, nowMs: number): Promise<string[]> {
+  const expiredIds: string[] = [];
+  let after: string | undefined;
+  for (let page = 0; ; page++) {
+    if (page >= MAX_SWEEP_PAGES) throw new SweepPageCeilingExceeded(namespace);
+    const batch = await vector.list(namespace, { limit: SWEEP_PAGE_LIMIT, after });
+    // INVARIANT (security review, Finding 10, NOTE): a record with NO `expiresAt` at all is structurally
+    // UNREACHABLE by this sweep (and by recall's renewal, service.ts) — it would be retained and served
+    // forever. Nothing in this codebase writes such a record today (service.ts's `remember` always
+    // stamps `expiresAt`), so this is latent, not live. If any future non-widget-memory writer ever
+    // touches `vp_records` without stamping `expiresAt`, that record silently escapes Inv 4 entirely —
+    // this filter has no floor for metadata-less rows.
+    for (const item of batch) {
+      const meta = item.metadata as Partial<FactMetadata> | undefined;
+      if (meta?.expiresAt !== undefined && new Date(meta.expiresAt).getTime() <= nowMs) expiredIds.push(item.id);
+    }
+    if (batch.length < SWEEP_PAGE_LIMIT) break; // short page — namespace exhausted
+    after = batch[batch.length - 1]!.id;
+  }
+  return expiredIds;
+}
+
 export interface RetentionDeps {
   vector: VectorPort;
   /** The RuntimeStatePort's audit surface (ADR-0015 Inv 6) — reused as-is, no new audit mechanism. */
@@ -130,60 +159,66 @@ export async function sweepExpired(
 
   for (const anonId of subjects) {
     const namespace = subjectNamespace(tenantId, anonId);
+    // #125 — special-category facts now live in the dedicated per-subject FLOOR namespace (identity.ts),
+    // not the main subject namespace, so their TTL expiry must be swept from THERE too: sweeping only
+    // `namespace` would let an expired special fact sit in the floor namespace forever, never physically
+    // reclaimed (TTL-on-read in service.ts's `recall` still hides it from being SERVED, but the storage
+    // itself would never be freed and `sweepAllSubjects`'s retire check below would never see this
+    // subject's floor namespace go empty).
+    const floorNs = floorNamespace(tenantId, anonId);
 
-    // Page to exhaustion (T2) — see the module-level note above. A short (< SWEEP_PAGE_LIMIT) page is the
-    // exhaustion terminator; exceeding MAX_SWEEP_PAGES throws rather than sweeping a partial view.
-    const expiredIds: string[] = [];
-    let after: string | undefined;
-    for (let page = 0; ; page++) {
-      if (page >= MAX_SWEEP_PAGES) throw new SweepPageCeilingExceeded(namespace);
-      const batch = await deps.vector.list(namespace, { limit: SWEEP_PAGE_LIMIT, after });
-      // INVARIANT (security review, Finding 10, NOTE): a record with NO `expiresAt` at all is structurally
-      // UNREACHABLE by this sweep (and by recall's renewal, service.ts) — it would be retained and served
-      // forever. Nothing in this codebase writes such a record today (service.ts's `remember` always
-      // stamps `expiresAt`), so this is latent, not live. If any future non-widget-memory writer ever
-      // touches `vp_records` without stamping `expiresAt`, that record silently escapes Inv 4 entirely —
-      // this filter has no floor for metadata-less rows.
-      for (const item of batch) {
-        const meta = item.metadata as Partial<FactMetadata> | undefined;
-        if (meta?.expiresAt !== undefined && new Date(meta.expiresAt).getTime() <= nowMs) expiredIds.push(item.id);
-      }
-      if (batch.length < SWEEP_PAGE_LIMIT) break; // short page — namespace exhausted
-      after = batch[batch.length - 1]!.id;
-    }
+    // Page each namespace to exhaustion (T2) — see `enumerateExpiredIds` above.
+    const expiredMain = await enumerateExpiredIds(deps.vector, namespace, nowMs);
+    const expiredFloor = await enumerateExpiredIds(deps.vector, floorNs, nowMs);
+    const combinedCount = expiredMain.length + expiredFloor.length;
 
-    if (expiredIds.length === 0) continue;
+    if (combinedCount === 0) continue;
 
     // ADR-0015 Inv 6 / NN#5 (security review, Finding 1 — HIGH: "a destructive delete can land
     // unaudited"). AUDIT BEFORE DELETE, never the reverse, so "deleted but unaudited" is structurally
-    // unreachable: if the audit write itself throws, we skip the delete for THIS subject entirely
+    // unreachable: if the audit write itself throws, we skip BOTH deletes for THIS subject entirely
     // (caught below) rather than risk an unaudited destructive action. `audit` and `vector` are
     // separate ports (ADR-0001 — a VectorPort adapter need not even be Postgres), so this ordering,
-    // not a cross-port DB transaction, is what makes the guarantee hold portably. The accepted, narrower
-    // residual is the mirror case: audited, but the physical delete then fails — a stale record simply
-    // stays undeleted (TTL-on-read in service.ts `recall` still hides it from ever being served, so
-    // nothing is served past its TTL) rather than an invisible destructive action, and that failure is
-    // never silently swallowed — it is surfaced below as a PII-free, operator-visible signal (tenantId +
-    // hashed subjectRef + attempted count + the error's class only — never fact text or the raw anonId).
+    // not a cross-port DB transaction, is what makes the guarantee hold portably. One COMBINED audit per
+    // subject (main + floor counted together, `combinedCount`) rather than two — a subject either had
+    // something expired somewhere and that's audited once, or it didn't and nothing is written. The
+    // accepted, narrower residual is the mirror case: audited, but a physical delete then fails — a stale
+    // record simply stays undeleted (TTL-on-read in service.ts `recall` still hides it from ever being
+    // served, so nothing is served past its TTL) rather than an invisible destructive action, and that
+    // failure is never silently swallowed — it is surfaced below as a PII-free, operator-visible signal
+    // (tenantId + hashed subjectRef + attempted count + the error's class only — never fact text or the
+    // raw anonId).
     const ref = subjectRef(tenantId, anonId, deps.hmacKey);
     try {
       await deps.audit.audit(
         { tenantId },
-        buildMemoryAudit({ action: "ttl_sweep", tenantId, anonId, count: expiredIds.length, hmacKey: deps.hmacKey }),
+        buildMemoryAudit({ action: "ttl_sweep", tenantId, anonId, count: combinedCount, hmacKey: deps.hmacKey }),
       );
     } catch (e) {
       console.error(
-        `[retention] ttl_sweep audit failed tenant=${tenantId} subjectRef=${ref} attemptedCount=${expiredIds.length} error=${errorClassName(e)} — skipping delete for this subject (never delete without its audit)`,
+        `[retention] ttl_sweep audit failed tenant=${tenantId} subjectRef=${ref} attemptedCount=${combinedCount} error=${errorClassName(e)} — skipping delete for this subject (never delete without its audit)`,
       );
       continue;
     }
-    try {
-      await deps.vector.deleteById(namespace, expiredIds);
-      totalDeleted += expiredIds.length;
-    } catch (e) {
-      console.error(
-        `[retention] ttl_sweep delete failed tenant=${tenantId} subjectRef=${ref} attemptedCount=${expiredIds.length} error=${errorClassName(e)} — audited as decided, NOT physically deleted; TTL-on-read still hides it from serving`,
-      );
+    if (expiredMain.length > 0) {
+      try {
+        await deps.vector.deleteById(namespace, expiredMain);
+        totalDeleted += expiredMain.length;
+      } catch (e) {
+        console.error(
+          `[retention] ttl_sweep delete failed tenant=${tenantId} subjectRef=${ref} namespace=main attemptedCount=${expiredMain.length} error=${errorClassName(e)} — audited as decided, NOT physically deleted; TTL-on-read still hides it from serving`,
+        );
+      }
+    }
+    if (expiredFloor.length > 0) {
+      try {
+        await deps.vector.deleteById(floorNs, expiredFloor);
+        totalDeleted += expiredFloor.length;
+      } catch (e) {
+        console.error(
+          `[retention] ttl_sweep delete failed tenant=${tenantId} subjectRef=${ref} namespace=floor attemptedCount=${expiredFloor.length} error=${errorClassName(e)} — audited as decided, NOT physically deleted; TTL-on-read still hides it from serving`,
+        );
+      }
     }
   }
 
@@ -250,8 +285,19 @@ export async function sweepAllSubjects(
       // Retire only on a CONFIRMED-empty namespace, re-read after the delete — never inferred from the
       // delete count, which would wrongly retire a subject whose only records happened to be expired
       // while a concurrent write was landing.
-      const remainingRecords = await deps.vector.list(subjectNamespace(tenantId, entry.subject), { limit: 1 });
-      if (remainingRecords.length === 0) {
+      //
+      // #125 — a subject's facts can now live in TWO namespaces (the main one and its `floorNamespace`
+      // for safety-floor/special-category rows), so retirement requires BOTH to be confirmed empty.
+      // Checking only the main namespace would wrongly retire a subject that still holds live floor
+      // rows (orphaning them — the scheduled sweep would stop visiting a subject the index no longer
+      // lists, even though special-category facts remain in storage); checking only the floor namespace
+      // would symmetrically block retirement forever for an ordinary-only subject that never wrote a
+      // special fact (its floor namespace is always empty, so that alone must never gate anything).
+      const [remainingMain, remainingFloor] = await Promise.all([
+        deps.vector.list(subjectNamespace(tenantId, entry.subject), { limit: 1 }),
+        deps.vector.list(floorNamespace(tenantId, entry.subject), { limit: 1 }),
+      ]);
+      if (remainingMain.length === 0 && remainingFloor.length === 0) {
         await retireSubject(deps.audit, { tenantId, subject: entry.subject });
         result.retired++;
       }
