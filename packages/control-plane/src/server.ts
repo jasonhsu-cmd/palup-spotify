@@ -47,10 +47,13 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   const { grader, mode, judgeFamily } = chooseGrader();
   const championMetrics = await grader.grade(DEFAULT_POLICY);
   // T4g — per-tenant engine binding via the shared EngineRegistry (a routed candidate lives on the
-  // tenant's engine; an in-process orchestrator shares this same registry). The demo server operates the
-  // single "demo" tenant; all existing routes use engineFor(PROMOTE_TENANT), so their behavior is
-  // unchanged. (Cross-PROCESS candidate/approval visibility needs durable engine state — enablement work.)
-  const PROMOTE_TENANT = "demo";
+  // tenant's engine; an in-process orchestrator shares this same registry). All existing routes use
+  // engineFor(PROMOTE_TENANT), so their behavior is unchanged. (Cross-PROCESS candidate/approval
+  // visibility needs durable engine state — enablement work.)
+  // W3-1 (deploy-prep): configurable via env so a real deploy can point this at the actual merchant
+  // tenant it's promoting for (e.g. PROMOTE_TENANT=palup-skincare-jason) instead of the demo tenant.
+  // Default stays "demo" for back-compat with every existing caller/test that doesn't set it.
+  const PROMOTE_TENANT = process.env.PROMOTE_TENANT ?? "demo";
   const engines = new EngineRegistry(() => new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader }));
   const engine = engines.engineFor(PROMOTE_TENANT);
 
