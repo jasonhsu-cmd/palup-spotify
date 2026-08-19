@@ -200,6 +200,20 @@ describe("sharded arm_tally counters (durability NOW-1)", () => {
     expect(shards).toHaveLength(1); // only the shard actually written exists — no fabricated empty rows
     expect(shards[0].exposures).toBe(5);
   });
+
+  it("a fractional/zero/negative/garbage ARM_TALLY_SHARD_COUNT falls back to the default — never a silent 0 count that hides the whole tally", async () => {
+    // Security-review HIGH: "0.5" previously passed `> 0` then floored to 0 → writes on shard 0 but reads
+    // enumerate ZERO shards → the whole money tally reads as null/zero. Every bad value must fall back.
+    for (const bad of ["0.5", "0", "-5", "", "abc", "Infinity", "1e-9"]) {
+      process.env.ARM_TALLY_SHARD_COUNT = bad;
+      const store = new InMemoryRuntimeStore();
+      await accumulateArmTally(store, { tenantId: "acme", play: "cart_recovery", period: "2026-08", arm: "treated", exposures: 7, orders: 1, revenue: 20 });
+      const tally = await readArmTally(store, "acme", "cart_recovery", "2026-08", "treated");
+      expect(tally, `bad env ${JSON.stringify(bad)} must not zero the tally`).not.toBeNull();
+      expect(tally!.exposures).toBe(7);
+      expect(tally!.revenue).toBe(20);
+    }
+  });
 });
 
 describe("appendOutcomeLedgerEntry + readOutcomeLedger (round-trip)", () => {

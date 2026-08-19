@@ -40,11 +40,17 @@ const LEDGER_STREAM = "outcome_ledger"; // append-only stream, per tenant (= mer
 // a silent under-count, not a crash. Treat any shard-count change as a migration (drain/resum under
 // the old count first), never a hot config flip.
 const DEFAULT_ARM_TALLY_SHARD_COUNT = 16;
+const MAX_ARM_TALLY_SHARD_COUNT = 1024; // caps the read fan-out (a read sums N rows) against a fat-fingered env
 
 function armTallyShardCount(): number {
   const raw = process.env.ARM_TALLY_SHARD_COUNT;
-  const n = raw !== undefined ? Number(raw) : NaN;
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_ARM_TALLY_SHARD_COUNT;
+  // Floor BEFORE the positivity test: a fractional value in (0,1) (e.g. "0.5") would otherwise pass
+  // `> 0` and then `Math.floor` to 0 — writes land on shard 0 but reads enumerate ZERO shards, silently
+  // zeroing the whole money tally. Any non-integer-≥1 or unreadable value falls back to the default; the
+  // count is capped so a huge value can't blow up the per-read fan-out.
+  const n = raw !== undefined ? Math.floor(Number(raw)) : NaN;
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_ARM_TALLY_SHARD_COUNT;
+  return Math.min(n, MAX_ARM_TALLY_SHARD_COUNT);
 }
 
 function tallyKey(play: Play, period: string, arm: Arm, shardId: number): string {
