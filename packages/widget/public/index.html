@@ -1021,10 +1021,15 @@
       let r = await doFetch();
       if (r.status === 401){ await ensureToken(true); r = await doFetch(); } // token expired → refresh once
       if (!r.ok) throw new Error("http " + r.status);
-      const d = await r.json(); add(d.reply, "agent", d); onChatMeta(d); if (d.escalate) enterHandoff();
-      // E3 — the cited products, as an aside BELOW the reply, never spliced into it. Inert today: the
-      // server cannot send this field while the PRODUCT_CARDS posture flag is off.
+      const d = await r.json();
+      add(d.reply, "agent", d);
+      // E3 — the cited products, as an aside directly BELOW the reply (never spliced into it). Rendered
+      // BEFORE onChatMeta so the memory/consent card can never wedge itself between the reply and its own
+      // cards (layout polish): the answer + its cards stay one visual unit, memory UI comes after. Inert
+      // today unless the PRODUCT_CARDS posture flag is on.
       addProductCards(d.recommendedProductCards);
+      if (d.escalate) enterHandoff();
+      onChatMeta(d); // memory state + consent/manage UI — AFTER the answer and its cards
       // §6 INV-D — "offered, not pushed". A SEPARATE, quieter line after the answer, never spliced into it,
       // and only when the server sent one (the server gates it: once per conversation, and never while an
       // issue is open, safety is latched, an escalation is pending, or the mood is negative). Rendered as a
