@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { InMemoryRuntimeStore, createInMemoryMerchantRegistry, createInMemoryVectorStore } from "@palup/platform-ports";
 import type { AuditRecord, MerchantRegistryPort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
-import { armKill, disarmKill } from "@palup/state-postgres";
+import { armKill, disarmKill, readArmTally } from "@palup/state-postgres";
 import { subjectNamespace, accountSubjectId, recordSubject, listSubjects } from "@palup/widget-memory";
 import { buildServer } from "../src/server.js";
 import { guestTokenHeader } from "./helpers/guest-token.js";
@@ -12,6 +12,9 @@ import {
   DATA_REQUEST_COLLECTION,
   WEBHOOK_ROUTES,
 } from "../src/routes/shopify-webhooks.js";
+import { assignHoldoutArm } from "../src/holdout.js";
+import { mintOrderJoinToken } from "../src/order-join-token.js";
+import { JOIN_TOKEN_NOTE_ATTRIBUTE } from "../src/shopify-webhook-identity.js";
 
 // C2 — the three MANDATORY Shopify compliance webhooks plus `app/uninstalled`, exercised END TO END
 // through the real Fastify app. Driving it through `app.inject` is the whole point: the property under
@@ -57,7 +60,7 @@ const GUEST_ANON = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const ACCOUNT_SUBJECT = accountSubjectId(`shopify:${TENANT}:${CUSTOMER_ID}`);
 const OTHER_ACCOUNT_SUBJECT = accountSubjectId(`shopify:${TENANT}:${OTHER_CUSTOMER_ID}`);
 
-const ENV_KEYS = ["PALUP_SECRETS", "WIDGET_EMBED_KEYS", "SHOPIFY_STORES", "SHOPIFY_APP_CLIENT_ID", "GUEST_TOKEN_SECRET", "CATALOG_WEBHOOKS"];
+const ENV_KEYS = ["PALUP_SECRETS", "WIDGET_EMBED_KEYS", "SHOPIFY_STORES", "SHOPIFY_APP_CLIENT_ID", "GUEST_TOKEN_SECRET", "CATALOG_WEBHOOKS", "ORDER_ATTRIBUTION_WEBHOOKS"];
 // ADR-0019 task 4/9 — incidental fallout, not this file's concern: `/consent`'s guest subject now comes
 // ONLY from a VERIFIED `x-guest-token` (invariant 4), so the JSON-parsing-encapsulation test below needs
 // one purely to get a 200 back; it is not testing anything about memory/consent semantics.
@@ -867,5 +870,183 @@ describe("C2 — nothing leaks: not the body, not the HMAC, not a customer ident
     expectNothingLeaked(res.body, "a failed webhook response");
     // AUDIT-FIRST: an unauditable governed write must not persist.
     expect(await registry.lookupByTenantId(TENANT), "no unaudited revocation may land").not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// W2-C — orders/create, orders/updated, refunds/create, END TO END through the real Fastify app
+// (`buildServer`, mirroring the A3 catalog block above): raw-body HMAC verification, tenant resolution
+// from the (unsigned) shop header, kill-switch gating, webhook-delivery idempotency, and — the property
+// unique to this ticket — turning a resolved join token into a REAL `ArmTally` ledger write via the
+// async worker, with `ORDER_ATTRIBUTION_WEBHOOKS`'s in-memory queue fallback processing synchronously
+// within the same request (server.ts's own documented trade-off, mirroring CATALOG_WEBHOOKS's).
+const IDENTITY = "shopper:42";
+const PERIOD = "2026-08";
+const PLAY = "agent";
+
+/** Enable the holdout for TENANT, bucket IDENTITY into `arm` for PERIOD (the same primitive the /chat
+ *  serving path calls), and mint a real join token for it. */
+async function seedMintedToken(store: RuntimeStatePort, tenantId: string, fraction: number): Promise<{ token: string; arm: "treated" | "control" }> {
+  const config = { enabled: true, fraction };
+  await store.put({ tenantId }, "holdout", "config", config);
+  const arm = await assignHoldoutArm(store, tenantId, config, IDENTITY, PERIOD);
+  const token = await mintOrderJoinToken(store, tenantId, IDENTITY, PERIOD);
+  if (!token) throw new Error("test setup: expected a real token");
+  return { token, arm };
+}
+
+const orderCreateBody = (over: Record<string, unknown> = {}): string =>
+  JSON.stringify({
+    id: 450789469,
+    note_attributes: [] as Array<{ name: string; value: string }>,
+    total_price: "120.00",
+    currency: "USD",
+    customer: { id: Number(CUSTOMER_ID), email: CUSTOMER_EMAIL, phone: CUSTOMER_PHONE },
+    ...over,
+  });
+
+const refundCreateBody = (over: Record<string, unknown> = {}): string =>
+  JSON.stringify({
+    id: 987654,
+    order_id: 450789469,
+    transactions: [{ amount: "20.00", currency: "USD" }],
+    ...over,
+  });
+
+describe("W2-C — order-attribution webhooks (behind ORDER_ATTRIBUTION_WEBHOOKS)", () => {
+  it("the order/refund routes DO NOT EXIST when ORDER_ATTRIBUTION_WEBHOOKS is off (404, not 500) — inert by default", async () => {
+    const h = await harness(); // flag off
+    await seedMerchant(h.registry);
+    for (const [path, topic] of [
+      [WEBHOOK_ROUTES.ordersCreate, "orders/create"],
+      [WEBHOOK_ROUTES.ordersUpdated, "orders/updated"],
+      [WEBHOOK_ROUTES.refundsCreate, "refunds/create"],
+    ] as const) {
+      const res = await h.post(path, { raw: orderCreateBody(), topic });
+      expect(res.statusCode).toBe(404);
+    }
+  });
+
+  it("a validly-signed orders/create with a REAL join token tallies orders:+1 revenue:+=total onto the resolved arm", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const { token, arm } = await seedMintedToken(h.store, TENANT, 0); // fraction 0 ⇒ treated
+
+    const res = await h.post(WEBHOOK_ROUTES.ordersCreate, {
+      raw: orderCreateBody({ note_attributes: [{ name: JOIN_TOKEN_NOTE_ATTRIBUTE, value: token }] }),
+      topic: "orders/create",
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("applied");
+
+    const tally = await readArmTally(h.store, TENANT, PLAY, PERIOD, arm);
+    expect(tally).toMatchObject({ orders: 1, revenue: 120 });
+  });
+
+  it("an order with NO join token is acknowledged but UNATTRIBUTED — no tally, no crash", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+
+    const res = await h.post(WEBHOOK_ROUTES.ordersCreate, { raw: orderCreateBody(), topic: "orders/create" });
+    expect(res.statusCode).toBe(200);
+    expect(await readArmTally(h.store, TENANT, PLAY, PERIOD, "treated")).toBeNull();
+    expect(await readArmTally(h.store, TENANT, PLAY, PERIOD, "control")).toBeNull();
+  });
+
+  it("an order with an UNKNOWN/expired join token is unattributed, never guesses an arm", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const res = await h.post(WEBHOOK_ROUTES.ordersCreate, {
+      raw: orderCreateBody({ note_attributes: [{ name: JOIN_TOKEN_NOTE_ATTRIBUTE, value: "not-a-real-token" }] }),
+      topic: "orders/create",
+    });
+    expect(res.statusCode).toBe(200);
+    expect(await readArmTally(h.store, TENANT, PLAY, PERIOD, "treated")).toBeNull();
+    expect(await readArmTally(h.store, TENANT, PLAY, PERIOD, "control")).toBeNull();
+  });
+
+  it("a bad HMAC is 401, never enqueued/tallied", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const { token } = await seedMintedToken(h.store, TENANT, 0);
+    const res = await h.post(WEBHOOK_ROUTES.ordersCreate, {
+      raw: orderCreateBody({ note_attributes: [{ name: JOIN_TOKEN_NOTE_ATTRIBUTE, value: token }] }),
+      topic: "orders/create",
+      hmac: "not-the-real-hmac",
+    });
+    expect(res.statusCode).toBe(401);
+    expect(await readArmTally(h.store, TENANT, PLAY, PERIOD, "treated")).toBeNull();
+  });
+
+  it("a REDELIVERED webhook (same X-Shopify-Webhook-Id) is deduped (already_handled), never double-tallied", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const { token, arm } = await seedMintedToken(h.store, TENANT, 0);
+    const raw = orderCreateBody({ note_attributes: [{ name: JOIN_TOKEN_NOTE_ATTRIBUTE, value: token }] });
+
+    const first = await h.post(WEBHOOK_ROUTES.ordersCreate, { raw, topic: "orders/create", webhookId: "wh-order-dup-1" });
+    const second = await h.post(WEBHOOK_ROUTES.ordersCreate, { raw, topic: "orders/create", webhookId: "wh-order-dup-1" });
+    expect(first.body).toContain("applied");
+    expect(second.body).toContain("already_handled");
+
+    const tally = await readArmTally(h.store, TENANT, PLAY, PERIOD, arm);
+    expect(tally).toMatchObject({ orders: 1, revenue: 120 });
+  });
+
+  it("a kill HALTS ingestion — acknowledged as halted_deferred, not tallied", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const { token } = await seedMintedToken(h.store, TENANT, 0);
+    const scope = `tenant:${TENANT}`;
+    await armKill(h.store, scope, "test");
+    try {
+      const res = await h.post(WEBHOOK_ROUTES.ordersCreate, {
+        raw: orderCreateBody({ note_attributes: [{ name: JOIN_TOKEN_NOTE_ATTRIBUTE, value: token }] }),
+        topic: "orders/create",
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain("halted_deferred");
+      expect(await readArmTally(h.store, TENANT, PLAY, PERIOD, "treated")).toBeNull();
+    } finally {
+      await disarmKill(h.store, scope);
+    }
+  });
+
+  it("refunds/create tallies the refunded amount as NEGATIVE revenue on the SAME arm the order resolved to", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const { token, arm } = await seedMintedToken(h.store, TENANT, 0);
+
+    await h.post(WEBHOOK_ROUTES.ordersCreate, {
+      raw: orderCreateBody({ note_attributes: [{ name: JOIN_TOKEN_NOTE_ATTRIBUTE, value: token }] }),
+      topic: "orders/create",
+    });
+    const res = await h.post(WEBHOOK_ROUTES.refundsCreate, { raw: refundCreateBody(), topic: "refunds/create" });
+    expect(res.statusCode).toBe(200);
+
+    const tally = await readArmTally(h.store, TENANT, PLAY, PERIOD, arm);
+    expect(tally).toMatchObject({ orders: 1, revenue: 100 }); // 120 - 20
+  });
+
+  it("a validly-signed CATALOG/compliance body replayed at an order path is refused on shape (no cross-topic escalation)", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const res = await h.post(WEBHOOK_ROUTES.ordersCreate, { raw: customerRedactBody(), topic: "orders/create" });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("no response body, audit record, or log line leaks the app secret or the raw customer id/email/phone", async () => {
+    const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+    await seedMerchant(h.registry);
+    const { token } = await seedMintedToken(h.store, TENANT, 0);
+    const res = await h.post(WEBHOOK_ROUTES.ordersCreate, {
+      raw: orderCreateBody({ note_attributes: [{ name: JOIN_TOKEN_NOTE_ATTRIBUTE, value: token }] }),
+      topic: "orders/create",
+    });
+    expectNothingLeaked(res.body, "an order-attribution webhook response");
+    const audit = await auditFor(h.store, TENANT);
+    expectNothingLeaked(JSON.stringify(audit), "the tenant audit chain");
+    // The join token itself is a bearer credential — never audited either.
+    expect(JSON.stringify(audit)).not.toContain(token);
   });
 });

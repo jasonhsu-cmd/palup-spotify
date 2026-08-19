@@ -121,6 +121,26 @@ interface HoldoutAssignment {
 }
 
 /**
+ * W2-C (order-join-token) — a READ-ONLY lookup of the arm already assigned to `(tenantId, identity,
+ * period)`, or `null` if none exists yet. Deliberately does NOT assign (unlike `assignHoldoutArm`,
+ * which creates one on first sight): the join-token minter (`order-join-token.ts`) runs at CHECKOUT
+ * HANDOFF, a point in the flow this file knows nothing about and must never originate a fresh
+ * assignment for — the /chat serving path is the only place an identity is FIRST bucketed into an arm
+ * (`assignHoldoutArm`'s own doc). A shopper who reaches checkout without having chatted this period
+ * has, correctly, no assignment to attribute a token to — the minter reads that as "mint nothing"
+ * rather than inventing an arm on the spot.
+ */
+export async function readHoldoutAssignment(
+  store: RuntimeStatePort,
+  tenantId: string,
+  identity: string,
+  period: string,
+): Promise<Arm | null> {
+  const existing = await store.get<HoldoutAssignment>({ tenantId }, ASSIGNMENT, assignmentKey(identity, period));
+  return existing?.arm ?? null;
+}
+
+/**
  * Deterministic + PERSISTED per (tenant, identity, period). The FIRST turn a given identity is seen in a
  * period computes the split with the SAME sticky hash `canary.ts`'s `bucket()` uses (seeded with the
  * period too, so a fresh coin flip happens each new period rather than the same shoppers being stuck in
