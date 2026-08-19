@@ -2712,12 +2712,30 @@ export async function buildServer(opts?: {
       //      (health/allergy/medical) information.
       // Absent (undefined) otherwise, which `JSON.stringify` (Fastify's default serializer, no route
       // schema here) drops from the wire response entirely — byte-identical to before this PR when off.
+      const consentPromptFactClass = classifyFact(message).class; // hoisted: reused by the decision log below
       const consentPrompt: "special" | undefined =
         memoryServiceEnabled &&
         (consentRecord?.memorySpecial ?? "unknown") === "unknown" &&
-        classifyFact(message).class === "special"
+        consentPromptFactClass === "special"
           ? "special"
           : undefined;
+      // Durable, no-PII observability for the special-category consent DECISION. This is a
+      // compliance-relevant decision (whether to ask a shopper to share health/Art-9 info), so its inputs
+      // and outcome belong in the permanent log — not a throwaway probe. We log ONLY the decision and the
+      // three booleans/enums that produce it: never the message text, the shopper/guest identity, or any
+      // token. `factClass` is the classifier's verdict (ordinary|special), which is what makes
+      // "why did / didn't the health-consent prompt fire?" answerable in Cloud Logging without guessing.
+      console.log(
+        JSON.stringify({
+          evt: "consent-prompt-decision",
+          tenantId,
+          memoryServiceEnabled,
+          factClass: consentPromptFactClass,
+          memorySpecial: consentRecord?.memorySpecial ?? "unknown",
+          hasConsentRecord: consentRecord != null,
+          consentPrompt: consentPrompt ?? "none",
+        }),
+      );
       // T1 phase 2 — server-side guard classification for THIS turn, run BEFORE deriveServingSignals so the
       // result is server-authored and unspoofable. Runs only when SERVER_GUARD_SIGNALS is on (⇒
       // guardClassifierModel defined), never while halted, and never on an empty/proactive turn (no message
