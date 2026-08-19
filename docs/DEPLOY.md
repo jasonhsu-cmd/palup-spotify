@@ -980,20 +980,28 @@ gcloud run jobs deploy palup-catalog-index \
   --command pnpm --args catalog:index \
   --set-cloudsql-instances palup-jason:us-central1:palup-staging \
   --set-secrets "DATABASE_URL=palup-staging-database-url:latest,PALUP_SECRETS=palup-secrets:latest" \
-  --set-env-vars '^@^VECTOR_ANN=true@SHOPIFY_STORES={"demo":"palup-skincare-jason.myshopify.com"}@PALUP_REQUIRE_DATABASE_URL=true@GOOGLE_CLOUD_PROJECT=palup-jason@GOOGLE_CLOUD_LOCATION=global@PALUP_EMBED_MODEL=gemini-embedding-2@PALUP_EMBED_DIMENSION=1536'
+  --set-env-vars '^@^VECTOR_ANN=true@SHOPIFY_STORES={"palup-skincare-jason":"palup-skincare-jason.myshopify.com"}@PALUP_REQUIRE_DATABASE_URL=true@GOOGLE_CLOUD_PROJECT=palup-jason@GOOGLE_CLOUD_LOCATION=global@PALUP_EMBED_MODEL=gemini-embedding-2@PALUP_EMBED_DIMENSION=1536'
 # GOOGLE_CLOUD_LOCATION=global is REQUIRED for gemini-embedding-2 — verified 2026-08-17 by probe: the model
 # 404s (NOT_FOUND) at us-central1 ("not available in the specified region") and resolves only at `global`,
 # which is also what the serving service uses (deploy-staging.yml). `--region us-central1` above is the
 # Cloud Run region and is unrelated to the Vertex endpoint.
-# TWO CORRECTIONS over the earlier draft of this command, both load-bearing:
+# THREE CORRECTIONS over the earlier draft of this command, all load-bearing:
 #   (1) VECTOR_ANN=true — WITHOUT it, createVectorStore (vector-factory.ts:28) writes to the NON-ANN
 #       PostgresVectorStore, a DIFFERENT table than the pgvector HNSW store the VECTOR_ANN serving path
 #       reads. Index and serve MUST use the same store, so the job needs VECTOR_ANN=true too.
 #   (2) SHOPIFY_STORES is parsed as JSON (merchant-store.ts:22 parseStoreDomains) — it must be
-#       {"demo":"…"}, not demo=…, or tenantsToIndex() finds no tenant and the job no-ops.
+#       {"palup-skincare-jason":"…"}, not palup-skincare-jason=…, or tenantsToIndex() finds no tenant and the job no-ops.
+#   (3) The tenant KEY must be `palup-skincare-jason`, NOT `demo` (corrected 2026-08-20). The serving service's
+#       OWN live env is SHOPIFY_STORES={"palup-skincare-jason":"palup-skincare-jason.myshopify.com"} (verified
+#       against the deployed Cloud Run service), so it serves + reads tenant `palup-skincare-jason`. A job keyed
+#       `demo` writes its corpus, product-facts AND 1b channel-health under `demo` — a namespace the service
+#       never reads, so the heartbeat that gates PRICE_REQUIRES_LIVE_CHANNEL never reaches the served tenant.
 # The embed model/dimension MUST match the serving pin (deploy-staging.yml): gemini-embedding-2 @ 1536.
 # NOTE: no serving-side flag is set here — the job WRITES the corpus, it does not serve it (see the
-# "Enabling note" below). Add PRODUCT_FACTS_POLL=true only when the Tier-2 poll producer is intended (§5).
+# "Enabling note" below). For the PRICE-TRUTH channel-health heartbeat (Pillar 1b), also add
+# PRODUCT_FACTS_POLL=true to --set-env-vars: it turns on the Tier-2 product-facts writer AND wires
+# recordProducerOk (catalog-index.ts:1429) so the served tenant gets a scheduled heartbeat. Enabling the
+# SERVE side (PRICE_REQUIRES_LIVE_CHANNEL) stays a separate money/NN#1 §5 promotion.
 
 # 2. Run it once by hand and READ THE OUTPUT before scheduling anything. On a pre-existing corpus this first
 #    run is the 100%-re-embed run described above — expect it to take longer and cost more than every run
