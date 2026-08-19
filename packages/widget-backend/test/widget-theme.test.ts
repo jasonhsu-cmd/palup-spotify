@@ -37,11 +37,18 @@ describe("deriveThemeVars — AA across a hostile brand matrix", () => {
 });
 
 describe("resolveTheme / resolveThemeConfig", () => {
-  it("returns the curated terracotta theme + brand name for palup-skincare-jason", () => {
-    const t = resolveTheme("palup-skincare-jason");
-    expect(t.brandName).toBe("Auria");
-    expect(t.brand).toMatch(/^#[0-9a-f]{6}$/i);
-    expect(contrast(rgb(t.brandInk), rgb(t.brand))).toBeGreaterThanOrEqual(4.5);
+  it("returns the curated terracotta COLOUR for palup-skincare-jason; the brand NAME comes from the fallback, not a hardcoded literal", () => {
+    // Pillar 5 (auto-brand) — the curated map holds COLOUR only; the brand name is no longer hardcoded per
+    // tenant. Without a fallback the name is undefined; the merchant's real (cached) shop name flows in as
+    // `fallbackBrandName` (wired by resolveThemeFor / the /embed/panel brandNameForShop resolver).
+    const noName = resolveTheme("palup-skincare-jason");
+    expect(noName.brandName).toBeUndefined();
+    expect(noName.brand).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(contrast(rgb(noName.brandInk), rgb(noName.brand))).toBeGreaterThanOrEqual(4.5);
+
+    const withName = resolveTheme("palup-skincare-jason", "Auria");
+    expect(withName.brandName).toBe("Auria"); // the real shop name flows through as fallbackBrandName
+    expect(withName.brand).toBe(noName.brand); // colour is unchanged (still the curated terracotta)
   });
 
   it("falls back to the default indigo config + the grounding brandName for an unknown tenant", () => {

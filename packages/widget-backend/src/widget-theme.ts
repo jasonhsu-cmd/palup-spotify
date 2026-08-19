@@ -49,11 +49,14 @@ type Rgb = [number, number, number];
 /** Today's widget indigo — the safe default when a tenant has no curated theme or a config is malformed. */
 export const DEFAULT_THEME: ThemeConfig = { brand: "#4f46e5" };
 
-// Curated per-tenant themes. The staging demo tenant matches the sample storefront's terracotta so the
-// widget reads as native to the Auria store. (This map is the v1 source; Shop.brand is a later enrichment.)
+// Curated per-tenant brand COLOUR (the staging demo tenant matches the sample storefront's terracotta so the
+// widget reads as native to the store). The brand NAME is deliberately NOT hardcoded here — it is resolved
+// from the merchant's real Shopify shop name and cached (Pillar 5, `brand-cache.ts`), threaded in as
+// `fallbackBrandName` by `resolveThemeFor`, so it scales to every merchant with no per-tenant edit. (Colour +
+// logo from Shopify Shop.brand at install are the next enrichment behind this same `resolveTheme` seam.)
 const THEME_CONFIGS: Record<string, ThemeConfig> = {
-  "palup-skincare-jason": { brand: "#a44a34", brandName: "Auria" },
-  demo: { brand: "#a44a34", brandName: "Auria" },
+  "palup-skincare-jason": { brand: "#a44a34" },
+  demo: { brand: "#a44a34" },
 };
 
 function hexToRgb(hex: string): Rgb | null {

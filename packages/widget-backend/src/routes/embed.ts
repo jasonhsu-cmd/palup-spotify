@@ -55,6 +55,10 @@ export interface EmbedDeps {
   frameAncestors: (shop: string | undefined) => Promise<string>;
   /** WS10 — resolve the merchant brand theme for a shop (server-side; contrast-safe). */
   resolveThemeFor: (shop: string | undefined) => Promise<ResolvedTheme>;
+  /** Pillar 5 (auto-brand) — resolve the merchant's real, cached Shopify shop NAME for the panel header.
+   *  Kept OFF the high-traffic /embed/theme launcher-colour endpoint (colours only). Optional: when absent
+   *  or unresolved, the theme's own brandName (default undefined → neutral header) is used. */
+  brandNameForShop?: (shop: string | undefined) => Promise<string | undefined>;
 }
 
 export function registerEmbedRoutes(app: FastifyInstance, deps: EmbedDeps): void {
@@ -71,11 +75,15 @@ export function registerEmbedRoutes(app: FastifyInstance, deps: EmbedDeps): void
     // WS10 — inject the merchant brand theme FOUC-free at the panel's <!--PALUP_THEME--> marker. Values are
     // validated hex (CSS) + JSON-escaped name/logo; a shop that doesn't resolve gets the default indigo theme.
     const theme = await deps.resolveThemeFor(shop);
+    // Pillar 5 (auto-brand) — overlay the merchant's real, cached brand NAME for the panel header only, so no
+    // brand name is hardcoded per tenant. Fail-closed: unresolved → the theme's neutral default (undefined).
+    const brandName = deps.brandNameForShop ? await deps.brandNameForShop(shop) : theme.brandName;
+    const panelTheme: ResolvedTheme = brandName ? { ...theme, brandName } : theme;
     // Pin the embedded chat to the light scheme so it matches the light-toned storefront and never
     // darkens on a dark-OS shopper (owner directive). The raw widgetHtml served at /widget stays
     // unpinned, so the a11y suite keeps exercising the dark scheme there.
     return deps.panelHtml
-      .replace("<!--PALUP_THEME-->", themeStyleBlock(theme))
+      .replace("<!--PALUP_THEME-->", themeStyleBlock(panelTheme))
       .replace('<html lang="en">', '<html lang="en" data-theme="light">');
   });
   // WS10 — the loader's shadow-DOM launcher (on the merchant page, cross-origin) fetches this to recolour
