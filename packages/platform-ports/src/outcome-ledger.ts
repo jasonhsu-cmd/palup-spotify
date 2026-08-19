@@ -105,8 +105,11 @@ export interface IncrementalLiftResult {
   /** USD. (treated revenue-per-exposure − control revenue-per-exposure) × treated exposures. Clamped to
    * 0 whenever `underpowered` — NEVER a positive number the measurement can't support. */
   incrementalLift: number;
-  /** (treated rate − control rate) / control rate. 0 when underpowered, or when the control rate is
-   * exactly 0 (division has no finite answer — see the comment at its computation). */
+  /** (treated rate − control rate) / control rate. Clamped to 0 whenever `underpowered` — including when
+   * the control rate is exactly 0, which (durability NOW-3, security review) is now ITSELF a trip
+   * condition for `underpowered` rather than a silent division-by-zero fallback — see the comment at its
+   * computation. A rate-normalized lift has no meaningful value with a zero denominator to normalize
+   * against, so this is never a "real" relativeLift of 0. */
   relativeLift: number;
   /** 0..1. `1 - (two-sided p-value)` of a two-proportion z-test on order rate. Forced to 0 whenever
    * `underpowered` — a confidence number is not meaningful without enough data to compute one. */
@@ -115,7 +118,9 @@ export interface IncrementalLiftResult {
    * auditable even though the numeric result is clamped away. */
   method: string;
   /** true whenever the inputs cannot support a trustworthy lift measurement: below the min-exposure
-   * floor, a zero/absent control, or non-finite/invalid inputs. Fail-closed. */
+   * floor, a zero/absent control (zero EXPOSURES), a control with real exposures but a zero revenue-per-
+   * exposure RATE (nothing to normalize `relativeLift` against — durability NOW-3), or non-finite/invalid
+   * inputs. Fail-closed. */
   underpowered: boolean;
 }
 
@@ -127,6 +132,14 @@ export interface IncrementalLiftResult {
 export const MIN_EXPOSURES_PER_ARM = 200;
 
 const METHOD_BASE = "incrementality-v1:two-arm-holdout-lift+two-proportion-z";
+// NOTE on versioning (task instruction: "bump the method sub-version if the file versions methods, else
+// note it"): `METHOD_BASE`'s "v1" names the overall two-arm-holdout + two-proportion-z METHODOLOGY, which
+// this fix does not change — it only adds a new fail-closed TRIP CONDITION, following the exact same
+// pattern as the three that already existed (`:underpowered-invalid-input`, `:underpowered-zero-control`,
+// `:underpowered-min-exposure-floor`), none of which bumped the base version either. The reason suffix
+// itself (`:underpowered-zero-control-rate`, below) IS the audit trail for this change. Bumping to "v2"
+// is reserved for the larger D1 incrementality-v2 methodology reconciliation (see the comment at
+// `relativeLift`'s computation) — doing it here would overclaim that this fix addresses that too.
 
 function isValidArmAgg(agg: ArmAgg): boolean {
   const vals = [agg.exposures, agg.orders, agg.revenue];
@@ -179,10 +192,11 @@ function underpowered(method: string): IncrementalLiftResult {
  *
  *   incrementalLift = (treated revenue-per-exposure − control revenue-per-exposure) × treated exposures
  *
- * Fail-closed: below `MIN_EXPOSURES_PER_ARM`, a zero/absent control, or non-finite/invalid inputs all
- * return `underpowered: true`, `confidence: 0`, and `incrementalLift` CLAMPED TO 0 — never a positive
- * attributed-revenue figure the measurement can't support, even if the raw (untrusted) numbers would
- * suggest one.
+ * Fail-closed: below `MIN_EXPOSURES_PER_ARM`, a zero/absent control (zero exposures), a control with real
+ * exposures but a zero revenue-per-exposure rate (durability NOW-3 — nothing to normalize against), or
+ * non-finite/invalid inputs all return `underpowered: true`, `confidence: 0`, and `incrementalLift`/
+ * `relativeLift` CLAMPED TO 0 — never a positive attributed-revenue figure the measurement can't support,
+ * even if the raw (untrusted) numbers would suggest one.
  */
 export function computeIncrementalLift(input: IncrementalLiftInput): IncrementalLiftResult {
   const { treated, control } = input;
@@ -199,13 +213,26 @@ export function computeIncrementalLift(input: IncrementalLiftInput): Incremental
 
   const treatedRate = treated.revenue / treated.exposures;
   const controlRate = control.revenue / control.exposures;
+  // Durability NOW-3 (security review): a control arm can have real, above-floor EXPOSURES (so it isn't
+  // caught by "zero/absent control" above) yet still convert literally ZERO revenue-per-exposure — e.g.
+  // the control genuinely made no sales this period. `incrementalLift` (the absolute figure) still
+  // carries a real signal in that case, but `relativeLift = (treatedRate − controlRate) / controlRate`
+  // has NO finite answer to normalize by. The previous code fell back to `relativeLift = 0` here WITHOUT
+  // flagging `underpowered` — that produced a trustworthy-LOOKING "no lift" verdict for a measurement
+  // that in fact cannot be taken at all, which is exactly the false-negative a `relativeLift`-comparing
+  // caller (evolution/engine.ts's gate/monitor, durability NOW-2) must not be handed. Fail closed instead:
+  // treat a zero control RATE the same as any other condition that can't support a trustworthy lift.
+  //
+  // Out of scope (larger D1 "incrementality-v2" work, left for eval-validated follow-up, NOT built here):
+  // `confidence`/`power` below is a two-proportion z-test on ORDER RATE while `relativeLift` is a REVENUE
+  // RATE — the two are not the same statistic, and neither carries a variance-based CI on revenue itself.
+  // This fix only closes the zero-control-rate gap; it does not reconcile that broader methodology
+  // mismatch.
+  if (controlRate === 0) {
+    return underpowered(`${METHOD_BASE}:underpowered-zero-control-rate`);
+  }
   const incrementalLift = (treatedRate - controlRate) * treated.exposures;
-  // Guard division-by-zero: a control arm with real exposures but zero revenue/orders is a legitimate,
-  // well-powered outcome (e.g. the control genuinely converted nobody) — NOT the same as "zero/absent
-  // control" above (which is zero EXPOSURES). Falling back to 0 rather than an infinite ratio keeps the
-  // output finite without fabricating a number; the absolute `incrementalLift` above still carries the
-  // real signal.
-  const relativeLift = controlRate !== 0 ? (treatedRate - controlRate) / controlRate : 0;
+  const relativeLift = (treatedRate - controlRate) / controlRate;
 
   const z = twoProportionZ(treated, control);
   const confidence = Math.min(1, Math.max(0, 2 * normalCdf(Math.abs(z)) - 1));
