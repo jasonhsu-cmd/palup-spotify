@@ -439,6 +439,39 @@ describe("EvolutionEngine.regressionVerdict — measured-outcome preference (Wav
     expect(verdict).toEqual({ regressed: true, reason: "quality-regression" });
   });
 
+  // HIGH fix (review, W3-2 follow-up) — symmetric with `gate()`'s `powerAdequate` check on BOTH sides.
+  // Before the fix, `preferMeasured` only checked `observedMO.power`; an UNDERPOWERED bar (e.g. a thin
+  // gate-time ledger read, power:0) would still be treated as "comparable", so a well-powered observation
+  // that beat that meaningless bar on the measured lift alone would report healthy — SUPPRESSING a real
+  // quality regression the proxy would have caught. The fix requires the bar to also clear
+  // `powerAdequate`, so this case now falls straight through to the qualityScore check instead.
+  it("HIGH fix: an UNDERPOWERED bar + a well-powered observation ⇒ preferMeasured is false — falls back to qualityScore, regression is NOT suppressed", () => {
+    // Bar's own measuredOutcome is present but power:0 (underpowered) — e.g. a thin gate-time read.
+    const e = new EvolutionEngine({ champion: champWithMO(0.05, 0), grader: new MockGrader({}) });
+    // The OBSERVATION is well-powered and shows a POSITIVE lift vs. the (untrustworthy) bar — the OLD,
+    // asymmetric check would have called this "comparable" (only observedMO's power mattered) and
+    // reported healthy purely on the lift beating 0.05. qualityScore, meanwhile, genuinely regressed
+    // (0.5 < the champion's 0.75 baseline — see `champion` in this file's shared fixtures).
+    const verdict = e.regressionVerdict({
+      qualityScore: 0.5,
+      safetyPass: true,
+      measuredOutcome: { incrementalLift: 0.5, power: 0.99 },
+    });
+    expect(verdict).toEqual({ regressed: true, reason: "quality-regression" }); // NOT suppressed as healthy
+  });
+
+  it("HIGH fix, confirmed unaffected: BOTH sides powered still prefers the measured verdict (regression case, (e) above) and the non-regression case", () => {
+    const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
+    // Regression: qualityScore looks healthy but the powered-both-sides measured lift regressed.
+    expect(
+      e.regressionVerdict({ qualityScore: 0.99, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, power: 0.95 } }),
+    ).toEqual({ regressed: true, reason: "measured-outcome-regression" });
+    // Healthy: qualityScore looks bad but the powered-both-sides measured lift did not regress.
+    expect(
+      e.regressionVerdict({ qualityScore: 0.01, safetyPass: true, measuredOutcome: { incrementalLift: 0.08, power: 0.95 } }),
+    ).toEqual({ regressed: false });
+  });
+
   it("no baseline measuredOutcome to compare against ⇒ falls back to qualityScore", () => {
     const e = engineWith({ good: GOOD }); // champion carries no measuredOutcome
     const verdict = e.regressionVerdict({ qualityScore: 0.9, safetyPass: true, measuredOutcome: { incrementalLift: -5, power: 0.95 } });

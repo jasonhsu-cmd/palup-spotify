@@ -467,16 +467,19 @@ export class EvolutionEngine {
     // the monitor went blind exactly when a second problem was most likely, and would then have recorded
     // the regressing champion as the known-good baseline.
     const bar = (this.prevChampion ?? this.champion).metrics;
-    // PREFER the measured lift over the caller-attested qualityScore — but ONLY when it is trustworthy
-    // (finite, and power either absent or >= MEASURED_OUTCOME_POWER_FLOOR, exactly the gate's
-    // `powerAdequate` predicate) AND comparable (the bar itself carries a finite measuredOutcome to
-    // compare against). Any of those missing ⇒ falls straight through to the qualityScore check,
+    // PREFER the measured lift over the caller-attested qualityScore — but ONLY when BOTH sides are
+    // trustworthy: each finite AND adequately powered (power absent, or >= MEASURED_OUTCOME_POWER_FLOOR —
+    // exactly the gate's `powerAdequate` predicate). The BAR must clear `powerAdequate` too, symmetric
+    // with `gate()`: otherwise a well-powered observation could be compared against a statistically
+    // meaningless underpowered bar (e.g. a thin gate-time ledger read of power:0) and, because
+    // preferMeasured would be true, SKIP the qualityScore proxy check — silently suppressing a real
+    // regression. Either side missing/underpowered ⇒ falls straight through to the qualityScore check,
     // UNCHANGED — "else keep attested".
     const observedMO = observed.measuredOutcome;
     const barMO = bar.measuredOutcome;
     const preferMeasured =
       observedMO !== undefined && Number.isFinite(observedMO.incrementalLift) && powerAdequate(observedMO.power) &&
-      barMO !== undefined && Number.isFinite(barMO.incrementalLift);
+      barMO !== undefined && Number.isFinite(barMO.incrementalLift) && powerAdequate(barMO.power);
     if (preferMeasured) {
       if (observedMO!.incrementalLift < barMO!.incrementalLift) return { regressed: true, reason: "measured-outcome-regression" };
       return { regressed: false };
@@ -593,8 +596,11 @@ function isRate01(v: unknown): v is number {
  * Revenue-flywheel Wave-2 (D) — the power/confidence floor a `measuredOutcome.power` value must clear
  * before the gate (`gate()`) or the monitor (`regressionVerdict()`) will trust it enough to decide on.
  *
- * OWNER-SET (Revenue-flywheel W3-2, recorded decision — not an engineering guess): 0.95, i.e. the
- * standard 95% two-proportion-z confidence bar for a revenue-affecting promotion/rollback decision.
+ * 0.95 — the standard 95% two-proportion-z confidence bar for a revenue-affecting promotion/rollback.
+ * PROVENANCE (honest): recommended by Claude and approved by the owner in the Wave-3 turn-on plan this
+ * session; a formal governance-record sign-off (ADR / HITL-POLICY) before any LIVE ledger feed is a
+ * tracked pre-enable item, NOT yet filed. The change is a STRENGTHENING (0.8→0.95), so it is
+ * HITL-POLICY §5-compliant regardless. Do not read this as an already-recorded governance decision.
  * `DEFAULT_CANARY_POWER` (control-plane/canary-controller.ts) is a SEPARATE, still-placeholder seam and
  * must not be confused with this one: it gates the canary's judge-graded QUALITY-delta traffic
  * volume/window (n + elapsedMs); this floor gates only the measured-outcome LIFT's own statistical

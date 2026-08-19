@@ -4,9 +4,10 @@ import { setAutoPromoteOptIn, setPlatformAutoPromote, armKill, freezeAutoPromote
 import { EngineRegistry, EvolutionEngine, MockGrader, type PolicyMetrics } from "@palup/evolution";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { servingChampion } from "../src/champion-promoter.js";
-import { canaryConfig, type CanaryPowerThresholds } from "../src/canary-controller.js";
+import { canaryConfig, type CanaryPowerThresholds, type Interaction } from "../src/canary-controller.js";
 import { AutoOptimizeOrchestrator, type OrchestratorDeps } from "../src/auto-optimize-orchestrator.js";
-import type { CanaryMeasurement } from "../src/canary-measure.js";
+import { measureCanary, type CanaryMeasurement } from "../src/canary-measure.js";
+import { readServingMeasuredOutcome } from "../src/measured-outcome-caller.js";
 
 // ADR-0014 T4f — the orchestrator composes ALL stages and funnels EVERY miss through ONE force-human exit
 // (never promote, never silent-drop). Ships DORMANT (opt-in default OFF). Serving is reachable ONLY via
@@ -195,7 +196,10 @@ describe("AutoOptimizeOrchestrator (ADR-0014 T4f)", () => {
   // qualityDelta/power arithmetic that decides shadow/canary pass-fail above, it only rides along on the
   // audit entry so a reviewer can see the measured lift next to the judge-graded delta at canary time.
   describe("W3-2 canary stage: measuredOutcome forwarded into engine.recordCanary's audit", () => {
-    it("DARK-SAFE: no measuredOutcome on the CanaryMeasurement (every test above) ⇒ the audit carries none", async () => {
+    it("no measuredOutcome supplied on the CanaryMeasurement (the injected dep never attaches one) ⇒ the audit carries none", async () => {
+      // NOTE ON FRAMING: this is NOT what a real empty ledger produces (see the composed test below for
+      // that) — `PASS_CANARY` here is a hand-built CanaryMeasurement that simply omits the field. This
+      // test only proves recordCanary's passthrough is optional/undefined-safe when nothing is supplied.
       const sc = scenario(); await enable(sc.store); await seed(sc);
       const orch = new AutoOptimizeOrchestrator(deps(sc));
       await orch.advance("acme", "cand"); // began
@@ -204,6 +208,62 @@ describe("AutoOptimizeOrchestrator (ADR-0014 T4f)", () => {
       expect(r.outcome).toBe("canary-passed");
       const entry = sc.engine.getAudit().find((a) => a.action === "auto_canary");
       expect(entry?.detail?.measuredOutcome).toBeUndefined();
+    });
+
+    // Steward correction: composes the REAL production call chain — `readServingMeasuredOutcome` (over a
+    // genuinely EMPTY store, no accumulateArmTally calls at all) → `measureCanary` → this orchestrator's
+    // `engine.recordCanary` — exactly the way `auto-optimize.ts`'s `runCanaryMeasure` composition does it.
+    // With a real empty ledger, `readMeasuredOutcomeSignal` returns the HONEST ZERO — a DEFINED
+    // underpowered object, `{incrementalLift:0, power:0, underpowered:true, method}` — NEVER `undefined`.
+    // The prior test above must not be read as modeling this: it hand-supplies `undefined` on the
+    // CanaryMeasurement, which is a different (also-valid, but not "the real dark state") scenario.
+    it("DARK-SAFE (real composition): an EMPTY ledger produces a DEFINED underpowered measuredOutcome on the audit — never undefined — and the canary still passes on the quality-delta proxy alone", async () => {
+      const sc = scenario(); await enable(sc.store); await seed(sc);
+      // A monotonic clock, +25h per call. `preflight()` (Stage 0) ALSO calls `now()` on every `advance()`,
+      // so ticks land: advance#1 began→tick0; advance#2 preflight→tick1, Stage2 `at`(=shadow.at)→tick2;
+      // advance#3 preflight→tick3, Stage3 `now`→tick4. The window that matters is tick2 → tick4 = 50h,
+      // comfortably over the 24h `minWindowMs`, and well under the 7-day `maxWindowMs`.
+      const BASE_MS = Date.parse("2026-08-03T00:00:00Z");
+      const STEP_MS = 25 * 3600 * 1000;
+      let call = 0;
+      const clock = () => new Date(BASE_MS + call++ * STEP_MS).toISOString();
+      const grade = async (reply: string) => (reply.includes("good") ? 1 : 0);
+      const orch = new AutoOptimizeOrchestrator(
+        deps(sc, {
+          now: clock,
+          runCanaryMeasure: async (tenantId, canaryPolicyId, championPolicyId, window) => {
+            // The exact call auto-optimize.ts's composition root makes — a genuinely empty `sc.store`.
+            const measuredOutcome = await readServingMeasuredOutcome(sc.store, tenantId);
+            // Falls inside the [since=tick2≈Aug5 02:00Z, now=tick4≈Aug7 04:00Z) window computed above.
+            const traffic: Interaction[] = Array.from({ length: 120 }, (_, i) => ({
+              ts: "2026-08-05T12:00:00Z",
+              servedBy: canaryPolicyId,
+              sessionId: `s${i}`,
+              message: "do you have a good recommendation for dry skin?",
+              reply: "yes, a good pick for you",
+              mode: "sales",
+              escalate: false,
+            }));
+            return measureCanary(traffic, grade, { canaryPolicyId, championPolicyId }, window, undefined, measuredOutcome);
+          },
+        }),
+      );
+      await orch.advance("acme", "cand"); // began
+      await orch.advance("acme", "cand"); // shadow-passed (stamps shadow.at = times[0])
+      const r = await orch.advance("acme", "cand"); // canary: window = {since: times[0], now: times[1]} = 25h, n=120, delta=1
+
+      // The DECISION is dark-safe: quality-delta alone (120 exposures, delta=1 >= minDelta) promotes the
+      // canary stage — the underpowered measured signal was never consulted for pass/fail.
+      expect(r.outcome).toBe("canary-passed");
+      expect(sc.engine.getCandidate("cand")?.auto?.stage).toBe("canaried");
+
+      const entry = sc.engine.getAudit().find((a) => a.action === "auto_canary");
+      expect(entry?.detail?.measuredOutcome).toEqual({
+        incrementalLift: 0,
+        power: 0,
+        underpowered: true,
+        method: expect.stringMatching(/underpowered/),
+      });
     });
 
     it("a measuredOutcome supplied on the CanaryMeasurement is forwarded verbatim, without affecting the canary pass/fail arithmetic", async () => {
