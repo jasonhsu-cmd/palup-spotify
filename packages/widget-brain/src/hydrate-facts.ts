@@ -43,6 +43,17 @@ import type { Product, ProductFact } from "@palup/platform-ports";
 export interface HydrationStaleness {
   now: Date;
   maxAgeMs: number;
+  /**
+   * Pillar 1 (price truth) — whether the merchant's freshness CHANNEL (webhook subscription + producer) is
+   * provably LIVE. A fact's `updatedAt` only proves the row was WRITTEN recently, not that the pipe keeping
+   * it fresh is still alive: a webhook subscription can die silently while an old poll-written row still
+   * looks recent. So when `channelHealthy` is explicitly `false`, every matched fact renders
+   * `priceConfirmed:false` regardless of its own age — a recent row from a dead channel is not a confirmed
+   * price (money/NN#1 fail-honest). Omitted or `true` ⇒ freshness is judged on `updatedAt` alone, exactly
+   * as before (byte-identical). Only ever consulted on the already-flag-gated hydration path, and only when
+   * a serve-path caller supplies it (behind its own posture flag).
+   */
+  channelHealthy?: boolean;
 }
 
 /**
@@ -58,6 +69,11 @@ export function hydrateProductFacts(products: Product[], facts: ProductFact[], s
   for (const f of facts) byId.set(f.productId, f);
   const isStale = (fact: ProductFact): boolean => {
     if (!staleness) return false; // no ceiling configured ⇒ never stale (pre-D2 behaviour)
+    // Pillar 1 — the freshness CHANNEL must be provably live to quote a confirmed price. When channel health
+    // is supplied and NOT healthy, a matched fact is unconfirmed regardless of its own `updatedAt`: a recent
+    // row proves only that it was written recently, not that the webhook/producer keeping it fresh is still
+    // alive (money/NN#1 fail-honest). `channelHealthy` omitted/true ⇒ judged on `updatedAt` alone (unchanged).
+    if (staleness.channelHealthy === false) return true;
     // No updatedAt ⇒ freshness UNPROVABLE ⇒ treat as stale (fail-honest); a malformed date does too.
     if (!fact.updatedAt) return true;
     const at = new Date(fact.updatedAt).getTime();

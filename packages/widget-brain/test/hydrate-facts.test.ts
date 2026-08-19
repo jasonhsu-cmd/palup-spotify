@@ -117,6 +117,49 @@ describe("A1b/D2 — the staleness ceiling (fail-honest on a stale money fact)",
   });
 });
 
+describe("Pillar 1 — channel-health gate (a fact is unconfirmed unless the freshness channel is provably live)", () => {
+  const now = new Date("2026-08-19T12:00:00.000Z");
+  const CEILING_15_MIN = 900_000;
+  const fresh: ProductFact = {
+    productId: "serum-vc",
+    price: "$29",
+    availableForSale: true,
+    updatedAt: new Date(now.getTime() - 60_000).toISOString(), // 1 min old — well inside the ceiling
+  };
+
+  it("channelHealthy:false ⇒ even a FRESH fact is priceConfirmed:false (a recent row from a dead channel is not a confirmed price)", () => {
+    const out = hydrateProductFacts([prod({ price: "$34" })], [fresh], { now, maxAgeMs: CEILING_15_MIN, channelHealthy: false });
+    expect(out[0]!.priceConfirmed).toBe(false);
+    expect(out[0]!.price).toBe("$34"); // the fresh $29 is NOT quoted while the channel is unproven
+    expect(out[0]!.availableForSale).toBeUndefined(); // stale-channel availability is dropped too
+  });
+
+  it("channelHealthy:true ⇒ a fresh fact is quoted normally, byte-identical to omitting the field", () => {
+    const withHealth = hydrateProductFacts([prod({ price: "$34" })], [fresh], { now, maxAgeMs: CEILING_15_MIN, channelHealthy: true });
+    const without = hydrateProductFacts([prod({ price: "$34" })], [fresh], { now, maxAgeMs: CEILING_15_MIN });
+    expect(withHealth[0]!.price).toBe("$29");
+    expect(withHealth[0]!.priceConfirmed).toBeUndefined();
+    expect(withHealth).toEqual(without); // a healthy channel changes nothing
+  });
+
+  it("channelHealthy omitted ⇒ existing behaviour, byte-identical (no serve-path caller sets it today)", () => {
+    const out = hydrateProductFacts([prod({ price: "$34" })], [fresh], { now, maxAgeMs: CEILING_15_MIN });
+    expect(out[0]!.price).toBe("$29");
+    expect(out[0]!.priceConfirmed).toBeUndefined();
+  });
+
+  it("an unhealthy channel hedges every matched fact, even ones that would pass the freshness ceiling", () => {
+    const a = prod({ id: "a", price: "$10" });
+    const b = prod({ id: "b", price: "$20" });
+    const out = hydrateProductFacts([a, b], [
+      { productId: "a", price: "$8", updatedAt: fresh.updatedAt },
+      { productId: "b", price: "$18", updatedAt: fresh.updatedAt },
+    ], { now, maxAgeMs: CEILING_15_MIN, channelHealthy: false });
+    expect(out.map((p) => p.priceConfirmed)).toEqual([false, false]);
+    expect(out.map((p) => p.price)).toEqual(["$10", "$20"]); // neither stale-channel price is quoted
+  });
+});
+
 describe("S3 §D — 15-minute serve-time staleness ceiling (fail-honest)", () => {
   const now = new Date("2026-08-16T12:00:00.000Z");
   const CEILING_15_MIN = 900_000;
