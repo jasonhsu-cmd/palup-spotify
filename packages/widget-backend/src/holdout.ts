@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Arm, RuntimeStatePort } from "@palup/platform-ports";
+import { PLATFORM_TENANT } from "@palup/state-postgres";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { bucket } from "./canary.js";
 
@@ -103,6 +104,21 @@ export async function writeHoldoutConfig(
   config: HoldoutConfig,
   opts: WriteHoldoutConfigOpts,
 ): Promise<HoldoutConfig> {
+  // A holdout is a PER-MERCHANT measurement arm; the reserved `__system__` partition is never a serving
+  // tenant, so writing one there is inert but a footgun. Refuse it at the single writer — every caller is
+  // covered, not just the CLI — mirroring `setTenantOptIn`'s reserved-partition refusal in state-postgres.
+  if (tenantId === PLATFORM_TENANT) {
+    throw new Error(
+      `writeHoldoutConfig requires a real merchant tenantId, not the reserved ${PLATFORM_TENANT} partition — ` +
+        "a holdout is a per-merchant measurement arm and the system partition is never a serving tenant.",
+    );
+  }
+  // Defense in depth: never persist a non-finite fraction. `Math.max(0, Math.min(1, NaN))` is NaN, which
+  // would corrupt the arm split on read. The CLI parser already rejects non-numeric input; this guards any
+  // FUTURE caller that reaches the writer directly.
+  if (!Number.isFinite(config.fraction)) {
+    throw new Error(`writeHoldoutConfig fraction must be a finite number in [0,1], got ${config.fraction}`);
+  }
   const clamped: HoldoutConfig = { ...config, fraction: Math.max(0, Math.min(1, config.fraction)) };
   const at = opts.at ?? new Date().toISOString();
   await store.tx({ tenantId }, async (t) => {

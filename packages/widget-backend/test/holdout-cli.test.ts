@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryRuntimeStore } from "@palup/platform-ports";
-import { readHoldoutConfig } from "../src/holdout.js";
+import { PLATFORM_TENANT } from "@palup/state-postgres";
+import { readHoldoutConfig, writeHoldoutConfig } from "../src/holdout.js";
 import { HoldoutArgsError, parseHoldoutArgv, runHoldout } from "../src/jobs/holdout.js";
 
 // The operator entry point for the business HOLDOUT (Wave 2 / W2-B, ADR-0007). Mirrors
@@ -169,6 +170,39 @@ describe("holdout CLI — status reads back without mutating", () => {
 
     expect(report.config).toEqual({ enabled: true, fraction: 0.15 });
     expect(await store.readAudit({ tenantId: "acme" })).toHaveLength(1); // only the set, status added nothing
+  });
+});
+
+describe("holdout writer — refuses the reserved system partition + non-finite fraction (defense in depth)", () => {
+  // A holdout is a PER-MERCHANT measurement arm; the reserved `__system__` partition is never a serving
+  // tenant, so a write there is inert but a footgun. Mirror `setTenantOptIn`'s reserved-partition refusal
+  // (state-postgres/catalog-retrieval-enablement.ts) at the single writer, so EVERY caller is protected —
+  // not just this CLI. Security review (PR #387) LOW note (a).
+  it("writeHoldoutConfig THROWS on the reserved __system__ tenant and writes/audits nothing", async () => {
+    const store = new InMemoryRuntimeStore();
+    await expect(
+      writeHoldoutConfig(store, PLATFORM_TENANT, { enabled: true, fraction: 0.5 }, { actor: "operator" }),
+    ).rejects.toThrow(/reserved|__system__|real merchant/i);
+    expect(await readHoldoutConfig(store, PLATFORM_TENANT)).toEqual({ enabled: false, fraction: 0 });
+    expect(await store.readAudit({ tenantId: PLATFORM_TENANT })).toEqual([]);
+  });
+
+  it("the CLI set path surfaces the reserved-partition refusal", async () => {
+    const store = new InMemoryRuntimeStore();
+    await expect(
+      runHoldout({ store }, parseHoldoutArgv(["set", PLATFORM_TENANT, "true", "0.5"])),
+    ).rejects.toThrow(/reserved|__system__|real merchant/i);
+  });
+
+  // Defense in depth: the CLI parser already rejects a non-numeric fraction (`Number.isFinite` at
+  // parse time), but the single writer must not silently persist NaN if any FUTURE caller reaches it
+  // directly — `Math.max(0, Math.min(1, NaN))` is NaN. Security review (PR #387) LOW note (b).
+  it("writeHoldoutConfig THROWS on a non-finite fraction rather than writing NaN", async () => {
+    const store = new InMemoryRuntimeStore();
+    await expect(
+      writeHoldoutConfig(store, "acme", { enabled: true, fraction: Number.NaN }, { actor: "operator" }),
+    ).rejects.toThrow(/finite|NaN|\[0,1\]/i);
+    expect(await readHoldoutConfig(store, "acme")).toEqual({ enabled: false, fraction: 0 });
   });
 });
 
