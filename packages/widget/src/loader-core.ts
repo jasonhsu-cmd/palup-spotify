@@ -238,6 +238,23 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
           // 2nd message. `open()` above is the only place that clears it back to "none".
           dot.style.display = "block";
           break;
+        case "palup:jointoken": {
+          // Flywheel attribution (ADR-0020, Pillar 4). The PANEL mints the join token itself — it holds the
+          // widget token + sessionId and is same-origin to /checkout/join-token, which derives the tenant
+          // from that token (a storefront-side mint would 401 or mis-attribute). So ONLY this opaque,
+          // PII-free token (randomBytes(24), shopify-webhook-identity.ts) crosses the frame boundary; the
+          // sessionId never does — keeping the "no identifying data on the '*' channel" invariant intact.
+          // Already origin+source validated above (e.origin===origin && e.source===iframe.contentWindow).
+          // Exposed on window.PALUP for the host storefront to append to its checkout permalink
+          // (?attributes[_palup_join_token]=<token> → the order's note_attributes).
+          const tok = (data as { joinToken?: unknown }).joinToken;
+          if (typeof tok === "string" && tok) {
+            const w = window as unknown as { PALUP?: Record<string, unknown> };
+            w.PALUP = w.PALUP || {};
+            w.PALUP.joinToken = tok;
+          }
+          break;
+        }
         default:
           break;
       }
