@@ -43,3 +43,41 @@ test("self-improvement loop is observable and governed via the dashboard", async
   await expect(page.getByTestId("tel-status")).toContainText("tenant: demo");
   await expect(page.getByTestId("telemetry")).not.toContainText("set the operator token");
 });
+
+// CLAUDE.md §3 non-negotiable #4 — "The Kill Switch must always work." The self-improvement test above
+// exercises the governed loop but never the halt control itself. This drives the real dashboard button:
+// KILL → the halt is real server-side (GET /api/state killed:true), label flips to "ON"; CLEAR → restored.
+// Start-state-agnostic so it can't be flaked by a leftover killed state from another run.
+test("the Kill Switch halts and clears via the operator dashboard (§3 #4 — must always work)", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("palup_operator_token", "e2e-op-token"));
+  const killApiCalls: string[] = [];
+  page.on("request", (req) => {
+    const u = req.url();
+    if (u.includes("/api/kill")) killApiCalls.push("kill");
+    else if (u.includes("/api/unkill")) killApiCalls.push("unkill");
+  });
+  await page.goto("/");
+
+  const kill = page.getByTestId("kill-btn");
+  const state = () =>
+    page.evaluate(() => fetch("/api/state", { headers: { authorization: "Bearer e2e-op-token" } }).then((r) => r.json() as Promise<{ killed: boolean }>));
+
+  // Baseline: ensure NOT killed (clear a leftover halt from another test/run first).
+  if ((await state()).killed) {
+    await kill.click();
+    await expect(kill).toHaveText("Kill switch");
+  }
+  await expect(kill).toHaveText("Kill switch");
+
+  // KILL — an operator can halt instantly, and the halt is real server-side (not just a label).
+  await kill.click();
+  await expect(kill).toHaveText(/Kill switch: ON/);
+  expect((await state()).killed, "clicking Kill must actually halt (server state killed:true)").toBe(true);
+
+  // CLEAR — the same control restores.
+  await kill.click();
+  await expect(kill).toHaveText("Kill switch");
+  expect((await state()).killed, "clicking again must clear the halt").toBe(false);
+
+  expect(killApiCalls).toEqual(["kill", "unkill"]);
+});
