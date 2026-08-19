@@ -443,6 +443,7 @@
   }
   let memoryEnabled = false; // learned ONLY from a /chat response; NEVER client-guessed
   let consentMode = null;    // "opt_in" | "opt_out", learned the same way
+  let memoryTurnsSeen = 0;   // memory-active turns this session — gates the just-in-time opt_out notice
   // { ordinary: boolean, special: boolean } — the EFFECTIVE memory state for the subject the server is
   // actually serving, from /chat and /consent alike. Also never client-guessed, and for the same reason
   // the other two aren't: the panel used to bind its checkbox to `consent === "in"`, which is simply
@@ -684,7 +685,19 @@
     // a signed-in shopper whose token later expires sees the panel move to their guest state on the next
     // turn: that is residual C14 (accepted 2026-08-04) being shown rather than hidden.
     if (d.memoryActive && typeof d.memoryActive === "object"){ memoryActive = d.memoryActive; syncManagePanelToggles(); }
-    if (!memState.consentShown) showConsentPrompt();
+    // Just-in-time consent (US opt_out): the notice is a DISCLOSURE, not a decision, so it must not
+    // front-load itself onto the shopper's highest-intent FIRST turn (their opening question). The manage
+    // panel above is already present for full transparency + control from turn 1. Surface the notice when
+    // memory is demonstrably IN USE — the server recalled a stored preference this turn (a returning shopper
+    // being helped) — or, for a first-time shopper where nothing has been recalled yet, from their SECOND
+    // turn onward, so their first answer lands uninterrupted. opt_in (EU/UK) is UNCHANGED: it must ASK up
+    // front, because in an opt-in region nothing may be kept before an explicit yes.
+    memoryTurnsSeen++;
+    if (!memState.consentShown){
+      const isOptIn = consentMode === "opt_in";
+      const recalled = Array.isArray(d.flags) && d.flags.indexOf("memory:recalled") >= 0;
+      if (isOptIn || recalled || memoryTurnsSeen >= 2) showConsentPrompt();
+    }
     // PR-11c — the contextual health-consent prompt (Consent 2), independent of the general prompt
     // above: fires off the server's OWN `consentPrompt:"special"` signal (never guessed client-side),
     // at most once per session until answered (specialConsentShown).
