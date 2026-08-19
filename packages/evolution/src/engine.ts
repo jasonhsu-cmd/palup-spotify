@@ -173,18 +173,33 @@ export class EvolutionEngine {
     // Fail-CLOSED on a malformed measuredOutcome (security review): a present-but-non-finite
     // `incrementalLift` (NaN/Infinity/non-number) on EITHER side must BLOCK, mirroring the `complaintRate`
     // `isRate01` hardening above — a raw `<` would evaluate false and silently no-op the seam (fail-OPEN).
-    // Dormant until Phase 1 feeds a live value, but the malformed branch must fail closed before then.
+    // UNCONDITIONAL — a malformed value is a data-integrity failure, never merely "underpowered", so it is
+    // never eligible for the power-floor fallback below.
     const measuredOutcomeMalformed =
       (candMO !== undefined && !Number.isFinite(candMO.incrementalLift)) ||
       (champMO !== undefined && !Number.isFinite(champMO.incrementalLift));
-    const measuredOutcomeBaselineAbsent = candMO !== undefined && champMO === undefined;
+    // Revenue-flywheel Wave-2 (D) — the POWER FLOOR (see `MEASURED_OUTCOME_POWER_FLOOR`/`powerAdequate`
+    // below). `power` ABSENT on a side ⇒ that side is treated as adequate (the pre-Wave-2-D behavior:
+    // every #349 caller, none of which ever set `power`, is byte-identical). `power` EXPLICITLY below the
+    // floor on EITHER side ⇒ the comparison is not trustworthy enough to gate on in EITHER direction, so
+    // the baseline-absent/regressed checks below are SKIPPED entirely — the gate falls back to deciding
+    // on the proxy (qualityScore/counter-metrics/holdout) alone, exactly as if measuredOutcome were
+    // absent. This is a fail-CLOSED bypass (an underpowered signal can never justify a promotion — it
+    // simply stops being consulted), never a fail-OPEN one: every other floor above still applies in full.
+    const measuredOutcomeTrustworthy =
+      !measuredOutcomeMalformed && powerAdequate(candMO?.power) && powerAdequate(champMO?.power);
+    const measuredOutcomeUnderpowered = candMO !== undefined && !measuredOutcomeMalformed && !measuredOutcomeTrustworthy;
+    const measuredOutcomeBaselineAbsent =
+      measuredOutcomeTrustworthy && candMO !== undefined && champMO === undefined;
     const measuredOutcomeRegressed =
-      candMO !== undefined && champMO !== undefined &&
-      Number.isFinite(candMO.incrementalLift) && Number.isFinite(champMO.incrementalLift) &&
+      measuredOutcomeTrustworthy && candMO !== undefined && champMO !== undefined &&
       candMO.incrementalLift < champMO.incrementalLift;
     if (measuredOutcomeMalformed) reasons.push("measured-outcome-invalid");
     if (measuredOutcomeBaselineAbsent) reasons.push("measured-outcome-baseline-absent");
     if (measuredOutcomeRegressed) reasons.push("measured-outcome-regressed");
+    // Informational only (never blocking) — records WHY a present measuredOutcome was ignored, so an
+    // operator/audit reader can tell "no signal" apart from "a signal we deliberately didn't trust yet".
+    if (measuredOutcomeUnderpowered) reasons.push("measured-outcome-underpowered-fallback-to-proxy");
     const measuredOutcomeOk = !measuredOutcomeMalformed && !measuredOutcomeBaselineAbsent && !measuredOutcomeRegressed;
     // Fail-CLOSED cross-family gate (ADR-0014): a grade the grader marked ADVISORY (gating === false —
     // a same-family judge, e.g. Gemini grading the Gemini agent, or no cross-family judge available) can
@@ -339,15 +354,27 @@ export class EvolutionEngine {
 
   /** Record the canary (1-5%) result. Advances to "canaried" ONLY if the engine-derived pass holds
    * (statistical power AND delta≥minDelta — the SAME arithmetic as control-plane windowedVerdictFor,
-   * thresholds INJECTED so the engine never imports control-plane). Throws unless shadow passed. */
-  recordCanary(id: string, raw: { n: number; delta: number; elapsedMs: number; at: string }, power: { minN: number; minWindowMs: number; minDelta: number }): CandidateRecord {
+   * thresholds INJECTED so the engine never imports control-plane). Throws unless shadow passed.
+   *
+   * `raw.measuredOutcome` (Revenue-flywheel Wave-2 D) is an OPTIONAL, AUDIT-ONLY passthrough — it is
+   * recorded on the audit log entry so a reviewer can see the measured lift alongside the judge-graded
+   * `delta` at the moment the canary was recorded, but it does NOT feed the `pass`/stage-advancement
+   * arithmetic above: `delta`/`power.minDelta` here are calibrated for the judge-graded QUALITY delta
+   * (a 0..1-ish score), and a USD/fractional incremental-lift number is a different unit that would
+   * silently corrupt that calibration if substituted in. The measured lift's OWN gating happens at
+   * `gate()` via `PolicyMetrics.measuredOutcome`, never here. */
+  recordCanary(
+    id: string,
+    raw: { n: number; delta: number; elapsedMs: number; at: string; measuredOutcome?: { incrementalLift: number; power?: number } },
+    power: { minN: number; minWindowMs: number; minDelta: number },
+  ): CandidateRecord {
     const rec = this.require(this.candidates.get(id), id);
     if (rec.auto?.stage !== "shadowed" || rec.auto.shadow?.pass !== true) throw new Error(`cannot record canary for ${id} — requires a passing shadow (stage ${rec.auto?.stage ?? "none"})`);
     const pass = Number.isFinite(raw.n) && Number.isFinite(raw.elapsedMs) && raw.n >= power.minN && raw.elapsedMs >= power.minWindowMs && raw.delta >= power.minDelta;
     const marker: StageMarker = { n: raw.n, delta: raw.delta, elapsedMs: raw.elapsedMs, at: raw.at, pass };
     rec.auto.canary = marker;
     if (pass) rec.auto.stage = "canaried";
-    this.log("engine", "auto_canary", id, { n: raw.n, delta: raw.delta, elapsedMs: raw.elapsedMs, pass });
+    this.log("engine", "auto_canary", id, { n: raw.n, delta: raw.delta, elapsedMs: raw.elapsedMs, pass, measuredOutcome: raw.measuredOutcome });
     return rec;
   }
 
@@ -395,16 +422,41 @@ export class EvolutionEngine {
    * the bar the current one had to beat — so with no previous champion there is nothing to regress
    * against and only safety can trip it.
    */
-  regressionVerdict(observed: { qualityScore: number; safetyPass: boolean }): { regressed: boolean; reason?: string } {
+  regressionVerdict(observed: {
+    qualityScore: number;
+    safetyPass: boolean;
+    /**
+     * Revenue-flywheel Wave-2 (D) — OPTIONAL measured business-outcome lift for THIS observation. Absent
+     * on every caller today (dormant — item (a): byte-identical to the qualityScore-only verdict below).
+     * When present, PREFERRED over `qualityScore` (the caller-attested proxy) whenever it is trustworthy
+     * AND comparable — see the `preferMeasured` derivation just below for the exact conditions; otherwise
+     * this falls through to the qualityScore check completely unchanged.
+     */
+    measuredOutcome?: { incrementalLift: number; power?: number };
+  }): { regressed: boolean; reason?: string } {
     if (!observed.safetyPass) return { regressed: true, reason: "safety-regression" };
-    // The bar is the PREVIOUS champion's score — the one the current champion had to beat to ship. Once
+    // The bar is the PREVIOUS champion's metrics — the one the current champion had to beat to ship. Once
     // that is spent (a rollback nulls prevChampion, depth-1), fall back to the CURRENT champion's own
-    // recorded score: "you are performing worse than you graded at the gate" is still a real regression,
+    // recorded metrics: "you are performing worse than you graded at the gate" is still a real regression,
     // and it is the only bar left. Without this fallback a post-rollback regression read as HEALTHY —
     // the monitor went blind exactly when a second problem was most likely, and would then have recorded
     // the regressing champion as the known-good baseline.
-    const bar = (this.prevChampion ?? this.champion).metrics.qualityScore;
-    if (observed.qualityScore < bar) return { regressed: true, reason: "quality-regression" };
+    const bar = (this.prevChampion ?? this.champion).metrics;
+    // PREFER the measured lift over the caller-attested qualityScore — but ONLY when it is trustworthy
+    // (finite, and power either absent or >= MEASURED_OUTCOME_POWER_FLOOR, exactly the gate's
+    // `powerAdequate` predicate) AND comparable (the bar itself carries a finite measuredOutcome to
+    // compare against). Any of those missing ⇒ falls straight through to the qualityScore check,
+    // UNCHANGED — "else keep attested".
+    const observedMO = observed.measuredOutcome;
+    const barMO = bar.measuredOutcome;
+    const preferMeasured =
+      observedMO !== undefined && Number.isFinite(observedMO.incrementalLift) && powerAdequate(observedMO.power) &&
+      barMO !== undefined && Number.isFinite(barMO.incrementalLift);
+    if (preferMeasured) {
+      if (observedMO!.incrementalLift < barMO!.incrementalLift) return { regressed: true, reason: "measured-outcome-regression" };
+      return { regressed: false };
+    }
+    if (observed.qualityScore < bar.qualityScore) return { regressed: true, reason: "quality-regression" };
     return { regressed: false };
   }
 
@@ -510,6 +562,29 @@ function counterMetricsComplete(cm?: PolicyMetrics["counterMetrics"]): boolean {
  * mistaken for a valid 0). */
 function isRate01(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
+}
+
+/**
+ * Revenue-flywheel Wave-2 (D) — the power/confidence floor a `measuredOutcome.power` value must clear
+ * before the gate (`gate()`) or the monitor (`regressionVerdict()`) will trust it enough to decide on.
+ *
+ * CONSERVATIVE PLACEHOLDER, not an owner-set value — same status as `DEFAULT_CANARY_POWER`
+ * (control-plane/canary-controller.ts), which is ALSO a placeholder. The two are deliberately SEPARATE
+ * seams and must not be confused: `DEFAULT_CANARY_POWER` gates the canary's judge-graded QUALITY-delta
+ * traffic volume/window (n + elapsedMs); this floor gates the measured-outcome LIFT's own statistical
+ * confidence (0..1 — `computeIncrementalLift`'s `confidence`, fed in by control-plane as
+ * `measuredOutcome.power`). Both need an owner sign-off (a recorded business decision, not an
+ * engineering guess) before this seam is ever fed a live signal — see the flywheel plan / HARD GATE #3
+ * (per-merchant statistical-power gate). 0.8 here is an engineering default (an "80% confidence"
+ * rule-of-thumb), nothing more.
+ */
+export const MEASURED_OUTCOME_POWER_FLOOR = 0.8;
+
+/** `power` absent ⇒ adequate (back-compat: the pre-Wave-2-D behavior enforced measuredOutcome
+ * unconditionally, and no existing caller ever set `power`). `power` present ⇒ must be finite and at
+ * least `MEASURED_OUTCOME_POWER_FLOOR` — fail-CLOSED on NaN/Infinity, never mistaken for adequate. */
+function powerAdequate(power?: number): boolean {
+  return power === undefined || (Number.isFinite(power) && power >= MEASURED_OUTCOME_POWER_FLOOR);
 }
 
 /** PR-1 governance floor — FAIL CLOSED (never fail-open): `personaPriceInvariance` (HIGHER is better; 1 =

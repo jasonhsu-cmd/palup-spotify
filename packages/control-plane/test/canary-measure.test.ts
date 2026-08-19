@@ -59,4 +59,22 @@ describe("measureCanary (ADR-0014 T4e: live canary-vs-champion quality + escalat
     expect(escalationRegressed({ canaryEscalationRate: 0.45, championEscalationRate: 0.5 } as never, 0.1)).toBe(false); // within tolerance
     expect(escalationRegressed({ canaryEscalationRate: 0.6, championEscalationRate: 0.5 } as never, 0.1)).toBe(false); // escalates more ⇒ fine
   });
+
+  // Revenue-flywheel Wave-2 (D), item 4 — `measuredOutcome` is a pure, dormant-until-supplied passthrough
+  // onto the result; it never touches the judge-graded n/qualityDelta/escalation arithmetic above.
+  describe("measuredOutcome passthrough (Wave-2 D)", () => {
+    it("(a) omitted ⇒ absent on the result — byte-identical to before this seam existed", async () => {
+      const traffic: Interaction[] = [mk("canary-warm", "a good pick", false), mk("champion-v0", "a good pick", false)];
+      const m = await measureCanary(traffic, grade, ARMS, WINDOW, 20);
+      expect(m.measuredOutcome).toBeUndefined();
+    });
+
+    it("supplied ⇒ carried through on the result untouched, and the quality arithmetic is unaffected", async () => {
+      const traffic: Interaction[] = [mk("canary-warm", "a good pick", false), mk("champion-v0", "meh", false)];
+      const signal = { incrementalLift: -500, power: 0.95, underpowered: false, method: "incrementality-v1:test" };
+      const m = await measureCanary(traffic, grade, ARMS, WINDOW, 20, signal);
+      expect(m.measuredOutcome).toEqual(signal);
+      expect(m.qualityDelta).toBeCloseTo(1 - 0); // unaffected by the (negative) measured lift
+    });
+  });
 });

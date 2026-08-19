@@ -68,9 +68,13 @@ export interface PolicyMetrics {
     /** HIGHER is better — the incremental lift (e.g. fractional revenue/conversion delta) of the
      * treated arm over its holdout. Compared candidate-vs-champion, same direction as qualityScore. */
     incrementalLift: number;
-    /** Optional statistical power/confidence of the measurement (0..1) — informational only today; the
-     * gate does not yet enforce a minimum (a documented future seam, not a silent gap: Phase 1 owns
-     * deciding the power bar). */
+    /** Statistical power/confidence of the measurement (0..1). Revenue-flywheel Wave-2 (D): the gate
+     * (engine.ts `gate`, `MEASURED_OUTCOME_POWER_FLOOR`) and the monitor (`regressionVerdict`) now
+     * ENFORCE a floor on this — absent ⇒ treated as adequate (back-compat, the pre-Wave-2-D behavior:
+     * every existing caller, none of which ever set `power`, is byte-identical); present and EXPLICITLY
+     * below the floor ⇒ the signal is too noisy to trust either direction and both the gate and the
+     * monitor fall back to the existing proxy (qualityScore) decision, never promoting OR blocking on an
+     * unproven lift (fail-closed, not fail-open). See engine.ts for the exact predicate. */
     power?: number;
   };
   /**
