@@ -132,7 +132,10 @@ export class AutoOptimizeOrchestrator {
         await applyCanaryVerdict(this.deps.store, tenantId, "rollback", now);
         return this.routeToHuman(engine, tenantId, candidateId, "canary-escalation-regressed");
       }
-      engine.recordCanary(candidateId, { n: m.n, delta: m.qualityDelta, elapsedMs: m.elapsedMs, at: now }, this.deps.thresholds);
+      // Revenue-flywheel W3-2 — audit-only passthrough (see recordCanary's own doc comment): `m.measuredOutcome`,
+      // when the injected runCanaryMeasure supplied one, rides onto the audit entry alongside the judge-graded
+      // delta. It never feeds the pass/fail arithmetic above (that already decided `verdict`/`pass`).
+      engine.recordCanary(candidateId, { n: m.n, delta: m.qualityDelta, elapsedMs: m.elapsedMs, at: now, measuredOutcome: m.measuredOutcome }, this.deps.thresholds);
       const marker = engine.getCandidate(candidateId)!.auto!.canary!;
       await recordAutoStage(this.deps.store, tenantId, candidateId, "canary", { n: marker.n, delta: marker.delta, elapsedMs: marker.elapsedMs, at: marker.at, pass: marker.pass }, now);
       await stopCanary(this.deps.store, tenantId);

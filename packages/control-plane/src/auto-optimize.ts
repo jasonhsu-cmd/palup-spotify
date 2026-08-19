@@ -20,6 +20,8 @@ import { measureCanary } from "./canary-measure.js";
 import { servingChampion } from "./champion-promoter.js";
 import { AutoOptimizeOrchestrator, type OrchestratorDeps } from "./auto-optimize-orchestrator.js";
 import { LiveGrader } from "./live-grader.js";
+import { readServingMeasuredOutcome } from "./measured-outcome-caller.js";
+import { toGateMeasuredOutcome } from "./measured-outcome-signal.js";
 
 const RUNTIME_TENANT = "demo"; // single-tenant demo; per-tenant when multi-tenancy lands (ADR-0014 #4)
 
@@ -67,8 +69,14 @@ async function main() {
       const r = await shadowEvaluate(store, agent, judge, tenantId, policy);
       return { n: r.n, delta: r.delta };
     },
-    runCanaryMeasure: async (tenantId, canaryPolicyId, championPolicyId, window) =>
-      measureCanary(await readTrafficLog(store, tenantId), gradeReply, { canaryPolicyId, championPolicyId }, window),
+    // Revenue-flywheel W3-2 — canary stage: read this tenant's LIVE measured-outcome signal and carry it
+    // onto the CanaryMeasurement as a pure audit passthrough (measureCanary's own header) — it never
+    // feeds the quality-delta/escalation arithmetic above, only rides along for engine.recordCanary's
+    // audit entry (auto-optimize-orchestrator.ts).
+    runCanaryMeasure: async (tenantId, canaryPolicyId, championPolicyId, window) => {
+      const measuredOutcome = await readServingMeasuredOutcome(store, tenantId);
+      return measureCanary(await readTrafficLog(store, tenantId), gradeReply, { canaryPolicyId, championPolicyId }, window, undefined, measuredOutcome);
+    },
     // CONSERVATIVE PLACEHOLDER thresholds — the real per-tenant values are OWNER-SET at enablement.
     thresholds: DEFAULT_CANARY_POWER,
     // both-sided: bound a regression AND a suspiciously large positive swing (placeholder, owner-set).
@@ -83,6 +91,10 @@ async function main() {
   const engine = engines.engineFor(RUNTIME_TENANT);
   const candidate: Policy = { id: "auto-cand-1", label: "auto-cand-1", styleDirective: DEFAULT_POLICY.styleDirective, proactivityDefault: DEFAULT_POLICY.proactivityDefault };
   engine.propose(candidate);
+  // Revenue-flywheel W3-2 — gate stage: attach the incumbent champion's LIVE measured-outcome baseline
+  // before evaluate()/gate() reads it. The candidate's own measuredOutcome stays absent (nothing has
+  // served IT yet), so the gate correctly falls back to the quality proxy for the candidate side.
+  engine.setChampionMeasuredOutcome(toGateMeasuredOutcome(await readServingMeasuredOutcome(store, RUNTIME_TENANT)));
   await engine.evaluate(candidate.id);
 
   console.log(`\n=== GOVERNED AUTO-OPTIMIZE (dormant unless ADR-0014 enacted + both switches on) ===`);
