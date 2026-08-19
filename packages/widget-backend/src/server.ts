@@ -81,6 +81,7 @@ import {
 import { parseStoreDomains, parsePrimaryDomains, resolveStorefrontCredential } from "./merchant-store.js";
 import type { StorefrontFetch } from "./shopify-grounding.js";
 import { storefrontCatalogPageFetch, storefrontProductByHandleFetch, mapStorefrontToContext } from "./shopify-grounding.js";
+import { createBrandNameResolver } from "./brand-cache.js";
 import { createMerchantResolver, consentModeFor } from "./merchant-resolver.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE, DELEGATE_SCOPES_DEFAULT } from "./shopify-install-identity.js";
 import {
@@ -514,6 +515,14 @@ export async function buildServer(opts?: {
     readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
     credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
     shopifyFetch: opts?.shopifyFetch,
+  });
+  // Pillar 5 (auto-brand) — resolve the merchant's real Shopify shop NAME (via the light `getShell`), cached
+  // on the RuntimeStatePort: at most ONE bounded fetch per tenant per TTL, fail-closed to the neutral default,
+  // and NEVER a per-request fetch (the hot launcher-colour path stays fetch-free). Threaded into the
+  // /embed/panel header only, so no brand name is hardcoded per tenant (`widget-theme.ts` holds colour only).
+  const brandNameFor = createBrandNameResolver({
+    store,
+    fetchShopName: async (t) => (await grounding.getShell(t)).brandName,
   });
   // Hoisted ABOVE `createMemoryService` below (it used to be declared much later, alongside
   // `shopperIdentity`) so the memory service can be constructed with a real `hmacKey` from the start —
@@ -1620,6 +1629,13 @@ export async function buildServer(opts?: {
     resolveThemeFor: async (shop) => {
       const r = shop ? await merchants.tenantForShopDomain(shop) : ({ kind: "unknown" } as const);
       return resolveTheme(r.kind === "ok" ? r.tenantId : "");
+    },
+    // Pillar 5 (auto-brand) — the panel header's brand name, resolved from the merchant's real shop name and
+    // cached. Only /embed/panel calls this (never the launcher-colour endpoint). Fail-closed → undefined.
+    brandNameForShop: async (shop) => {
+      if (!shop) return undefined;
+      const r = await merchants.tenantForShopDomain(shop);
+      return r.kind === "ok" ? await brandNameFor(r.tenantId) : undefined;
     },
   });
 
