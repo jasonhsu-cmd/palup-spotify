@@ -57,6 +57,8 @@ const ENV_KEYS = [
   "PALUP_SECRETS",
   "WIDGET_EMBED_KEYS",
   "SHOPIFY_STORES",
+  "CATALOG_WEBHOOKS",
+  "ORDER_ATTRIBUTION_WEBHOOKS",
 ];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 
@@ -1042,6 +1044,52 @@ describe("Track B — install registers shop-specific webhooks with the PARENT t
       expect(topics.get("PRODUCTS_DELETE")).toBe(`${origin}${WEBHOOK_ROUTES.productsDelete}`);
       expect(topics.get("INVENTORY_LEVELS_UPDATE")).toBe(`${origin}${WEBHOOK_ROUTES.inventoryLevelsUpdate}`);
       // The URI host is ALWAYS the app's own origin (operator config), never the shop domain (SSRF defence).
+      for (const uri of topics.values()) expect(new URL(uri).origin).toBe(origin);
+    }
+  });
+
+  it("(f) W3-3 — ORDER_ATTRIBUTION_WEBHOOKS on ⇒ APP_UNINSTALLED + the three order-attribution topics, each pointed at its own route; off ⇒ absent", async () => {
+    const origin = new URL(REDIRECT_URI).origin;
+
+    // Off (default from harness()'s own env, since harness() itself never sets it): only APP_UNINSTALLED.
+    {
+      const h = await harness();
+      const topics = new Map<string, string>();
+      h.setFetch((url, init) => {
+        if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+        const vars = webhookVariablesFrom(init);
+        if (vars) {
+          topics.set(vars.topic, vars.webhookSubscription.uri);
+          return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid" }, userErrors: [] } } }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: { accessToken: DELEGATE_TOKEN, accessScopes: [GRANTED_SCOPES] }, userErrors: [] } } }) };
+      });
+      const { state, cookie } = await begin(h);
+      await callback(h, { state, cookie });
+      expect([...topics.keys()].sort()).toEqual(["APP_UNINSTALLED"]);
+    }
+
+    // ORDER_ATTRIBUTION_WEBHOOKS on ⇒ APP_UNINSTALLED + the three order topics, each at its own route.
+    {
+      const h = await harness({ ORDER_ATTRIBUTION_WEBHOOKS: "true" });
+      const topics = new Map<string, string>();
+      h.setFetch((url, init) => {
+        if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+        const vars = webhookVariablesFrom(init);
+        if (vars) {
+          topics.set(vars.topic, vars.webhookSubscription.uri);
+          return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid" }, userErrors: [] } } }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: { accessToken: DELEGATE_TOKEN, accessScopes: [GRANTED_SCOPES] }, userErrors: [] } } }) };
+      });
+      const { state, cookie } = await begin(h);
+      await callback(h, { state, cookie });
+      expect([...topics.keys()].sort()).toEqual(["APP_UNINSTALLED", "ORDERS_CREATE", "ORDERS_UPDATED", "REFUNDS_CREATE"]);
+      expect(topics.get("ORDERS_CREATE")).toBe(`${origin}${WEBHOOK_ROUTES.ordersCreate}`);
+      expect(topics.get("ORDERS_UPDATED")).toBe(`${origin}${WEBHOOK_ROUTES.ordersUpdated}`);
+      expect(topics.get("REFUNDS_CREATE")).toBe(`${origin}${WEBHOOK_ROUTES.refundsCreate}`);
+      // The URI host is ALWAYS the app's own origin (operator config), never the shop domain (SSRF defence) —
+      // same property Track B(e) asserts for the catalog topics.
       for (const uri of topics.values()) expect(new URL(uri).origin).toBe(origin);
     }
   });

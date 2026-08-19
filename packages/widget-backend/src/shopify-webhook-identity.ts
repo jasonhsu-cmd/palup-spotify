@@ -178,6 +178,22 @@ export const CATALOG_TOPICS = ["products/create", "products/update", "products/d
 export const ORDER_TOPICS = ["orders/create", "orders/updated"] as const;
 export const REFUND_TOPIC = "refunds/create" as const;
 
+/**
+ * W3-3 — the Admin scope `webhookSubscriptionCreate` needs on the PARENT token to subscribe
+ * `ORDERS_CREATE` / `ORDERS_UPDATED` / `REFUNDS_CREATE` ([S7]'s own per-topic-scope note in
+ * shopify-install-identity.ts: "each TOPIC needs its resource read scope"). Named/exported (mirroring
+ * `CATALOG_TOPICS`' own `read_products`/`read_inventory` pairing, documented in the same [S7] comment)
+ * purely for DOCUMENTATION + a pinning test — nothing in this repo requests it automatically. The
+ * decision this constant records: `read_orders` is requested (if at all) via the OPERATOR-CONTROLLED,
+ * per-deployment `SHOPIFY_INSTALL_SCOPES` env var (server.ts, `docs/DEPLOY.md`) — NEVER via
+ * `shopify.app.toml`'s static `[access_scopes]`, which is shared across every deployment including a
+ * future production one. `order-attribution-scope-pinning.test.ts` pins both halves: the toml stays
+ * untouched, and the code-level DEFAULT (`INSTALL_SCOPES_DEFAULT`) never includes this scope, so a
+ * deployment that sets nothing new never requests it. Granting it for real ALSO requires completing
+ * Shopify's protected-customer-data review — an owner-gated step this constant does not perform.
+ */
+export const ORDER_ATTRIBUTION_ADMIN_SCOPE = "read_orders" as const;
+
 /** The Storefront/Admin GID prefix for an Order node — used only if a future increment needs a
  *  GID-shaped id; the order-attribution KEY SPACE itself (below) deliberately does NOT use GIDs. */
 export const SHOPIFY_ORDER_GID_PREFIX = "gid://shopify/Order/";

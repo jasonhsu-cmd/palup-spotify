@@ -91,6 +91,7 @@ import {
 import { registerShopifyWebhookRoutes, WEBHOOK_ROUTES } from "./routes/shopify-webhooks.js";
 import { subscribeCatalogReconcile, type ReconcileReason } from "./catalog-webhook-queue.js";
 import { subscribeOrderAttribution } from "./order-attribution-queue.js";
+import { mintOrderJoinToken } from "./order-join-token.js";
 import { createReconcileCoalescer, CATALOG_RECONCILE_COALESCE_MS_DEFAULT } from "./catalog-reconcile-coalescer.js";
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
@@ -1143,6 +1144,28 @@ export async function buildServer(opts?: {
         { topic: "INVENTORY_LEVELS_UPDATE", uri: webhookOrigin + WEBHOOK_ROUTES.inventoryLevelsUpdate },
       );
     }
+    // W3-3 — order-attribution ingestion (ADR-0007 / the revenue flywheel's incrementality signal). Added
+    // to the SAME per-shop, Admin-API subscription call CATALOG_WEBHOOKS's topics use just above — never
+    // to shopify.app.toml's declarative `[webhooks]` (untouched; see order-attribution-scope-pinning.test.ts).
+    // Topic enum names follow the SAME REST-topic→SCREAMING_SNAKE_CASE convention the four lines above
+    // already use ("orders/create" → "ORDERS_CREATE", mirroring "products/create" → "PRODUCTS_CREATE").
+    // Confirmed against shopify.dev's WebhookSubscriptionTopic enum (retrieved 2026-08-19): ORDERS_CREATE,
+    // ORDERS_UPDATED, REFUNDS_CREATE are the exact enum members. As a belt-and-suspenders, a `userErrors`
+    // failure from Shopify would surface as a `failed` tally (registerWebhookSubscriptions never throws on
+    // one), never a silent success, so even a future spelling drift fails LOUD, not quiet. Registering these three topics needs the
+    // PARENT token to hold `read_orders` (ORDER_ATTRIBUTION_ADMIN_SCOPE, shopify-webhook-identity.ts) — that
+    // scope is requested (if at all) via the operator-controlled `SHOPIFY_INSTALL_SCOPES` env var for THIS
+    // deployment only, never via shopify.app.toml, and its grant additionally requires Shopify's
+    // protected-customer-data review to complete before any live delivery is meaningful (routes/shopify-
+    // webhooks.ts's W2-C header). Subscribing with the scope ungranted simply fails its own tally, exactly
+    // like an under-scoped catalog topic does today.
+    if (ORDER_ATTRIBUTION_WEBHOOKS) {
+      webhookSubscriptions.push(
+        { topic: "ORDERS_CREATE", uri: webhookOrigin + WEBHOOK_ROUTES.ordersCreate },
+        { topic: "ORDERS_UPDATED", uri: webhookOrigin + WEBHOOK_ROUTES.ordersUpdated },
+        { topic: "REFUNDS_CREATE", uri: webhookOrigin + WEBHOOK_ROUTES.refundsCreate },
+      );
+    }
     // Idempotent DDL, exactly like the runtime/vector stores' own `migrate()` — one more table in the
     // existing database, never a new cloud resource. Only for the real Postgres adapter; an injected
     // registry (test seam) has no migration.
@@ -1420,6 +1443,89 @@ export async function buildServer(opts?: {
       // W2-C — present ONLY when ORDER_ATTRIBUTION_WEBHOOKS is on, so the order-attribution routes
       // register only then (else 404) — the same inert-by-absence pattern as `queue` above.
       orderQueue,
+    });
+  }
+
+  // W3-3 — the mint endpoint the (out-of-scope here) widget-side checkout handoff will call, to turn
+  // THIS shopper's already-assigned holdout arm (W2-B's `assignHoldoutArm`, on /chat) into the opaque,
+  // PII-free join token an `orders/create` webhook (`handleOrderWebhook` above) later resolves back to
+  // an arm. Registered ONLY when ORDER_ATTRIBUTION_WEBHOOKS is on — the SAME inert-by-absence gate the
+  // order webhook routes use just above, so an operator flips one flag for both halves of this feature.
+  // With it off this route 404s, byte-identical to before this endpoint existed.
+  //
+  // `mintOrderJoinToken` (order-join-token.ts) is the SECOND, PER-TENANT dark gate, and it is the one
+  // that actually decides whether anything is minted: it returns `null` — never a guessed token — when
+  // the holdout is off for this tenant, or when this identity has no recorded assignment for the
+  // current period (a shopper who never reached /chat this period, so /chat's own `assignHoldoutArm`
+  // never bucketed them). So a merchant with the holdout off gets 204 from every call, and a merchant
+  // with it on still gets 204 for any shopper who has not chatted yet this period — never a fabricated
+  // arm just because checkout asked for one.
+  if (ORDER_ATTRIBUTION_WEBHOOKS) {
+    app.post("/checkout/join-token", async (req, reply) => {
+      // Same per-IP rate-limit posture as /consent — a public, audit-writing mint endpoint — fail-open
+      // on the limiter itself so a broken limiter cannot block a shopper's checkout.
+      const xff = req.headers["x-forwarded-for"];
+      const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+      try {
+        if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+          reply.code(429);
+          return { error: "rate limited" };
+        }
+      } catch {
+        /* fail-open, mirrors /consent */
+      }
+
+      const body = (req.body ?? {}) as { sessionId?: unknown; widgetToken?: string; shopperToken?: string };
+      const authHeader = req.headers["authorization"];
+      const widgetToken =
+        typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+          ? authHeader.slice(7)
+          : typeof body.widgetToken === "string"
+            ? body.widgetToken
+            : undefined;
+      const principal = await widgetIdentity.authenticate(widgetToken);
+      if (principal.kind !== "merchant" && WIDGET_AUTH_REQUIRED) {
+        reply.code(401);
+        return { error: "unauthenticated" };
+      }
+      const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
+
+      // Per-tenant ceiling — backstop against a distributed-IP flood inside one tenant, mirrors /consent.
+      try {
+        if (!(await underLimit(store, { tenantId }, "checkout-join-token", RL_TENANT, RL_WINDOW))) {
+          reply.code(429);
+          return { error: "rate limited" };
+        }
+      } catch {
+        /* fail-open, as above */
+      }
+
+      // NN#4 — the same operator kill switch every other governed write in this file honours. UNLIKE
+      // W2-B's arm ASSIGNMENT on /chat (deliberately fail-open there — it sits on the shopper's hot
+      // reply path), this endpoint is off /chat's critical path entirely: it is called at checkout
+      // handoff, after the shopper already has their reply, so refusing it while halted costs nothing
+      // but one unattributed order, never a broken chat turn or a broken checkout (Shopify's own
+      // checkout proceeds regardless of whether this call succeeds).
+      if (await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) {
+        reply.code(503);
+        return { error: "paused" };
+      }
+
+      // The SAME identity /chat's own holdout assignment is keyed on: the server-VERIFIED shopperId when
+      // one is presented, else the (hashed, inside holdoutIdentity) sessionId — never a client-claimed
+      // shopperId. A missing/blank sessionId falls back to "anon", mirroring /chat's own default.
+      const sessionId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : "anon";
+      const verifiedShopperId = await verifiedShopperIdFor(principal, tenantId, req.headers["x-shopper-token"], body.shopperToken);
+      const token = await mintOrderJoinToken(store, tenantId, holdoutIdentity({ verifiedShopperId, sessionId }), holdoutPeriod());
+      if (!token) {
+        // Nothing to mint (holdout off for this tenant, or no assignment yet this period) — 204, never a
+        // distinguishable error: the widget's checkout handoff simply attaches no note_attribute.
+        reply.code(204);
+        return null;
+      }
+      // PII-free by construction: `token` is `mintOrderJoinToken`'s own `randomBytes(24)` opaque value,
+      // carrying no shopper identity (see that file's header for why). This is the ENTIRE response body.
+      return { ok: true, joinToken: token };
     });
   }
 

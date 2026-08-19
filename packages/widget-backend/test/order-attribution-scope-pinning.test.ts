@@ -3,6 +3,8 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { INSTALL_SCOPES_DEFAULT } from "../src/routes/shopify-install.js";
+import { ORDER_ATTRIBUTION_ADMIN_SCOPE } from "../src/shopify-webhook-identity.js";
 
 // W2-C — CRITICAL CONSTRAINTS, pinned so a later change cannot silently cross either boundary this
 // work item was explicitly told never to touch:
@@ -50,5 +52,33 @@ describe("W2-C — no widget file changed", () => {
   it("nothing under packages/widget/ is among the files this branch changed", () => {
     const widgetFiles = changedPaths().filter((p) => p.startsWith("packages/widget/"));
     expect(widgetFiles, `expected no packages/widget/ changes, found: ${JSON.stringify(widgetFiles)}`).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// W3-3 — the `read_orders` DECISION this ticket had to make, pinned so it cannot silently drift:
+// `read_orders` is requested (if ever) via the OPERATOR-CONTROLLED, per-deployment `SHOPIFY_INSTALL_SCOPES`
+// env var (server.ts, docs/DEPLOY.md) — NEVER via shopify.app.toml's static `[access_scopes]`, which is
+// shared across every deployment INCLUDING a not-yet-deployed production one. The two describes above
+// already pin half of this (the toml itself); this section pins the other half — the CODE-LEVEL default
+// a deployment gets when it sets NOTHING new never requests this scope, so prod's OAuth authorize request
+// stays byte-identical to before this ticket unless an operator deliberately opts a SPECIFIC deployment in.
+describe("W3-3 — read_orders is requested only via the per-deployment SHOPIFY_INSTALL_SCOPES env var, never a code default", () => {
+  it("INSTALL_SCOPES_DEFAULT (the code-level default Admin OAuth `scope` request) does not include read_orders", () => {
+    const scopes = INSTALL_SCOPES_DEFAULT.split(",").map((s) => s.trim());
+    expect(scopes).not.toContain(ORDER_ATTRIBUTION_ADMIN_SCOPE);
+  });
+
+  it("ORDER_ATTRIBUTION_ADMIN_SCOPE names exactly the one scope order-attribution webhook subscriptions need (read_orders)", () => {
+    // Pinned so a future rename/typo of this documentation constant is caught by a test rather than only
+    // discovered against a live Shopify `userErrors` response.
+    expect(ORDER_ATTRIBUTION_ADMIN_SCOPE).toBe("read_orders");
+  });
+
+  it("shopify.app.toml declares no order/customer scope (reasserted here, alongside the W3-3 decision it grounds)", () => {
+    const toml = readFileSync(join(repoRoot, "shopify.app.toml"), "utf8");
+    const scopesLine = toml.split("\n").find((l) => l.trim().startsWith("scopes ="));
+    expect(scopesLine, "shopify.app.toml must declare an [access_scopes] scopes line").toBeDefined();
+    expect(scopesLine).not.toContain(ORDER_ATTRIBUTION_ADMIN_SCOPE);
   });
 });

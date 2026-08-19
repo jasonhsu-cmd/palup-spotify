@@ -152,6 +152,23 @@ Shopify signs webhook HMACs with the same app client secret — **no new env var
 - `POST /shopify/webhooks/shop/redact`
 - `POST /shopify/webhooks/app/uninstalled` ← the topic that makes revocation real (see D1 above)
 
+**W3-3 — order-attribution ingestion (`ORDER_ATTRIBUTION_WEBHOOKS`), for a dev/staging Shopify store only.**
+Set `ORDER_ATTRIBUTION_WEBHOOKS=true` (needs the same two preconditions as the compliance webhooks above) to
+register `POST /shopify/webhooks/orders/create`, `/orders/updated`, `/refunds/create` AND `POST
+/checkout/join-token` (the mint endpoint the widget's checkout handoff calls — see routes/shopify-webhooks.ts's
+W2-C header and `order-join-token.ts` for the design). The three webhook topics also need this app's PARENT
+Admin token to hold the **`read_orders`** scope (`shopify-webhook-identity.ts`'s `ORDER_ATTRIBUTION_ADMIN_SCOPE`)
+— request it, if at all, by setting `SHOPIFY_INSTALL_SCOPES` to include `read_orders` **on that ONE
+deployment's env only** (e.g. `unauthenticated_read_product_listings,read_orders`), never by adding it to
+`shopify.app.toml`'s `[access_scopes]` (shared across every deployment, including a future production one —
+`order-attribution-scope-pinning.test.ts` pins that this file stays untouched). Two further gates before any
+of this is meaningful in real Shopify traffic: (1) Shopify's **protected-customer-data review** must clear for
+`read_orders` on this app, and (2) a shop must actually be re-installed (or have its subscriptions refreshed)
+after the scope is granted, so the legacy-install-flow's per-shop `webhookSubscriptionCreate` call
+(`registerWebhookSubscriptions`) can subscribe the three topics with it. Until both clear, the routes are
+registered but receive no live deliveries — the same "dark by construction, not by a separate flag" posture
+CATALOG_WEBHOOKS documents above.
+
 `AUDIT_HMAC_SECRET` is the keyed-HMAC key for audit `subjectRef`s, so a low-entropy numeric customer id is
 never recorded as a bare hash. It is **optional to BOOT** and falls back to `SHOPPER_TOKEN_SECRET` — but
 **corrected 2026-08-06: it is NOT optional for memory go-live.** Checklist **B5** requires it, because with
