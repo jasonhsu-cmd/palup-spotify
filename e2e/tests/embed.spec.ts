@@ -372,3 +372,59 @@ test("embed: WS-G — the default empty-reply greeting turn leaves the static we
   await expect(frame.getByTestId("agent-msg").first()).toContainText("Hi! I'm");
   await expect(frame.getByTestId("product-card")).toHaveCount(0);
 });
+
+// Pillar 4 (flywheel attribution) — the PANEL mints the join token and hands ONLY the opaque token to the
+// host via window.PALUP.joinToken; the sessionId (a durable cross-visit id) NEVER crosses the iframe
+// boundary. /checkout/join-token is MOCKED here (it is dark on staging until ORDER_ATTRIBUTION_WEBHOOKS is
+// enabled), so this exercises the CLIENT bridge end to end: mint POST → palup:jointoken → loader →
+// window.PALUP.joinToken, and pins the #1 correctness constraint (the mint's sessionId === the /chat sessionId).
+test("embed: panel mints a join token after a turn and hands ONLY the opaque token to the host (window.PALUP.joinToken); sessionId never crosses", async ({ page }) => {
+  const mintBodies: Array<{ sessionId?: string }> = [];
+  const chatSessionIds: string[] = [];
+  await page.route("**/chat", async (route) => {
+    try {
+      const b = route.request().postDataJSON() as { sessionId?: string };
+      if (b?.sessionId) chatSessionIds.push(b.sessionId);
+    } catch {
+      /* non-JSON body */
+    }
+    await route.continue();
+  });
+  await page.route("**/checkout/join-token", async (route) => {
+    let body: { sessionId?: string } = {};
+    try {
+      body = route.request().postDataJSON() as { sessionId?: string };
+    } catch {
+      /* */
+    }
+    mintBodies.push(body);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, joinToken: "jt_e2e_opaque" }) });
+  });
+
+  await openEmbedPanel(page);
+
+  // greeting turn fires on open → buckets → panel mints → palup:jointoken → loader writes window.PALUP.joinToken
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { PALUP?: { joinToken?: string } }).PALUP?.joinToken), {
+      message: "window.PALUP.joinToken never set — panel-mint → palup:jointoken → loader bridge did not complete",
+    })
+    .toBe("jt_e2e_opaque");
+
+  // #1 correctness pin: the id sent to /checkout/join-token === the id the panel sends on /chat
+  expect(mintBodies.length).toBeGreaterThan(0);
+  expect(chatSessionIds.length).toBeGreaterThan(0);
+  expect(mintBodies[0].sessionId).toBe(chatSessionIds[0]);
+
+  // the sessionId itself NEVER reaches the host
+  const hostSessionId = await page.evaluate(() => (window as unknown as { PALUP?: { sessionId?: string } }).PALUP?.sessionId);
+  expect(hostSessionId).toBeUndefined();
+});
+
+test("embed: a 204 from /checkout/join-token attaches nothing — window.PALUP.joinToken stays unset", async ({ page }) => {
+  await page.route("**/checkout/join-token", (route) => route.fulfill({ status: 204, body: "" }));
+  const mintSeen = page.waitForRequest("**/checkout/join-token");
+  await openEmbedPanel(page);
+  await mintSeen; // the panel attempted the mint
+  const tok = await page.evaluate(() => (window as unknown as { PALUP?: { joinToken?: string } }).PALUP?.joinToken);
+  expect(tok).toBeUndefined();
+});

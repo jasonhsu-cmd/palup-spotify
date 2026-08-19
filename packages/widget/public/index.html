@@ -1023,6 +1023,33 @@
     msgs.appendChild(row); msgs.scrollTop = msgs.scrollHeight;
   }
 
+  // Flywheel attribution (ADR-0020, Pillar 4) — the PANEL mints the join token. It already holds the widget
+  // token + sessionId and is same-origin to /checkout/join-token, so it authenticates correctly (the endpoint
+  // derives the tenant FROM the widget token — a storefront-side mint would 401 or mis-attribute) and hands
+  // ONLY the opaque, PII-free token to the host via palup:jointoken (targeted to the validated host origin).
+  // The sessionId NEVER leaves this iframe. Fully INERT unless the backend has ORDER_ATTRIBUTION_WEBHOOKS on
+  // (else 404) AND the tenant's holdout buckets this session (else 204) — every non-200 is a silent no-op, so
+  // nothing is attached and the shopper's checkout is never disrupted. At most one successful mint per session.
+  let hostOrigin = null;       // the validated host-page origin, learned from palup:host (see PANEL MODE below)
+  let joinTokenMinted = false;
+  async function maybeMintJoinToken(){
+    if (joinTokenMinted || !PANEL_MODE) return;          // once per session; panel-embedded only
+    try {
+      await ensureToken(false);
+      const headers = { "content-type": "application/json" };
+      if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      const r = await fetch("/checkout/join-token", { method:"POST", headers, body: JSON.stringify({ sessionId }) });
+      if (r.status !== 200) return;                        // 204 not-bucketed / 404 off / 429 / 503 / error ⇒ attach nothing
+      const d = await r.json().catch(() => null);
+      const tok = d && typeof d.joinToken === "string" && d.joinToken ? d.joinToken : null;
+      if (!tok) return;
+      joinTokenMinted = true;                              // one successful mint per session
+      // Emit ONLY to the validated host origin captured from palup:host; fail-closed if unknown (no
+      // attribution beats posting an attribution token to an unverified target).
+      if (hostOrigin){ try { window.parent.postMessage({ type: "palup:jointoken", joinToken: tok }, hostOrigin); } catch {} }
+    } catch { /* never disrupt chat or checkout */ }
+  }
+
   async function send(message, isRetry){
     if (!isRetry) add(message, "user");
     if (!isRetry) clearChips();                                // a typed message is the shopper acting ⇒ clear stale chips
@@ -1076,6 +1103,7 @@
       // drop the stale token and offer sign-in again. App-Proxy shoppers never see this.
       if (d.flags && d.flags.indexOf("reauth_required") >= 0){ setShopperToken(null); promptSignIn("reauth"); }
       recordTurn(message, d.reply); // persist the completed turn so the next follow-up (and a reload) keep context
+      void maybeMintJoinToken(); // Pillar 4 — a bucketed turn just completed; mint the attribution join token (once/session; no-op unless enabled)
     }catch(err){ offline(); }
     finally{ clearTimeout(timer); typing(false); btn.disabled = false; }
   }
@@ -1163,6 +1191,7 @@
         if (d.escalate) enterHandoff();
         renderChips(d.suggestedChips);
       }
+      void maybeMintJoinToken(); // Pillar 4 — the greeting turn bucketed this session; mint (once/session; no-op unless enabled)
     } catch { /* best-effort — the static welcome remains */ }
   }
 
@@ -1205,8 +1234,10 @@
       // shape): only {productId, quantity} and a bounded pageContext survive into hostCtx, which
       // cartSignal()/currentPageContext() read on the next /chat turn.
       if (d.type === "palup:context"){ hostCtx = readPanelContext(d); }
-      // `palup:host` {shop,position} carries nothing this panel needs to act on: it already knows its
-      // own shop from SHOP above, and `position` only matters to the loader's OWN bubble placement.
+      // `palup:host` {shop,position}: the panel already knows its shop (SHOP) and ignores position (that's
+      // the loader's own bubble placement). But this message's `event.origin` IS the validated host-page
+      // origin — captured here so a minted join token (Pillar 4) is posted ONLY to that origin, never "*".
+      if (d.type === "palup:host" && typeof e.origin === "string" && /^https?:\/\//.test(e.origin)){ hostOrigin = e.origin; }
     });
     function readPanelContext(d){
       const out = { cart: undefined, pageContext: undefined };

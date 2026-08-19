@@ -344,4 +344,51 @@ describe("initWidgetLoader", () => {
       expect(launcher.style.background).toMatch(/79|4f46e5/i); // rejected → default kept
     });
   });
+
+  // Pillar 4 (flywheel attribution): the PANEL mints the opaque join token and hands it out via
+  // palup:jointoken; the loader exposes it on window.PALUP.joinToken for the host storefront to append to
+  // its checkout permalink. The sessionId never crosses. These pin the loader half — a valid write, the
+  // foreign-origin reject (same guard as every other inbound message), and junk-token rejection.
+  describe("palup:jointoken → window.PALUP.joinToken (Pillar 4 attribution bridge)", () => {
+    afterEach(() => { delete (window as unknown as { PALUP?: unknown }).PALUP; });
+
+    it("writes a valid same-origin palup:jointoken onto window.PALUP.joinToken", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:jointoken", joinToken: "jt_opaque_123" } }),
+      );
+      expect((window as unknown as { PALUP?: { joinToken?: string } }).PALUP?.joinToken).toBe("jt_opaque_123");
+    });
+
+    it("ignores a palup:jointoken from a FOREIGN origin (never writes window.PALUP.joinToken)", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      stubContentWindow(iframe);
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: "https://evil.example", source: {} as any, data: { type: "palup:jointoken", joinToken: "jt_evil" } }),
+      );
+      expect((window as unknown as { PALUP?: { joinToken?: string } }).PALUP?.joinToken).toBeUndefined();
+    });
+
+    it("ignores a palup:jointoken with a non-string or empty token", () => {
+      const c = cfg();
+      const api = initWidgetLoader(c)!;
+      api.open();
+      const iframe = (c.host as any).__palupRoot.querySelector("iframe") as HTMLIFrameElement;
+      const fakeWindow = stubContentWindow(iframe);
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:jointoken", joinToken: 12345 } }),
+      );
+      window.dispatchEvent(
+        new MessageEvent("message", { origin: ORIGIN, source: fakeWindow as any, data: { type: "palup:jointoken", joinToken: "" } }),
+      );
+      expect((window as unknown as { PALUP?: { joinToken?: string } }).PALUP?.joinToken).toBeUndefined();
+    });
+  });
 });
