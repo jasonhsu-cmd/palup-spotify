@@ -1,6 +1,6 @@
 # ADR-0017: Shopper-identity foundation (M2) — layered, portable behind the identity port
 
-- **Status: Proposed — first slice scoped; NOT a HITL/autonomy change.** Records the port contract and
+- **Status: Accepted — built and live on internal staging (`SHOPPER_AUTH` on); NOT a HITL/autonomy change.** Records the port contract and
   the first-slice Shopify-customer adapter that give every `/chat` request a **server-verified shopper
   principal**. It ships **no new autonomy and no durable shopper memory** — it is the load-bearing
   prerequisite for ADR-0016 enforcement prerequisite #1 (a real owner to authorize skip/pause against)
