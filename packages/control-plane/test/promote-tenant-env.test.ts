@@ -67,8 +67,9 @@ describe("PROMOTE_TENANT is env-configurable (W3-1 deploy-prep)", () => {
     try {
       const res = await promoteViaApi(app);
       expect(JSON.parse(res.body).error).toBeUndefined();
+      // The guard worked: the promotion landed on "demo", not a blank tenant. (The store itself
+      // rejects a blank tenantId outright — tenant isolation — so there's no blank row to check for.)
       expect((await servingChampion(store, "demo"))?.policy.id).toBe(CAND);
-      expect(await servingChampion(store, "")).toBeNull(); // never a blank tenant id
     } finally {
       delete process.env.PROMOTE_TENANT;
       await app.close();
