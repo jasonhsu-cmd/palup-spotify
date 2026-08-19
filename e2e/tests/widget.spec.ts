@@ -1458,3 +1458,275 @@ test.describe("layout — cards stay attached to their reply", () => {
     expect(consentBox!.y, "the consent card sits BELOW the cards, never between reply and cards").toBeGreaterThan(cardsBox!.y);
   });
 });
+
+// ── Pillar 3 — opener chips (mocked /chat seam) ───────────────────────────────────────────────────
+//
+// Server-sent, tappable quick-reply chips (index.html `renderChips`/`clearChips`/`CHIP_MESSAGES`).
+// `action` is a CLOSED enum (find_my_match | bestsellers | new_here); `label` is a code-owned string
+// from the server. Exercised the same way E3's product cards are: a REAL browser against the `/widget`
+// standalone surface with a mocked `/chat` seam (`route.fulfill`) — no server today ever sends
+// `suggestedChips` (the opener rung + PROACTIVE_OPENER are unbuilt/off), so this pins what the browser
+// does with the payload once a human eventually promotes that flag, exactly as the E3 comment does for
+// `recommendedProductCards`.
+test.describe("Pillar 3 — opener chips (mocked /chat seam)", () => {
+  // Labels are deliberately NOT the CHIP_MESSAGES text, so a passing test can't be hiding a mix-up
+  // between "the label shown" and "the canned message sent".
+  const CHIPS = [
+    { label: "Find my match", action: "find_my_match" },
+    { label: "See our bestsellers", action: "bestsellers" },
+    { label: "New here? Start here", action: "new_here" },
+  ];
+
+  const chatWith = (page: Page, extra: Record<string, unknown>) =>
+    page.route("**/chat", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "Happy to help you find the right pick.",
+          mode: "sales",
+          pitch: "guided_rec",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          ...extra,
+        }),
+      }),
+    );
+
+  const send = async (page: Page, message = "what should I get?") => {
+    await page.goto("/widget");
+    await page.getByTestId("chat-input").fill(message);
+    await page.getByTestId("send").click();
+  };
+
+  test("renders one chip per valid action with the server's own label, in a labelled group, below the reply", async ({
+    page,
+  }) => {
+    await chatWith(page, { suggestedChips: CHIPS });
+    await send(page);
+
+    await expect(page.getByTestId("agent-msg").last()).toContainText("Happy to help you find the right pick.");
+    const row = page.getByTestId("opener-chips");
+    await expect(row).toBeVisible();
+    await expect(row).toHaveAttribute("role", "group");
+    await expect(row).toHaveAttribute("aria-label", "Suggestions");
+    const chips = row.getByTestId("opener-chip");
+    await expect(chips).toHaveCount(3);
+    await expect(chips.nth(0)).toHaveText("Find my match");
+    await expect(chips.nth(0)).toHaveAttribute("data-action", "find_my_match");
+    await expect(chips.nth(1)).toHaveText("See our bestsellers");
+    await expect(chips.nth(1)).toHaveAttribute("data-action", "bestsellers");
+    await expect(chips.nth(2)).toHaveText("New here? Start here");
+    await expect(chips.nth(2)).toHaveAttribute("data-action", "new_here");
+
+    // chips sit BELOW the reply bubble (and, per the layout test above, below any product cards too)
+    const replyBox = await page.getByTestId("agent-msg").last().boundingBox();
+    const rowBox = await row.boundingBox();
+    expect(replyBox && rowBox).toBeTruthy();
+    expect(rowBox!.y, "the chip row sits below the reply it travelled with").toBeGreaterThan(replyBox!.y);
+  });
+
+  test("tapping a chip clears the row IMMEDIATELY, then sends its canned message as a normal shopper turn", async ({
+    page,
+  }) => {
+    // The tap's own /chat reply is deliberately held open (never fulfilled) until AFTER we've asserted
+    // the row is gone. Without this gate, "the row is gone after the tap" would be indistinguishable
+    // from an unrelated fact — renderChips() itself always clears any existing row before deciding what
+    // (if anything) to draw next, so a resolved second reply with no chips would ALSO leave the row
+    // gone, whether or not the tap's own clear-on-act logic exists at all. Verified by mutation: with
+    // clear-on-act removed from BOTH the button's own handler and send()'s shared `if (!isRetry)
+    // clearChips()`, an un-gated version of this test still passed, purely because renderChips's own
+    // internal clear-then-redraw ran once the (chipless) second reply eventually landed.
+    let chatCalls = 0;
+    const bodies: Array<{ message?: string }> = [];
+    let releaseSecondReply: (() => void) | null = null;
+    const secondReplyGate = new Promise<void>((resolve) => {
+      releaseSecondReply = resolve;
+    });
+    await page.route("**/chat", async (route) => {
+      chatCalls++;
+      try {
+        bodies.push(route.request().postDataJSON());
+      } catch {
+        bodies.push({});
+      }
+      if (chatCalls === 2) await secondReplyGate; // hold the tap's own reply open
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: chatCalls === 1 ? "Happy to help you find the right pick." : "Great choice.",
+          mode: "sales",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          suggestedChips: chatCalls === 1 ? CHIPS : undefined,
+        }),
+      });
+    });
+
+    await send(page);
+    const row = page.getByTestId("opener-chips");
+    await expect(row).toBeVisible();
+
+    await row.locator('button[data-action="find_my_match"]').click();
+
+    // The tap's own /chat call is still pending (gated above) — if the row is gone NOW, that can only be
+    // clear-on-act, not a later render's side effect.
+    await expect(page.getByTestId("opener-chips")).toHaveCount(0);
+    // a real user bubble with the EXACT canned message (never the chip's own label) — also already
+    // rendered before the reply comes back, since `add(message, "user")` runs before the fetch.
+    await expect(page.getByTestId("messages").locator(".msg.user").last()).toHaveText("Help me find my match");
+
+    releaseSecondReply!();
+    // a genuine /chat POST carried that exact message
+    await expect.poll(() => bodies.at(-1)?.message).toBe("Help me find my match");
+    expect(chatCalls, "exactly one turn for the initial send + one for the tap").toBe(2);
+  });
+
+  test("suggestedChips absent ⇒ no chip row at all (empty-state)", async ({ page }) => {
+    await chatWith(page, {});
+    await send(page);
+    await expect(page.getByTestId("agent-msg").last()).toContainText("Happy to help you find the right pick.");
+    await expect(page.getByTestId("opener-chips")).toHaveCount(0);
+    await expect(page.getByTestId("opener-chip")).toHaveCount(0);
+  });
+
+  test("suggestedChips: [] ⇒ also no chip row (empty array is also nothing)", async ({ page }) => {
+    await chatWith(page, { suggestedChips: [] });
+    await send(page);
+    await expect(page.getByTestId("opener-chips")).toHaveCount(0);
+  });
+
+  test("a chip with an action outside the closed enum is dropped; the only chip ⇒ no row renders", async ({
+    page,
+  }) => {
+    await chatWith(page, { suggestedChips: [{ label: "Buy now!", action: "buy_now" }] });
+    await send(page);
+    await expect(page.getByTestId("opener-chips")).toHaveCount(0);
+    await expect(page.getByTestId("opener-chip")).toHaveCount(0);
+  });
+
+  test("a mix of one valid and one unknown-action chip renders only the valid one", async ({ page }) => {
+    await chatWith(page, {
+      suggestedChips: [
+        { label: "See our bestsellers", action: "bestsellers" },
+        { label: "Buy now!", action: "buy_now" },
+      ],
+    });
+    await send(page);
+    const row = page.getByTestId("opener-chips");
+    await expect(row).toBeVisible();
+    const chips = row.getByTestId("opener-chip");
+    await expect(chips).toHaveCount(1);
+    await expect(chips).toHaveText("See our bestsellers");
+  });
+
+  test("a chip with a non-string or empty label is dropped even though its action is valid", async ({ page }) => {
+    await chatWith(page, {
+      suggestedChips: [
+        { label: "", action: "bestsellers" },
+        { label: 42, action: "new_here" },
+        { label: "Find my match", action: "find_my_match" },
+      ],
+    });
+    await send(page);
+    const row = page.getByTestId("opener-chips");
+    await expect(row).toBeVisible();
+    const chips = row.getByTestId("opener-chip");
+    await expect(chips).toHaveCount(1);
+    await expect(chips).toHaveText("Find my match");
+  });
+
+  test("typing and sending a normal message clears an existing chip row IMMEDIATELY (clear-on-act)", async ({
+    page,
+  }) => {
+    // Same gating rationale as the tap test above: the second turn's own reply is held open until after
+    // the "row is gone" assertion, so this can only pass via send()'s own `if (!isRetry) clearChips()` —
+    // never via renderChips()'s unrelated "always clear before redrawing" behaviour once some later
+    // reply eventually lands.
+    let chatCalls = 0;
+    let releaseSecondReply: (() => void) | null = null;
+    const secondReplyGate = new Promise<void>((resolve) => {
+      releaseSecondReply = resolve;
+    });
+    await page.route("**/chat", async (route) => {
+      chatCalls++;
+      if (chatCalls === 2) await secondReplyGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: chatCalls === 1 ? "Happy to help you find the right pick." : "Sounds good.",
+          mode: "sales",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          suggestedChips: chatCalls === 1 ? CHIPS : undefined,
+        }),
+      });
+    });
+
+    await send(page);
+    await expect(page.getByTestId("opener-chips")).toBeVisible();
+
+    await page.getByTestId("chat-input").fill("actually, tell me about the moisturizer");
+    await page.getByTestId("send").click();
+
+    // the second /chat call is still pending (gated) — the row's absence here can only be clear-on-act.
+    await expect(page.getByTestId("opener-chips")).toHaveCount(0);
+
+    releaseSecondReply!();
+    await expect.poll(() => chatCalls).toBe(2);
+  });
+
+  test("double-tapping a chip fires EXACTLY ONE /chat turn — the second tap finds no button", async ({ page }) => {
+    let chatCalls = 0;
+    const messages: Array<string | undefined> = [];
+    await page.route("**/chat", async (route) => {
+      chatCalls++;
+      try {
+        messages.push((route.request().postDataJSON() as { message?: string }).message);
+      } catch {
+        messages.push(undefined);
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "Sure thing.",
+          mode: "sales",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+          suggestedChips: chatCalls === 1 ? CHIPS : undefined,
+        }),
+      });
+    });
+
+    await send(page);
+    await expect(page.getByTestId("opener-chips").locator('button[data-action="bestsellers"]')).toBeVisible();
+
+    // Two rapid taps dispatched in the SAME task, before either /chat promise settles: the first click's
+    // synchronous clearChips() removes the button, so a genuine second tap (not merely "Playwright
+    // declines to click a hidden element") finds nothing to click at all.
+    await page.evaluate(() => {
+      const clickIt = () =>
+        (document.querySelector('[data-testid="opener-chips"] button[data-action="bestsellers"]') as HTMLButtonElement | null)?.click();
+      clickIt();
+      clickIt();
+    });
+
+    await expect.poll(() => chatCalls, { message: "expected exactly 2 /chat calls (1 initial + 1 chip tap), never 3" }).toBe(2);
+    expect(messages).toEqual([expect.any(String), "What are your bestsellers?"]);
+    await expect(page.getByTestId("opener-chips")).toHaveCount(0);
+  });
+});
