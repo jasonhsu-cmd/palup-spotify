@@ -30,6 +30,7 @@ EXPECT=(
   "Application E2E (blocking pre-promotion gate)"
   "Control-plane self-improvement E2E (mock)"
   "Embed round-trip E2E (mock)"
+  "Storefront catalog E2E (mock, demo-tenant fixtures)"
   "pgvector ANN adapter (testcontainer)"
 )
 
@@ -78,6 +79,7 @@ gate_step "Self-improvement eval gate (safety floor + no-regression)" "pnpm eval
 gate_step "Application E2E (blocking pre-promotion gate)" "pnpm e2e"
 gate_step "Control-plane self-improvement E2E (mock)" "pnpm e2e:monitor"
 gate_step "Embed round-trip E2E (mock)" "pnpm e2e:embed"
+gate_step "Storefront catalog E2E (mock, demo-tenant fixtures)" "pnpm e2e:storefront-catalog"
 # Cannot pass vacuously: (a) refuses if Docker is unreachable rather than silently skipping every
 # pgvector test, (b) forces PGVECTOR_TESTCONTAINER to a value that is NOT "off" so an inherited/local skip flag can never
 # disable this REQUIRED step, and (c) greps its own output for a non-zero passed count — a testcontainer
