@@ -100,6 +100,7 @@ export {
 export {
   accumulateArmTally,
   readArmTally,
+  readArmTallyShards,
   readArmAggPair,
   listArmTallies,
   appendOutcomeLedgerEntry,
