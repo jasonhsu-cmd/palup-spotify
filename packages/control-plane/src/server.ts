@@ -53,7 +53,9 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   // W3-1 (deploy-prep): configurable via env so a real deploy can point this at the actual merchant
   // tenant it's promoting for (e.g. PROMOTE_TENANT=palup-skincare-jason) instead of the demo tenant.
   // Default stays "demo" for back-compat with every existing caller/test that doesn't set it.
-  const PROMOTE_TENANT = process.env.PROMOTE_TENANT ?? "demo";
+  // `?.trim() || "demo"` (not `??`) so an empty/whitespace env value (a deploy misconfig) also falls
+  // back to "demo" rather than promoting to a blank tenant id.
+  const PROMOTE_TENANT = process.env.PROMOTE_TENANT?.trim() || "demo";
   const engines = new EngineRegistry(() => new EvolutionEngine({ champion: { policy: DEFAULT_POLICY, metrics: championMetrics }, grader }));
   const engine = engines.engineFor(PROMOTE_TENANT);
 

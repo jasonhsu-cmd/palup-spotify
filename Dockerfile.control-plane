@@ -20,7 +20,8 @@ EXPOSE 8990
 #   gcloud run deploy <service> --source . --dockerfile Dockerfile.control-plane \
 #     --no-allow-unauthenticated \
 #     --set-env-vars PROMOTE_TENANT=palup-skincare-jason,OPERATOR_TOKEN=<secret>,DATABASE_URL=<secret>
-# --no-allow-unauthenticated is load-bearing here: GET /api/state (and other reads) are intentionally
-# left open at the app layer for the dashboard (see server.ts comments) — edge IAM is what gates them
-# in this deploy. Do not change that route's auth as a side effect of wiring the container.
+# --no-allow-unauthenticated is load-bearing: the control-plane exposes operator surfaces (kill,
+# promote, cost-cap). App-layer auth already fails closed — mutations require OPERATOR_TOKEN, and
+# GET /api/state is gated by requireOperatorRead (W1-B, server.ts) — so edge IAM here is
+# defense-in-depth, not the sole gate. Deploy --no-allow-unauthenticated anyway; never relax app auth.
 CMD ["pnpm", "monitor"]

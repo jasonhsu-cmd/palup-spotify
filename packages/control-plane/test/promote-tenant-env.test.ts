@@ -59,4 +59,19 @@ describe("PROMOTE_TENANT is env-configurable (W3-1 deploy-prep)", () => {
       await app.close();
     }
   });
+
+  it("with PROMOTE_TENANT empty/whitespace (deploy misconfig), falls back to 'demo' — never a blank tenant", async () => {
+    process.env.PROMOTE_TENANT = "   ";
+    const store = new InMemoryRuntimeStore();
+    const app = await buildServer({ store });
+    try {
+      const res = await promoteViaApi(app);
+      expect(JSON.parse(res.body).error).toBeUndefined();
+      expect((await servingChampion(store, "demo"))?.policy.id).toBe(CAND);
+      expect(await servingChampion(store, "")).toBeNull(); // never a blank tenant id
+    } finally {
+      delete process.env.PROMOTE_TENANT;
+      await app.close();
+    }
+  });
 });
