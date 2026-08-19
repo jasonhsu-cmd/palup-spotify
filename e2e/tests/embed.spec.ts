@@ -45,6 +45,58 @@ async function panelFrame(page: Page): Promise<Frame> {
   return frame;
 }
 
+// Pillar 3 slice 2b (WS-G) helpers — greeting collapse + greeting-card render. Both live entirely
+// inside sendGreeting(), which fires on the FIRST-TOUCH `palup:open` postMessage (panel-mode only), so
+// exercising them just needs (a) the real loader->launcher->panel open flow already above, and (b) a
+// way to fake ONLY that one greeting /chat response while every other /chat call (a real shopper turn)
+// still hits the real mock-model backend untouched.
+
+/** Reach through the loader's closed-shadow-root test seam and click the real launcher, then return
+ *  the real panel iframe's Frame handle — the exact sequence every test above repeats inline. */
+async function openEmbedPanel(page: Page): Promise<Frame> {
+  await page.goto("/embed-host");
+  await expect(page.locator("[data-palup-host]")).toHaveAttribute("data-palup-mounted", "true");
+  await page.evaluate(() => {
+    type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
+    const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
+    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
+    launcher.click();
+  });
+  return panelFrame(page);
+}
+
+/** Mock ONLY the greeting turn (`signals.proactiveTrigger === "greeting"`) with `body`; every other
+ *  /chat request (a real shopper-typed turn) passes through to the real backend via `route.continue()`,
+ *  so this never has to fake the whole session, just the one first-touch round trip WS6 fires. */
+async function mockGreetingChat(page: Page, body: Record<string, unknown>) {
+  await page.route("**/chat", async (route) => {
+    let parsed: { signals?: { proactiveTrigger?: string } } = {};
+    try {
+      parsed = route.request().postDataJSON() as { signals?: { proactiveTrigger?: string } };
+    } catch {
+      /* non-JSON body — not the greeting turn, fall through untouched */
+    }
+    if (parsed?.signals?.proactiveTrigger !== "greeting") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        mode: "smalltalk",
+        pitch: "none",
+        escalate: false,
+        outbound: false,
+        flags: [],
+        servedBy: "prop-0",
+        ...body,
+      }),
+    });
+  });
+}
+
 test("embed: loader on a host page -> launcher mounts -> open -> panel iframe -> mint -> /chat -> assistant reply renders", async ({
   page,
 }) => {
@@ -244,4 +296,79 @@ test("embed: opening the panel delivers palup:open so the first-touch greeting t
   // give any erroneous double-fire a chance to show up, then confirm it stayed at one (once-per-session).
   await page.waitForTimeout(300);
   expect(greetingTurns.length).toBe(1);
+});
+
+// Pillar 3 slice 2b (WS-G gap-4) — the greeting COLLAPSE. Before this change, a non-empty server
+// greeting was appended AFTER the instant static welcome, so the shopper saw two agent bubbles ("Hi!
+// I'm <brand>'s assistant..." followed by the server's own greeting). index.html now removes the
+// static placeholder the moment a non-empty server greeting lands, so there is exactly ONE bubble —
+// never both. This is deliberately NOT vacuous: it asserts BOTH the server text IS present AND the
+// static text IS ABSENT, on a single bubble whose count is pinned at 1 — a version that appended
+// instead of replacing would fail the count assertion (2, not 1), and a version that showed the static
+// text instead of the server's would fail the exact-text assertion.
+test("embed: WS-G gap-4 — a non-empty SERVER greeting collapses the static welcome into ONE bubble", async ({
+  page,
+}) => {
+  const SERVER_GREETING = "Welcome back — happy to help you find something today.";
+  await mockGreetingChat(page, { reply: SERVER_GREETING });
+
+  const frame = await openEmbedPanel(page);
+
+  // Exactly one greeting bubble total: not the static PLUS the server greeting (a double-greeting would
+  // fail here at count 2), and not zero (a version that removed the static but never added the server
+  // greeting would fail here at count 0).
+  await expect(frame.getByTestId("agent-msg")).toHaveCount(1);
+  // The one bubble that IS there is the server's, not the static placeholder — an exact-text match, so
+  // a version that left the static bubble in place (never replaced it) fails here even though the count
+  // above might still read 1 in some other broken variant (e.g. the static removed twice, server text
+  // never added — count would be 0, still caught above, but belt + suspenders on the text itself too).
+  await expect(frame.getByTestId("agent-msg").first()).toHaveText(SERVER_GREETING);
+
+  // Let any late/duplicate bubble a race could produce show up, then confirm the count held at one.
+  await page.waitForTimeout(300);
+  await expect(frame.getByTestId("agent-msg")).toHaveCount(1);
+});
+
+// Pillar 3 slice 2b (WS-G gap-2) — sendGreeting() now calls addProductCards(d.recommendedProductCards)
+// on the greeting turn, so an opener-minted card (none today — the opener rung is unbuilt) will render
+// under the greeting exactly like a normal reply's cited products do (E3). Reuses the E3 testids
+// (product-card/product-cards) rather than inventing new ones. Fires on OPEN alone — no shopper text is
+// ever typed in this test, so the card renders purely off the agent-initiated greeting turn.
+test("embed: WS-G gap-2 — a greeting-turn product card renders on open, with no shopper turn", async ({
+  page,
+}) => {
+  const CARD_TITLE = "Vitamin-C Brightening Serum";
+  await mockGreetingChat(page, {
+    reply: "Hi there! Since folks love brightening serums, here's a pick to start with.",
+    recommendedProductCards: [{ productId: "serum-vc", title: CARD_TITLE, price: "$34", availableForSale: true }],
+  });
+
+  const frame = await openEmbedPanel(page);
+
+  await expect(frame.getByTestId("product-card")).toHaveCount(1);
+  await expect(frame.getByTestId("product-card").first()).toContainText(CARD_TITLE);
+  // No shopper turn was ever sent — the card came purely off the agent-initiated greeting.
+  await expect(frame.locator("#messages .msg.user")).toHaveCount(0);
+});
+
+// Pillar 3 slice 2b — the byte-identical EMPTY case (GREETING_PROACTIVE off, this suite's default
+// posture — see playwright.embed.config.ts's webServer env, which never sets it). No /chat mock here:
+// this hits the REAL mock-model backend, which returns an empty reply for the greeting trigger while
+// the flag is off (widget-brain/src/brain.ts's greetingProactiveEnabled=false branch), so sendGreeting's
+// `if (d && d.reply)` branch never runs and the static welcome must stand completely unchanged — the
+// pre-2b behavior this change must never disturb.
+test("embed: WS-G — the default empty-reply greeting turn leaves the static welcome byte-identical (no collapse, no card)", async ({
+  page,
+}) => {
+  const frame = await openEmbedPanel(page);
+
+  await expect(frame.getByTestId("agent-msg")).toHaveCount(1);
+  await expect(frame.getByTestId("agent-msg").first()).toContainText("Hi! I'm");
+  await expect(frame.getByTestId("product-card")).toHaveCount(0);
+
+  // Give the (empty) greeting round trip time to land, then confirm nothing about the DOM changed.
+  await page.waitForTimeout(300);
+  await expect(frame.getByTestId("agent-msg")).toHaveCount(1);
+  await expect(frame.getByTestId("agent-msg").first()).toContainText("Hi! I'm");
+  await expect(frame.getByTestId("product-card")).toHaveCount(0);
 });
