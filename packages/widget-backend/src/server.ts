@@ -1282,7 +1282,14 @@ export async function buildServer(opts?: {
         verify,
         expectedServiceAccount: PUBSUB_PUSH_SERVICE_ACCOUNT!,
         reconcile,
-        checkRateLimit: (ip) => underLimit(store, { tenantId: "__mint__" }, `ip:${ip}`, RL_IP, RL_WINDOW),
+        // §E4 dedicated Pub/Sub limiter (NOT the shared 60/min RL_IP public-traffic bucket): every push
+        // egresses from ONE shared Google source IP, so a bulk product edit/delete fans out far more than
+        // 60 reconciles/min into a single counter → 429 → retry → dead-letter → the delete-prune never runs
+        // and deleted SKUs linger in vp_ann. Its own `pubsub-catalog:` key namespace keeps this window
+        // isolated from the memory push route's `pubsub-mem:` window and from public `ip:` traffic (they
+        // key the same fixed-window store). Mirrors the memory push route below; see the RL_PUBSUB_PUSH
+        // comment at its definition for the scale-ceiling caveat.
+        checkRateLimit: (ip) => underLimit(store, { tenantId: "__mint__" }, `pubsub-catalog:${ip}`, RL_PUBSUB_PUSH, RL_WINDOW),
       });
       console.warn(
         "[config] Pub/Sub OIDC push route registered (consume side) — its OIDC verify (signature + audience + " +
