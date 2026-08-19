@@ -130,6 +130,9 @@ jobs:
           # as confirmed (money/NN#1 fail-honest). Inert until this repo var is set true; enabling it is a
           # HITL §5 promotion, and requires a running producer heartbeat or every quiet-catalog price hedges.
           PRICE_REQUIRES_LIVE_CHANNEL: ${{ vars.PRICE_REQUIRES_LIVE_CHANNEL || 'false' }}
+          # Pillar 3 (opener) — upgrade the first-touch greeting to a fit-first opener (code-owned chips +,
+          # on a product page, the viewed-product card). Needs GREETING_PROACTIVE on too (it's a greeting upgrade).
+          PROACTIVE_OPENER: ${{ vars.PROACTIVE_OPENER || 'false' }}
           SERVER_GUARD_SIGNALS: ${{ vars.SERVER_GUARD_SIGNALS || 'false' }}
           OUTGOING_OFFER_CHECK: ${{ vars.OUTGOING_OFFER_CHECK || 'false' }}
           GREETING_PROACTIVE: ${{ vars.GREETING_PROACTIVE || 'false' }}
@@ -217,6 +220,7 @@ jobs:
                       "PRODUCT_CITATIONS=${PRODUCT_CITATIONS}" "PRODUCT_CARDS=${PRODUCT_CARDS}" \
                       "CART_LINE_ITEMS=${CART_LINE_ITEMS}" "PRODUCT_FACTS_HYDRATION=${PRODUCT_FACTS_HYDRATION}" \
                       "PRICE_REQUIRES_LIVE_CHANNEL=${PRICE_REQUIRES_LIVE_CHANNEL}" \
+                      "PROACTIVE_OPENER=${PROACTIVE_OPENER}" \
                       "SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}" "OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}" \
                       "SHOPPER_AUTH=${SHOPPER_AUTH}" "SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}" \
                       "GREETING_PROACTIVE=${GREETING_PROACTIVE}" \
@@ -298,6 +302,7 @@ jobs:
           ENVS="${ENVS}@CART_LINE_ITEMS=${CART_LINE_ITEMS}"
           ENVS="${ENVS}@PRODUCT_FACTS_HYDRATION=${PRODUCT_FACTS_HYDRATION}"
           ENVS="${ENVS}@PRICE_REQUIRES_LIVE_CHANNEL=${PRICE_REQUIRES_LIVE_CHANNEL}"
+          ENVS="${ENVS}@PROACTIVE_OPENER=${PROACTIVE_OPENER}"
           ENVS="${ENVS}@SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}"
           ENVS="${ENVS}@OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}"
           ENVS="${ENVS}@SHOPPER_AUTH=${SHOPPER_AUTH}"
