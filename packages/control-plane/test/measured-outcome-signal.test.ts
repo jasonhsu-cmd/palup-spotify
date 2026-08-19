@@ -53,8 +53,8 @@ describe("readMeasuredOutcomeSignal (Wave-2 D, item 1: the read-side adapter)", 
 });
 
 describe("toGateMeasuredOutcome (Wave-2 D, item 2: shaping the signal for PolicyMetrics.measuredOutcome)", () => {
-  it("projects exactly {incrementalLift, power} — nothing else", () => {
-    const shaped = toGateMeasuredOutcome({ incrementalLift: 42, power: 0.9, underpowered: false, method: "m" });
-    expect(shaped).toEqual({ incrementalLift: 42, power: 0.9 });
+  it("projects exactly {incrementalLift, relativeLift, power} — nothing else (durability NOW-2: relativeLift is carried through, not dropped)", () => {
+    const shaped = toGateMeasuredOutcome({ incrementalLift: 42, relativeLift: 0.3, power: 0.9, underpowered: false, method: "m" });
+    expect(shaped).toEqual({ incrementalLift: 42, relativeLift: 0.3, power: 0.9 });
   });
 });

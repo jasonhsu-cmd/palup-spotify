@@ -18,8 +18,17 @@ import { readArmAggPair } from "@palup/state-postgres";
 // play/period a given evaluation round should read is a business question this module does not guess.
 
 export interface MeasuredOutcomeSignal {
-  /** USD (or whatever unit the ledger's revenue field carries) — see `computeIncrementalLift`. */
+  /** USD (or whatever unit the ledger's revenue field carries) — see `computeIncrementalLift`. AUDIT/
+   * DISPLAY ONLY as of durability NOW-2 (`evolution/src/engine.ts`): the gate/monitor comparison reads
+   * `relativeLift` below, never this absolute, exposure-scaled figure. */
   incrementalLift: number;
+  /** (treated rate − control rate) / control rate — `computeIncrementalLift`'s `relativeLift`,
+   * RATE-normalized (per-exposure). Durability NOW-2: this is the field `toGateMeasuredOutcome` carries
+   * through to `PolicyMetrics.measuredOutcome.relativeLift`, and the ONLY field the evolution gate/
+   * monitor compare candidate-vs-champion — fixes the volume/cumulative bias an absolute-lift comparison
+   * had (a higher-traffic candidate could "win" on `incrementalLift` alone despite converting WORSE per
+   * shopper). */
+  relativeLift: number;
   /** 0..1 — `computeIncrementalLift`'s `confidence`, carried through as `PolicyMetrics.measuredOutcome
    * .power`. Forced to 0 whenever `underpowered` (see `computeIncrementalLift`), so a low/zero `power`
    * here already implies `underpowered` — no separate flag is needed for the gate's power-floor check
@@ -51,6 +60,7 @@ export async function readMeasuredOutcomeSignal(
   const result = computeIncrementalLift({ treated, control });
   return {
     incrementalLift: result.incrementalLift,
+    relativeLift: result.relativeLift,
     power: result.confidence,
     underpowered: result.underpowered,
     method: result.method,
@@ -61,8 +71,12 @@ export async function readMeasuredOutcomeSignal(
  * Shape a `MeasuredOutcomeSignal` into the exact `PolicyMetrics.measuredOutcome` the evolution gate
  * reads (`evolution/types.ts`). A pure projection — drops `underpowered`/`method` (audit-only fields the
  * gate doesn't need: the gate re-derives its own power-floor verdict from `power` alone, per
- * `MEASURED_OUTCOME_POWER_FLOOR`/`powerAdequate` in `evolution/engine.ts`).
+ * `MEASURED_OUTCOME_POWER_FLOOR`/`powerAdequate` in `evolution/engine.ts`). Durability NOW-2: carries
+ * `relativeLift` through too (previously dropped) — it is now the field the gate/monitor actually
+ * compare; `incrementalLift` still rides along for audit/display.
  */
-export function toGateMeasuredOutcome(signal: MeasuredOutcomeSignal): { incrementalLift: number; power: number } {
-  return { incrementalLift: signal.incrementalLift, power: signal.power };
+export function toGateMeasuredOutcome(
+  signal: MeasuredOutcomeSignal,
+): { incrementalLift: number; relativeLift: number; power: number } {
+  return { incrementalLift: signal.incrementalLift, relativeLift: signal.relativeLift, power: signal.power };
 }

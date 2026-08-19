@@ -63,7 +63,7 @@ describe("Gate stage wiring — /api/evaluate/:id attaches the champion's live m
       await app.inject({ method: "POST", url: "/api/seed", headers: AUTH });
       await app.inject({ method: "POST", url: `/api/evaluate/${CAND}`, headers: AUTH });
       const body = (await app.inject({ method: "GET", url: "/api/state", headers: AUTH })).json();
-      expect(body.champion.metrics.measuredOutcome).toEqual({ incrementalLift: 0, power: 0 });
+      expect(body.champion.metrics.measuredOutcome).toEqual({ incrementalLift: 0, relativeLift: 0, power: 0 });
       const rec = body.candidates.find((c: { policy: { id: string } }) => c.policy.id === CAND);
       expect(rec.gate.pass).toBe(true); // MOCK qualityScore 0.9 > champion 0.75 — unaffected either way
     } finally {
@@ -93,13 +93,15 @@ describe("Gate stage wiring — /api/evaluate/:id attaches the champion's live m
 });
 
 describe("toGateMeasuredOutcome composes with the adapter exactly as the canary caller does", () => {
-  it("projects the adapter's read down to {incrementalLift, power} for a PolicyMetrics.measuredOutcome seam", async () => {
+  it("projects the adapter's read down to {incrementalLift, relativeLift, power} for a PolicyMetrics.measuredOutcome seam", async () => {
     const store = new InMemoryRuntimeStore();
     const now = new Date("2026-08-19T00:00:00Z");
     await accumulateArmTally(store, { tenantId: T, play: HOLDOUT_PLAY, period: holdoutPeriod(now), arm: "treated", exposures: 300, orders: 60, revenue: 3000 });
     await accumulateArmTally(store, { tenantId: T, play: HOLDOUT_PLAY, period: holdoutPeriod(now), arm: "control", exposures: 300, orders: 15, revenue: 750 });
     const shaped = toGateMeasuredOutcome(await readServingMeasuredOutcome(store, T, now));
-    expect(Object.keys(shaped).sort()).toEqual(["incrementalLift", "power"]);
+    expect(Object.keys(shaped).sort()).toEqual(["incrementalLift", "power", "relativeLift"]);
     expect(shaped.incrementalLift).toBeCloseTo(2250);
+    // treatedRate=10, controlRate=2.5 ⇒ relativeLift = (10-2.5)/2.5 = 3 (durability NOW-2: rate-normalized).
+    expect(shaped.relativeLift).toBeCloseTo(3);
   });
 });
