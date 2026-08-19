@@ -428,3 +428,20 @@ test("embed: a 204 from /checkout/join-token attaches nothing — window.PALUP.j
   const tok = await page.evaluate(() => (window as unknown as { PALUP?: { joinToken?: string } }).PALUP?.joinToken);
   expect(tok).toBeUndefined();
 });
+
+// A 404 means /checkout/join-token is not mounted (ORDER_ATTRIBUTION_WEBHOOKS off — the staging state today).
+// The panel must latch on the first 404 and NOT re-probe on every subsequent turn (LOW-2 efficiency/COGS).
+test("embed: a 404 latches — the panel does NOT re-probe /checkout/join-token on the next turn", async ({ page }) => {
+  let mintCalls = 0;
+  await page.route("**/checkout/join-token", (route) => {
+    mintCalls += 1;
+    return route.fulfill({ status: 404, body: "" });
+  });
+  const frame = await openEmbedPanel(page);
+  await expect.poll(() => mintCalls, { message: "the greeting turn never triggered a mint probe" }).toBe(1); // greeting → one probe → 404 → latched
+  // a real second shopper turn must NOT trigger another probe
+  await frame.getByTestId("chat-input").fill("tell me about the serum");
+  await frame.getByTestId("chat-input").press("Enter");
+  await expect(frame.getByTestId("agent-msg")).toHaveCount(2); // static welcome + this reply → the turn completed
+  expect(mintCalls).toBe(1); // still one: the 404 latched, no per-turn re-probe
+});

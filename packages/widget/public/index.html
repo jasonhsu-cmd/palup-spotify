@@ -1032,14 +1032,16 @@
   // nothing is attached and the shopper's checkout is never disrupted. At most one successful mint per session.
   let hostOrigin = null;       // the validated host-page origin, learned from palup:host (see PANEL MODE below)
   let joinTokenMinted = false;
+  let joinTokenEndpointOff = false; // a 404 means the feature is off for this deployment — stop re-probing every turn
   async function maybeMintJoinToken(){
-    if (joinTokenMinted || !PANEL_MODE) return;          // once per session; panel-embedded only
+    if (joinTokenMinted || joinTokenEndpointOff || !PANEL_MODE) return;   // once per session; panel-embedded only
     try {
       await ensureToken(false);
       const headers = { "content-type": "application/json" };
       if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
       const r = await fetch("/checkout/join-token", { method:"POST", headers, body: JSON.stringify({ sessionId }) });
-      if (r.status !== 200) return;                        // 204 not-bucketed / 404 off / 429 / 503 / error ⇒ attach nothing
+      if (r.status === 404){ joinTokenEndpointOff = true; return; } // endpoint not mounted (feature off) ⇒ don't probe again this session
+      if (r.status !== 200) return;                        // 204 not-bucketed yet / 429 / 503 / error ⇒ retry on a later turn
       const d = await r.json().catch(() => null);
       const tok = d && typeof d.joinToken === "string" && d.joinToken ? d.joinToken : null;
       if (!tok) return;
