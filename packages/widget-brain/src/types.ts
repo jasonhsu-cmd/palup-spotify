@@ -494,6 +494,18 @@ export type PersonaFlag =
   | "behavioral:dwell" | "behavioral:hesitation" | "behavioral:repeat_question" | "behavioral:declined" | "behavioral:idle_return" | "behavioral:rage"
   | "disposition:one_strike" | "safety:regulated_claim" | "memory:style_applied";
 
+/**
+ * Pillar 3 (opener) — a tappable quick-reply the proactive opener may surface. The `action` is a CLOSED
+ * enum and the `label` is CODE-OWNED (never model text), so a chip can never carry a scarcity / discount /
+ * urgency string — the anti-dark-pattern defense. Rendered as an ignorable affordance; tapping just runs a
+ * normal discovery turn (no auto-purchase, no cart mutation).
+ */
+export type OpenerChipAction = "find_my_match" | "bestsellers" | "new_here";
+export interface SuggestedChip {
+  label: string;
+  action: OpenerChipAction;
+}
+
 export interface Decision {
   mode: Mode;
   reply: string;
@@ -556,4 +568,13 @@ export interface Decision {
    * ADR-0007 §2 and docs/PRICING.md §2 forbid as a fee basis.
    */
   recommendedProductCards?: RecommendedProductCard[];
+
+  /**
+   * OPENER CHIPS (Pillar 3) — tappable quick-replies the proactive opener surfaces (find-my-match /
+   * bestsellers / new-here). Behind the PROACTIVE_OPENER posture flag: OMITTED entirely (no key) whenever
+   * the flag is off or the opener minted none, so the flag-off `Decision` and the /chat wire are
+   * byte-identical (pinned by chat-wire-flag-off.test.ts). Labels are code-owned and actions are a closed
+   * enum, so a chip can never carry a commercial / scarcity string.
+   */
+  suggestedChips?: SuggestedChip[];
 }
