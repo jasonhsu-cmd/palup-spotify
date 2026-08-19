@@ -1130,6 +1130,11 @@
   // AGENT-INITIATED (empty message + proactiveTrigger:"greeting"); the SERVER decides whether any greeting
   // is emitted (GREETING_PROACTIVE flag). Flag OFF (production default) or any failure ⇒ empty reply ⇒ the
   // static welcome already in the log stands — the chat is never left empty and this adds nothing.
+  // Pillar 3 (opener) — a handle to the INSTANT static-welcome placeholder, so a non-empty SERVER greeting
+  // can REPLACE it (collapse to one greeting) instead of appearing as a second bubble. Null on a reload (the
+  // persisted transcript is re-rendered, no static welcome) and in standalone /widget (sendGreeting never
+  // fires there — panel-mode only), so the removal below runs only in the panel + flag-on case.
+  let staticGreetingEl = null;
   const GREET_KEY = "palup.widget.greeted.v1";
   function greetedThisSession(){ try { return sessionStorage.getItem(GREET_KEY) === "1"; } catch { return false; } }
   async function sendGreeting(){
@@ -1148,7 +1153,16 @@
       if (!r.ok) return;
       const d = await r.json();
       // Only a real, non-empty server greeting is shown (flag ON). Flag OFF ⇒ empty reply ⇒ nothing added.
-      if (d && d.reply){ add(d.reply, "agent", d); if (d.escalate) enterHandoff(); renderChips(d.suggestedChips); }
+      if (d && d.reply){
+        // Collapse to ONE greeting: replace the instant static placeholder with the real server greeting
+        // (never both). Flag OFF ⇒ d.reply is empty ⇒ this branch never runs ⇒ the static welcome stands,
+        // byte-identical to before.
+        if (staticGreetingEl){ staticGreetingEl.remove(); staticGreetingEl = null; }
+        add(d.reply, "agent", d);
+        addProductCards(d.recommendedProductCards); // WS-G gap-2 — an opener-minted card renders on the greeting turn (inert until the opener rung mints one)
+        if (d.escalate) enterHandoff();
+        renderChips(d.suggestedChips);
+      }
     } catch { /* best-effort — the static welcome remains */ }
   }
 
@@ -1156,7 +1170,7 @@
   if (transcript.length){
     for (const t of transcript){ add(t.content, t.role === "agent" ? "agent" : "user"); }
   } else {
-    add("Hi! I'm " + BRAND_NAME + "'s assistant — ask me about a product or your order.", "agent");
+    staticGreetingEl = add("Hi! I'm " + BRAND_NAME + "'s assistant — ask me about a product or your order.", "agent");
   }
   // Stamp the sessionId now, so a reload OR a closed tab before the first turn still continues this
   // conversation rather than opening a second one the server can't connect to the first.
