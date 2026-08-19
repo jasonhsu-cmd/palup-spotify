@@ -1304,3 +1304,61 @@ test.describe("E4 — cart line items are opt-in from the storefront, never inve
     expect(Object.keys(signals)).not.toContain("cartItems");
   });
 });
+
+// Error journey — a failed /chat must degrade to an offline notice with a working Retry, and the retry
+// must REPLAY the same idempotency key (never a second distinct turn the server could double-apply).
+// This was only implicit before (send() reuses lastSend.idempotencyKey, index.html) — no E2E drove the
+// real DOM path: send → network failure → [data-testid="offline"] + Retry → resend → reply renders.
+test.describe("error journey — offline + retry", () => {
+  test("a failed /chat shows an offline notice; Retry replays the SAME idempotency key and renders the reply", async ({
+    page,
+  }) => {
+    let chatCalls = 0;
+    const idem: Array<string | undefined> = [];
+    await page.route("**/chat", async (route) => {
+      chatCalls++;
+      try {
+        idem.push((route.request().postDataJSON() as { idempotencyKey?: string }).idempotencyKey);
+      } catch {
+        idem.push(undefined);
+      }
+      if (chatCalls === 1) {
+        await route.abort("failed"); // first attempt: network failure → offline()
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "Here are two great sunscreens.",
+          mode: "sales",
+          pitch: "none",
+          escalate: false,
+          outbound: false,
+          flags: [],
+          servedBy: "prop-0",
+        }),
+      });
+    });
+
+    await page.goto("/widget");
+    await page.getByTestId("chat-input").fill("what sunscreen do you have?");
+    await page.getByTestId("send").click();
+
+    // failed turn → offline notice, no reply rendered
+    const offline = page.locator('[data-testid="offline"]');
+    await expect(offline).toBeVisible();
+    await expect(offline).toContainText(/couldn't reach/i);
+    await expect(page.getByText("Here are two great sunscreens.")).toHaveCount(0);
+
+    // Retry → notice clears, the reply renders
+    await offline.getByRole("button", { name: "Retry" }).click();
+    await expect(page.locator('[data-testid="offline"]')).toHaveCount(0);
+    await expect(page.getByTestId("agent-msg").last()).toContainText("Here are two great sunscreens.");
+
+    // the idempotent-replay contract: exactly one retry, the SAME key both times (never a distinct turn)
+    expect(chatCalls).toBe(2);
+    expect(idem[0]).toBeTruthy();
+    expect(idem[1]).toBe(idem[0]);
+  });
+});
