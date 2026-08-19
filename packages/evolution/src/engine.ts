@@ -71,6 +71,31 @@ export class EvolutionEngine {
     return policy.id;
   }
 
+  /**
+   * Revenue-flywheel W3-2 — GATE STAGE wiring seam: attach/refresh the CURRENT champion's
+   * `measuredOutcome` baseline (`PolicyMetrics.measuredOutcome`) from a live read the CALLER already
+   * took (control-plane's `measured-outcome-caller.ts`, over the W2-A/B outcome ledger). Call this
+   * BEFORE `evaluate()` so the champion baseline a candidate is gated against carries THIS period's
+   * measured lift — `evaluate()`/`gate()` read `this.champion.metrics` directly and there is no other
+   * seam to feed it through without either mutating champion state some other way or threading a new
+   * parameter through `evaluate()`; this is the narrower, more explicit change.
+   *
+   * A brand-new candidate's OWN `measuredOutcome` is never set here (nothing has served IT yet — see
+   * `measured-outcome-signal.ts`'s header) — this method only ever populates the CHAMPION side, exactly
+   * matching the design contract's "a brand-new candidate's is absent ⇒ the gate correctly falls back
+   * to the proxy for it".
+   *
+   * Pure bookkeeping (no store access — the engine stays store-free per CLAUDE.md §3) and NOT itself
+   * audited: it is an input attachment, not a decision. The very next `evaluate()` call IS audited
+   * (`gate_pass`/`gate_block`) and its `reasons` will reflect the attached value via the existing
+   * measured-outcome gate checks above. Passing `undefined` (or an absent/underpowered signal) clears
+   * the baseline back to "no measured-outcome opinion" — `gate()`'s own absent/underpowered handling
+   * then falls back to the quality proxy exactly as if this method were never called (dark-safe).
+   */
+  setChampionMeasuredOutcome(measuredOutcome?: { incrementalLift: number; power?: number }): void {
+    this.champion = { ...this.champion, metrics: { ...this.champion.metrics, measuredOutcome } };
+  }
+
   /** Run the grader and apply the gate. Result: "blocked" or "awaiting_approval". */
   async evaluate(id: string): Promise<CandidateRecord> {
     const rec = this.require(this.candidates.get(id), id);
@@ -568,17 +593,17 @@ function isRate01(v: unknown): v is number {
  * Revenue-flywheel Wave-2 (D) — the power/confidence floor a `measuredOutcome.power` value must clear
  * before the gate (`gate()`) or the monitor (`regressionVerdict()`) will trust it enough to decide on.
  *
- * CONSERVATIVE PLACEHOLDER, not an owner-set value — same status as `DEFAULT_CANARY_POWER`
- * (control-plane/canary-controller.ts), which is ALSO a placeholder. The two are deliberately SEPARATE
- * seams and must not be confused: `DEFAULT_CANARY_POWER` gates the canary's judge-graded QUALITY-delta
- * traffic volume/window (n + elapsedMs); this floor gates the measured-outcome LIFT's own statistical
+ * OWNER-SET (Revenue-flywheel W3-2, recorded decision — not an engineering guess): 0.95, i.e. the
+ * standard 95% two-proportion-z confidence bar for a revenue-affecting promotion/rollback decision.
+ * `DEFAULT_CANARY_POWER` (control-plane/canary-controller.ts) is a SEPARATE, still-placeholder seam and
+ * must not be confused with this one: it gates the canary's judge-graded QUALITY-delta traffic
+ * volume/window (n + elapsedMs); this floor gates only the measured-outcome LIFT's own statistical
  * confidence (0..1 — `computeIncrementalLift`'s `confidence`, fed in by control-plane as
- * `measuredOutcome.power`). Both need an owner sign-off (a recorded business decision, not an
- * engineering guess) before this seam is ever fed a live signal — see the flywheel plan / HARD GATE #3
- * (per-merchant statistical-power gate). 0.8 here is an engineering default (an "80% confidence"
- * rule-of-thumb), nothing more.
+ * `measuredOutcome.power`). NOTE: `MIN_EXPOSURES_PER_ARM` (`platform-ports/outcome-ledger.ts`) still
+ * needs its own owner sizing pass before this seam is ever fed a live prod signal — this floor governs
+ * trust in the CONFIDENCE NUMBER once computed, not whether enough raw traffic existed to compute one.
  */
-export const MEASURED_OUTCOME_POWER_FLOOR = 0.8;
+export const MEASURED_OUTCOME_POWER_FLOOR = 0.95;
 
 /** `power` absent ⇒ adequate (back-compat: the pre-Wave-2-D behavior enforced measuredOutcome
  * unconditionally, and no existing caller ever set `power`). `power` present ⇒ must be finite and at

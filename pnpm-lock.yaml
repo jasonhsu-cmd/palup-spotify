@@ -53,6 +53,9 @@ importers:
       '@palup/state-postgres':
         specifier: workspace:*
         version: link:../state-postgres
+      '@palup/widget-backend':
+        specifier: workspace:*
+        version: link:../widget-backend
       '@palup/widget-brain':
         specifier: workspace:*
         version: link:../widget-brain

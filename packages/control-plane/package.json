@@ -11,6 +11,7 @@
     "@palup/evolution": "workspace:*",
     "@palup/eval": "workspace:*",
     "fastify": "^5.0.0",
-    "@palup/state-postgres": "workspace:*"
+    "@palup/state-postgres": "workspace:*",
+    "@palup/widget-backend": "workspace:*"
   }
 }

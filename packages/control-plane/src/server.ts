@@ -14,6 +14,8 @@ import { SCENARIOS } from "./scenarios.js";
 import { canaryConfig, canaryStats, startCanary, stopCanary, shadowEvaluate, DEFAULT_CANARY, MAX_CANARY_PCT, DEFAULT_CANARY_POWER } from "./canary-controller.js";
 import { applyCanaryVerdict } from "./canary-reaction.js";
 import { promoteToServing, monitorServing } from "./champion-promoter.js";
+import { readServingMeasuredOutcome } from "./measured-outcome-caller.js";
+import { toGateMeasuredOutcome } from "./measured-outcome-signal.js";
 import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, costCapStatus, setCostCap, clearCostCap, type KillScope, type KillEntry, type CostCapScope } from "@palup/state-postgres";
 import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices, type RuntimeStatePort } from "@palup/platform-ports";
 
@@ -216,6 +218,11 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
   );
   app.post("/api/evaluate/:id", async (req) => {
     const id = (req.params as { id: string }).id;
+    // Revenue-flywheel W3-2 — gate stage: attach the incumbent champion's LIVE measured-outcome baseline
+    // (over the W2-A/B outcome ledger, tenant PROMOTE_TENANT) before evaluate()/gate() reads it. Cheap
+    // KV reads (unlike the live grading below), so this stays awaited unconditionally in both modes. A
+    // brand-new candidate's own measuredOutcome stays absent — the gate falls back to the proxy for it.
+    engine.setChampionMeasuredOutcome(toGateMeasuredOutcome(await readServingMeasuredOutcome(runtimeStore, PROMOTE_TENANT)));
     // Status flips to "evaluating" synchronously. In live mode grading (~15–30s: live Gemini + Opus
     // judge) runs in the background and the dashboard picks up the result by polling; in mock mode it's
     // instant, so we await it (keeps the CI E2E deterministic).
@@ -347,10 +354,19 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
     // first (and freezes the auto-promote fast-lane), then advances the engine; on a healthy observation
     // it records the serving champion as the durable known-good baseline, which is what makes a
     // beyond-depth-1 delayed rollback possible at all.
+    //
+    // Revenue-flywheel W3-2 — monitor stage: read the serving champion's LIVE measured lift for the
+    // current period (over the same W2-A/B outcome ledger) and pass it as `observed.measuredOutcome` so
+    // a MEASURED regression can trigger rollback even when the caller-attested qualityScore looks
+    // healthy (`regressionVerdict`'s "measured-outcome-regression" verdict). Dark-safe: with no ledger
+    // activity yet the read is the honest zero (underpowered), which `regressionVerdict` already treats
+    // as a no-op fallback to `qualityScore` — byte-identical to today.
     return act(async () => {
+      const measuredOutcome = toGateMeasuredOutcome(await readServingMeasuredOutcome(runtimeStore, PROMOTE_TENANT));
       await monitorServing(engine, runtimeStore, PROMOTE_TENANT, {
         qualityScore: Number(b.qualityScore ?? 0.4),
         safetyPass: b.safetyPass !== false,
+        measuredOutcome,
       });
     });
   });

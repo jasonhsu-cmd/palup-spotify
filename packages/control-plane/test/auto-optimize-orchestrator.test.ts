@@ -190,6 +190,46 @@ describe("AutoOptimizeOrchestrator (ADR-0014 T4f)", () => {
     expect(await servingChampion(sc.store, "acme")).toBeNull();
   });
 
+  // Revenue-flywheel W3-2 — canary stage measuredOutcome passthrough. This is a pure AUDIT-ONLY
+  // passthrough (measureCanary's own header + engine.recordCanary's doc comment): it never feeds the
+  // qualityDelta/power arithmetic that decides shadow/canary pass-fail above, it only rides along on the
+  // audit entry so a reviewer can see the measured lift next to the judge-graded delta at canary time.
+  describe("W3-2 canary stage: measuredOutcome forwarded into engine.recordCanary's audit", () => {
+    it("DARK-SAFE: no measuredOutcome on the CanaryMeasurement (every test above) ⇒ the audit carries none", async () => {
+      const sc = scenario(); await enable(sc.store); await seed(sc);
+      const orch = new AutoOptimizeOrchestrator(deps(sc));
+      await orch.advance("acme", "cand"); // began
+      await orch.advance("acme", "cand"); // shadow-passed
+      const r = await orch.advance("acme", "cand");
+      expect(r.outcome).toBe("canary-passed");
+      const entry = sc.engine.getAudit().find((a) => a.action === "auto_canary");
+      expect(entry?.detail?.measuredOutcome).toBeUndefined();
+    });
+
+    it("a measuredOutcome supplied on the CanaryMeasurement is forwarded verbatim, without affecting the canary pass/fail arithmetic", async () => {
+      const measuredOutcome = { incrementalLift: 2250, power: 0.98, underpowered: false, method: "incrementality-v1:test" };
+      const sc = scenario(); await enable(sc.store); await seed(sc);
+      const orch = new AutoOptimizeOrchestrator(deps(sc, { runCanaryMeasure: async () => ({ ...PASS_CANARY, measuredOutcome }) }));
+      await orch.advance("acme", "cand"); // began
+      await orch.advance("acme", "cand"); // shadow-passed
+      const r = await orch.advance("acme", "cand");
+      expect(r.outcome).toBe("canary-passed"); // unchanged — the quality-delta verdict, not the lift, decides this
+      const entry = sc.engine.getAudit().find((a) => a.action === "auto_canary");
+      expect(entry?.detail?.measuredOutcome).toEqual(measuredOutcome);
+    });
+
+    it("a NEGATIVE measuredOutcome does NOT block a canary the quality-delta arithmetic otherwise passes (audit-only, never gates here)", async () => {
+      const measuredOutcome = { incrementalLift: -4500, power: 0.99, underpowered: false, method: "incrementality-v1:test" };
+      const sc = scenario(); await enable(sc.store); await seed(sc);
+      const orch = new AutoOptimizeOrchestrator(deps(sc, { runCanaryMeasure: async () => ({ ...PASS_CANARY, measuredOutcome }) }));
+      await orch.advance("acme", "cand"); // began
+      await orch.advance("acme", "cand"); // shadow-passed
+      const r = await orch.advance("acme", "cand");
+      expect(r.outcome).toBe("canary-passed");
+      expect(sc.engine.getCandidate("cand")?.auto?.canary?.pass).toBe(true);
+    });
+  });
+
   it("no double-serve: advancing again after 'served' is a no-op that does not re-promote", async () => {
     const sc = scenario(); await enable(sc.store); await seed(sc);
     const orch = new AutoOptimizeOrchestrator(deps(sc));
