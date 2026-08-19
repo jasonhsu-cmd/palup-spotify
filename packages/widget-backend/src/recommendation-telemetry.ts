@@ -1,4 +1,4 @@
-import type { Decision, RecommendedProductCard } from "@palup/widget-brain";
+import type { Decision, RecommendedProductCard, SuggestedChip } from "@palup/widget-brain";
 import type { TelemetryEvent } from "@palup/platform-ports";
 import { cartPermalink } from "./cart-permalink.js";
 
@@ -96,4 +96,16 @@ export function recommendationTelemetryFields(
   return d.recommendedProducts && d.recommendedProducts.length > 0
     ? { recommendedProductIds: d.recommendedProducts }
     : {};
+}
+
+/**
+ * Pillar 3 (opener) — the /chat wire field for the opener's tappable CHIPS. Same forwarding-layer pattern as
+ * the E3 helpers above (server.ts cannot construct a `Decision`, so the PRESENT case is testable here):
+ * contributes NO key unless the decision actually carried chips, so a turn that mints none — every turn while
+ * PROACTIVE_OPENER is off — serializes byte-identically to before this seam existed.
+ */
+export function suggestedChipsWireField(
+  d: Pick<Decision, "suggestedChips">,
+): { suggestedChips?: SuggestedChip[] } {
+  return d.suggestedChips && d.suggestedChips.length > 0 ? { suggestedChips: d.suggestedChips } : {};
 }

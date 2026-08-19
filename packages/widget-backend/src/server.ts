@@ -60,7 +60,7 @@ import { registerStorefrontCatalogRoutes } from "./routes/storefront-catalog.js"
 // reads PRODUCT_CITATIONS/PRODUCT_CARDS and can produce such a Decision (see the Wave 4 flag block below).
 // The flags still default OFF, so an environment that sets nothing behaves exactly as before.
 // See recommendation-telemetry.ts for the not-a-billing-basis constraint that governs the telemetry half.
-import { recommendationTelemetryFields, recommendationWireFields } from "./recommendation-telemetry.js";
+import { recommendationTelemetryFields, recommendationWireFields, suggestedChipsWireField } from "./recommendation-telemetry.js";
 import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput } from "./audit.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
@@ -3338,6 +3338,10 @@ export async function buildServer(opts?: {
         // assistant suggested" will under-display. They are NOT a billing basis — see
         // recommendation-telemetry.ts.
         ...recommendationWireFields(d, cartBase),
+        // Pillar 3 (opener) — the tappable quick-reply chips the opener may surface. Spread-conditional (no
+        // key unless the decision carried chips), so every turn today — PROACTIVE_OPENER off, no opener rung
+        // yet mints any — serializes byte-identically to before this seam existed (chat-wire-flag-off golden).
+        ...suggestedChipsWireField(d),
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
