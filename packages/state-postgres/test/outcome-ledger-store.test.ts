@@ -169,15 +169,21 @@ describe("sharded arm_tally counters (durability NOW-1)", () => {
     for (let i = 0; i < 40; i++) {
       await accumulateArmTally(store, { tenantId: "acme", play: "cart_recovery", period: "2026-08", arm: "treated", exposures: 25, orders: 2, revenue: 200 });
     }
+    // Durability NOW-3 (security review, platform-ports/outcome-ledger.ts): a control arm with real
+    // exposures but ZERO revenue now correctly trips `underpowered` (a controlRate of 0 has nothing to
+    // normalize `relativeLift` against) — that is the exact bug this shard test isn't about, so the
+    // control arm here carries a small NONZERO revenue purely to keep this test on its own topic (sharded
+    // summation correctness), not the zero-control-rate fail-closed path (covered in
+    // `platform-ports/test/outcome-ledger.test.ts`).
     for (let i = 0; i < 40; i++) {
-      await accumulateArmTally(store, { tenantId: "acme", play: "cart_recovery", period: "2026-08", arm: "control", exposures: 25, orders: 0, revenue: 0 });
+      await accumulateArmTally(store, { tenantId: "acme", play: "cart_recovery", period: "2026-08", arm: "control", exposures: 25, orders: 1, revenue: 10 });
     }
     const { treated, control } = await readArmAggPair(store, "acme", "cart_recovery", "2026-08");
     expect(treated).toEqual({ exposures: 1000, orders: 80, revenue: 8_000 });
-    expect(control).toEqual({ exposures: 1000, orders: 0, revenue: 0 });
+    expect(control).toEqual({ exposures: 1000, orders: 40, revenue: 400 });
     const lift = computeIncrementalLift({ treated, control });
     expect(lift.underpowered).toBe(false);
-    expect(lift.incrementalLift).toBeCloseTo(8_000);
+    expect(lift.incrementalLift).toBeCloseTo(7_600); // (8 - 0.4) * 1000
   });
 
   it("listArmTallies still returns exactly ONE row per (play, period, arm) even when shards split the writes across rows", async () => {

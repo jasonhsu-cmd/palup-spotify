@@ -109,6 +109,42 @@ describe("computeIncrementalLift — fail-closed (underpowered), never a support
     expect(r.confidence).toBe(0);
     expect(r.incrementalLift).toBe(0);
   });
+
+  // Durability NOW-3 (security review): a control arm with real, above-floor EXPOSURES but ZERO revenue
+  // has a controlRate of 0 — relativeLift's denominator has no finite answer to normalize by. This must
+  // be underpowered, never a silent "trustworthy" relativeLift of 0 (which would read as a confident
+  // "no lift" verdict to a relativeLift-comparing caller and could mask a real regression).
+  it("control arm has real above-floor exposures but ZERO revenue (controlRate=0): underpowered, not a trustworthy zero", () => {
+    const treated: ArmAgg = { exposures: 1000, orders: 100, revenue: 10_000 };
+    const control: ArmAgg = { exposures: 1000, orders: 0, revenue: 0 };
+    const r = computeIncrementalLift({ treated, control });
+    expect(r.underpowered).toBe(true);
+    expect(r.confidence).toBe(0);
+    expect(r.incrementalLift).toBe(0); // clamped — NOT the raw (positive) $10/exposure the unsupported ratio would suggest
+    expect(r.relativeLift).toBe(0);
+    expect(r.method).toContain("underpowered-zero-control-rate");
+  });
+
+  it("both arms have zero revenue (0-vs-0 controlRate): underpowered, not a coincidental 'identical, no lift' result", () => {
+    const treated: ArmAgg = { exposures: 1000, orders: 0, revenue: 0 };
+    const control: ArmAgg = { exposures: 1000, orders: 0, revenue: 0 };
+    const r = computeIncrementalLift({ treated, control });
+    expect(r.underpowered).toBe(true);
+    expect(r.confidence).toBe(0);
+    expect(r.incrementalLift).toBe(0);
+    expect(r.relativeLift).toBe(0);
+    expect(r.method).toContain("underpowered-zero-control-rate");
+  });
+
+  it("a control with real above-floor exposures and NONZERO revenue is UNCHANGED — still a trusted measurement (regression pin)", () => {
+    const treated: ArmAgg = { exposures: 1000, orders: 100, revenue: 10_000 };
+    const control: ArmAgg = { exposures: 1000, orders: 20, revenue: 2_000 };
+    const r = computeIncrementalLift({ treated, control });
+    expect(r.underpowered).toBe(false);
+    expect(r.incrementalLift).toBeCloseTo(8_000);
+    expect(r.relativeLift).toBeCloseTo(4);
+    expect(r.method).toBe("incrementality-v1:two-arm-holdout-lift+two-proportion-z");
+  });
 });
 
 describe("types match the design doc's shapes (docs/design/attribution-and-billing.md :12, :23)", () => {
