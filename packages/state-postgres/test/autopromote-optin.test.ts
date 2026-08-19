@@ -5,6 +5,7 @@ import { RUNTIME_AGENT_TYPE } from "../src/runtime-kill-registry.js";
 import {
   autoPromoteGate,
   readAutoPromoteEnabled,
+  readPlatformEnabled,
   setAutoPromoteOptIn,
   setPlatformAutoPromote,
   STEPUP_ACTION,
@@ -48,6 +49,25 @@ describe("autopromote opt-in (ADR-0014: default OFF, platform override wins, ste
     await expect(setAutoPromoteOptIn(store, "acme", true, op("acme", "nb", { actor: RUNTIME_AGENT_TYPE }))).rejects.toThrow(/human operator|agent/i);
     await expect(setAutoPromoteOptIn(store, "acme", true, op("acme", "nc", { actor: "" }))).rejects.toThrow(/human operator|agent/i);
     expect((await readAutoPromoteEnabled(store, "acme")).enabled).toBe(false); // nothing written
+  });
+
+  // The PLATFORM-MASTER switch shares the same setFlag/assertHumanActor guard as the tenant opt-in
+  // above — this is the master switch itself (force-human whenever off, regardless of any tenant's
+  // opt-in), so it gets its own direct assertion rather than relying only on the tenant-opt-in test to
+  // exercise the shared code path.
+  it("PLATFORM switch: REFUSES an agent actor — an agent can never flip the platform master switch", async () => {
+    const store = new InMemoryRuntimeStore();
+    const platformOp = (nonce: string, over = {}) => ({
+      actor: "jane.operator",
+      stepUpToken: mintStepUp(SECRET, { action: "autopromote.platform.set", tenantId: "__system__", iat: NOW, nonce }),
+      stepUpSecret: SECRET,
+      now: NOW,
+      ...over,
+    });
+    await expect(setPlatformAutoPromote(store, true, platformOp("pa", { actor: "auto-loop" }))).rejects.toThrow(/human operator|agent/i);
+    await expect(setPlatformAutoPromote(store, true, platformOp("pb", { actor: RUNTIME_AGENT_TYPE }))).rejects.toThrow(/human operator|agent/i);
+    await expect(setPlatformAutoPromote(store, true, platformOp("pc", { actor: "" }))).rejects.toThrow(/human operator|agent/i);
+    expect(await readPlatformEnabled(store)).toBe(false); // nothing written
   });
 
   it("fails CLOSED without a valid step-up (absent / wrong secret / wrong tenant)", async () => {

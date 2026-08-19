@@ -16,7 +16,7 @@ import { applyCanaryVerdict } from "./canary-reaction.js";
 import { promoteToServing, monitorServing } from "./champion-promoter.js";
 import { readServingMeasuredOutcome } from "./measured-outcome-caller.js";
 import { toGateMeasuredOutcome } from "./measured-outcome-signal.js";
-import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, costCapStatus, setCostCap, clearCostCap, type KillScope, type KillEntry, type CostCapScope } from "@palup/state-postgres";
+import { createRuntimeStore, killStatus, armKill, disarmKill, matchedKill, RUNTIME_AGENT_TYPE, setAutoPromoteOptIn, setPlatformAutoPromote, costCapStatus, setCostCap, clearCostCap, type KillScope, type KillEntry, type CostCapScope } from "@palup/state-postgres";
 import { createOperatorTokenIdentity, createStoreTelemetry, deriveCostUsd, loadModelPrices, type RuntimeStatePort } from "@palup/platform-ports";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -459,6 +459,34 @@ export async function buildServer(opts?: { store?: RuntimeStatePort }) {
         stepUpSecret: process.env.AUTOPROMOTE_STEPUP_SECRET,
       });
       return { ok: true, tenantId, enabled: b.enabled === true };
+    } catch (e) {
+      // Operator IS authenticated (onRequest hook) but the sensitive SET failed its step-up / actor
+      // check → 403, not a 200-with-error. Message carries no secret.
+      return reply.code(403).send({ error: (e as Error).message });
+    }
+  });
+  // ADR-0014 prereq #6 — SET the PLATFORM-MASTER auto-promote override (force-human whenever off,
+  // regardless of any tenant's opt-in — see autoPromoteGate). Same guard chain as
+  // /api/autopromote/optin above, exactly: POST ⇒ already operator:mutate-gated by the onRequest hook;
+  // ON TOP of that this requires a real STEP-UP assertion bound to THIS action
+  // (PLATFORM_STEPUP_ACTION = "autopromote.platform.set") + the reserved platform tenant, single-use,
+  // and audited. The actor passed to setPlatformAutoPromote is ALWAYS the string "operator" — the
+  // server-authenticated principal, never anything client-supplied in the body — so this surface can
+  // never be used to record an agent as the setter; setPlatformAutoPromote's own assertHumanActor is
+  // the backstop even if that changed. This ONLY exposes the already-guarded setter; it does not flip
+  // anything itself, and today nothing calls it — enabling the platform switch stays a deliberate,
+  // separately-audited operator action (docs/MEMORY-GO-LIVE-CHECKLIST.md-style human step).
+  app.post("/api/autopromote/platform", async (req, reply) => {
+    const b = (req.body ?? {}) as { enabled?: unknown };
+    const hdr = req.headers["x-stepup-assertion"];
+    const stepUpToken = typeof hdr === "string" ? hdr : undefined;
+    try {
+      await setPlatformAutoPromote(runtimeStore, b.enabled === true, {
+        actor: "operator", // the authenticated operator principal (shared-token model → "operator")
+        stepUpToken,
+        stepUpSecret: process.env.AUTOPROMOTE_STEPUP_SECRET,
+      });
+      return { ok: true, enabled: b.enabled === true };
     } catch (e) {
       // Operator IS authenticated (onRequest hook) but the sensitive SET failed its step-up / actor
       // check → 403, not a 200-with-error. Message carries no secret.
