@@ -674,6 +674,20 @@ const OPENER_CHIPS: readonly SuggestedChip[] = [
   { label: "New here?", action: "new_here" },
 ];
 
+// Pillar 3b — the DETERMINISTIC, honest best-fit product for the first-touch opener card, from the
+// ALREADY-CACHED grounding context (zero extra inference, a real catalog entry, zero fabrication risk).
+// It surfaces a card ONLY for a product we can genuinely justify as a fit: the one the shopper is VIEWING
+// (pageContext carries `product:<handle>`). Off a product page — or when nothing in the catalog matches —
+// it returns undefined, so the opener shows NO card rather than an arbitrary "oldest product" mislabelled
+// best-fit; the chips + greeting carry the opener there. A ranked (bestseller/relevance) pick for the
+// off-PDP case is a follow-on that needs a ranking signal.
+function pickOpenerProduct(products: readonly Product[] | undefined, pageContext: string | undefined): Product | undefined {
+  if (!products || products.length === 0) return undefined;
+  const m = typeof pageContext === "string" ? /^product:(.+)$/.exec(pageContext.trim()) : null;
+  const handle = m && m[1] ? m[1].slice(0, 200) : undefined; // client-supplied → bound before matching
+  return handle ? products.find((p) => p.handle === handle || p.id === handle) : undefined;
+}
+
 /**
  * THE NUMBER OF CANDIDATES retrieval puts in the prompt, and the argument for it.
  *
@@ -1004,7 +1018,8 @@ export function createBrain(
   // Pillar 3 (opener) — the PROACTIVE_OPENER posture flag, threaded like every flag above (positional,
   // default OFF, no env read in this package). When ON (and the greeting fires + not at cap), the first-touch
   // greeting is UPGRADED to a fit-first opener: OPENER_PROMPT + tappable quick-reply chips from the code-owned
-  // OPENER_CHIPS set. Still NON-COMMERCIAL by construction — pitch:"none", never selectPitch, no INV-E spend,
+  // OPENER_CHIPS set, plus (on a product page, gated on PRODUCT_CARDS) a best-fit card for the VIEWED product
+  // from the cached catalog. Still NON-COMMERCIAL by construction — pitch:"none", never selectPitch, no INV-E spend,
   // the discount backstop still applies. Default OFF ⇒ the plain GREETING_PROMPT path is byte-identical. A new
   // shopper-reaching proactive surface ⇒ eval gate → shadow → canary → named-human approval (HITL §5).
   proactiveOpenerEnabled = false,
@@ -1583,9 +1598,38 @@ export function createBrain(
         if (await offersUngroundedDiscount(greet.text, tenantId)) return discountGuardrail();
         if (useOpener) {
           flags.push("opener");
-          // Fresh chip OBJECTS per decision (a shallow array copy would still share the const's objects), so
-          // no downstream consumer can mutate the shared OPENER_CHIPS.
-          return { mode: "smalltalk", reply: greet.text, pitch: "none", escalateToHuman: false, outbound: false, safetyClass: "none", flags, model: greet.model, suggestedChips: OPENER_CHIPS.map((c) => ({ ...c })) };
+          // Pillar 3b — surface ONE best-fit product CARD from the ALREADY-CACHED catalog (grounding.getContext
+          // is behind the 30-min cache): the product the shopper is VIEWING (pageContext), deterministically —
+          // ZERO extra inference and zero fabrication risk (a real catalog entry, never an LLM citation). Off a
+          // product page there is no card (see pickOpenerProduct). Gated on PRODUCT_CARDS (shopper-visible),
+          // price withheld correctly by buildProductCards (priceConfirmed). Fail-OPEN: any grounding hiccup ⇒
+          // no card, and the fit-first greeting + chips still land.
+          let openerProducts: string[] | undefined;
+          let openerCards: RecommendedProductCard[] | undefined;
+          if (productCardsEnabled) {
+            try {
+              const openerCtx = grounding ? await grounding.getContext(tenantId) : undefined;
+              const featured = pickOpenerProduct(openerCtx?.products, signals.pageContext);
+              if (featured) {
+                const cards = buildProductCards([featured.id], [featured]);
+                if (cards.length > 0) {
+                  openerProducts = [featured.id];
+                  openerCards = cards;
+                  flags.push("opener:card");
+                }
+              }
+            } catch {
+              /* fail-open — no card on any grounding failure; greeting + chips still land */
+            }
+          }
+          // Fresh chip OBJECTS per decision (a shallow array copy would still share the const's objects).
+          return {
+            mode: "smalltalk", reply: greet.text, pitch: "none", escalateToHuman: false, outbound: false,
+            safetyClass: "none", flags, model: greet.model,
+            suggestedChips: OPENER_CHIPS.map((c) => ({ ...c })),
+            ...(openerProducts ? { recommendedProducts: openerProducts } : {}),
+            ...(openerCards ? { recommendedProductCards: openerCards } : {}),
+          };
         }
         return { mode: "smalltalk", reply: greet.text, pitch: "none", escalateToHuman: false, outbound: false, safetyClass: "none", flags, model: greet.model };
       }

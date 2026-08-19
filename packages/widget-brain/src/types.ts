@@ -253,7 +253,8 @@ export interface CatalogRetrieverPort {
  * exact `Product` object `systemPrompt` rendered into this turn's CATALOG block, through the SAME
  * `sanitizeGroundingText` caps that produced the prompt line — never from the retrieval corpus (which
  * stores ids only, deliberately, so a stale price is physically unquotable — see `CatalogRetrieverPort`),
- * never from a second `getContext` call, and never from the client. So a card cannot show a price the
+ * and never from the client (the Pillar-3b opener card is the one exception: it builds directly from a cached
+ * `getContext` product, still a real catalog entry with the SAME priceConfirmed price-honesty). So a card cannot show a price the
  * model was not told, cannot outlive the turn that produced it, and cannot disagree with the reply.
  *
  * NO URL ON THIS NEUTRAL CARD, on purpose — but the capability is no longer absent. `Product`
