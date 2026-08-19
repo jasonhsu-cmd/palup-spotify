@@ -350,6 +350,11 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
     await page.getByTestId("send").click();
 
     const prompt = page.locator('[data-testid="consent-prompt"]');
+    // Just-in-time: the opt_out notice does NOT front-load onto the first turn (no recall here).
+    await expect(prompt).toHaveCount(0);
+    // A second turn surfaces it (the shopper's first answer landed uninterrupted).
+    await page.getByTestId("chat-input").fill("what else do you carry?");
+    await page.getByTestId("send").click();
     await expect(prompt).toBeVisible();
     await expect(prompt.locator('[data-testid="consent-title"]')).toHaveText("I remember your preferences to help you shop.");
     await expect(prompt.locator('[data-testid="consent-body"]')).toHaveText(
@@ -410,7 +415,7 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
           pitch: "none",
           escalate: false,
           outbound: false,
-          flags: [],
+          flags: ["memory:recalled"], // a returning shopper — recall surfaces the just-in-time notice on turn 1
           servedBy: "prop-0",
           memoryEnabled: true,
           consentMode: "opt_out",
@@ -491,6 +496,10 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
     await page.getByTestId("send").click();
 
     const prompt = page.locator('[data-testid="consent-prompt"]');
+    // just-in-time: the opt_out notice surfaces on the shopper's SECOND turn, not the first
+    await expect(prompt).toHaveCount(0);
+    await page.getByTestId("chat-input").fill("anything for oily skin?");
+    await page.getByTestId("send").click();
     await expect(prompt).toBeVisible();
     await prompt.locator('[data-testid="consent-secondary"]').click(); // triggers postConsent() -> POST /consent
     await expect.poll(() => consentHeaders.length).toBe(1);
@@ -1384,7 +1393,7 @@ test.describe("PR-11b — memory ON: guest identity survives a reload (cross-vis
         contentType: "application/json",
         body: JSON.stringify({
           reply: "Sure — here's a suggestion.",
-          mode: "sales", pitch: "none", escalate: false, outbound: false, flags: [], servedBy: "prop-0",
+          mode: "sales", pitch: "none", escalate: false, outbound: false, flags: ["memory:recalled"], servedBy: "prop-0",
           memoryEnabled: true, consentMode: "opt_out",
         }),
       });
@@ -1433,7 +1442,7 @@ test.describe("layout — cards stay attached to their reply", () => {
         contentType: "application/json",
         body: JSON.stringify({
           reply: "Here are two options I'd suggest.",
-          mode: "sales", pitch: "none", escalate: false, outbound: false, flags: [], servedBy: "prop-0",
+          mode: "sales", pitch: "none", escalate: false, outbound: false, flags: ["memory:recalled"], servedBy: "prop-0",
           memoryEnabled: true, consentMode: "opt_out",
           recommendedProductCards: [{ productId: "serum-vc", title: "Vitamin-C Brightening Serum", price: "$34" }],
         }),
@@ -1456,5 +1465,40 @@ test.describe("layout — cards stay attached to their reply", () => {
     // reply -> cards -> consent, top to bottom
     expect(cardsBox!.y, "cards sit below the reply").toBeGreaterThan(replyBox!.y);
     expect(consentBox!.y, "the consent card sits BELOW the cards, never between reply and cards").toBeGreaterThan(cardsBox!.y);
+  });
+});
+
+// Just-in-time consent (US opt_out) — the notice is a DISCLOSURE, not a decision, so it must not
+// front-load onto the shopper's highest-intent FIRST turn. It surfaces when memory is demonstrably in
+// USE — a recalled preference (a returning shopper being helped) — or, failing that, from the second
+// turn, so the first answer lands uninterrupted. (opt_in still asks up front — covered by the opt_in
+// test above.) The manage panel is present from turn 1 either way, so control/transparency is never
+// deferred; only the interrupting card is.
+test.describe("just-in-time consent (opt_out)", () => {
+  const chatBody = (flags: string[]) =>
+    JSON.stringify({ reply: "ok", mode: "sales", pitch: "none", escalate: false, outbound: false, flags, servedBy: "prop-0", memoryEnabled: true, consentMode: "opt_out" });
+
+  test("deferred past the first turn, then surfaces on the second (no recall)", async ({ page }) => {
+    const guest = mockGuestToken(page);
+    await guest.route();
+    await page.route("**/chat", (route) => route.fulfill({ status: 200, contentType: "application/json", body: chatBody([]) }));
+    await page.goto("/widget");
+    const prompt = page.locator('[data-testid="consent-prompt"]');
+    await page.getByTestId("chat-input").fill("hi");
+    await page.getByTestId("send").click();
+    await expect(prompt).toHaveCount(0); // NOT on the first, highest-intent turn
+    await page.getByTestId("chat-input").fill("what else?");
+    await page.getByTestId("send").click();
+    await expect(prompt).toBeVisible(); // surfaced on the second turn
+  });
+
+  test("a recalled preference surfaces the notice immediately (memory visibly in use)", async ({ page }) => {
+    const guest = mockGuestToken(page);
+    await guest.route();
+    await page.route("**/chat", (route) => route.fulfill({ status: 200, contentType: "application/json", body: chatBody(["memory:recalled"]) }));
+    await page.goto("/widget");
+    await page.getByTestId("chat-input").fill("hi again");
+    await page.getByTestId("send").click();
+    await expect(page.locator('[data-testid="consent-prompt"]')).toBeVisible(); // first turn — recall is the just-in-time moment
   });
 });
