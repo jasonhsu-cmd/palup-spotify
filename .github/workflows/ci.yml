@@ -50,5 +50,7 @@ jobs:
         run: pnpm e2e:monitor
       - name: Embed round-trip E2E (mock)
         run: pnpm e2e:embed
+      - name: Storefront catalog E2E (mock, demo-tenant fixtures)
+        run: pnpm e2e:storefront-catalog
       - name: pgvector ANN adapter (testcontainer)
         run: pnpm test:pgvector
