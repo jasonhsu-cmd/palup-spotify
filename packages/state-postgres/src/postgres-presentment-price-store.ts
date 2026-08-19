@@ -69,6 +69,14 @@ export class PostgresPresentmentPriceStore implements PresentmentPricePort {
     });
   }
 
+  async deleteMany(tenantId: string, productIds: string[]): Promise<void> {
+    const t = requirePresentmentTenant(tenantId);
+    if (productIds.length === 0) return;
+    // Surgical delist-prune: drop EVERY currency's row for these products (no currency filter — the whole
+    // product is gone). Tenant-bound, so a product id can never reach across tenants; absent ids are no-ops.
+    await this.sql.query("DELETE FROM presentment_prices WHERE tenant_id=$1 AND product_id = ANY($2::text[])", [t, productIds]);
+  }
+
   async deleteTenant(tenantId: string): Promise<void> {
     const t = requirePresentmentTenant(tenantId);
     await this.sql.query("DELETE FROM presentment_prices WHERE tenant_id=$1", [t]);

@@ -112,6 +112,14 @@ export function catalogRecordId(productId: string): string {
   return `product:${productId}`;
 }
 
+/** The inverse of `catalogRecordId`: recover the productId from a `product:`-prefixed corpus record id.
+ *  Used by the delist-prune to map the stale VECTOR record ids back to the product ids the Tier-2 money-fact
+ *  stores are keyed by. Returns undefined for anything not carrying the prefix (defensive — the ledger only
+ *  ever holds `product:` ids, per `readCorpusLedger`, so this never drops a real id). */
+export function productIdFromCatalogRecordId(recordId: string): string | undefined {
+  return recordId.startsWith("product:") ? recordId.slice("product:".length) : undefined;
+}
+
 /**
  * FIX 3 (security C2, final review) — the SAME shape `shopify-webhook-identity.ts`'s `productIdOf` validates
  * at the producer. Re-declared (not imported) so this consumer-side check does not depend on the producer
@@ -732,6 +740,31 @@ async function indexOneTenant(
 
   if (stale.length > 0) await deps.vector.deleteById(ns, stale);
 
+  // Delist-prune the Tier-2 money-facts too (the vector prune above removed them from retrieval; without
+  // this their price/availability row would OUTLIVE the deleted product — a stale money fact serving could
+  // still hydrate, the exact bug this fixes). Fail-safe like the upsert: a facts failure is alerted +
+  // swallowed, never failing the primary vector index. The delete IS audited (§5) — it mutates money facts.
+  if (deps.productFacts && stale.length > 0) {
+    const staleProductIds = stale.map(productIdFromCatalogRecordId).filter((id): id is string => id !== undefined);
+    if (staleProductIds.length > 0) {
+      try {
+        await deps.productFacts.deleteMany(tenantId, staleProductIds);
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: CATALOG_INDEX_ACTOR,
+            action: "catalog.product_facts",
+            input: { tenantId, count: staleProductIds.length, source: "poll:catalog-index" },
+            decision: "pruned", // delisted products' Tier-2 facts removed so no stale price can be quoted
+            reversalPath: `the next \`pnpm catalog:index --tenant ${tenantId}\` run re-adds any product still in the catalog`,
+          },
+        );
+      } catch (e) {
+        console.error(`[catalog] ALERT product_facts_prune_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
+      }
+    }
+  }
+
   // A DELETE-ONLY run (a product was delisted and nothing else changed) embeds nothing, so there is no
   // fresh pin to record. Carry the manifest's forward rather than inventing one — the corpus's vectors did
   // not change, so neither may its recorded provenance. `manifest` is guaranteed here: a non-empty corpus
@@ -1012,6 +1045,21 @@ export async function reconcileProducts(
   });
   if (records.length > 0) await deps.vector.upsert(ns, records);
   if (stale.length > 0) await deps.vector.deleteById(ns, stale);
+
+  // Delist-prune the Tier-2 money-facts for the delisted ids (mirrors the full path): the vector prune above
+  // removed them from retrieval; without this their price/availability row would outlive the deleted
+  // product. Fail-safe: alerted + swallowed, never failing the primary vector index. The delist itself is
+  // recorded by this path's manifest audit (writeManifestAndAudit, with the `removed` count) below.
+  if (deps.productFacts && stale.length > 0) {
+    const staleProductIds = stale.map(productIdFromCatalogRecordId).filter((id): id is string => id !== undefined);
+    if (staleProductIds.length > 0) {
+      try {
+        await deps.productFacts.deleteMany(tenantId, staleProductIds);
+      } catch (e) {
+        console.error(`[catalog] ALERT product_facts_prune_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
+      }
+    }
+  }
 
   // Tier-2 money-facts for the refreshed subset (D2 poll-side, same as the full path). Fail-safe: the
   // vector write is primary, a facts failure is alerted + swallowed.

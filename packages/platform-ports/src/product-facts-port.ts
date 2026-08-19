@@ -39,6 +39,14 @@ export interface ProductFactsPort {
   getMany(tenantId: string, productIds: string[]): Promise<ProductFact[]>;
   /** Insert-or-replace facts for one tenant, keyed by `productId`. */
   upsertMany(tenantId: string, facts: ProductFact[]): Promise<void>;
+  /**
+   * Remove the facts for the named product ids under one tenant. The DELIST-PRUNE op: when a product is
+   * deleted/unpublished, the reconcile removes its vector AND calls this so a stale price/availability fact
+   * cannot outlive the product (a money/NN#1 fault — quoting a price for something no longer sold). Ids with
+   * no stored fact are silently ignored (idempotent); an empty list is a no-op. Distinct from `deleteTenant`
+   * (whole-tenant erasure) — this is surgical, per-product.
+   */
+  deleteMany(tenantId: string, productIds: string[]): Promise<void>;
   /** Right-to-erasure (ADR-0015 Inv 5): remove ALL of a tenant's facts. */
   deleteTenant(tenantId: string): Promise<void>;
 }
@@ -76,6 +84,13 @@ export function createInMemoryProductFactsStore(): ProductFactsPort {
         byTenant.set(t, m);
       }
       for (const f of facts) m.set(f.productId, { ...f });
+    },
+    async deleteMany(tenantId, productIds) {
+      const t = requireProductFactsTenant(tenantId);
+      if (productIds.length === 0) return;
+      const m = byTenant.get(t);
+      if (!m) return;
+      for (const id of productIds) m.delete(id);
     },
     async deleteTenant(tenantId) {
       byTenant.delete(requireProductFactsTenant(tenantId));
