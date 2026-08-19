@@ -78,6 +78,7 @@ async function setFlag(
   action: string,
   boundTenant: string,
   enabled: boolean,
+  reversalPath: string,
   opts: SetOptInOpts,
 ): Promise<void> {
   assertHumanActor(opts.actor);
@@ -98,7 +99,7 @@ async function setFlag(
         action: enabled ? `${action}.enable` : `${action}.disable`,
         input: { tenantId: boundTenant, enabled },
         decision: `autopromote flag set to ${enabled}`,
-        reversalPath: "setAutoPromoteOptIn(..., false, ...)",
+        reversalPath,
       },
       at,
     );
@@ -108,10 +109,12 @@ async function setFlag(
 /** SET a merchant's opt-in flag (step-up + audited; human-only). */
 export async function setAutoPromoteOptIn(store: RuntimeStatePort, tenantId: string, enabled: boolean, opts: SetOptInOpts): Promise<void> {
   if (!tenantId || tenantId === PLATFORM_TENANT) throw new Error("setAutoPromoteOptIn requires a real merchant tenantId");
-  await setFlag(store, { tenantId }, OPTIN_KEY, STEPUP_ACTION, tenantId, enabled, opts);
+  await setFlag(store, { tenantId }, OPTIN_KEY, STEPUP_ACTION, tenantId, enabled, `setAutoPromoteOptIn(${JSON.stringify(tenantId)}, false, ...) with a fresh step-up`, opts);
 }
 
 /** SET the platform force-human override (step-up + audited; human-only). */
 export async function setPlatformAutoPromote(store: RuntimeStatePort, enabled: boolean, opts: SetOptInOpts): Promise<void> {
-  await setFlag(store, { tenantId: PLATFORM_TENANT }, PLATFORM_KEY, PLATFORM_STEPUP_ACTION, PLATFORM_TENANT, enabled, opts);
+  // Reversal names THIS function (setAutoPromoteOptIn throws on PLATFORM_TENANT, so it could never
+  // execute the recorded reversal) — security review LOW, NN#5 accurate-reversal-path.
+  await setFlag(store, { tenantId: PLATFORM_TENANT }, PLATFORM_KEY, PLATFORM_STEPUP_ACTION, PLATFORM_TENANT, enabled, "setPlatformAutoPromote(false, ...) with a fresh step-up", opts);
 }
