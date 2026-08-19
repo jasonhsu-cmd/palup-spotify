@@ -14,6 +14,16 @@ const NUMERIC_VARIANT_ID = /^[0-9]{1,20}$/;
 export const MAX_PERMALINK_QTY = 99;
 
 /**
+ * True only for a plain `<label>.myshopify.com` string — the same host rule `cartPermalink` itself
+ * enforces. Exported (rather than kept private, unlike the sibling permalink builders in this package)
+ * so the multi-line CartPort permalink adapter (`cart-permalink-adapter.ts`) can reuse this exact check
+ * instead of re-deriving its own copy of SHOP_HOST.
+ */
+export function isValidShopDomain(shopDomain: string): boolean {
+  return SHOP_HOST.test(shopDomain);
+}
+
+/**
  * Extract the numeric variant id a cart permalink needs from a Shopify ProductVariant GID
  * (`gid://shopify/ProductVariant/4567` → `"4567"`), or accept an already-numeric id. Returns undefined for
  * anything else — never guesses. Pure.
@@ -30,7 +40,7 @@ export function variantNumericId(variantIdOrGid: string): string | undefined {
  * variant id, or out-of-range quantity). Never throws, never returns a partial/unsafe URL.
  */
 export function cartPermalink(shopDomain: string, variantIdOrGid: string, qty = 1): string | undefined {
-  if (!SHOP_HOST.test(shopDomain)) return undefined;
+  if (!isValidShopDomain(shopDomain)) return undefined;
   const variantId = variantNumericId(variantIdOrGid);
   if (variantId === undefined) return undefined;
   if (!Number.isInteger(qty) || qty < 1 || qty > MAX_PERMALINK_QTY) return undefined;
