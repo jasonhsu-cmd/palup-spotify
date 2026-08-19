@@ -341,7 +341,17 @@
         return i.variantId + ":" + Math.min(i.quantity, 99);
       });
     if (!parts.length || !SHOP_HOST.test(SHOP)) return null;
-    return "https://" + SHOP + "/cart/" + parts.join(",");
+    var url = "https://" + SHOP + "/cart/" + parts.join(",");
+    // Pillar-4 flywheel attribution (dark until ORDER_ATTRIBUTION_WEBHOOKS on the widget-backend): if the
+    // panel minted a join token, the loader exposes it on window.PALUP.joinToken (opaque, PII-free — see
+    // loader-core.ts `palup:jointoken`). Thread it onto the permalink as a cart attribute; Shopify carries
+    // `?attributes[...]` to the order's note_attributes, which the backend order webhook reads to attribute
+    // the sale to its holdout arm. No token (the default today) → the URL is byte-identical to before.
+    var joinToken = window.PALUP && window.PALUP.joinToken;
+    if (typeof joinToken === "string" && joinToken) {
+      url += "?attributes[_palup_join_token]=" + encodeURIComponent(joinToken);
+    }
+    return url;
   }
   function renderCart() {
     var mount = document.getElementById("cart");
