@@ -142,6 +142,12 @@
   .consent-actions button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
   .consent-actions button:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
   .consent-actions button[data-testid="consent-primary"]{ background:var(--brand); border-color:var(--brand); color:var(--brand-ink); font-weight:600 }
+  /* Pillar 3 (opener) — tappable quick-reply chips. Same proven-AA palette as the consent-action pills
+     (border --line / bg --panel / text --fg), just a wrapping pill row. Ignorable by design; NOT aggressive
+     (no scarcity/urgency styling), and the label text is code-owned by the server, never model output. */
+  .opener-chips{ display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 2px }
+  .opener-chips button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:999px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
+  .opener-chips button:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
   .manage-memory{ width:100%; border-top:1px solid var(--line); margin-top:4px; padding-top:8px; display:flex; flex-direction:column; gap:7px }
   .manage-memory > b{ font-size:12.5px }
   .mm-row{ display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--fg); cursor:pointer }
@@ -989,8 +995,37 @@
     $("#in").value = ""; $("#in").focus();
     send(message, false);
   });
+  // Pillar 3 (opener) — tappable quick-reply CHIPS. The server sends a CLOSED action enum + a code-owned
+  // label; each tap just runs a normal discovery turn (a canned, code-owned message), never an auto-purchase
+  // or cart mutation, and the row is fully ignorable. A tap or a typed message CLEARS the row (clear-on-act),
+  // so it can never linger and re-pitch, and clearing on the first tap makes a double-tap idempotent (the
+  // second tap finds no button). Rendered only when the server actually sent chips (none today: the opener
+  // rung is unbuilt + PROACTIVE_OPENER is off), so this is inert until that ships.
+  const CHIP_MESSAGES = { find_my_match: "Help me find my match", bestsellers: "What are your bestsellers?", new_here: "I'm new here — where should I start?" };
+  function clearChips(){ const old = $("#opener-chips"); if (old) old.remove(); }
+  function renderChips(chips){
+    clearChips();                                              // one row at a time — never stack
+    if (!Array.isArray(chips) || chips.length === 0) return;   // absent/empty ⇒ no chip UI at all (empty-state)
+    const row = document.createElement("div");
+    row.id = "opener-chips"; row.className = "opener-chips";
+    row.setAttribute("data-testid", "opener-chips");
+    row.setAttribute("role", "group"); row.setAttribute("aria-label", "Suggestions");
+    for (const c of chips){
+      const msg = c && CHIP_MESSAGES[c.action];                // closed set: an unknown action is dropped
+      if (!msg || typeof c.label !== "string" || !c.label) continue;
+      const b = document.createElement("button");
+      b.type = "button"; b.setAttribute("data-testid", "opener-chip"); b.setAttribute("data-action", c.action);
+      b.textContent = c.label;                                 // code-owned label from the server (textContent, never innerHTML)
+      b.addEventListener("click", () => { clearChips(); send(msg, false); });  // clear-on-act ⇒ idempotent
+      row.appendChild(b);
+    }
+    if (!row.children.length) return;                          // every chip invalid ⇒ render nothing
+    msgs.appendChild(row); msgs.scrollTop = msgs.scrollHeight;
+  }
+
   async function send(message, isRetry){
     if (!isRetry) add(message, "user");
+    if (!isRetry) clearChips();                                // a typed message is the shopper acting ⇒ clear stale chips
     // Shopper request: demoSignals() is `{}` here unless the page was opened with ?palupDebug=1, so the
     // only signals a real shopper ever sends are the merchant page's own pageContext and (once memory is
     // live and consented) their anonId.
@@ -1028,6 +1063,7 @@
       // cards (layout polish): the answer + its cards stay one visual unit, memory UI comes after. Inert
       // today unless the PRODUCT_CARDS posture flag is on.
       addProductCards(d.recommendedProductCards);
+      renderChips(d.suggestedChips); // opener chips travel with the reply that carried them (below the cards)
       if (d.escalate) enterHandoff();
       onChatMeta(d); // memory state + consent/manage UI — AFTER the answer and its cards
       // §6 INV-D — "offered, not pushed". A SEPARATE, quieter line after the answer, never spliced into it,
@@ -1112,7 +1148,7 @@
       if (!r.ok) return;
       const d = await r.json();
       // Only a real, non-empty server greeting is shown (flag ON). Flag OFF ⇒ empty reply ⇒ nothing added.
-      if (d && d.reply){ add(d.reply, "agent", d); if (d.escalate) enterHandoff(); }
+      if (d && d.reply){ add(d.reply, "agent", d); if (d.escalate) enterHandoff(); renderChips(d.suggestedChips); }
     } catch { /* best-effort — the static welcome remains */ }
   }
 

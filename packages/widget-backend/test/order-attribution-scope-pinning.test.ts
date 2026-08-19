@@ -48,12 +48,12 @@ describe("W2-C — shopify.app.toml is untouched and grants no new scope", () =>
   });
 });
 
-describe("W2-C — no widget file changed", () => {
-  it("nothing under packages/widget/ is among the files this branch changed", () => {
-    const widgetFiles = changedPaths().filter((p) => p.startsWith("packages/widget/"));
-    expect(widgetFiles, `expected no packages/widget/ changes, found: ${JSON.stringify(widgetFiles)}`).toEqual([]);
-  });
-});
+// W2-C — RETIRED (2026-08-19): the "nothing under packages/widget/ changed" pin was a REVIEW-TIME scope
+// guard for the W2-C PR (whose widget-side cart note_attribute wiring was out of scope, owned by another
+// session). W2-C is merged, so this blanket guard now only false-fails ANY later legitimate widget change
+// (e.g. the Pillar 3 opener chips UI) against a base it no longer describes. Retired here; the invariants
+// that still matter — shopify.app.toml grants no new read_orders/customer scope (describe above), and
+// read_orders is requested only via SHOPIFY_INSTALL_SCOPES, never a code default (W3-3 below) — are untouched.
 
 // ---------------------------------------------------------------------------------------------------
 // W3-3 — the `read_orders` DECISION this ticket had to make, pinned so it cannot silently drift:
