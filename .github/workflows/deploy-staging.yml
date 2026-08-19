@@ -126,6 +126,10 @@ jobs:
           PRODUCT_CARDS: ${{ vars.PRODUCT_CARDS || 'false' }}
           CART_LINE_ITEMS: ${{ vars.CART_LINE_ITEMS || 'false' }}
           PRODUCT_FACTS_HYDRATION: ${{ vars.PRODUCT_FACTS_HYDRATION || 'false' }}
+          # Pillar 1b (ADR-0020) — require a provably-live freshness CHANNEL before a hydrated price is quoted
+          # as confirmed (money/NN#1 fail-honest). Inert until this repo var is set true; enabling it is a
+          # HITL §5 promotion, and requires a running producer heartbeat or every quiet-catalog price hedges.
+          PRICE_REQUIRES_LIVE_CHANNEL: ${{ vars.PRICE_REQUIRES_LIVE_CHANNEL || 'false' }}
           SERVER_GUARD_SIGNALS: ${{ vars.SERVER_GUARD_SIGNALS || 'false' }}
           OUTGOING_OFFER_CHECK: ${{ vars.OUTGOING_OFFER_CHECK || 'false' }}
           GREETING_PROACTIVE: ${{ vars.GREETING_PROACTIVE || 'false' }}
@@ -212,6 +216,7 @@ jobs:
                       "MERCHANT_CRED_SHARED_KEY_ENABLED=${MERCHANT_CRED_SHARED_KEY_ENABLED}" \
                       "PRODUCT_CITATIONS=${PRODUCT_CITATIONS}" "PRODUCT_CARDS=${PRODUCT_CARDS}" \
                       "CART_LINE_ITEMS=${CART_LINE_ITEMS}" "PRODUCT_FACTS_HYDRATION=${PRODUCT_FACTS_HYDRATION}" \
+                      "PRICE_REQUIRES_LIVE_CHANNEL=${PRICE_REQUIRES_LIVE_CHANNEL}" \
                       "SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}" "OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}" \
                       "SHOPPER_AUTH=${SHOPPER_AUTH}" "SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}" \
                       "GREETING_PROACTIVE=${GREETING_PROACTIVE}" \
@@ -292,6 +297,7 @@ jobs:
           ENVS="${ENVS}@PRODUCT_CARDS=${PRODUCT_CARDS}"
           ENVS="${ENVS}@CART_LINE_ITEMS=${CART_LINE_ITEMS}"
           ENVS="${ENVS}@PRODUCT_FACTS_HYDRATION=${PRODUCT_FACTS_HYDRATION}"
+          ENVS="${ENVS}@PRICE_REQUIRES_LIVE_CHANNEL=${PRICE_REQUIRES_LIVE_CHANNEL}"
           ENVS="${ENVS}@SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}"
           ENVS="${ENVS}@OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}"
           ENVS="${ENVS}@SHOPPER_AUTH=${SHOPPER_AUTH}"
