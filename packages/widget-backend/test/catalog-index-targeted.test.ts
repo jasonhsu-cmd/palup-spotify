@@ -176,3 +176,48 @@ describe("S3 §C — reconcileProducts touches ONLY the changed set", () => {
     expect(catalogById).not.toHaveBeenCalled();
   });
 });
+
+describe("Pillar 1b — onProducerOk records a live producer run on the TARGETED reconcile path (channel-health)", () => {
+  it("is called with the tenantId after a SUCCESSFUL facts upsert", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+    await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B, C]) }, ["acme"]);
+
+    const Bx = P("gid://shopify/Product/2", "beta-updated", "$12");
+    const catalogById: CatalogByIdSource = async () => [Bx];
+    const facts = createInMemoryProductFactsStore();
+    const calls: string[] = [];
+
+    const r = await reconcileProducts(
+      { store, vector, model, catalog: fullCatalog([A, Bx, C]), catalogById, productFacts: facts, onProducerOk: (t) => { calls.push(t); } },
+      "acme",
+      [B.id],
+      { reason: "product" },
+    );
+
+    expect(r.outcome).toBe("indexed");
+    expect(calls).toEqual(["acme"]);
+  });
+
+  it("is NOT called when productFacts is absent (no money-fact write ⇒ no health signal)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+    await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B, C]) }, ["acme"]);
+
+    const Bx = P("gid://shopify/Product/2", "beta-updated", "$12");
+    const catalogById: CatalogByIdSource = async () => [Bx];
+    const calls: string[] = [];
+
+    const r = await reconcileProducts(
+      { store, vector, model, catalog: fullCatalog([A, Bx, C]), catalogById, onProducerOk: (t) => { calls.push(t); } },
+      "acme",
+      [B.id],
+      { reason: "product" },
+    );
+
+    expect(r.outcome).toBe("indexed");
+    expect(calls).toEqual([]);
+  });
+});

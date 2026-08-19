@@ -97,6 +97,7 @@ import { createReconcileCoalescer, CATALOG_RECONCILE_COALESCE_MS_DEFAULT } from 
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
 import { reconcileByReason, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
+import { createChannelHealth } from "./channel-health.js";
 import { registerMemoryWritePushRoute } from "./routes/pubsub-push-memory.js";
 import { dispatchMemoryWrite } from "./memory-write-dispatch.js";
 
@@ -745,6 +746,14 @@ export async function buildServer(opts?: {
   // (money/NN#1 fail-honest). This is the money safety net, independent of webhook/scheduler reliability.
   // Only takes effect on the flag-gated hydration path.
   const PRODUCT_FACTS_MAX_AGE_MS = posInt("PRODUCT_FACTS_MAX_AGE_MS", PRODUCT_FACTS_MAX_AGE_MS_DEFAULT);
+  // Pillar 1b (ADR-0020) — PRICE_REQUIRES_LIVE_CHANNEL: on the hydration path, also require the merchant's
+  // freshness CHANNEL (webhook/poll producer) to be provably live before a fact is quoted as confirmed — a
+  // recent fact row alone only proves it was WRITTEN recently, not that the pipe keeping it fresh is still
+  // alive. Same governed posture-flag discipline as every flag above: env-read here, default OFF, turning it
+  // on is a human promotion (HITL-POLICY §5) — it can only WITHHOLD a price (never invent one), but
+  // withholding is still a shopper-visible behaviour change (money/NN#1). OFF ⇒ channelHealthFor is never
+  // read by createBrain and the CATALOG block is byte-identical.
+  const PRICE_REQUIRES_LIVE_CHANNEL = process.env.PRICE_REQUIRES_LIVE_CHANNEL === "true";
   // 3b — OUTGOING_OFFER_CHECK: run the language-agnostic semantic check on the outgoing reply (a backstop to
   // the deterministic keyword floor) per sales turn. Same governed posture-flag discipline: env-read here,
   // default OFF, turning it on is a human promotion (HITL §5) — it adds a per-turn model call (cost) and is
@@ -777,6 +786,12 @@ export async function buildServer(opts?: {
   // own decide()-time gating (`memory && anonId`, or catalog retrieval enabled) actually calls embed on a
   // clean-sales-path turn — see brain.ts's own doc comment on the `turnEmbedder` constructor parameter.
   const turnEmbedder = createMeteringModelPort(activeModelPort, telemetry, { agentType: TURN_EMBED_AGENT_TYPE });
+  // Pillar 1b (ADR-0020) — the per-tenant freshness-channel liveness reader, constructed UNCONDITIONALLY
+  // (cheap: it only wraps `store`, like catalogRetriever/turnEmbedder above). `recordProducerOk` is wired
+  // into the webhook/pubsub reconcile deps below REGARDLESS of PRICE_REQUIRES_LIVE_CHANNEL — recording a
+  // producer run is harmless and cheap; only the SERVE-side consult (createBrain's `channelHealthFor`) is
+  // gated on the flag, so an operator can observe channel health before ever gating price on it.
+  const channelHealth = createChannelHealth({ store });
   // T1 phase 2 — the guard classifier's model port, metered under its OWN agentType so its per-turn
   // classification spend is distinguishable from generation/embedding (ADR-0013). Constructed ONLY when
   // SERVER_GUARD_SIGNALS is on, so a deployment that never enables it spends nothing.
@@ -807,7 +822,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE })
+  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -864,6 +879,13 @@ export async function buildServer(opts?: {
         // Position 24 — WS6 GREETING_PROACTIVE. Default OFF ⇒ the greeting trigger is inert; when ON the
         // greeting rung returns pitch:"none" and never calls selectPitch (no money pitch, no budget spend).
         GREETING_PROACTIVE,
+        // Position 25 — Pillar 1b (ADR-0020). The per-tenant freshness-channel liveness reader (constructed
+        // unconditionally above). Only ever CONSULTED when PRICE_REQUIRES_LIVE_CHANNEL (position 26) is on
+        // AND the hydration path is otherwise active (PRODUCT_FACTS_HYDRATION + a retrieved subset).
+        (t: string) => channelHealth.isHealthy(t),
+        // Position 26 — PRICE_REQUIRES_LIVE_CHANNEL. Default OFF ⇒ channelHealthFor above is never invoked
+        // and the CATALOG/cards block is byte-identical.
+        PRICE_REQUIRES_LIVE_CHANNEL,
       );
       brains.set(key, b);
     }
@@ -1251,6 +1273,9 @@ export async function buildServer(opts?: {
       catalog: shopifyCatalogSource(secrets),
       catalogById: shopifyCatalogByIdSource(secrets),
       productFacts: factsStore,
+      // Pillar 1b — a successful money-fact upsert here is a live producer run; record it for channel-health
+      // regardless of PRICE_REQUIRES_LIVE_CHANNEL (see channelHealth's own construction comment above).
+      onProducerOk: (t: string) => channelHealth.recordProducerOk(t),
     };
     // S3 §C — `reconcileByReason` (catalog-index.ts) owns the routing: named product ids ⇒ the TARGETED
     // reconcile (fetch+embed+upsert+ledger for just those SKUs, S3·T5); a bare "inventory" tick is a NO-OP

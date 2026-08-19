@@ -25,6 +25,7 @@ import {
   RUNTIME_AGENT_TYPE,
   type Sql,
 } from "@palup/state-postgres";
+import { createChannelHealth } from "../channel-health.js";
 import { parseStoreDomains, resolveShopifyStore } from "../merchant-store.js";
 import { createModelPort } from "../model.js";
 import {
@@ -265,6 +266,11 @@ export interface CatalogIndexDeps {
    * the vector index (the primary job) still completes.
    */
   productFacts?: ProductFactsPort;
+  /**
+   * Pillar 1b — invoked after a SUCCESSFUL money-fact upsert so channel-health records a live producer run.
+   * Optional; absent ⇒ no health signal (byte-identical). Never throws by contract.
+   */
+  onProducerOk?: (tenantId: string) => void | Promise<void>;
   now?: () => Date;
 }
 
@@ -530,6 +536,17 @@ async function indexOneTenant(
         `[catalog] ALERT product_facts_${upserted ? "audit" : "upsert"}_failed tenant=${tenantId} ` +
           `error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`,
       );
+    }
+    // Pillar 1b — record the live producer run AFTER the mandatory NN#5 audit, in its OWN guard, so a
+    // (contract-violating) health-store throw can neither skip/mislabel the money-fact audit NOR break the
+    // producer job. Gated on a successful upsert (a real producer run). recordProducerOk never throws by
+    // contract; this swallow is belt-and-suspenders (health is a best-effort side signal).
+    if (upserted) {
+      try {
+        await deps.onProducerOk?.(tenantId);
+      } catch {
+        /* best-effort channel-health heartbeat — never fail the audited producer run on it */
+      }
     }
   }
 
@@ -999,10 +1016,22 @@ export async function reconcileProducts(
   // Tier-2 money-facts for the refreshed subset (D2 poll-side, same as the full path). Fail-safe: the
   // vector write is primary, a facts failure is alerted + swallowed.
   if (deps.productFacts && fetched.length > 0) {
+    let upserted = false;
     try {
       await deps.productFacts.upsertMany(tenantId, productFactsFrom({ tenantId, brandName: "", products: fetched, policy: { returns: "", shipping: "" } }, now()));
+      upserted = true;
     } catch (e) {
       console.error(`[catalog] ALERT product_facts_upsert_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
+    }
+    // Pillar 1b — record the live producer run OUTSIDE the try, in its own guard, so a (contract-violating)
+    // health-store throw can neither be mislabeled as an upsert failure nor break the reconcile. Gated on a
+    // successful upsert; recordProducerOk never throws by contract (this swallow is belt-and-suspenders).
+    if (upserted) {
+      try {
+        await deps.onProducerOk?.(tenantId);
+      } catch {
+        /* best-effort channel-health heartbeat */
+      }
     }
   }
 
@@ -1328,6 +1357,9 @@ async function main(): Promise<void> {
     const PRODUCT_FACTS_POLL = process.env.PRODUCT_FACTS_POLL === "true";
     const productFacts = PRODUCT_FACTS_POLL && sql ? new PostgresProductFactsStore(sql) : undefined;
     if (productFacts) await productFacts.migrate();
+    // Pillar 1b — the channel-health recorder, wired under the SAME condition as `productFacts`: only a
+    // deployment that actually writes money-facts here has a producer run worth recording as healthy.
+    const channelHealth = createChannelHealth({ store });
     if (PRODUCT_FACTS_POLL) {
       console.warn(
         "[config] PRODUCT_FACTS_POLL is ON — this job now also writes the Tier-2 product-facts store the " +
@@ -1340,9 +1372,17 @@ async function main(): Promise<void> {
       `[catalog] store=${kind} tenants=${tenantIds.length} ceiling=${MAX_INDEXED_PRODUCTS}` +
         `${cmd.reindex ? " REINDEX (replacing each corpus)" : ""}${productFacts ? " +product-facts" : ""}`,
     );
-    const reports = await runCatalogIndex({ store, vector, model, catalog, ...(productFacts ? { productFacts } : {}) }, tenantIds, {
-      ...(cmd.reindex ? { reindex: true } : {}),
-    });
+    const reports = await runCatalogIndex(
+      {
+        store,
+        vector,
+        model,
+        catalog,
+        ...(productFacts ? { productFacts, onProducerOk: (t: string) => channelHealth.recordProducerOk(t) } : {}),
+      },
+      tenantIds,
+      { ...(cmd.reindex ? { reindex: true } : {}) },
+    );
 
     for (const r of reports) {
       const detail =

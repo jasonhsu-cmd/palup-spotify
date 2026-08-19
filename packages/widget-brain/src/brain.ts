@@ -978,6 +978,12 @@ export function createBrain(
   // call site is byte-identical. Even when ON, the greeting rung returns pitch:"none", never calls
   // selectPitch, spends no INV-E budget, and emits no offer — it cannot become a commercial pitch.
   greetingProactiveEnabled = false,
+  // Pillar 1b (ADR-0020) — the per-tenant freshness-CHANNEL liveness reader + its posture flag, threaded
+  // like every flag above: positional, defaulted OFF, no env read in this package. When the flag is ON, a
+  // confirmed price requires BOTH a fresh fact AND a provably-live channel; OFF ⇒ channelHealth is never
+  // read and the CATALOG/cards block is byte-identical. money/NN#1 fail-honest → §5 human promotion.
+  channelHealthFor?: (tenantId: string) => Promise<boolean>,
+  priceRequiresLiveChannelEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -1103,12 +1109,23 @@ export function createBrain(
     // exactly as the flag-off baseline would (a hydration error must never withhold or degrade a reply).
     let hydrated = retrieved;
     if (productFactsHydrationEnabled && productFactsPort && retrieved && retrieved.length > 0) {
+      // Pillar 1b — freshness-CHANNEL liveness gate (money/NN#1 fail-honest), behind its own posture flag.
+      // A recent fact row only proves it was WRITTEN recently, not that the webhook/producer keeping it
+      // fresh is still alive; when the flag is on and the channel is not provably healthy, hydrate-facts
+      // renders every matched fact priceConfirmed:false. Flag OFF ⇒ channelHealthy is never read/passed ⇒
+      // byte-identical. isHealthy() is itself fail-closed (false, never throws), and we hard-catch anyway so
+      // an unresolved health signal HEDGES (fail-honest) rather than fails open to a stale price.
+      let channelHealthy: boolean | undefined;
+      if (priceRequiresLiveChannelEnabled && channelHealthFor) {
+        try { channelHealthy = await channelHealthFor(tenantId); }
+        catch { channelHealthy = false; }
+      }
       try {
-        // D2 — supply the staleness ceiling only when one is configured, so a deployment without it keeps
-        // the pre-D2 overlay behaviour. `now` is read here (the choke point), never an ambient clock.
-        const staleness = productFactsMaxAgeMs !== undefined ? { now: new Date(), maxAgeMs: productFactsMaxAgeMs } : undefined;
+        const staleness = productFactsMaxAgeMs !== undefined
+          ? { now: new Date(), maxAgeMs: productFactsMaxAgeMs, ...(priceRequiresLiveChannelEnabled ? { channelHealthy } : {}) }
+          : undefined;
         hydrated = hydrateProductFacts(retrieved, await productFactsPort.getMany(tenantId, retrieved.map((p) => p.id)), staleness);
-        retrieval?.flags.push("hydration:applied");
+        retrieval?.flags.push(channelHealthy === false ? "hydration:channel_unhealthy" : "hydration:applied");
       } catch {
         hydrated = retrieved;
         retrieval?.flags.push("hydration:unavailable");
