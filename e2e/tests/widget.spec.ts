@@ -1362,3 +1362,61 @@ test.describe("error journey — offline + retry", () => {
     expect(idem[1]).toBe(idem[0]);
   });
 });
+
+// Cross-VISIT durability (ADR-0019 guest identity). The opt_in suite above proves the guest token
+// persists + is sent on the NEXT TURN of the same page load. This proves the DURABLE cross-visit
+// guarantee cross-visit memory actually depends on: after a page RELOAD (a return visit), the widget
+// reuses the SAME persisted guest token (never re-mints) and does NOT re-prompt consent.
+test.describe("PR-11b — memory ON: guest identity survives a reload (cross-visit)", () => {
+  test("opt_out: same guest token reused across a reload, no re-mint, consent never re-prompts", async ({
+    page,
+  }) => {
+    const guest = mockGuestToken(page);
+    await guest.route();
+    await page.route("**/consent", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) }),
+    );
+    const chatHeaders: Array<Record<string, string>> = [];
+    await page.route("**/chat", async (route) => {
+      chatHeaders.push(route.request().headers());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "Sure — here's a suggestion.",
+          mode: "sales", pitch: "none", escalate: false, outbound: false, flags: [], servedBy: "prop-0",
+          memoryEnabled: true, consentMode: "opt_out",
+        }),
+      });
+    });
+    const memState = () =>
+      page.evaluate(() => {
+        const k = Object.keys(localStorage).find((key) => key.startsWith("palup.widget.memory"));
+        return k ? (JSON.parse(localStorage.getItem(k) as string) as { guestToken?: string; consentShown?: boolean }) : null;
+      });
+
+    // First visit — two turns so memory goes live (learned from the response) and the token mints; dismiss the notice.
+    await page.goto("/widget");
+    await page.getByTestId("chat-input").fill("recommend a moisturizer");
+    await page.getByTestId("send").click();
+    await page.locator('[data-testid="consent-prompt"] [data-testid="consent-primary"]').click(); // opt_out "Got it"
+    await page.getByTestId("chat-input").fill("and a serum?");
+    await page.getByTestId("send").click();
+    await expect.poll(() => guest.count()).toBe(1);
+    await expect.poll(async () => (await memState())?.guestToken).toBe(guest.first());
+
+    // Return visit — reload. The persisted token + consent decision must survive the load.
+    await page.reload();
+    expect((await memState())?.guestToken, "the guest token survives a reload — durable cross-visit identity").toBe(guest.first());
+
+    await page.getByTestId("chat-input").fill("and a cleanser?");
+    await page.getByTestId("send").click();
+    await page.getByTestId("chat-input").fill("what about a toner?");
+    await page.getByTestId("send").click();
+
+    // Same token on the wire, never re-minted, and the notice does not re-prompt for this known identity.
+    await expect.poll(() => chatHeaders.at(-1)?.["x-guest-token"]).toBe(guest.first());
+    expect(guest.count(), "the cached token is reused across the visit, never re-minted").toBe(1);
+    await expect(page.locator('[data-testid="consent-prompt"]')).toHaveCount(0);
+  });
+});
