@@ -1184,3 +1184,64 @@ describe("A3 — runCatalogIndex populates the product-facts store when the dep 
     }
   });
 });
+
+describe("Pillar 1b — onProducerOk records a live producer run on the full-poll path (channel-health)", () => {
+  it("is called with the tenantId after a SUCCESSFUL facts upsert", async () => {
+    const h = harness([product("serum", { price: "$34" })]);
+    const facts = spyFacts();
+    const calls: string[] = [];
+    const [report] = await runCatalogIndex(
+      { store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: facts, onProducerOk: (t) => { calls.push(t); } },
+      [h.tenantId],
+      { maxProducts: 5 },
+    );
+    expect(report!.outcome).toBe("indexed");
+    expect(calls).toEqual([h.tenantId]);
+  });
+
+  it("is NOT called when productFacts is absent (no money-fact write ⇒ no health signal)", async () => {
+    const h = harness([product("serum", { price: "$34" })]);
+    const calls: string[] = [];
+    await runCatalogIndex(
+      { store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, onProducerOk: (t) => { calls.push(t); } },
+      [h.tenantId],
+      { maxProducts: 5 },
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("is NOT called when the facts upsert THROWS — only the success path records health", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const h = harness([product("serum", { price: "$34" })]);
+      const facts = spyFacts({ throwOnUpsert: true });
+      const calls: string[] = [];
+      await runCatalogIndex(
+        { store: h.store, vector: h.vector, model: h.model, catalog: h.catalog, productFacts: facts, onProducerOk: (t) => { calls.push(t); } },
+        [h.tenantId],
+        { maxProducts: 5 },
+      );
+      expect(calls).toEqual([]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("a producer run still completes even when onProducerOk is slow (never throws by contract)", async () => {
+    const h = harness([product("serum", { price: "$34" })]);
+    const facts = spyFacts();
+    const [report] = await runCatalogIndex(
+      {
+        store: h.store,
+        vector: h.vector,
+        model: h.model,
+        catalog: h.catalog,
+        productFacts: facts,
+        onProducerOk: async () => { await new Promise((r) => setTimeout(r, 5)); },
+      },
+      [h.tenantId],
+      { maxProducts: 5 },
+    );
+    expect(report!.outcome).toBe("indexed");
+  });
+});

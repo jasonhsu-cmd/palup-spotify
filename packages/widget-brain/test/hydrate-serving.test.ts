@@ -65,6 +65,8 @@ function brainWithHydration(
   facts: ProductFactsPort | undefined,
   hydrationEnabled: boolean,
   maxAgeMs?: number, // A1b/D2 staleness ceiling (position 22)
+  channelHealthFor?: (tenantId: string) => Promise<boolean>, // Pillar 1b (position 25)
+  priceRequiresLiveChannelEnabled = false, // Pillar 1b (position 26)
 ) {
   return createBrain(
     model, grounding, undefined, new MockCommerceAdapter(), undefined, undefined,
@@ -74,6 +76,10 @@ function brainWithHydration(
     facts, hydrationEnabled,
     undefined, false,
     maxAgeMs,
+    undefined, // turnEmbedder (position 23) — unused here
+    false,     // greetingProactiveEnabled (position 24)
+    channelHealthFor,
+    priceRequiresLiveChannelEnabled,
   );
 }
 
@@ -144,5 +150,55 @@ describe("A1b/D2 — staleness ceiling in serving (fail-honest on a stale fact)"
     const prompt = lastSystemPrompt(model);
     expect(prompt).toContain("$29");
     expect(prompt).not.toContain("current price needs confirming");
+  });
+});
+
+// Pillar 1b (ADR-0020) — the freshness-CHANNEL liveness gate. A recent fact row only proves it was WRITTEN
+// recently, not that the webhook/producer keeping it fresh is still alive. Behind its OWN posture flag
+// (PRICE_REQUIRES_LIVE_CHANNEL): flag ON + channel NOT healthy ⇒ even a FRESH fact renders
+// priceConfirmed:false (`hydration:channel_unhealthy`); flag ON + channel healthy ⇒ quoted as today
+// (`hydration:applied`); flag OFF ⇒ channelHealthFor is never consulted at all — byte-identical.
+describe("Pillar 1b — freshness-channel liveness gate (money/NN#1 fail-honest)", () => {
+  it("flag ON + channel UNHEALTHY ⇒ even a FRESH fact is withheld, flagged hydration:channel_unhealthy", async () => {
+    const model = new RecordingModelPort();
+    const fresh = fakeFacts([{ productId: "p1", price: "$29", updatedAt: new Date().toISOString() }]);
+    const channelHealthFor = async () => false;
+    const d = await brainWithHydration(
+      model, groundingOf(bigCatalog()), fakeRetriever(["p1", "p2"]), fresh, true, 3_600_000, channelHealthFor, true,
+    ).decide(SALES, ASK);
+    const prompt = lastSystemPrompt(model);
+    expect(prompt).toContain("current price needs confirming"); // withheld despite being fresh
+    expect(prompt).not.toContain("$29"); // the fresh number never reaches the model
+    expect(d.flags).toContain("hydration:channel_unhealthy");
+    expect(d.flags).not.toContain("hydration:applied");
+  });
+
+  it("flag ON + channel HEALTHY ⇒ a fresh fact is quoted normally, flagged hydration:applied", async () => {
+    const model = new RecordingModelPort();
+    const fresh = fakeFacts([{ productId: "p1", price: "$29", updatedAt: new Date().toISOString() }]);
+    const channelHealthFor = async () => true;
+    const d = await brainWithHydration(
+      model, groundingOf(bigCatalog()), fakeRetriever(["p1", "p2"]), fresh, true, 3_600_000, channelHealthFor, true,
+    ).decide(SALES, ASK);
+    const prompt = lastSystemPrompt(model);
+    expect(prompt).toContain("$29");
+    expect(prompt).not.toContain("current price needs confirming");
+    expect(d.flags).toContain("hydration:applied");
+    expect(d.flags).not.toContain("hydration:channel_unhealthy");
+  });
+
+  it("flag OFF ⇒ channelHealthFor is NEVER called (byte-identical) and the fresh fact is quoted as before", async () => {
+    const model = new RecordingModelPort();
+    const fresh = fakeFacts([{ productId: "p1", price: "$29", updatedAt: new Date().toISOString() }]);
+    let calls = 0;
+    const channelHealthFor = async () => { calls++; return false; };
+    const d = await brainWithHydration(
+      model, groundingOf(bigCatalog()), fakeRetriever(["p1", "p2"]), fresh, true, 3_600_000, channelHealthFor, false,
+    ).decide(SALES, ASK);
+    const prompt = lastSystemPrompt(model);
+    expect(calls).toBe(0); // never consulted with the flag off
+    expect(prompt).toContain("$29");
+    expect(prompt).not.toContain("current price needs confirming");
+    expect(d.flags).toContain("hydration:applied");
   });
 });
