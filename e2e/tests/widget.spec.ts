@@ -1420,3 +1420,41 @@ test.describe("PR-11b — memory ON: guest identity survives a reload (cross-vis
     await expect(page.locator('[data-testid="consent-prompt"]')).toHaveCount(0);
   });
 });
+
+// Layout polish — when a turn returns BOTH product cards and the memory/consent notice, the cards must
+// render directly under the reply and the consent card must sit BELOW them, so the memory UI never wedges
+// itself between the reply and its own cards (the split seen in the live UX review). Guards the send()
+// ordering: add(reply) -> addProductCards -> onChatMeta.
+test.describe("layout — cards stay attached to their reply", () => {
+  test("product cards render directly under the reply; the memory/consent card is BELOW them", async ({ page }) => {
+    await page.route("**/chat", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "Here are two options I'd suggest.",
+          mode: "sales", pitch: "none", escalate: false, outbound: false, flags: [], servedBy: "prop-0",
+          memoryEnabled: true, consentMode: "opt_out",
+          recommendedProductCards: [{ productId: "serum-vc", title: "Vitamin-C Brightening Serum", price: "$34" }],
+        }),
+      });
+    });
+    await page.goto("/widget");
+    await page.getByTestId("chat-input").fill("what do you recommend?");
+    await page.getByTestId("send").click();
+
+    const reply = page.getByText("Here are two options I'd suggest.");
+    const cards = page.getByTestId("product-cards");
+    const consent = page.locator('[data-testid="consent-prompt"]');
+    await expect(cards).toBeVisible();
+    await expect(consent).toBeVisible();
+
+    const replyBox = await reply.boundingBox();
+    const cardsBox = await cards.boundingBox();
+    const consentBox = await consent.boundingBox();
+    expect(replyBox && cardsBox && consentBox).toBeTruthy();
+    // reply -> cards -> consent, top to bottom
+    expect(cardsBox!.y, "cards sit below the reply").toBeGreaterThan(replyBox!.y);
+    expect(consentBox!.y, "the consent card sits BELOW the cards, never between reply and cards").toBeGreaterThan(cardsBox!.y);
+  });
+});
