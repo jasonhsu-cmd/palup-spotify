@@ -73,6 +73,31 @@ export function runPresentmentPricePortContract(makeAdapter: () => PresentmentPr
       expect(await s.getMany("tenant-c", ["p1"], "EUR")).toEqual([]);
     });
 
+    it("deleteMany removes the named products across ALL currencies, leaving the rest (delist-prune)", async () => {
+      const s = await makeAdapter();
+      await s.upsertMany("t", [p("p1", "EUR", "€1"), p("p1", "JPY", "¥100"), p("p2", "EUR", "€2")]);
+      await s.deleteMany("t", ["p1", "does-not-exist"]); // absent id ignored (idempotent)
+      expect(await s.getMany("t", ["p1"], "EUR")).toEqual([]); // every currency of p1 gone
+      expect(await s.getMany("t", ["p1"], "JPY")).toEqual([]);
+      expect(await s.getMany("t", ["p2"], "EUR")).toEqual([p("p2", "EUR", "€2")]); // survivor untouched
+    });
+
+    it("deleteMany with an empty id list is a no-op", async () => {
+      const s = await makeAdapter();
+      await s.upsertMany("t", [p("p1", "EUR", "€1")]);
+      await s.deleteMany("t", []);
+      expect(await s.getMany("t", ["p1"], "EUR")).toEqual([p("p1", "EUR", "€1")]);
+    });
+
+    it("deleteMany is tenant-isolated — pruning one tenant never touches another's identically-keyed rows", async () => {
+      const s = await makeAdapter();
+      await s.upsertMany("tenant-a", [p("p1", "EUR", "€1")]);
+      await s.upsertMany("tenant-b", [p("p1", "EUR", "€9")]);
+      await s.deleteMany("tenant-a", ["p1"]);
+      expect(await s.getMany("tenant-a", ["p1"], "EUR")).toEqual([]);
+      expect(await s.getMany("tenant-b", ["p1"], "EUR")).toEqual([p("p1", "EUR", "€9")]); // other tenant untouched
+    });
+
     it("deleteTenant erases ALL of a tenant's prices across currencies (right-to-erasure)", async () => {
       const s = await makeAdapter();
       await s.upsertMany("tenant-a", [p("p1", "EUR", "€1"), p("p1", "JPY", "¥100")]);
@@ -97,6 +122,7 @@ export function runPresentmentPricePortContract(makeAdapter: () => PresentmentPr
       await expect(s.getMany("", ["p1"], "EUR")).rejects.toThrow(/tenant/i);
       await expect(s.getMany("t", ["p1"], "  ")).rejects.toThrow(/currency/i);
       await expect(s.upsertMany("  ", [p("p1", "EUR", "€1")])).rejects.toThrow(/tenant/i);
+      await expect(s.deleteMany("", ["p1"])).rejects.toThrow(/tenant/i);
       await expect(s.deleteTenant("")).rejects.toThrow(/tenant/i);
     });
   });

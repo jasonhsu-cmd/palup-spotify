@@ -48,6 +48,14 @@ export interface PresentmentPricePort {
   getMany(tenantId: string, productIds: string[], currency: string): Promise<PresentmentPrice[]>;
   /** Insert-or-replace prices for one tenant, keyed by (productId, currency). */
   upsertMany(tenantId: string, prices: PresentmentPrice[]): Promise<void>;
+  /**
+   * Remove EVERY currency's price for the named product ids under one tenant. The DELIST-PRUNE op: when a
+   * product is deleted/unpublished, its presentment prices must not outlive it (a stale price in any
+   * currency is the same money/NN#1 fault as a stale base fact). Keyed by product id only, so it drops the
+   * product across all currencies at once. Ids with no stored price are ignored (idempotent); an empty list
+   * is a no-op. Distinct from `deleteTenant` (whole-tenant erasure) — this is surgical, per-product.
+   */
+  deleteMany(tenantId: string, productIds: string[]): Promise<void>;
   /** Right-to-erasure (ADR-0015 Inv 5): remove ALL of a tenant's presentment prices. */
   deleteTenant(tenantId: string): Promise<void>;
 }
@@ -98,6 +106,18 @@ export function createInMemoryPresentmentPriceStore(): PresentmentPricePort {
       for (const p of prices) {
         const cur = requirePresentmentCurrency(p.currency);
         m.set(key(cur, p.productId), { ...p, currency: cur });
+      }
+    },
+    async deleteMany(tenantId, productIds) {
+      const t = requirePresentmentTenant(tenantId);
+      if (productIds.length === 0) return;
+      const m = byTenant.get(t);
+      if (!m) return;
+      // Keyed `${currency} ${productId}` — drop every currency row whose product id is in the set.
+      const drop = new Set(productIds);
+      for (const k of [...m.keys()]) {
+        const productId = k.slice(k.indexOf(" ") + 1);
+        if (drop.has(productId)) m.delete(k);
       }
     },
     async deleteTenant(tenantId) {

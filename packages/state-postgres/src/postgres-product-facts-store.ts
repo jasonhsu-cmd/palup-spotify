@@ -79,6 +79,14 @@ export class PostgresProductFactsStore implements ProductFactsPort {
     });
   }
 
+  async deleteMany(tenantId: string, productIds: string[]): Promise<void> {
+    const t = requireProductFactsTenant(tenantId);
+    if (productIds.length === 0) return;
+    // Surgical per-product delete (delist-prune). Tenant-bound like every statement here — a product id can
+    // never reach across tenants. `= ANY($2)` mirrors the getMany batch read; absent ids are simply no-ops.
+    await this.sql.query("DELETE FROM product_facts WHERE tenant_id=$1 AND product_id = ANY($2::text[])", [t, productIds]);
+  }
+
   async deleteTenant(tenantId: string): Promise<void> {
     const t = requireProductFactsTenant(tenantId);
     await this.sql.query("DELETE FROM product_facts WHERE tenant_id=$1", [t]);

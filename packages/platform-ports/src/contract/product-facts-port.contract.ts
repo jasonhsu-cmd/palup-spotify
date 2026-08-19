@@ -62,6 +62,29 @@ export function runProductFactsPortContract(makeAdapter: () => ProductFactsPort 
       expect(await s.getMany("tenant-c", ["p1"])).toEqual([]);
     });
 
+    it("deleteMany removes exactly the named ids and leaves the rest (delist-prune)", async () => {
+      const s = await makeAdapter();
+      await s.upsertMany("t", [f("p1", "$1"), f("p2", "$2"), f("p3", "$3")]);
+      await s.deleteMany("t", ["p2", "does-not-exist"]); // absent id is ignored (idempotent)
+      expect((await s.getMany("t", ["p1", "p2", "p3"])).map((x) => x.productId).sort()).toEqual(["p1", "p3"]);
+    });
+
+    it("deleteMany with an empty id list is a no-op", async () => {
+      const s = await makeAdapter();
+      await s.upsertMany("t", [f("p1", "$1")]);
+      await s.deleteMany("t", []);
+      expect((await s.getMany("t", ["p1"])).map((x) => x.productId)).toEqual(["p1"]);
+    });
+
+    it("deleteMany is tenant-isolated — pruning one tenant never touches another's identically-keyed rows", async () => {
+      const s = await makeAdapter();
+      await s.upsertMany("tenant-a", [f("p1", "$1")]);
+      await s.upsertMany("tenant-b", [f("p1", "$9")]);
+      await s.deleteMany("tenant-a", ["p1"]);
+      expect(await s.getMany("tenant-a", ["p1"])).toEqual([]);
+      expect(await s.getMany("tenant-b", ["p1"])).toEqual([f("p1", "$9")]); // other tenant untouched
+    });
+
     it("deleteTenant erases ALL of a tenant's facts (right-to-erasure)", async () => {
       const s = await makeAdapter();
       await s.upsertMany("tenant-a", [f("p1", "$1"), f("p2", "$2")]);
@@ -84,6 +107,7 @@ export function runProductFactsPortContract(makeAdapter: () => ProductFactsPort 
       const s = await makeAdapter();
       await expect(s.getMany("", ["p1"])).rejects.toThrow(/tenant/i);
       await expect(s.upsertMany("  ", [f("p1", "$1")])).rejects.toThrow(/tenant/i);
+      await expect(s.deleteMany("", ["p1"])).rejects.toThrow(/tenant/i);
       await expect(s.deleteTenant("")).rejects.toThrow(/tenant/i);
     });
   });

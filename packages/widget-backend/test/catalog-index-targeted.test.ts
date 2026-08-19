@@ -95,6 +95,46 @@ describe("S3 §C — reconcileProducts touches ONLY the changed set", () => {
     expect([...ledger.keys()].sort()).toEqual([catalogRecordId(A.id), catalogRecordId(B.id)]);
   });
 
+  it("BUGFIX (stale product_facts) — a delisted product's money-facts row is pruned, not just its vector", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+    const facts = createInMemoryProductFactsStore();
+    // Seed a 3-product corpus AND its Tier-2 money-facts (the poll producer writes facts on every index).
+    await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B, C]), productFacts: facts }, ["acme"]);
+    expect((await facts.getMany("acme", [C.id])).map((x) => x.productId)).toEqual([C.id]); // sanity: C's fact exists
+
+    // C is deleted in Shopify → the targeted reconcile resolves it to nothing (delisted).
+    const catalogById: CatalogByIdSource = async () => [];
+    const r = await reconcileProducts({ store, vector, model, catalog: fullCatalog([A, B]), catalogById, productFacts: facts }, "acme", [C.id], {
+      reason: "product",
+    });
+
+    expect(r.outcome).toBe("indexed");
+    expect(r.removed).toBe(1);
+    // The FIX: the delisted product's money-fact is gone (previously it lingered forever — a stale price for
+    // a product no longer sold).
+    expect(await facts.getMany("acme", [C.id])).toEqual([]);
+    // Survivors untouched.
+    expect((await facts.getMany("acme", [A.id, B.id])).map((x) => x.productId).sort()).toEqual([A.id, B.id]);
+  });
+
+  it("BUGFIX (stale product_facts, full path) — a product removed from the catalog has its money-facts row pruned", async () => {
+    const store = new InMemoryRuntimeStore();
+    const vector = createInMemoryVectorStore();
+    const model = fakeModel();
+    const facts = createInMemoryProductFactsStore();
+    await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B, C]), productFacts: facts }, ["acme"]);
+    expect((await facts.getMany("acme", [C.id])).map((x) => x.productId)).toEqual([C.id]);
+
+    // Next full index sees C gone (bulk-deleted). The whole-catalog reconcile must prune its money-fact too.
+    const [r] = await runCatalogIndex({ store, vector, model, catalog: fullCatalog([A, B]), productFacts: facts }, ["acme"]);
+    expect(r!.outcome).toBe("indexed");
+    expect(r!.removed).toBe(1);
+    expect(await facts.getMany("acme", [C.id])).toEqual([]);
+    expect((await facts.getMany("acme", [A.id, B.id])).map((x) => x.productId).sort()).toEqual([A.id, B.id]);
+  });
+
   it("with no manifest yet, falls back to a full reconcile (never a 1-product corpus)", async () => {
     const store = new InMemoryRuntimeStore();
     const vector = createInMemoryVectorStore();
