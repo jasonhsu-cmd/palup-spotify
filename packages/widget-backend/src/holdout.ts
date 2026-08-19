@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Arm, RuntimeStatePort } from "@palup/platform-ports";
+import { PLATFORM_TENANT } from "@palup/state-postgres";
 import { DEFAULT_POLICY, type Policy } from "@palup/widget-brain";
 import { bucket } from "./canary.js";
 
@@ -74,6 +75,68 @@ const DEFAULT_HOLDOUT_CONFIG: Readonly<HoldoutConfig> = { enabled: false, fracti
 export async function readHoldoutConfig(store: RuntimeStatePort, tenantId: string): Promise<HoldoutConfig> {
   const cfg = await store.get<HoldoutConfig>({ tenantId }, HOLDOUT, CONFIG_KEY);
   return cfg ?? DEFAULT_HOLDOUT_CONFIG;
+}
+
+export interface WriteHoldoutConfigOpts {
+  /** The recorded HUMAN operator (audit actor) — mirrors `setCostCap`/`armKill`'s "operator" convention.
+   * Free text so an operator can name themselves (e.g. "jane.operator"); never a run-time agent id. */
+  actor: string;
+  /** Free text recorded alongside the config in the audit row. */
+  reason?: string;
+  at?: string;
+}
+
+/**
+ * The SINGLE writer for a tenant's holdout config — the operator-CLI counterpart to `readHoldoutConfig`
+ * above, using the exact same `HOLDOUT`/`CONFIG_KEY` collection/key so a write here is guaranteed visible
+ * to the very read the /chat serving path (`assignHoldoutArm`'s caller) performs. `fraction` is clamped
+ * to [0,1] here too — defense in depth alongside `assignHoldoutArm`'s own clamp — so a bad value can never
+ * be written as anything other than what it will actually be read back as.
+ *
+ * ENABLING THE HOLDOUT REMAINS AN OWNER/LEGAL DECISION (see the file header): this function does not make
+ * that call, it only makes the OFF→ON transition — once a human has decided to make it — audited and
+ * reversible instead of a hand-written KV row, exactly as `armKill`/`setCostCap` are for their registries.
+ * Write + audit commit atomically (NN #5), same as `assignHoldoutArm`'s own tx.
+ */
+export async function writeHoldoutConfig(
+  store: RuntimeStatePort,
+  tenantId: string,
+  config: HoldoutConfig,
+  opts: WriteHoldoutConfigOpts,
+): Promise<HoldoutConfig> {
+  // A holdout is a PER-MERCHANT measurement arm; the reserved `__system__` partition is never a serving
+  // tenant, so writing one there is inert but a footgun. Refuse it at the single writer — every caller is
+  // covered, not just the CLI — mirroring `setTenantOptIn`'s reserved-partition refusal in state-postgres.
+  if (tenantId === PLATFORM_TENANT) {
+    throw new Error(
+      `writeHoldoutConfig requires a real merchant tenantId, not the reserved ${PLATFORM_TENANT} partition — ` +
+        "a holdout is a per-merchant measurement arm and the system partition is never a serving tenant.",
+    );
+  }
+  // Defense in depth: never persist a non-finite fraction. `Math.max(0, Math.min(1, NaN))` is NaN, which
+  // would corrupt the arm split on read. The CLI parser already rejects non-numeric input; this guards any
+  // FUTURE caller that reaches the writer directly.
+  if (!Number.isFinite(config.fraction)) {
+    throw new Error(`writeHoldoutConfig fraction must be a finite number in [0,1], got ${config.fraction}`);
+  }
+  const clamped: HoldoutConfig = { ...config, fraction: Math.max(0, Math.min(1, config.fraction)) };
+  const at = opts.at ?? new Date().toISOString();
+  await store.tx({ tenantId }, async (t) => {
+    await t.put(HOLDOUT, CONFIG_KEY, clamped);
+    await t.audit(
+      {
+        actor: opts.actor,
+        action: clamped.enabled ? "holdout_config.enable" : "holdout_config.disable",
+        input: { tenantId, enabled: clamped.enabled, fraction: clamped.fraction, reason: opts.reason },
+        decision: clamped.enabled ? "holdout_enabled" : "holdout_disabled",
+        reversalPath:
+          `pnpm holdout:set ${tenantId} ${!clamped.enabled} — flips this tenant's holdout straight back; ` +
+          "this is a measurement-config change, not an action taken on a shopper's behalf.",
+      },
+      at,
+    );
+  });
+  return clamped;
 }
 
 /**
