@@ -35,7 +35,7 @@ export interface CanaryMeasurement {
   canaryEscalationRate: number;
   championEscalationRate: number;
   /** Revenue-flywheel Wave-2 (D) — see the header comment above. Absent unless the caller supplied one. */
-  measuredOutcome?: { incrementalLift: number; power: number; underpowered: boolean; method: string };
+  measuredOutcome?: { incrementalLift: number; relativeLift: number; power: number; underpowered: boolean; method: string };
 }
 
 export async function measureCanary(
@@ -46,7 +46,7 @@ export async function measureCanary(
   sampleN = 20,
   /** Revenue-flywheel Wave-2 (D) — OPTIONAL pre-computed measured-outcome signal, passed straight
    * through onto the result (see the header comment). Dormant when omitted. */
-  measuredOutcome?: { incrementalLift: number; power: number; underpowered: boolean; method: string },
+  measuredOutcome?: { incrementalLift: number; relativeLift: number; power: number; underpowered: boolean; method: string },
 ): Promise<CanaryMeasurement> {
   const sinceMs = Date.parse(window.since);
   const nowMs = Date.parse(window.now);
