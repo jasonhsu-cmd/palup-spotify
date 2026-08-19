@@ -1148,12 +1148,11 @@ export async function buildServer(opts?: {
     // to the SAME per-shop, Admin-API subscription call CATALOG_WEBHOOKS's topics use just above — never
     // to shopify.app.toml's declarative `[webhooks]` (untouched; see order-attribution-scope-pinning.test.ts).
     // Topic enum names follow the SAME REST-topic→SCREAMING_SNAKE_CASE convention the four lines above
-    // already use ("orders/create" → "ORDERS_CREATE", mirroring "products/create" → "PRODUCTS_CREATE");
-    // unlike those four, this exact enum spelling has NOT been confirmed against a live schema fetch this
-    // session — recorded here rather than glossed, alongside every other "NO LIVE" caveat this feature's
-    // files already carry (shopify-webhook-identity.ts's ORDER_TOPICS doc). A `userErrors` failure from
-    // Shopify would surface as a `failed` tally (registerWebhookSubscriptions never throws on one), never a
-    // silent success, so a wrong spelling fails LOUD, not quiet. Registering these three topics needs the
+    // already use ("orders/create" → "ORDERS_CREATE", mirroring "products/create" → "PRODUCTS_CREATE").
+    // Confirmed against shopify.dev's WebhookSubscriptionTopic enum (retrieved 2026-08-19): ORDERS_CREATE,
+    // ORDERS_UPDATED, REFUNDS_CREATE are the exact enum members. As a belt-and-suspenders, a `userErrors`
+    // failure from Shopify would surface as a `failed` tally (registerWebhookSubscriptions never throws on
+    // one), never a silent success, so even a future spelling drift fails LOUD, not quiet. Registering these three topics needs the
     // PARENT token to hold `read_orders` (ORDER_ATTRIBUTION_ADMIN_SCOPE, shopify-webhook-identity.ts) — that
     // scope is requested (if at all) via the operator-controlled `SHOPIFY_INSTALL_SCOPES` env var for THIS
     // deployment only, never via shopify.app.toml, and its grant additionally requires Shopify's
