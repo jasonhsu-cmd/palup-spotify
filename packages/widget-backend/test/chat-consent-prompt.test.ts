@@ -26,7 +26,7 @@ function distillingModel(facts: Array<{ text: string }>): ModelPort & { calls: M
   };
 }
 
-const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "GUEST_TOKEN_SECRET"];
+const ENV_KEYS = ["MERCHANT_REGION", "WIDGET_TOKEN_SECRET", "WIDGET_AUTH_REQUIRED", "GUEST_TOKEN_SECRET", "SERVER_GUARD_SIGNALS"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
 // ADR-0019 task 4/9 — the guest memory subject now comes ONLY from a VERIFIED `x-guest-token`.
 const GUEST_SECRET = "gsecret";
@@ -184,6 +184,87 @@ describe("PR-11c — /chat carries a contextual consentPrompt='special' signal",
     expect(res.json().consentPrompt).toBe("special");
     const log = await store.readAudit({ tenantId: "demo" });
     expect(log.map((r) => r.action)).not.toContain("write.special");
+    await app.close();
+  });
+
+  // #3 — multilingual special-category detection. The English keyword classifier (classifyFact) misses
+  // non-English health disclosures (e.g. "我有濕疹"). When SERVER_GUARD_SIGNALS is on, the model guard
+  // classifier is LANGUAGE-AGNOSTIC, so its two health classes — "medical" and "product_safety" — now ALSO
+  // drive the consent prompt, catching what the keyword floor would miss. A mock model returns the guard
+  // classification for the guard call (the only request carrying a `safetyClass` schema) and a plain reply
+  // otherwise.
+  function guardAwareModel(safetyClass: string): ModelPort {
+    return {
+      async complete(req: ModelRequest) {
+        if (JSON.stringify(req).includes("safetyClass")) {
+          return { text: JSON.stringify({ safetyClass, injection: false, supportIntent: "general" }), model: "mock-guard" };
+        }
+        return { text: "Here is a helpful reply.", model: "mock-chat" };
+      },
+    };
+  }
+
+  it("guard 'medical' fires the prompt for a non-English message the keyword classifier misses (我有濕疹)", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.SERVER_GUARD_SIGNALS = "true";
+    const store = new InMemoryRuntimeStore();
+    const app = await buildServer({ store, modelPort: guardAwareModel("medical"), memoryEnabled: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "g1", message: "我有濕疹，有什麼推薦?", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().consentPrompt).toBe("special");
+    await app.close();
+  });
+
+  it("guard 'product_safety' also fires it for a non-English message", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.SERVER_GUARD_SIGNALS = "true";
+    const store = new InMemoryRuntimeStore();
+    const app = await buildServer({ store, modelPort: guardAwareModel("product_safety"), memoryEnabled: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "g2", message: "這個產品孕婦可以用嗎?", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().consentPrompt).toBe("special");
+    await app.close();
+  });
+
+  it("a NON-health guard class (regulated_claim) does NOT fire it for an ordinary message", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.SERVER_GUARD_SIGNALS = "true";
+    const store = new InMemoryRuntimeStore();
+    const app = await buildServer({ store, modelPort: guardAwareModel("regulated_claim"), memoryEnabled: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "g3", message: "推薦一款保濕的產品", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().consentPrompt).toBeUndefined();
+    await app.close();
+  });
+
+  it("the English keyword floor still fires it when the guard says 'none' (guard adds coverage, never removes it)", async () => {
+    process.env.WIDGET_TOKEN_SECRET = WIDGET_SECRET;
+    process.env.WIDGET_AUTH_REQUIRED = "true";
+    process.env.SERVER_GUARD_SIGNALS = "true";
+    const store = new InMemoryRuntimeStore();
+    const app = await buildServer({ store, modelPort: guardAwareModel("none"), memoryEnabled: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/chat",
+      payload: { sessionId: "g4", message: "I'm allergic to tree nuts", signals: {}, widgetToken: DEMO_WIDGET_TOKEN },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().consentPrompt).toBe("special");
     await app.close();
   });
 

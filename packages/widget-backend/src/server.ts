@@ -2747,32 +2747,9 @@ export async function buildServer(opts?: {
       //      (health/allergy/medical) information.
       // Absent (undefined) otherwise, which `JSON.stringify` (Fastify's default serializer, no route
       // schema here) drops from the wire response entirely — byte-identical to before this PR when off.
-      const consentPromptFactClass = classifyFact(message).class; // hoisted: reused by the decision log below
-      const consentPrompt: "special" | undefined =
-        memoryServiceEnabled &&
-        (consentRecord?.memorySpecial ?? "unknown") === "unknown" &&
-        consentPromptFactClass === "special"
-          ? "special"
-          : undefined;
-      // Durable, no-PII observability for the special-category consent DECISION. This is a
-      // compliance-relevant decision (whether to ask a shopper to share health/Art-9 info), so its inputs
-      // and outcome belong in the permanent log — not a throwaway probe. We log ONLY the decision and the
-      // three booleans/enums that produce it: never the message text, the shopper/guest identity, or any
-      // token. `factClass` is the classifier's verdict (ordinary|special), which is what makes
-      // "why did / didn't the health-consent prompt fire?" answerable in Cloud Logging without guessing.
-      console.log(
-        JSON.stringify({
-          evt: "consent-prompt-decision",
-          tenantId,
-          memoryServiceEnabled,
-          factClass: consentPromptFactClass,
-          memorySpecial: consentRecord?.memorySpecial ?? "unknown",
-          hasConsentRecord: consentRecord != null,
-          consentPrompt: consentPrompt ?? "none",
-        }),
-      );
-      // T1 phase 2 — server-side guard classification for THIS turn, run BEFORE deriveServingSignals so the
-      // result is server-authored and unspoofable. Runs only when SERVER_GUARD_SIGNALS is on (⇒
+      // T1 phase 2 — server-side guard classification for THIS turn. Computed HERE (moved up) because the
+      // special-category consent decision below now consults it, and still BEFORE deriveServingSignals so
+      // the result stays server-authored and unspoofable. Runs only when SERVER_GUARD_SIGNALS is on (⇒
       // guardClassifierModel defined), never while halted, and never on an empty/proactive turn (no message
       // to classify). classifyGuardSignals never throws — a failure returns a degraded result (no signal ⇒
       // the brain falls back to its keyword floor).
@@ -2780,6 +2757,41 @@ export async function buildServer(opts?: {
         guardClassifierModel && !kill && !costCap && message.trim() !== ""
           ? await classifyGuardSignals(guardClassifierModel, message, tenantId)
           : undefined;
+      // Special-category (GDPR Art. 9 health) detection for the consent prompt has TWO sources: the fast
+      // English keyword classifier (classifyFact — a floor) OR, when SERVER_GUARD_SIGNALS is on, the model
+      // guard classifier, which is LANGUAGE-AGNOSTIC and so catches health/allergy disclosures in ANY
+      // language (e.g. "我有濕疹") that the English keyword list would miss. Only the two health-bearing guard
+      // classes count as special-category here: "medical" (a medical/health message) and "product_safety"
+      // (allergy / swelling / skin-condition safety) — the same categories classifyFact keys on. The
+      // remaining classes (distress / regulated_claim / legal / abuse) are NOT Art. 9 health and never
+      // trigger this prompt. Guard OFF ⇒ guardSignals undefined ⇒ the keyword classifier alone decides,
+      // byte-identical to before this change.
+      const consentPromptFactClass = classifyFact(message).class;
+      const guardSpecial =
+        guardSignals?.safetyClass === "medical" || guardSignals?.safetyClass === "product_safety";
+      const consentPrompt: "special" | undefined =
+        memoryServiceEnabled &&
+        (consentRecord?.memorySpecial ?? "unknown") === "unknown" &&
+        (consentPromptFactClass === "special" || guardSpecial)
+          ? "special"
+          : undefined;
+      // Durable, no-PII observability for the special-category consent DECISION (a compliance-relevant
+      // decision: whether to ask a shopper to share health/Art-9 info). Logs ONLY the decision and the
+      // booleans/enums that produce it — never the message text, the shopper/guest identity, or any token.
+      // `factClass` is the keyword classifier's verdict; `guardSafetyClass` is the model guard's verdict —
+      // together they make "why did / didn't the health-consent prompt fire?" answerable in Cloud Logging.
+      console.log(
+        JSON.stringify({
+          evt: "consent-prompt-decision",
+          tenantId,
+          memoryServiceEnabled,
+          factClass: consentPromptFactClass,
+          guardSafetyClass: guardSignals?.safetyClass ?? "none",
+          memorySpecial: consentRecord?.memorySpecial ?? "unknown",
+          hasConsentRecord: consentRecord != null,
+          consentPrompt: consentPrompt ?? "none",
+        }),
+      );
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
         kill: Boolean(kill),
