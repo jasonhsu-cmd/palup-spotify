@@ -229,7 +229,7 @@ export async function monitorServing(
   engine: EvolutionEngine,
   store: RuntimeStatePort,
   tenantId: string,
-  observed: { qualityScore: number; safetyPass: boolean; measuredOutcome?: { incrementalLift: number; power?: number } },
+  observed: { qualityScore: number; safetyPass: boolean; measuredOutcome?: { incrementalLift: number; relativeLift: number; power?: number } },
   at = new Date().toISOString(),
 ): Promise<MonitorServingResult> {
   const verdict = engine.regressionVerdict(observed);

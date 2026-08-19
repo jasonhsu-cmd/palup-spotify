@@ -172,11 +172,14 @@ describe("EvolutionEngine gate — complaintRate hard-gate (Wave-1 C)", () => {
 
 // Revenue-flywheel Wave-1 (D) — the measured-outcome seam: `measuredOutcome` is OPTIONAL (nothing
 // populates it today; every existing caller is byte-identical), and when present it ADDITIONALLY requires
-// a non-regressive incrementalLift vs. the champion's own measuredOutcome, on top of every other check.
+// a non-regressive `relativeLift` vs. the champion's own measuredOutcome, on top of every other check.
+// Durability NOW-2: the comparison is RATE-normalized (`relativeLift`), never the absolute, exposure-
+// scaled `incrementalLift` — `incrementalLift` still rides along on every fixture below for audit/display
+// and for the malformed/non-finite fail-closed check, but it no longer decides pass/fail.
 describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
-  const champWithMO = (incrementalLift: number) => ({
+  const champWithMO = (relativeLift: number, incrementalLift = relativeLift) => ({
     policy: DEFAULT_POLICY,
-    metrics: { ...champion.metrics, measuredOutcome: { incrementalLift } } as PolicyMetrics,
+    metrics: { ...champion.metrics, measuredOutcome: { incrementalLift, relativeLift } } as PolicyMetrics,
   });
 
   it("gates IDENTICALLY to the baseline case when measuredOutcome is absent (no behavior change)", async () => {
@@ -188,7 +191,7 @@ describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
   it("BLOCKS a candidate whose measuredOutcome REGRESSES vs. the champion's (present on both)", async () => {
     const e = new EvolutionEngine({
       champion: champWithMO(0.05),
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, relativeLift: 0.02 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -199,7 +202,7 @@ describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
   it("PASSES a candidate whose measuredOutcome IMPROVES on the champion's (present on both, non-regressive)", async () => {
     const e = new EvolutionEngine({
       champion: champWithMO(0.05),
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.08 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.08, relativeLift: 0.08 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -210,7 +213,20 @@ describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
   it("FAILS CLOSED — a candidate whose measuredOutcome.incrementalLift is NON-FINITE (NaN) blocks (never silently passes)", async () => {
     const e = new EvolutionEngine({
       champion: champWithMO(0.05),
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: NaN } } }),
+      // relativeLift alone is a valid, non-regressive 0.08 — isolates that it is incrementalLift's NaN
+      // (still checked, never relaxed by NOW-2) that trips the malformed block, not a missing relativeLift.
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: NaN, relativeLift: 0.08 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-invalid");
+  });
+
+  it("FAILS CLOSED (durability NOW-2) — a candidate whose measuredOutcome.relativeLift is NON-FINITE (NaN) blocks, even with a valid incrementalLift", async () => {
+    const e = new EvolutionEngine({
+      champion: champWithMO(0.05),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.08, relativeLift: NaN } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -221,7 +237,7 @@ describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
   it("FAILS CLOSED — a candidate WITH a measuredOutcome but a champion baseline WITHOUT one blocks (no baseline to compare)", async () => {
     const e = new EvolutionEngine({
       champion, // no measuredOutcome
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.5 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.5, relativeLift: 0.5 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -230,19 +246,57 @@ describe("EvolutionEngine gate — measured-outcome seam (Wave-1 D)", () => {
   });
 });
 
+// Durability NOW-2 (security review) — the core fix: the gate must compare the RATE-normalized
+// `relativeLift`, never the absolute, exposure-scaled `incrementalLift`, so a candidate cannot "win" a
+// promotion purely by having run on higher-volume traffic than the champion.
+describe("EvolutionEngine gate — durability NOW-2: rate-normalized comparison (relativeLift, not incrementalLift)", () => {
+  const champWithMO = (relativeLift: number, incrementalLift = relativeLift) => ({
+    policy: DEFAULT_POLICY,
+    metrics: { ...champion.metrics, measuredOutcome: { incrementalLift, relativeLift } } as PolicyMetrics,
+  });
+
+  it("a candidate with a HIGHER absolute incrementalLift but a LOWER relativeLift BLOCKS — never wins purely on volume", async () => {
+    const e = new EvolutionEngine({
+      // Champion: low absolute lift (low traffic) but a healthy 50% per-exposure rate.
+      champion: champWithMO(0.5, 100),
+      // Candidate: a much bigger ABSOLUTE lift (5000 >> 100 — ran on far more traffic) but converts
+      // WORSE per shopper (10% relative lift < the champion's 50%). Must still block.
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 5000, relativeLift: 0.1 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-regressed");
+  });
+
+  it("a candidate with a LOWER absolute incrementalLift but a HIGHER relativeLift PASSES — a genuinely higher-rate win is not penalized for lower volume", async () => {
+    const e = new EvolutionEngine({
+      // Champion: a big absolute lift purely from high traffic, but a weak 10% per-exposure rate.
+      champion: champWithMO(0.1, 5000),
+      // Candidate: a much SMALLER absolute lift (100 << 5000) but a genuinely better 50% per-shopper rate.
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 100, relativeLift: 0.5 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("awaiting_approval");
+    expect(rec.gate?.pass).toBe(true);
+    expect(rec.gate?.reasons).not.toContain("measured-outcome-regressed");
+  });
+});
+
 // Revenue-flywheel Wave-2 (D) — the power-floor ENFORCEMENT on top of the Wave-1 (D) seam above. `power`
 // absent (every test above) preserves Wave-1's unconditional enforcement exactly; these tests exercise
 // the NEW behavior that only activates when a caller EXPLICITLY supplies `power`.
 describe("EvolutionEngine gate — measured-outcome POWER FLOOR (Wave-2 D)", () => {
-  const champPowered = (incrementalLift: number, power: number) => ({
+  const champPowered = (relativeLift: number, power: number, incrementalLift = relativeLift) => ({
     policy: DEFAULT_POLICY,
-    metrics: { ...champion.metrics, measuredOutcome: { incrementalLift, power } } as PolicyMetrics,
+    metrics: { ...champion.metrics, measuredOutcome: { incrementalLift, relativeLift, power } } as PolicyMetrics,
   });
 
   it("(b) present + POWERED + POSITIVE lift vs. a powered champion baseline ⇒ gate allows", async () => {
     const e = new EvolutionEngine({
       champion: champPowered(0.05, 0.95),
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.08, power: 0.95 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.08, relativeLift: 0.08, power: 0.95 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -253,7 +307,7 @@ describe("EvolutionEngine gate — measured-outcome POWER FLOOR (Wave-2 D)", () 
   it("(c) present + POWERED + NEGATIVE lift vs. a powered champion baseline ⇒ gate BLOCKS", async () => {
     const e = new EvolutionEngine({
       champion: champPowered(0.05, 0.95),
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, power: 0.95 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, relativeLift: 0.02, power: 0.95 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -264,9 +318,9 @@ describe("EvolutionEngine gate — measured-outcome POWER FLOOR (Wave-2 D)", () 
   it("(d) present but UNDERPOWERED (candidate side) ⇒ does NOT block on the regressed lift — falls back to the proxy, which passes", async () => {
     const e = new EvolutionEngine({
       champion: champPowered(0.05, 0.95),
-      // The lift itself REGRESSES (0.02 < 0.05), but the candidate's OWN measurement is far below the
+      // The rate itself REGRESSES (0.02 < 0.05), but the candidate's OWN measurement is far below the
       // floor — too noisy to trust in EITHER direction, so the gate must not block on it.
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, power: 0.1 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, relativeLift: 0.02, power: 0.1 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -279,7 +333,7 @@ describe("EvolutionEngine gate — measured-outcome POWER FLOOR (Wave-2 D)", () 
   it("(d) present but UNDERPOWERED (champion baseline side) ⇒ also falls back to the proxy", async () => {
     const e = new EvolutionEngine({
       champion: champPowered(0.05, 0.2), // champion's OWN baseline measurement is underpowered
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, power: 0.95 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, relativeLift: 0.02, power: 0.95 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -291,7 +345,18 @@ describe("EvolutionEngine gate — measured-outcome POWER FLOOR (Wave-2 D)", () 
   it("(d) a NON-FINITE lift still BLOCKS even though `power` is present and adequate — malformed is never merely 'underpowered'", async () => {
     const e = new EvolutionEngine({
       champion: champPowered(0.05, 0.95),
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: NaN, power: 0.99 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: NaN, relativeLift: 0.5, power: 0.99 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-invalid");
+  });
+
+  it("(d, durability NOW-2) a NON-FINITE relativeLift still BLOCKS even though `power` is present and adequate — malformed is never merely 'underpowered'", async () => {
+    const e = new EvolutionEngine({
+      champion: champPowered(0.05, 0.95),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.5, relativeLift: NaN, power: 0.99 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -302,7 +367,7 @@ describe("EvolutionEngine gate — measured-outcome POWER FLOOR (Wave-2 D)", () 
   it("underpowered ALSO bypasses the baseline-absent check (no champion measuredOutcome at all)", async () => {
     const e = new EvolutionEngine({
       champion, // no measuredOutcome whatsoever
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.5, power: 0.05 } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.5, relativeLift: 0.5, power: 0.05 } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
@@ -314,11 +379,22 @@ describe("EvolutionEngine gate — measured-outcome POWER FLOOR (Wave-2 D)", () 
   it("power exactly AT the floor is adequate (>=, not >)", async () => {
     const e = new EvolutionEngine({
       champion: champPowered(0.05, MEASURED_OUTCOME_POWER_FLOOR),
-      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, power: MEASURED_OUTCOME_POWER_FLOOR } } }),
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 0.02, relativeLift: 0.02, power: MEASURED_OUTCOME_POWER_FLOOR } } }),
     });
     e.propose(P("mo"));
     const rec = await e.evaluate("mo");
     // at-floor is adequate ⇒ trusted ⇒ the regressed lift (0.02 < 0.05) BLOCKS, same as (c).
+    expect(rec.status).toBe("blocked");
+    expect(rec.gate?.reasons).toContain("measured-outcome-regressed");
+  });
+
+  it("(durability NOW-2) a candidate with a HIGHER absolute lift but LOWER relativeLift still BLOCKS even when both sides are well-powered", async () => {
+    const e = new EvolutionEngine({
+      champion: champPowered(0.5, 0.95, 100), // low volume, high 50% rate
+      grader: new MockGrader({ mo: { ...GOOD, policyId: "mo", measuredOutcome: { incrementalLift: 5000, relativeLift: 0.1, power: 0.95 } } }),
+    });
+    e.propose(P("mo"));
+    const rec = await e.evaluate("mo");
     expect(rec.status).toBe("blocked");
     expect(rec.gate?.reasons).toContain("measured-outcome-regressed");
   });
@@ -409,9 +485,16 @@ describe("EvolutionEngine gate — PR-1 governance floor (fairness / leak / disp
 // the caller-attested qualityScore. This is the pure engine half of item (e); the control-plane half
 // (monitorServing actually reverting serving on this verdict) is covered in control-plane's test suite.
 describe("EvolutionEngine.regressionVerdict — measured-outcome preference (Wave-2 D)", () => {
-  const champWithMO = (incrementalLift: number, power?: number) => ({
+  // durability NOW-2: the comparison is on `relativeLift` (rate-normalized), never the absolute
+  // `incrementalLift` — see `gate()`'s header comment on the same seam. `incrementalLift` still rides
+  // along (defaults to the same value as `relativeLift` unless a test explicitly diverges them) for the
+  // malformed/non-finite fail-closed check.
+  const champWithMO = (relativeLift: number, power?: number, incrementalLift = relativeLift) => ({
     policy: DEFAULT_POLICY,
-    metrics: { ...champion.metrics, measuredOutcome: power === undefined ? { incrementalLift } : { incrementalLift, power } } as PolicyMetrics,
+    metrics: {
+      ...champion.metrics,
+      measuredOutcome: power === undefined ? { incrementalLift, relativeLift } : { incrementalLift, relativeLift, power },
+    } as PolicyMetrics,
   });
 
   it("(a) measuredOutcome absent on the observation ⇒ byte-identical to the qualityScore-only verdict", () => {
@@ -423,19 +506,19 @@ describe("EvolutionEngine.regressionVerdict — measured-outcome preference (Wav
   it("(e) PREFERS a trustworthy measured-lift regression over a HEALTHY caller-attested qualityScore", () => {
     const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
     // qualityScore looks great (0.99 >> champion's 0.75) — the OLD proxy-only verdict would say healthy.
-    const verdict = e.regressionVerdict({ qualityScore: 0.99, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, power: 0.95 } });
+    const verdict = e.regressionVerdict({ qualityScore: 0.99, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, relativeLift: 0.01, power: 0.95 } });
     expect(verdict).toEqual({ regressed: true, reason: "measured-outcome-regression" });
   });
 
   it("a trustworthy measured lift that did NOT regress reports healthy even if isolated from qualityScore", () => {
     const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
-    const verdict = e.regressionVerdict({ qualityScore: 0.01, safetyPass: true, measuredOutcome: { incrementalLift: 0.08, power: 0.95 } });
+    const verdict = e.regressionVerdict({ qualityScore: 0.01, safetyPass: true, measuredOutcome: { incrementalLift: 0.08, relativeLift: 0.08, power: 0.95 } });
     expect(verdict).toEqual({ regressed: false });
   });
 
   it("underpowered measured lift ⇒ falls back to the caller-attested qualityScore ('else keep attested')", () => {
     const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
-    const verdict = e.regressionVerdict({ qualityScore: 0.5, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, power: 0.1 } });
+    const verdict = e.regressionVerdict({ qualityScore: 0.5, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, relativeLift: 0.01, power: 0.1 } });
     expect(verdict).toEqual({ regressed: true, reason: "quality-regression" });
   });
 
@@ -455,7 +538,7 @@ describe("EvolutionEngine.regressionVerdict — measured-outcome preference (Wav
     const verdict = e.regressionVerdict({
       qualityScore: 0.5,
       safetyPass: true,
-      measuredOutcome: { incrementalLift: 0.5, power: 0.99 },
+      measuredOutcome: { incrementalLift: 0.5, relativeLift: 0.5, power: 0.99 },
     });
     expect(verdict).toEqual({ regressed: true, reason: "quality-regression" }); // NOT suppressed as healthy
   });
@@ -464,24 +547,46 @@ describe("EvolutionEngine.regressionVerdict — measured-outcome preference (Wav
     const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
     // Regression: qualityScore looks healthy but the powered-both-sides measured lift regressed.
     expect(
-      e.regressionVerdict({ qualityScore: 0.99, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, power: 0.95 } }),
+      e.regressionVerdict({ qualityScore: 0.99, safetyPass: true, measuredOutcome: { incrementalLift: 0.01, relativeLift: 0.01, power: 0.95 } }),
     ).toEqual({ regressed: true, reason: "measured-outcome-regression" });
     // Healthy: qualityScore looks bad but the powered-both-sides measured lift did not regress.
     expect(
-      e.regressionVerdict({ qualityScore: 0.01, safetyPass: true, measuredOutcome: { incrementalLift: 0.08, power: 0.95 } }),
+      e.regressionVerdict({ qualityScore: 0.01, safetyPass: true, measuredOutcome: { incrementalLift: 0.08, relativeLift: 0.08, power: 0.95 } }),
     ).toEqual({ regressed: false });
   });
 
   it("no baseline measuredOutcome to compare against ⇒ falls back to qualityScore", () => {
     const e = engineWith({ good: GOOD }); // champion carries no measuredOutcome
-    const verdict = e.regressionVerdict({ qualityScore: 0.9, safetyPass: true, measuredOutcome: { incrementalLift: -5, power: 0.95 } });
+    const verdict = e.regressionVerdict({ qualityScore: 0.9, safetyPass: true, measuredOutcome: { incrementalLift: -5, relativeLift: -5, power: 0.95 } });
     expect(verdict).toEqual({ regressed: false });
   });
 
   it("a safety failure always regresses regardless of a positive measured lift", () => {
     const e = new EvolutionEngine({ champion: champWithMO(0.05, 0.95), grader: new MockGrader({}) });
-    const verdict = e.regressionVerdict({ qualityScore: 0.99, safetyPass: false, measuredOutcome: { incrementalLift: 100, power: 0.99 } });
+    const verdict = e.regressionVerdict({ qualityScore: 0.99, safetyPass: false, measuredOutcome: { incrementalLift: 100, relativeLift: 100, power: 0.99 } });
     expect(verdict).toEqual({ regressed: true, reason: "safety-regression" });
+  });
+
+  // Durability NOW-2 — the core fix, at the regressionVerdict layer: a HIGHER absolute incrementalLift
+  // must never mask a LOWER relativeLift, and vice versa.
+  it("(durability NOW-2) a HIGHER absolute lift but LOWER relativeLift observation ⇒ regressed — never healthy purely on volume", () => {
+    const e = new EvolutionEngine({ champion: champWithMO(0.5, 0.95, 100), grader: new MockGrader({}) }); // low volume, high 50% rate bar
+    const verdict = e.regressionVerdict({
+      qualityScore: 0.99, // looks healthy on the proxy
+      safetyPass: true,
+      measuredOutcome: { incrementalLift: 5000, relativeLift: 0.1, power: 0.95 }, // huge absolute lift, worse per-shopper rate
+    });
+    expect(verdict).toEqual({ regressed: true, reason: "measured-outcome-regression" });
+  });
+
+  it("(durability NOW-2) a LOWER absolute lift but HIGHER relativeLift observation ⇒ healthy — not penalized for lower volume", () => {
+    const e = new EvolutionEngine({ champion: champWithMO(0.1, 0.95, 5000), grader: new MockGrader({}) }); // high volume, weak 10% rate bar
+    const verdict = e.regressionVerdict({
+      qualityScore: 0.01, // looks bad on the proxy
+      safetyPass: true,
+      measuredOutcome: { incrementalLift: 100, relativeLift: 0.5, power: 0.95 }, // small absolute lift, genuinely better rate
+    });
+    expect(verdict).toEqual({ regressed: false });
   });
 });
 

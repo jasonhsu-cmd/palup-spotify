@@ -258,8 +258,13 @@ describe("AutoOptimizeOrchestrator (ADR-0014 T4f)", () => {
       expect(sc.engine.getCandidate("cand")?.auto?.stage).toBe("canaried");
 
       const entry = sc.engine.getAudit().find((a) => a.action === "auto_canary");
+      // Durability NOW-2: `readServingMeasuredOutcome`/`MeasuredOutcomeSignal` now also carries
+      // `relativeLift` (honest zero here too, same underpowered read) — this passthrough is audit-only
+      // and unaffected by the rate-comparison change itself, but the real composed object now has the
+      // extra field.
       expect(entry?.detail?.measuredOutcome).toEqual({
         incrementalLift: 0,
+        relativeLift: 0,
         power: 0,
         underpowered: true,
         method: expect.stringMatching(/underpowered/),

@@ -92,7 +92,7 @@ export class EvolutionEngine {
    * the baseline back to "no measured-outcome opinion" — `gate()`'s own absent/underpowered handling
    * then falls back to the quality proxy exactly as if this method were never called (dark-safe).
    */
-  setChampionMeasuredOutcome(measuredOutcome?: { incrementalLift: number; power?: number }): void {
+  setChampionMeasuredOutcome(measuredOutcome?: { incrementalLift: number; relativeLift: number; power?: number }): void {
     this.champion = { ...this.champion, metrics: { ...this.champion.metrics, measuredOutcome } };
   }
 
@@ -193,16 +193,25 @@ export class EvolutionEngine {
     // idiom exactly: no baseline to compare against ⇒ fail closed (can't prove not-worse), same-direction
     // regression ⇒ fail closed. Still proxy-gated until Phase 1 lands: a measured win can never override a
     // safety/floor/counter-metric/fairness/holdout failure above, it can only ADD a requirement.
+    //
+    // Durability NOW-2 (security review): the COMPARISON is on `relativeLift` (RATE-normalized —
+    // `computeIncrementalLift`'s `relativeLift`, `platform-ports/outcome-ledger.ts`), NEVER the absolute
+    // `incrementalLift` — an exposure-scaled absolute lift lets a candidate served to MORE traffic "win"
+    // purely on volume against a champion that is genuinely worse per-shopper. `incrementalLift` is still
+    // carried on `PolicyMetrics.measuredOutcome` for audit/display, but it no longer feeds any pass/fail
+    // decision here.
     const candMO = cand.measuredOutcome;
     const champMO = champ.measuredOutcome;
     // Fail-CLOSED on a malformed measuredOutcome (security review): a present-but-non-finite
-    // `incrementalLift` (NaN/Infinity/non-number) on EITHER side must BLOCK, mirroring the `complaintRate`
-    // `isRate01` hardening above — a raw `<` would evaluate false and silently no-op the seam (fail-OPEN).
-    // UNCONDITIONAL — a malformed value is a data-integrity failure, never merely "underpowered", so it is
-    // never eligible for the power-floor fallback below.
+    // `relativeLift` OR `incrementalLift` (NaN/Infinity/non-number) on EITHER side must BLOCK, mirroring
+    // the `complaintRate` `isRate01` hardening above — a raw `<` would evaluate false and silently no-op
+    // the seam (fail-OPEN). UNCONDITIONAL — a malformed value is a data-integrity failure, never merely
+    // "underpowered", so it is never eligible for the power-floor fallback below. `incrementalLift` stays
+    // checked too (never regressed to a laxer floor than before NOW-2) even though it no longer decides
+    // the comparison itself.
     const measuredOutcomeMalformed =
-      (candMO !== undefined && !Number.isFinite(candMO.incrementalLift)) ||
-      (champMO !== undefined && !Number.isFinite(champMO.incrementalLift));
+      (candMO !== undefined && (!Number.isFinite(candMO.relativeLift) || !Number.isFinite(candMO.incrementalLift))) ||
+      (champMO !== undefined && (!Number.isFinite(champMO.relativeLift) || !Number.isFinite(champMO.incrementalLift)));
     // Revenue-flywheel Wave-2 (D) — the POWER FLOOR (see `MEASURED_OUTCOME_POWER_FLOOR`/`powerAdequate`
     // below). `power` ABSENT on a side ⇒ that side is treated as adequate (the pre-Wave-2-D behavior:
     // every #349 caller, none of which ever set `power`, is byte-identical). `power` EXPLICITLY below the
@@ -216,9 +225,11 @@ export class EvolutionEngine {
     const measuredOutcomeUnderpowered = candMO !== undefined && !measuredOutcomeMalformed && !measuredOutcomeTrustworthy;
     const measuredOutcomeBaselineAbsent =
       measuredOutcomeTrustworthy && candMO !== undefined && champMO === undefined;
+    // durability NOW-2: compare `relativeLift` (rate-normalized), not `incrementalLift` (absolute,
+    // exposure-scaled) — see the header comment above.
     const measuredOutcomeRegressed =
       measuredOutcomeTrustworthy && candMO !== undefined && champMO !== undefined &&
-      candMO.incrementalLift < champMO.incrementalLift;
+      candMO.relativeLift < champMO.relativeLift;
     if (measuredOutcomeMalformed) reasons.push("measured-outcome-invalid");
     if (measuredOutcomeBaselineAbsent) reasons.push("measured-outcome-baseline-absent");
     if (measuredOutcomeRegressed) reasons.push("measured-outcome-regressed");
@@ -455,9 +466,11 @@ export class EvolutionEngine {
      * on every caller today (dormant — item (a): byte-identical to the qualityScore-only verdict below).
      * When present, PREFERRED over `qualityScore` (the caller-attested proxy) whenever it is trustworthy
      * AND comparable — see the `preferMeasured` derivation just below for the exact conditions; otherwise
-     * this falls through to the qualityScore check completely unchanged.
+     * this falls through to the qualityScore check completely unchanged. Durability NOW-2: the actual
+     * comparison is on `relativeLift` (rate-normalized), never the absolute `incrementalLift` — see
+     * `gate()`'s header comment on the same seam for why.
      */
-    measuredOutcome?: { incrementalLift: number; power?: number };
+    measuredOutcome?: { incrementalLift: number; relativeLift: number; power?: number };
   }): { regressed: boolean; reason?: string } {
     if (!observed.safetyPass) return { regressed: true, reason: "safety-regression" };
     // The bar is the PREVIOUS champion's metrics — the one the current champion had to beat to ship. Once
@@ -477,11 +490,14 @@ export class EvolutionEngine {
     // UNCHANGED — "else keep attested".
     const observedMO = observed.measuredOutcome;
     const barMO = bar.measuredOutcome;
+    // Durability NOW-2: require BOTH `relativeLift` and `incrementalLift` finite before trusting the
+    // signal (never a laxer floor than before), but the COMPARISON below is on `relativeLift` — see
+    // `gate()`'s header comment on the same seam.
     const preferMeasured =
-      observedMO !== undefined && Number.isFinite(observedMO.incrementalLift) && powerAdequate(observedMO.power) &&
-      barMO !== undefined && Number.isFinite(barMO.incrementalLift) && powerAdequate(barMO.power);
+      observedMO !== undefined && Number.isFinite(observedMO.relativeLift) && Number.isFinite(observedMO.incrementalLift) && powerAdequate(observedMO.power) &&
+      barMO !== undefined && Number.isFinite(barMO.relativeLift) && Number.isFinite(barMO.incrementalLift) && powerAdequate(barMO.power);
     if (preferMeasured) {
-      if (observedMO!.incrementalLift < barMO!.incrementalLift) return { regressed: true, reason: "measured-outcome-regression" };
+      if (observedMO!.relativeLift < barMO!.relativeLift) return { regressed: true, reason: "measured-outcome-regression" };
       return { regressed: false };
     }
     if (observed.qualityScore < bar.qualityScore) return { regressed: true, reason: "quality-regression" };

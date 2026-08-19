@@ -59,15 +59,30 @@ export interface PolicyMetrics {
    * shoppers served this policy vs. a held-out control). Absent today: nothing populates this yet, so
    * every existing caller is byte-identical and the gate decides on `qualityScore` exactly as before.
    * `engine.gate` treats it as an ADDITIONAL, never-a-substitute requirement: when the candidate carries
-   * it, its `incrementalLift` must be non-regressive vs. the champion's own `measuredOutcome` (same
-   * fail-closed idiom as the holdout anti-overfit check — see engine.ts), on top of every other check.
-   * This is the seam Phase 1's measured lift will feed; until then the proxy (`qualityScore`) is what
-   * actually gates every promotion.
+   * it, its `relativeLift` (RATE-normalized, durability NOW-2 — see that field's own doc comment) must be
+   * non-regressive vs. the champion's own `measuredOutcome` (same fail-closed idiom as the holdout
+   * anti-overfit check — see engine.ts), on top of every other check. This is the seam Phase 1's measured
+   * lift will feed; until then the proxy (`qualityScore`) is what actually gates every promotion.
    */
   measuredOutcome?: {
-    /** HIGHER is better — the incremental lift (e.g. fractional revenue/conversion delta) of the
-     * treated arm over its holdout. Compared candidate-vs-champion, same direction as qualityScore. */
+    /** USD (or whatever unit the ledger's revenue field carries) — the ABSOLUTE incremental lift
+     * (`computeIncrementalLift`'s `incrementalLift`, `platform-ports/outcome-ledger.ts`) of the treated
+     * arm over its holdout. AUDIT/DISPLAY ONLY as of durability NOW-2: the gate/monitor comparison uses
+     * `relativeLift` below, never this field — an absolute USD/count figure is exposure-scaled, so a
+     * candidate served to MORE traffic can post a bigger `incrementalLift` than a genuinely
+     * worse-per-shopper champion purely on volume. Kept for the audit trail ("you made me $X") but never
+     * compared candidate-vs-champion. */
     incrementalLift: number;
+    /** (treated rate − control rate) / control rate — `computeIncrementalLift`'s `relativeLift`,
+     * RATE-NORMALIZED (per-exposure), never exposure-scaled. THIS is the field the gate (`engine.ts`
+     * `gate`'s `measuredOutcomeRegressed`) and the monitor (`regressionVerdict`) compare
+     * candidate-vs-champion, same direction as qualityScore (higher is better) — durability NOW-2, fixing
+     * the volume/cumulative bias an absolute-lift comparison had (a higher-traffic candidate could "win"
+     * on `incrementalLift` alone despite converting WORSE per shopper). Subject to the exact same
+     * fail-closed floors as `incrementalLift` always was: non-finite on either side blocks
+     * (`measured-outcome-invalid`), and the whole comparison is skipped (falls back to the proxy) unless
+     * BOTH sides clear `MEASURED_OUTCOME_POWER_FLOOR`. */
+    relativeLift: number;
     /** Statistical power/confidence of the measurement (0..1). Revenue-flywheel Wave-2 (D): the gate
      * (engine.ts `gate`, `MEASURED_OUTCOME_POWER_FLOOR`) and the monitor (`regressionVerdict`) now
      * ENFORCE a floor on this — absent ⇒ treated as adequate (back-compat, the pre-Wave-2-D behavior:
