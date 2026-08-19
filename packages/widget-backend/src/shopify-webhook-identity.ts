@@ -162,16 +162,18 @@ export const CATALOG_TOPICS = ["products/create", "products/update", "products/d
  * `refundedAmountOf` below), mirroring how `productIdOf` and `customerIdOf` are separate reads over
  * different resource shapes rather than one polymorphic reader.
  *
- * ⚠ RECOLLECTION, NOT A PRIMARY-SOURCE CITATION (unlike [W1]/[W2]/[W3] above). Every other wire-format
- * claim in this file cites a retrieved, dated shopify.dev/GitHub source; this session had no web
- * access, so the Order/Refund payload field names below (`note_attributes`, `total_price`, `currency`,
- * `order_id`, `transactions[].amount`) are from general knowledge of Shopify's Admin REST resources,
- * NOT a fetched or captured document. `read_orders` is not a granted scope (deliberately — see
- * `routes/shopify-webhooks.ts`'s W2-C header), so nothing here has ever seen a live payload either.
- * Treat every extractor below as UNVERIFIED until a real captured (or shopify.dev-cited) payload
- * confirms the field names — the same caveat this file's own header already carries for the
- * compliance/catalog topics ("NO GOLDEN VECTOR… NO LIVE DELIVERY"), stated explicitly here because
- * this time it also covers the FIELD NAMES, not just byte-equality.
+ * ✔ FIELD NAMES VERIFIED against shopify.dev's REST Admin API resource docs (Order + Refund, `latest`,
+ * retrieved 2026-08-19): an Order's `note_attributes` is an array of `{name, value}` objects,
+ * `total_price` is a decimal string (e.g. `"409.94"`), and `currency` is the top-level order currency
+ * code (`"USD"`); a Refund carries a top-level `id`, an `order_id` (its PARENT order), and a
+ * `transactions[]` array whose entries carry a decimal-string `amount` (e.g. `"209.00"`). So the
+ * extractors below read the correct fields. TWO caveats remain (the same "NO LIVE DELIVERY" class this
+ * file's header carries for the compliance/catalog topics): (a) `read_orders` is deliberately not a
+ * granted scope (see `routes/shopify-webhooks.ts`'s W2-C header), so no LIVE payload has ever been
+ * captured against these extractors; (b) REST is a LEGACY API (2024-10) — a pre-enable check must
+ * confirm the app's webhook API version/transport still delivers this REST-shaped body, since a
+ * GraphQL webhook subscription can carry a different shape. Every extractor fails CLOSED (unattributed)
+ * on any field it cannot read, so a shape mismatch degrades to no-measurement, never a wrong tally.
  */
 export const ORDER_TOPICS = ["orders/create", "orders/updated"] as const;
 export const REFUND_TOPIC = "refunds/create" as const;
