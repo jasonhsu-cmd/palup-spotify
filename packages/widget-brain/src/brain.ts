@@ -34,6 +34,7 @@ import type {
   Policy,
   RecalledFact,
   RecommendedProductCard,
+  SuggestedChip,
   SafetyClass,
   Signals,
 } from "./types.js";
@@ -657,6 +658,22 @@ const EXIT_INTENT_PROMPT =
 const GREETING_PROMPT =
   "The shopper just opened the chat. Greet them with ONE warm, brief, on-brand welcome and invite them to ask about a product or their order. Do NOT recommend or pitch a product, do NOT mention or offer any discount or promotion, and do NOT invent facts. A single friendly sentence.";
 
+// Pillar 3 (opener) — the fit-first FIRST-TOUCH opener prompt. A DISTINCT const from GREETING_PROMPT so the
+// plain-greeting eval stays byte-identical. Still NON-COMMERCIAL by construction (the rung returns
+// pitch:"none", never calls selectPitch, and the discount backstop applies): a warm, fit-first invitation,
+// never a pitch, never a price/discount/urgency/scarcity, never an invented fact or an off-context product.
+const OPENER_PROMPT =
+  "The shopper just opened the chat. In ONE warm, brief, on-brand sentence, welcome them and invite them to find what fits — offer to help them find their match or see what's popular. Be helpful and fit-first, never pushy. Do NOT pitch or hard-sell, do NOT mention or offer any discount, promotion, coupon, sale, price, urgency, or scarcity, do NOT say 'buy now', and do NOT invent facts or name a product that is not in the context. A single friendly sentence.";
+
+// The opener's tappable quick-reply chips. CODE-OWNED (never model output) and a CLOSED action enum, so a
+// chip can never carry a scarcity/discount/urgency string — the anti-dark-pattern defense. The labels here
+// are the exact strings the widget renders; the actions map to the widget's canned discovery messages.
+const OPENER_CHIPS: readonly SuggestedChip[] = [
+  { label: "Find my match", action: "find_my_match" },
+  { label: "Bestsellers", action: "bestsellers" },
+  { label: "New here?", action: "new_here" },
+];
+
 /**
  * THE NUMBER OF CANDIDATES retrieval puts in the prompt, and the argument for it.
  *
@@ -984,6 +1001,13 @@ export function createBrain(
   // read and the CATALOG/cards block is byte-identical. money/NN#1 fail-honest → §5 human promotion.
   channelHealthFor?: (tenantId: string) => Promise<boolean>,
   priceRequiresLiveChannelEnabled = false,
+  // Pillar 3 (opener) — the PROACTIVE_OPENER posture flag, threaded like every flag above (positional,
+  // default OFF, no env read in this package). When ON (and the greeting fires + not at cap), the first-touch
+  // greeting is UPGRADED to a fit-first opener: OPENER_PROMPT + tappable quick-reply chips from the code-owned
+  // OPENER_CHIPS set. Still NON-COMMERCIAL by construction — pitch:"none", never selectPitch, no INV-E spend,
+  // the discount backstop still applies. Default OFF ⇒ the plain GREETING_PROMPT path is byte-identical. A new
+  // shopper-reaching proactive surface ⇒ eval gate → shadow → canary → named-human approval (HITL §5).
+  proactiveOpenerEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -1543,13 +1567,26 @@ export function createBrain(
         // `relationship` is server-derived ("new" only for a verified shopper, else "anonymous"); it only
         // TONES the greeting — there is no pitch for it to gate.
         const rel = signals.relationship === "new" ? "new" : "anonymous";
+        // Pillar 3 (opener) — when PROACTIVE_OPENER is on, UPGRADE the greeting to a fit-first opener:
+        // OPENER_PROMPT + code-owned quick-reply chips. Still non-commercial (pitch:"none"; the discount
+        // backstop below still runs). Flag OFF ⇒ the plain GREETING_PROMPT path is byte-identical.
+        // A NEGATIVE mood withholds the upbeat opener affordance and falls back to the plain warm greeting
+        // (never show "find my match / bestsellers" chips to a frustrated shopper — the safer sales instinct).
+        const openerNegativeMood = signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
+        const useOpener = proactiveOpenerEnabled && !openerNegativeMood;
         const greet = await model.complete({
-          messages: await groundedMessages(GREETING_PROMPT, tenantId, `RELATIONSHIP: ${rel}. One warm sentence.`, history, signals.pageContext),
+          messages: await groundedMessages(useOpener ? OPENER_PROMPT : GREETING_PROMPT, tenantId, `RELATIONSHIP: ${rel}. One warm sentence.`, history, signals.pageContext),
           temperature: 0,
           tenantId,
         });
-        // Money-guard defence in depth (a greeting must never smuggle a discount, though it never pitches).
+        // Money-guard defence in depth (a greeting/opener must never smuggle a discount, though it never pitches).
         if (await offersUngroundedDiscount(greet.text, tenantId)) return discountGuardrail();
+        if (useOpener) {
+          flags.push("opener");
+          // Fresh chip OBJECTS per decision (a shallow array copy would still share the const's objects), so
+          // no downstream consumer can mutate the shared OPENER_CHIPS.
+          return { mode: "smalltalk", reply: greet.text, pitch: "none", escalateToHuman: false, outbound: false, safetyClass: "none", flags, model: greet.model, suggestedChips: OPENER_CHIPS.map((c) => ({ ...c })) };
+        }
         return { mode: "smalltalk", reply: greet.text, pitch: "none", escalateToHuman: false, outbound: false, safetyClass: "none", flags, model: greet.model };
       }
 

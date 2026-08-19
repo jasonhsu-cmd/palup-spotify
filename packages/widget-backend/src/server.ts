@@ -754,6 +754,11 @@ export async function buildServer(opts?: {
   // withholding is still a shopper-visible behaviour change (money/NN#1). OFF ⇒ channelHealthFor is never
   // read by createBrain and the CATALOG block is byte-identical.
   const PRICE_REQUIRES_LIVE_CHANNEL = process.env.PRICE_REQUIRES_LIVE_CHANNEL === "true";
+  // Pillar 3 (opener) — PROACTIVE_OPENER: upgrade the first-touch greeting to a fit-first opener (code-owned
+  // quick-reply chips today; a best-fit card in a follow-on). Default OFF ⇒ the plain greeting is
+  // byte-identical. A new shopper-reaching proactive surface + agent-behaviour change ⇒ eval gate → shadow →
+  // canary → named-human approval (HITL §5). Only takes effect alongside GREETING_PROACTIVE (it's a greeting upgrade).
+  const PROACTIVE_OPENER = process.env.PROACTIVE_OPENER === "true";
   // 3b — OUTGOING_OFFER_CHECK: run the language-agnostic semantic check on the outgoing reply (a backstop to
   // the deterministic keyword floor) per sales turn. Same governed posture-flag discipline: env-read here,
   // default OFF, turning it on is a human promotion (HITL §5) — it adds a per-turn model call (cost) and is
@@ -822,7 +827,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL })
+  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -886,6 +891,9 @@ export async function buildServer(opts?: {
         // Position 26 — PRICE_REQUIRES_LIVE_CHANNEL. Default OFF ⇒ channelHealthFor above is never invoked
         // and the CATALOG/cards block is byte-identical.
         PRICE_REQUIRES_LIVE_CHANNEL,
+        // Position 27 — Pillar 3 PROACTIVE_OPENER. Default OFF ⇒ the greeting rung uses the plain
+        // GREETING_PROMPT and mints no chips ⇒ the greeting Decision + /chat wire are byte-identical.
+        PROACTIVE_OPENER,
       );
       brains.set(key, b);
     }
