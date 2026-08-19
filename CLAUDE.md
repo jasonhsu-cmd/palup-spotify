@@ -175,8 +175,12 @@ staging service (`MEMORY_ENABLED="true"`) and OFF in production (unset — and p
 Enabling it FURTHER — production, or the legal-gated carry-over / special-category paths — is a **human-only**
 step gated on `docs/MEMORY-GO-LIVE-CHECKLIST.md`, never a build agent's, and never as a side effect of other
 work. And
-`control-plane` is built and tested but **deployed nowhere**, so every operator surface it exposes is
-unreachable in staging; the CLI jobs (`pnpm kill:arm`, `pnpm cap:set`) are the working path today.
+`control-plane` is built, tested, and now **deployed on internal staging** as the Cloud Run service
+`palup-control-staging` (2026-08-19), sharing the widget-backend `DATABASE_URL`; its operator surfaces
+require authentication (no public/unauthenticated access — a caller needs `run.invoker`), so they are
+reachable on staging but **not** in production, where `control-plane` is **deployed nowhere**. The CLI
+jobs (`pnpm kill:arm`, `pnpm cap:set`, and now `pnpm holdout:set` / `pnpm stepup:mint`) remain a working
+path and do not depend on the service being reachable.
 
 ## 7. When you are unsure
 
