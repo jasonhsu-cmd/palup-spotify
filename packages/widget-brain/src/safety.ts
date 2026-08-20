@@ -29,6 +29,15 @@ import type { SafetyClass } from "./types.js";
  * either over-match (catching an unrelated word) or under-match (losing an inflection the substring
  * form caught for free). Every entry states which real string it protects.
  */
+// F1 FIX ROUND 1 (security review, HIGH false-positive): "hurt myself" / "harm myself" are ordinary
+// English for self-sabotage when followed by a recontextualizing clause — "harming myself by skipping
+// sunscreen", "hurting myself financially" — which is NOT self-harm distress. Unlike "kill myself"
+// (a closed idiom with no benign continuation — nobody says "I'm killing myself financially"), "hurt"
+// and "harm" need the match to stop at a clause boundary: end-of-string, sentence punctuation, or a
+// short list of continuations that keep the distress reading ("tonight", "again", "right now", "badly").
+// Anything else after "myself" (a preposition, "not", "financially", etc.) falls through to "none".
+const SELF_HARM_CLAUSE_END = String.raw`(?=\s*$|[.!?,;:]|\s+(?:tonight|again|right now|badly|so bad))`;
+
 const TERM_PATTERN: Record<string, string> = {
   // Punctuation: a trailing \b after ":" would require a word char next, breaking "system: you are now".
   "system:": String.raw`\bsystem\s*:`,
@@ -36,16 +45,19 @@ const TERM_PATTERN: Record<string, string> = {
   "[system": String.raw`\[\s*system`,
   // MORPHOLOGY WE MUST KEEP. "burning" is floor case SAFE-1's own text.
   burn: String.raw`\bburn(s|ed|ing|t)?\b`,
-  // F1: "hurting myself" (gerund) is missed by a literal `\bhurt myself\b`. Anchoring on "myself" (not
-  // just "me") keeps this from over-matching idioms like "this workout is killing me" — see the sibling
-  // `kill myself` override below for the same reasoning applied to "killing myself".
-  "hurt myself": String.raw`\bhurt(ing|s)?\s+myself\b`,
+  // F1: "hurting myself" (gerund) is missed by a literal `\bhurt myself\b`. Requires a clause boundary
+  // right after "myself" (see SELF_HARM_CLAUSE_END) so "hurting myself financially" / "I only hurt
+  // myself by waiting for the sale to end" stay "none" while "I feel like hurting myself" (ends the
+  // clause) still matches.
+  "hurt myself": String.raw`\bhurt(ing|s)?\s+myself\b${SELF_HARM_CLAUSE_END}`,
   // Same gerund gap as "hurt myself", plus this is a NEW base term ("harm myself" was not covered at all
-  // before — only the unrelated word order "self harm"/"self-harm").
-  "harm myself": String.raw`\bharm(ing|ed|s)?\s+myself\b`,
-  // "killing myself" is unambiguous self-harm distress; the "myself" anchor is what keeps this from
-  // matching "this workout is killing me" / "these prices are killing me" (verified false-positive guards
-  // in brain-safety-precision.test.ts).
+  // before — only the unrelated word order "self harm"/"self-harm"). Same clause-boundary guard: "harming
+  // myself by skipping sunscreen" is a normal skincare sentence, not distress.
+  "harm myself": String.raw`\bharm(ing|ed|s)?\s+myself\b${SELF_HARM_CLAUSE_END}`,
+  // "killing myself" is unambiguous self-harm distress with no ordinary benign continuation (nobody says
+  // "I'm killing myself financially/by skipping sunscreen") — the "myself" anchor alone is what keeps
+  // this from matching "this workout is killing me" / "these prices are killing me" (verified
+  // false-positive guards in brain-safety-precision.test.ts). No clause-boundary guard needed here.
   "kill myself": String.raw`\bkill(ing|ed|s)?\s+myself\b`,
   // Prefix stems — the substring form was already acting as a stem, so \w* preserves exactly that.
   irritat: String.raw`\birritat\w*`,

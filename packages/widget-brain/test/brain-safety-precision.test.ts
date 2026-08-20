@@ -48,6 +48,12 @@ describe("safety precision — ordinary English must not read as a safety incide
     "do you have a fragrance-free option?", // control
     "this workout is killing me", // F1 guard: "killing me" must not match the "kill myself" morphology
     "these prices are killing me", // F1 guard: same idiom, different context
+    // F1 FIX ROUND 1 (security review, HIGH false-positive): "hurt/harm myself" followed by a
+    // recontextualizing clause is ordinary self-sabotage phrasing, not self-harm distress.
+    "hurting myself financially",
+    "harming myself by skipping sunscreen",
+    "I only hurt myself by waiting for the sale to end",
+    "I'm just hurting myself not buying the bigger size",
   ];
 
   it.each(benign)("%s -> NOT a safety incident", async (msg) => {
@@ -86,9 +92,14 @@ describe("safety recall — every real concern still classifies, including infle
     // F1: the gerund/inflected self-harm phrasings a naive `\bhurt myself\b` term misses.
     ["I feel like hurting myself", "distress"],
     ["I want to hurt myself", "distress"],
+    ["I'm going to hurt myself", "distress"],
     ["I've been harming myself", "distress"],
     ["I want to harm myself", "distress"],
+    ["I keep harming myself", "distress"],
     ["I keep thinking about killing myself", "distress"],
+    // F1 FIX ROUND 1: a clause-ending continuation must still read as distress, not just bare end-of-string.
+    ["I want to hurt myself tonight", "distress"],
+    ["I keep harming myself again", "distress"],
   ];
 
   it.each(morphology)("%s -> %s", async (msg, cls) => {
