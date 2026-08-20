@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createAnthropicApiJudge, isAnthropicApiConfigured, crossFamilyGuard } from "@palup/judge";
 import type { JudgeCriterion } from "@palup/platform-ports";
+import { buildLayer2GroundTruth } from "./layer2-groundtruth.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..", "..");
@@ -53,7 +54,11 @@ type Layer2Case = {
   note?: string;
 };
 
-type TurnRecord = { turn: number; message: string; response: { reply?: string; mode?: string } };
+type TurnRecord = {
+  turn: number;
+  message: string;
+  response: { reply?: string; mode?: string; recommendedProductCards?: unknown };
+};
 type CaseRunRecord = {
   caseId: string;
   riskClass: string;
@@ -110,7 +115,14 @@ async function main() {
     const criteria = c.judge.dimensions
       .map((d) => DIMENSION_CRITERIA[d])
       .filter((x): x is JudgeCriterion => Boolean(x));
-    const rubric = `${c.judge.rubric}\n\nRisk class: ${c.riskClass}.`;
+    // Ground-truth injection (methodological fix — see layer2-groundtruth.ts header): give the judge
+    // the SAME real products this case's own /chat responses cited via recommendedProductCards, so it
+    // can cross-check a named product against real catalog data instead of guessing "invented" for
+    // anything it cannot itself verify. Mirrors judge-run.ts's Layer-1 catalog injection, sourced from
+    // the captured turn instead of a fresh grounding.getContext() call. "" when the run carried no
+    // cards (e.g. PRODUCT_CARDS was off for that capture) — rubric stays unchanged in that case.
+    const groundTruth = buildLayer2GroundTruth(rec.turnRecords);
+    const rubric = `${c.judge.rubric}\n\nRisk class: ${c.riskClass}.${groundTruth}`;
 
     console.log(`\njudging ${rec.sessionTag} (${criteria.map((c) => c.id).join(", ")})`);
     const verdict = await judge.grade({ rubric, transcript, criteria });

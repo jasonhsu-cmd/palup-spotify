@@ -169,4 +169,32 @@ describe("competitor-mode handling", () => {
     expect(d.flags).not.toContain("competitor:full");
     expect(d.pitch).toBe("none");
   });
+
+  // F9 follow-up nit: COMPETITOR_FACT_QUERY missed "charge" and "how much" phrasings — a shopper
+  // asking what a competitor CHARGES, or how much something costs "at" a competitor, is the same
+  // unverifiable volatile-price ask as "competitor price", and must stay on honest_uncertainty too.
+  it("F9 follow-up: 'what does my competitor charge' stays on honest_uncertainty", async () => {
+    const { brain } = spyBrain();
+    const d = await brain.decide({}, "what does my competitor charge for this?");
+    expect(d.flags).toContain("honest_uncertainty");
+    expect(d.flags).not.toContain("competitor:full");
+    expect(d.pitch).toBe("none");
+  });
+
+  it("F9 follow-up: 'how much is it at my competitor' stays on honest_uncertainty", async () => {
+    const { brain } = spyBrain();
+    const d = await brain.decide({}, "how much is it at my competitor?");
+    expect(d.flags).toContain("honest_uncertainty");
+    expect(d.flags).not.toContain("competitor:full");
+    expect(d.pitch).toBe("none");
+  });
+
+  // Must NOT weaken the F9 comparison routing: a generic comparison question still reaches the
+  // groundingMode-aware competitor block, not honest_uncertainty.
+  it("F9 follow-up: comparison routing is unaffected by the charge/how-much additions", async () => {
+    const { brain } = spyBrain();
+    const d = await brain.decide({ groundingMode: "general" }, "how do you compare to your competitors?");
+    expect(d.flags).toContain("competitor:general");
+    expect(d.flags).not.toContain("honest_uncertainty");
+  });
 });

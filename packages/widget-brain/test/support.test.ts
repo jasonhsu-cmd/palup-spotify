@@ -31,6 +31,22 @@ describe("support intent classification", () => {
   it("still classifies a genuine bare 'wrong item/product' complaint as wrong_item", () => {
     expect(classifySupportIntent("I got the wrong product in my order")).toBe("wrong_item");
   });
+  // F4 residual — the narrowing above (pick/choos + wrong item/product/thing) doesn't distinguish WHO
+  // is doing the picking. A present-tense complaint about the MERCHANT's own fulfillment ("you keep
+  // picking the wrong item every time you fulfill my order") also matches that pattern and was wrongly
+  // falling through to "general" instead of "wrong_item". The fix must route a genuine merchant-side
+  // fulfillment complaint to wrong_item while still excluding the shopper's own future/self choice
+  // (verified by the two tests above, which must keep passing unchanged).
+  it("still classifies a present-tense MERCHANT fulfillment complaint ('you keep picking the wrong item') as wrong_item", () => {
+    expect(classifySupportIntent("you keep picking the wrong item every time you fulfill my order")).toBe(
+      "wrong_item",
+    );
+  });
+  it("still classifies 'you always choose the wrong product when you pack my order' as wrong_item", () => {
+    expect(classifySupportIntent("you always choose the wrong product when you pack my order")).toBe(
+      "wrong_item",
+    );
+  });
   it("does not read a price as an order id", () => {
     expect(extractOrderId("refund my $180 order #2000")).toBe("2000");
     expect(extractOrderId("where's my order #1042?")).toBe("1042");

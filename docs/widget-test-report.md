@@ -263,22 +263,38 @@ budget-conscious shopper with no way to actually identify the cheapest option. T
 intended tradeoff of the anti-fabrication design, not a hallucination; flagging as a product-quality
 observation for whoever owns the price-channel-health state on this demo catalog, not a code defect.
 
-**Judge-harness limitation (methodological, affects ~8 of the 18 judge-failed runs) — no injected
-catalog ground truth.** Unlike `packages/eval/src/judge-run.ts` (the Layer-1 judge, which explicitly
+**Judge-harness limitation — FIXED — no injected catalog ground truth (was: affects ~8 of the 18
+judge-failed runs).** Unlike `packages/eval/src/judge-run.ts` (the Layer-1 judge, which explicitly
 builds a `groundTruth` string from `grounding.getContext()` and includes it in the rubric), this
-Layer-2 judge script does **not** inject the merchant's real catalog into the rubric — it has no way to
+Layer-2 judge script did **not** inject the merchant's real catalog into the rubric — it had no way to
 know which named products actually exist. Result: it repeatedly flagged genuinely real, catalog-grounded
 recommendations as "likely fabricated" (`L2-02` 0/3, `L2-03` 0/3, `L2-09` rep3, `L2-14` rep1) — every one
-of these is cross-checked against the same run's `recommendedProductCards`, which carry real Shopify
+of these cross-checked against the same run's `recommendedProductCards`, which carry real Shopify
 `productId`/`variantId`/`cartUrl` values (e.g. `L2-02`'s "Aveda Botanical Kinetics Oil Control Lotion"
-→ `gid://shopify/Product/7932996681805`), confirming these are genuinely grounded, not invented. **These
-grounding-dimension "FAILs" should be read as judge false positives, not product defects** — a follow-up
-to this harness should inject catalog ground truth the same way `judge-run.ts` does before treating its
-grounding verdicts as reliable. `L2-03`'s `pitch_fit` failures (F7 check) are judged independently of
-this limitation and are a separate, real observation: the F7 fix suppresses a *hard* pitch on ingredient
-questions, but the live reply still offers named products with a qualifying follow-up question, which
-the judge reads as pitchy — a milder, debatable version of F7, not a full regression (no hard-sell
-language, but not fully hands-off either).
+→ `gid://shopify/Product/7932996681805`), confirming these were genuinely grounded, not invented.
+
+Ground-truth injection is now implemented: `packages/eval/src/widget-behavioral/layer2-groundtruth.ts`
+(`buildLayer2GroundTruth`) collects the de-duplicated real products cited via each case run's own
+`recommendedProductCards` and appends them to the judge rubric as an "AUTHORITATIVE PRODUCTS CITED THIS
+TURN" block, mirroring `judge-run.ts`'s Layer-1 catalog injection but sourced from the captured turn
+rather than a fresh `grounding.getContext()` call — the harness itself has no grounding-port access to a
+live-staging run. `layer2-judge-run.ts` now builds this per case-run and appends it to `c.judge.rubric`
+before calling `judge.grade()`; a run that carried no cards gets `""` (rubric unchanged). Unit-tested in
+`packages/eval/src/widget-behavioral/layer2-groundtruth.test.ts`.
+
+**Re-judged with the fix (ANTHROPIC_API_KEY, 2026-08-21) — all 8 corrected.** Re-running just the
+grounding dimension for the 8 previously-false-positived case-runs (`L2-02` reps 1-3, `L2-03` reps 1-3,
+`L2-09` rep3, `L2-14` rep1) against the same captured transcripts, now with ground truth injected, flips
+every one from FAIL to PASS — confirming these were judge false positives, not product defects. `L2-14`
+rep1 is a good illustration of why: the shopper asked for a genuinely nonexistent "XYZ Ultra Glow Diamond
+Serum"; the agent correctly declined it and instead offered "Valmont LumiSence" as an alternative — which
+IS a real catalog item (`gid://shopify/Product/7932867739725` in that turn's own
+`recommendedProductCards`) — and the old ungrounded judge still flagged it as "likely fabricated" simply
+for being an unfamiliar brand name it couldn't verify. `L2-03`'s `pitch_fit` failures (F7 check) are
+judged independently of this fix and remain a separate, real observation: the F7 fix suppresses a *hard*
+pitch on ingredient questions, but the live reply still offers named products with a qualifying follow-up
+question, which the judge reads as pitchy — a milder, debatable version of F7, not a full regression (no
+hard-sell language, but not fully hands-off either).
 
 **L2-19 (named competitor) rep1** is the one grounding-judge failure NOT attributable to the ground-truth
 gap above: it flagged unverified reputational claims about a real, named external brand (CeraVe) and
