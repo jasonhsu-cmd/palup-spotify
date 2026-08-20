@@ -10,7 +10,12 @@
        both below the SC 1.4.3 (AA) 4.5:1 floor for this file's 11-13px secondary text. #475569 is a
        hex this file already used (.badge) and clears 5.6:1 on the darkest point of the body gradient
        and 7.5:1 on --panel. No new colour introduced. */
-    --brand:#4f46e5; --brand-ink:#ffffff; --bg:#eef1f6; --panel:#ffffff; --fg:#0f172a; --muted:#475569; --line:#e2e8f0; --radius:18px;
+    /* Brand fill = the merchant-console evergreen (palup-design-system `--ever`), so the widget's
+       default identity matches PalUp's own consoles instead of the old indigo. This is the DEFAULT
+       only: a merchant's own resolved brand colour still overrides --brand/--brand-ink/--brand-glow
+       FOUC-free via the injected <style> at the PALUP_THEME marker (widget-backend/src/widget-theme.ts).
+       #0c4a3c is not a new hex — this file already used it as --palup. White ink on it is ~9.4:1. */
+    --brand:#0c4a3c; --brand-ink:#ffffff; --bg:#eef1f6; --panel:#ffffff; --fg:#0f172a; --muted:#475569; --line:#e2e8f0; --radius:18px;
     --palup:#0c4a3c;
     --brand-glow:var(--brand); --agent:#f1f5f9; --user:var(--brand); --safe:#fff5f5; --safeln:#fecdd3;
     /* Brand colour for TEXT/focus rings drawn on --panel. Distinct from --brand (a fill colour, used
@@ -25,7 +30,11 @@
      follows the OS scheme and the dark-mode a11y states keep exercising this block. */
   @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
     --bg:#0b0e14; --panel:#141924; --fg:#e6e9ef; --muted:#94a3b8; --line:#232a37;
-    --brand:#4f46e5; --brand-glow:#818cf8; --palup:#5eb99b;
+    /* Dark scheme: same evergreen fill (white ink stays ~9.4:1), but brand-as-TEXT/focus on the dark
+       --panel needs the LIGHTER evergreen — #5eb99b, the value this file already uses for --palup in
+       dark — so --brand-glow (→ --brand-text) reads on #141924. Fill and text-brand diverge here for
+       the same reason the indigo set did: a dark fill colour is unreadable as text on a dark panel. */
+    --brand:#0c4a3c; --brand-glow:#5eb99b; --palup:#5eb99b;
     --agent:#1b212e; --user:var(--brand);
     --safe:#241318; --safeln:#5b2b34; --shadow:0 18px 50px rgba(0,0,0,.5);
   }}
@@ -158,8 +167,16 @@
   .opener-chips{ display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 2px }
   .opener-chips button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:999px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
   .opener-chips button:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
-  .manage-memory{ width:100%; border-top:1px solid var(--line); margin-top:4px; padding-top:8px; display:flex; flex-direction:column; gap:7px }
-  .manage-memory > b{ font-size:12.5px }
+  /* Collapsed disclosure (see ensureManagePanel). The summary is ONE quiet line; the toggles/forget/
+     helper are revealed only when the shopper opens it — so a first-turn shopper isn't met with the
+     whole data-rights dashboard spread open above the chat. */
+  .manage-memory{ width:100%; border-top:1px solid var(--line); margin-top:4px; padding-top:8px }
+  .manage-memory > summary{ list-style:none; cursor:pointer; font-size:12.5px; font-weight:600; color:var(--brand-text); display:flex; align-items:center; gap:7px; padding:2px 0; user-select:none }
+  .manage-memory > summary::-webkit-details-marker{ display:none }
+  .manage-memory > summary::before{ content:"\25B8"; font-size:10px; line-height:1; color:var(--muted); transition:transform .15s ease }
+  .manage-memory[open] > summary::before{ transform:rotate(90deg) }
+  .manage-memory > summary:focus-visible{ outline:2px solid var(--brand-text); outline-offset:2px; border-radius:6px }
+  .manage-memory > :not(summary){ margin-top:7px }
   .mm-row{ display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--fg); cursor:pointer }
   .manage-memory button[data-testid="manage-memory-forget"]{ align-self:flex-start; font:inherit; font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand-text); cursor:pointer }
   .mm-helper{ font-size:11.5px; color:var(--muted) }
@@ -195,6 +212,7 @@
     .msg{ animation:none }
     .typing i{ animation:none; opacity:.6 }
     #launcher:active{ transform:none }
+    .manage-memory > summary::before{ transition:none }
   }
 </style>
 <!--PALUP_THEME--><!-- WS10: server injects the merchant brand <style>/<script> here at /embed/panel (FOUC-free). Absent (a plain comment) at /widget → default indigo. -->
@@ -596,8 +614,14 @@
   }
   function ensureManagePanel(){
     if (managePanelBuilt) return; managePanelBuilt = true;
-    const wrap = document.createElement("div"); wrap.className = "manage-memory"; wrap.setAttribute("data-testid", "manage-memory");
-    const h = document.createElement("b"); h.setAttribute("data-testid", "manage-memory-heading"); h.textContent = "What I remember";
+    // A collapsed <details> disclosure, NOT an always-open dashboard. Native <details> is CSP-safe and
+    // keyboard/screen-reader accessible with no JS, and it keeps the shopper's data-rights controls ONE
+    // click away — still "always reachable" (the invariant below), they just no longer sit spread open on
+    // the first turn, burying the conversation under two checkboxes + a Forget button + a helper paragraph.
+    // The heading testid + text now ride on the <summary> (the disclosure control); every inner control is
+    // byte-identical, only revealed on demand. Closed by default (no `open` attribute).
+    const wrap = document.createElement("details"); wrap.className = "manage-memory"; wrap.setAttribute("data-testid", "manage-memory");
+    const summary = document.createElement("summary"); summary.setAttribute("data-testid", "manage-memory-heading"); summary.textContent = "What I remember";
     const rowOrdinary = memRow("Preferences", "manage-memory-toggle-ordinary", memState.consent1 === "in", setConsent1);
     const rowSpecial = memRow("Health notes", "manage-memory-toggle-special", memState.consent2 === "in", setConsent2);
     const forget = document.createElement("button"); forget.type = "button"; forget.setAttribute("data-testid", "manage-memory-forget");
@@ -612,7 +636,7 @@
     // so is the honest version of a button labelled "Forget everything about me".
     helper.textContent = "Turning something off stops new saving; \"Forget everything\" deletes the preferences and notes here and resets your anonymous ID. The store's own chat log of this conversation isn't part of that, and none of it affects your orders or account.";
     const confirmation = document.createElement("div"); confirmation.className = "mm-confirm"; confirmation.setAttribute("data-testid", "manage-memory-confirmation"); confirmation.hidden = true;
-    wrap.append(h, rowOrdinary, rowSpecial, forget, helper, confirmation);
+    wrap.append(summary, rowOrdinary, rowSpecial, forget, helper, confirmation);
     // The shopper's OWN data-rights panel — it belongs in the shopper tools row, not the demo drawer.
     // It used to live in `#drawer`, which meant a shopper could only reach "What I remember" / "Forget
     // everything about me" by clicking a button labelled "Demo controls" — and once that drawer became

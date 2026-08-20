@@ -88,7 +88,9 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       "style",
       "display:inline-flex;align-items:center;gap:8px;height:48px;padding:0 18px;" +
         "border-radius:999px;border:none;cursor:pointer;white-space:nowrap;line-height:1;" +
-        "background:#4f46e5;color:#fff;font-size:15px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.25);",
+        // Evergreen (#0c4a3c) — the merchant-console brand colour, matching the panel's default --brand
+        // so the launcher pill and the panel it opens read as one identity. White label on it is ~9.4:1.
+        "background:#0c4a3c;color:#fff;font-size:15px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.25);",
     );
     launcher.textContent = "\u{1F4AC} Ask the expert"; // 💬 Ask the expert
 

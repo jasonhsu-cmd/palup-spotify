@@ -344,14 +344,14 @@ describe("initWidgetLoader", () => {
       expect(launcher.style.background).toMatch(/164|a44a34/i);
     });
 
-    it("keeps the default indigo bubble when the theme fetch fails (fail-safe)", async () => {
+    it("keeps the default evergreen bubble when the theme fetch fails (fail-safe)", async () => {
       // beforeEach already stubbed a rejecting fetch.
       const c = cfg();
       initWidgetLoader(c);
       const root = (c.host as any).__palupRoot as ShadowRoot;
       const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
       await flush();
-      expect(launcher.style.background).toMatch(/79|4f46e5/i); // rgb(79,70,229) / #4f46e5 — unchanged
+      expect(launcher.style.background).toMatch(/0c4a3c|12,\s*74,\s*60/i); // #0c4a3c / rgb(12,74,60) — console evergreen, unchanged
     });
 
     it("ignores a non-hex brand from the theme endpoint (never a broken/injected colour)", async () => {
@@ -364,7 +364,7 @@ describe("initWidgetLoader", () => {
       const root = (c.host as any).__palupRoot as ShadowRoot;
       const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
       await flush();
-      expect(launcher.style.background).toMatch(/79|4f46e5/i); // rejected → default kept
+      expect(launcher.style.background).toMatch(/0c4a3c|12,\s*74,\s*60/i); // rejected → default evergreen kept
     });
   });
 
