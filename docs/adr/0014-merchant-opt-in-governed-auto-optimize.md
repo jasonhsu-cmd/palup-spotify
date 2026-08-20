@@ -128,10 +128,14 @@ today's hooks would ship real bypasses. Each is a separate governed (human-merge
     `prevChampion` — could do nothing but throw. `monitorServing` (`champion-promoter.ts`) now records
     the serving champion as known-good on a healthy observation, and falls back to that baseline when a
     regression arrives with the depth-1 target already spent. Both halves are route-covered.
-    **Still open:** the observation that drives it is caller-supplied (`POST /api/monitor` takes it from
-    the request body), so this reacts to a *reported* regression, not a *measured* one, and the
-    per-tenant minimum-traffic/observation window is still unenforced. Measuring live quality is the
-    orchestrator's job and it remains dormant.
+    **Update (2026-08-19):** the measured-outcome signal is now wired into `POST /api/monitor` and the
+    evolution gate (#372/#354) — `readServingMeasuredOutcome` reads the Wave-2 outcome ledger and a
+    statistical **power floor** gates it (#354/#378, the per-tenant minimum-traffic/observation window) — so
+    monitor/rollback **can** react to a *measured* regression, not only the caller-supplied one. It stays
+    **dark-safe:** with no (or low-volume) live order-attribution data the ledger read returns
+    honest-zero/underpowered and falls back to the caller-attested `qualityScore`, so behaviour is
+    byte-identical until the ledger is fed with statistically-powered data. **Still dormant:** the
+    auto-optimize *orchestrator* (fast-lane) itself remains dormant and not deployed in production.
 
 ## Enablement precondition (must be met + recorded before any real merchant flag flips)
 

@@ -88,7 +88,7 @@
   a missing product into the agent *denying* the merchant carries it — a confident false claim to a
   shopper that looks healthy to every monitor — and because a partial catalog would be cached as
   last-known-good for the whole TTL. Above 1000 SKUs the answer is relevance retrieval (fetch → index →
-  top-K), not a bigger prompt: `composeSystemPrompt` renders every product on every turn. Pagination is
+  top-K), not a bigger prompt — now built (ADR-0020): `composeSystemPrompt` renders a top-K retrieved subset when retrieval is enabled for a tenant (`widget-brain/src/brain.ts`), otherwise every product. Pagination is
   fixture-tested against an injected fetch; it has **not** been exercised against a live store.
 - (−) **Allergen has no native Shopify field** (recollection, verify) — sourced from a product metafield
   or a merchant-authored PalUp field, else omitted (`StorePolicy.allergens` is optional). A product

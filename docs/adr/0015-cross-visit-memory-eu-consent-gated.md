@@ -53,6 +53,14 @@
     secret, mandatory tenant binding), and **`mergeGuestIntoAccount` (ADR-0019 task 10 carry-over) has NO
     production caller** — the linchpin that keeps the deferred Art-9 cross-subject legal question dormant.
     **If task 10 is ever wired, this acceptance is VOID and the verdict reverts to BLOCK.**
+    - **⛔ 2026-08-20 RECONCILIATION FLAG (security-reviewer + owner — do NOT self-resolve):** task 10 now HAS a
+      gated production caller — `POST /memory/merge` → `mergeGuestIntoAccount` (`widget-backend/src/server.ts:2679`,
+      #334) — and memory is live on staging, so the "no production caller" premise above is factually STALE. The
+      caller is gated (404s only while memory is dark, which staging is NOT; requires a verified shopper token + a
+      verified signed guest token + both consent tiers + a client-asserted `healthDisclosed`; the widget carry-over
+      prompt is still off, `CARRY_OVER_PROMPT_ENABLED=false`). Whether that gating means the stated VOID→BLOCK
+      trigger is or is not met is a `security-reviewer` + owner adjudication — it must be resolved, not assumed
+      benign. Mirrored in ADR-0019's 2026-08-20 update and `MEMORY-GO-LIVE-CHECKLIST.md` A4.
   - **NON-LEGAL conditions that MUST be met before the operator flip `MEMORY_ENABLED=true` (a separate
     step):** (1) provision a per-tenant `MEMORY_ENCRYPTION_KEY` for `palup-skincare-jason` — the existing
     key is `demo`-only; without it ordinary facts persist **plaintext at rest** and Art-9 facts fail-closed;

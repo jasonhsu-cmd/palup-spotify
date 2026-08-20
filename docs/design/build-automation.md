@@ -256,18 +256,22 @@ The repo's own subagents/commands are the backbone and need no external dependen
 
 ## 5. Prerequisites before the loop can actually run (honest blockers)
 
-The harness is designed; it **cannot operate yet** until these exist (mostly human/infra setup):
+The harness is designed; the core build/test/PR/deploy-to-staging prerequisites are now in place, with a
+few human/infra items still open:
 
-- [ ] **Repo scaffolding** — monorepo (`packages/…`), TypeScript/build config, test runner, lint.
-- [ ] **Git remote + CI/CD** — the pipeline (`compute-and-delivery.md` §5) with the gates wired.
-- [ ] **A staging environment + cloud project + credentials** (via the `secrets` port) — there is no
-      staging to auto-deploy to today.
+- [x] **Repo scaffolding** — DONE: the `packages/…` monorepo (11 packages), TypeScript/build config, test
+      runner, lint.
+- [x] **Git remote + CI/CD** — DONE: `.github/workflows/` (`ci.yml`, `deploy-staging.yml`, `eval-quality.yml`,
+      `drift-check.yml`); the gates are wired (`compute-and-delivery.md` §5).
+- [x] **A staging environment + cloud project + credentials** (via the `secrets` port) — DONE: Cloud Run
+      staging serves live `/chat` (`palup-widget-staging`; control-plane `palup-control-staging`), auto-deploy
+      on merge.
 - [ ] **Engine picks** — `storage` (ADR-0004 → prefer YugabyteDB) and `vector` (ADR-0009), license-cleared.
 - [ ] **Human sign-offs already flagged** (`design/README.md`) — security (isolation/PII, Shopify
       token, API-key scope), legal (instruments + flagged OSS licenses).
-- [ ] **E2E harness** — Playwright/Cypress + seeded/isolated test data + a **Shopify test store &
-      billing test mode** (money/auth journeys never hit real money), wired as a blocking CI +
-      pre-promotion gate (§3c).
+- [x] **E2E harness** — DONE: Playwright configs (`e2e/playwright*.config.ts` — widget/embed/live/monitor/
+      storefront) + seeded/isolated fixtures + a **Shopify test store & billing test mode** (money/auth
+      journeys never hit real money), wired as a blocking CI + pre-promotion gate (§3c).
 - [ ] **Scheduler/runtime** for the 24/7 cadence (CronCreate/background agents) — armed only after the
       above, and only for the develop→staging portion.
 
@@ -292,7 +296,8 @@ The harness is designed; it **cannot operate yet** until these exist (mostly hum
 This gives you **maximal, continuous automation — develop, test, fix, review, PR, and deploy-to-
 staging — with two human gates (merge, promote) that your own governance requires and that separate
 PalUp from OpenClaw.** "Flawless end-to-end, human-out-of-the-loop-to-prod" is intentionally **not**
-built: it violates `CLAUDE.md` §2/§3 and is the failure mode the product exists to prevent. The loop
-can turn on once §5's prerequisites are in place; the natural first work-item is bootstrapping
-`packages/` and the first vertical slice (cart-recovery wedge), which the agents deliver as the first
-reviewable PR.
+built: it violates `CLAUDE.md` §2/§3 and is the failure mode the product exists to prevent. With §5's core
+prerequisites now in place, the develop→test→PR→deploy-to-staging pipeline is live (staging auto-deploys on
+merge) and the repo is well past bootstrapping — `packages/` is built and shipping feature slices as
+reviewable PRs. The remaining §5 items (engine license-clears, human sign-offs, an armed 24/7 scheduler)
+still gate a fully hands-off cadence.

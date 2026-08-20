@@ -1,5 +1,25 @@
 # ADR-0019: Server-issued guest identity (signed guest token) — security-cleared + owner-accepted (Revision 2); ONE gate left (legal)
 
+> ## ⚠️ UPDATE 2026-08-20 (reconciliation — authoritative over the historical banners below)
+>
+> Two facts stated as present tense throughout this file are now STALE:
+> - **`MEMORY_ADR_ACCEPTED` is now `true`** (`widget-memory/src/flag.ts:18`), flipped 2026-08-17 (ADR-0015
+>   "Accepted for internal staging"); memory is ENABLED on the staging service for internal users, tenant
+>   `palup-skincare-jason`. Every "the const is `false` / nothing has ever been written / the window closes
+>   when flipped" statement below is historical — **the window has closed** (still OFF in production).
+> - **Task 10 (the carry-over) now HAS a gated production caller** — `POST /memory/merge` calls
+>   `mergeGuestIntoAccount` (`widget-backend/src/server.ts:2679`, #334). It is gated (404s only while memory
+>   is dark — which it is NOT on staging; requires a verified shopper token + a verified signed guest token +
+>   both consent tiers + a client-asserted `healthDisclosed`; the widget carry-over prompt is still off,
+>   `CARRY_OVER_PROMPT_ENABLED=false`). **This does not by itself resolve the legal gate.**
+>
+> **⛔ GOVERNANCE FLAG (security-reviewer + owner, do NOT self-resolve):** ADR-0015's 2026-08-17 acceptance and
+> `MEMORY-GO-LIVE-CHECKLIST.md` A4 both state that the staging security acceptance holds *because*
+> `mergeGuestIntoAccount` has **no production caller**, and that **"if task 10 is ever wired, this acceptance
+> is VOID and the verdict reverts to BLOCK."** A gated caller is now wired (#334) while memory is live on
+> staging. Whether the #334 gating means the VOID trigger is or is not met is a `security-reviewer` + owner
+> call — it must be adjudicated, not assumed benign. See the matching flags in ADR-0015 and the go-live checklist A4.
+>
 > ## Security gate CLEARED, owner re-accepted. ONE human gate remains (legal). Tasks 1–9 BUILT (2026-08-17); task 10 (carry-over) NOT built.
 >
 > **UPDATE 2026-08-17 (reconciliation).** The "Nothing built" language throughout this file is STALE. Tasks

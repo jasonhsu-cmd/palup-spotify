@@ -10,15 +10,17 @@
 > decisions counsel must make). Umbrella context: `provisions-brief.md` (instrument **B**, shopper-facing
 > notices).
 
-## 0. Status — nothing described here is running today
+## 0. Status — live on internal staging only; not in production
 
-The feature this notice would cover is **inert**. `MEMORY_ADR_ACCEPTED` is a hardcoded `false`
-(`packages/widget-memory/src/flag.ts:12`) and `isMemoryEnabled()` requires **both** that constant and the
-operator flag `MEMORY_ENABLED === "true"` (`flag.ts:16-18`), so no fact is written, read, or renewed in
-production regardless of configuration. The governing design record is
-`docs/adr/0015-cross-visit-memory-eu-consent-gated.md`, whose **Status is "Proposed — NOT enacted"**; its
-own sign-off section requires a privacy notice and a DPA **before** it can be Accepted. This draft exists
-to satisfy that dependency; **publishing it, or the flag flip, remains a human decision.**
+**(2026-08-20 update.)** `MEMORY_ADR_ACCEPTED` is now a hardcoded `true` (`packages/widget-memory/src/flag.ts:18`),
+flipped 2026-08-17, and `isMemoryEnabled()` requires **both** that constant and the operator flag
+`MEMORY_ENABLED === "true"` (`flag.ts:22-24`). Memory is therefore live on the **internal staging** service
+(`MEMORY_ENABLED="true"`, internal users only, tenant `palup-skincare-jason`) and **OFF in production**
+(`MEMORY_ENABLED` unset; production is deployed nowhere). The governing design record is
+`docs/adr/0015-cross-visit-memory-eu-consent-gated.md`, whose Status is now **"Accepted for internal staging;
+LEGAL DEFERRED"** — the §A Art-9/consent items (including this notice and the DPA) remain **NOT enacted for
+production or external shoppers** and gate any such enablement. This draft exists to satisfy that dependency;
+**publishing it, and any production/external flip, remains a human decision.**
 
 On sign-off, precisely: **no ADR acceptance, no notice publication, and no legal review of this draft has
 occurred.** One narrower thing *is* recorded in the repo — ADR-0015 carries an "Amendment (2026-08-04 —

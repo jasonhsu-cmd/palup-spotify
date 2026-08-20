@@ -281,7 +281,7 @@ surface.
   `widget-backend/src/widget-theme.ts`'s `deriveThemeVars` derives AA-clean CSS-variable values from any
   brand hex (reusing the a11y suite's WCAG luminance math), server-injected FOUC-free into `/embed/panel`
   with the launcher recoloured via `GET /embed/theme`. The safety bubble, handoff surface, muted text and the
-  "Powered by PalUp" mark stay on the fixed token set. Source is a curated per-tenant map today; Shopify
+  "Powered by PalUp" mark stay on the fixed token set. The brand **name** is now auto-derived from the merchant's Shopify shop name and cached (`widget-backend/src/brand-cache.ts`, #373); the brand **colour**/logo source is a curated per-tenant map today; Shopify
   `Shop.brand`/a registry column are a follow-on behind the same `resolveTheme` seam.
 - **Still open:** the **human take-over handoff** UX (there is no live-agent channel — the widget honestly
   says so), offline mode, and low-latency **transport (WebSocket, `<120ms` load)** — see

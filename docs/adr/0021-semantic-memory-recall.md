@@ -95,8 +95,9 @@ sent, Cloud Run throttles the container's CPU to ~0, so a write kicked off AFTER
 `server.ts`): this keeps it inside the request, where Cloud Run guarantees CPU, at the cost of adding the
 distiller round-trip back to the shopper-visible turn latency — trading back part of the win this decision
 originally claimed. Fail-open is unchanged: a `remember()` failure is caught and logged, never breaking the
-reply. **Follow-up (not yet built):** a durable async write queue (Cloud Tasks / Pub/Sub, mirroring the
-catalog-webhook path) is the correct way to reclaim the latency — hand the write off durably instead of
+reply. **Follow-up (built, dark by default):** a durable async write queue (Pub/Sub, mirroring the
+catalog-webhook path) is now wired (`widget-backend/src/memory-write-dispatch.ts`, #126) — inline unless
+`MEMORY_PUBSUB_*` is configured — the way to reclaim the latency by handing the write off durably instead of
 racing it against a container whose CPU may be reclaimed at any moment. Recall **reuses the one turn
 embedding** the catalog retriever already computes (metered `TURN_EMBED_AGENT_TYPE`), computed once on the
 clean-sales path only (zero embeds on a guardrail-short-circuited turn) — so semantic recall adds no new
