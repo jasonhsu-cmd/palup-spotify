@@ -463,4 +463,14 @@
       setPolicy(data.policy);
     });
   }
+
+  // Hero "Ask the expert" CTA (home only) — opens the assistant panel. The button runs on the HOST page and
+  // can't call the loader's open() directly, so it dispatches a `palup:open` window event that the loader
+  // listens for (loader-core.ts). Guarded: the button exists only on the home hero.
+  var heroAsk = document.querySelector('[data-testid="hero-ask"]');
+  if (heroAsk) {
+    heroAsk.addEventListener("click", function () {
+      window.dispatchEvent(new CustomEvent("palup:open"));
+    });
+  }
 })();

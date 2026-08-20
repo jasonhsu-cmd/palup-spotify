@@ -47,7 +47,30 @@ describe("initWidgetLoader", () => {
     expect(c.host.childNodes.length).toBe(0);
     const root = (c.host as any).__palupRoot as ShadowRoot;
     expect(root.querySelectorAll("button").length).toBe(1);
-    expect(root.querySelector('button[aria-label="Open chat"]')).toBeTruthy();
+    expect(root.querySelector('button[aria-label="Ask the expert"]')).toBeTruthy();
+    // The launcher is a LABELED PILL, not a bare icon: it shows a visible text label, and the accessible
+    // name contains that visible text (WCAG 2.5.3 Label in Name).
+    expect((root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement).textContent).toContain("Ask the expert");
+  });
+
+  // Host-open hook: the storefront hero "Ask the expert" CTA lives on the HOST page (a different frame/context
+  // from the panel), so it can't call the loader's open() directly. It dispatches a `palup:open` window
+  // CustomEvent; the loader listens on the host window and opens the panel — mirroring the existing
+  // `palup:contextchange` host→loader event. (Distinct channel from the loader→panel `palup:open` postMessage.)
+  it("opens the panel when the host dispatches a `palup:open` window event", () => {
+    const c = cfg();
+    const api = initWidgetLoader(c)!;
+    const root = (c.host as any).__palupRoot as ShadowRoot;
+    expect(root.querySelector("iframe")).toBeNull(); // closed at mount — no panel iframe yet
+    window.dispatchEvent(new CustomEvent("palup:open"));
+    const iframe = root.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe).toBeTruthy();
+    expect(iframe.style.display).toBe("block");
+    const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
+    expect(launcher.getAttribute("aria-expanded")).toBe("true");
+    api.destroy();
+    // after destroy the host-open listener is removed — a later event is a no-op (never throws)
+    expect(() => window.dispatchEvent(new CustomEvent("palup:open"))).not.toThrow();
   });
 
   it("is single-instance (second init on same host returns null)", () => {
@@ -64,7 +87,7 @@ describe("initWidgetLoader", () => {
     const c = cfg();
     const api = initWidgetLoader(c)!;
     const root = (c.host as any).__palupRoot as ShadowRoot;
-    const launcher = root.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement;
+    const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
     expect(launcher.getAttribute("aria-expanded")).toBe("false");
 
     api.open();
@@ -315,7 +338,7 @@ describe("initWidgetLoader", () => {
       initWidgetLoader(c);
       expect(fetch).toHaveBeenCalledWith(`${ORIGIN}/embed/theme?shop=acme.myshopify.com`);
       const root = (c.host as any).__palupRoot as ShadowRoot;
-      const launcher = root.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement;
+      const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
       await flush();
       // jsdom serialises to rgb(); accept either the hex or the rgb form of the terracotta brand.
       expect(launcher.style.background).toMatch(/164|a44a34/i);
@@ -326,7 +349,7 @@ describe("initWidgetLoader", () => {
       const c = cfg();
       initWidgetLoader(c);
       const root = (c.host as any).__palupRoot as ShadowRoot;
-      const launcher = root.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement;
+      const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
       await flush();
       expect(launcher.style.background).toMatch(/79|4f46e5/i); // rgb(79,70,229) / #4f46e5 — unchanged
     });
@@ -339,7 +362,7 @@ describe("initWidgetLoader", () => {
       const c = cfg();
       initWidgetLoader(c);
       const root = (c.host as any).__palupRoot as ShadowRoot;
-      const launcher = root.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement;
+      const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
       await flush();
       expect(launcher.style.background).toMatch(/79|4f46e5/i); // rejected → default kept
     });

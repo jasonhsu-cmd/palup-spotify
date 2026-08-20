@@ -35,6 +35,27 @@ test.describe("sample storefront", () => {
     await expect(page.locator('[data-palup-mounted="true"]')).toHaveCount(1);
   });
 
+  test('hero "Ask the expert" CTA opens the assistant (dispatches the palup:open host event)', async ({ page }) => {
+    await page.goto("/");
+    const ask = page.locator('[data-testid="hero-ask"]');
+    await expect(ask).toBeVisible();
+    await expect(ask).toContainText("Ask the expert");
+    // The CTA runs on the HOST page; it opens the panel by dispatching a `palup:open` window event the loader
+    // listens for (loader-core: window "palup:open" → open()). Assert the storefront half fires that event.
+    await page.evaluate(() => {
+      (window as unknown as { __palupOpenFired?: boolean }).__palupOpenFired = false;
+      window.addEventListener("palup:open", () => {
+        (window as unknown as { __palupOpenFired?: boolean }).__palupOpenFired = true;
+      });
+    });
+    await ask.click();
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { __palupOpenFired?: boolean }).__palupOpenFired))
+      .toBe(true);
+    // secondary "Browse all" jumps to the product grid
+    await expect(page.locator('.hero-cta a[href="#grid"]')).toBeVisible();
+  });
+
   test("cart page renders its empty state and is WCAG 2.2 AA clean", async ({ page }) => {
     await page.goto("/cart");
     await expect(page.locator("h1")).toHaveText("Your cart");
