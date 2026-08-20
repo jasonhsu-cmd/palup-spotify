@@ -10,7 +10,7 @@
 >
 > **Current state (one line):** the shopper-serving stack — embeddable widget, OAuth install, per-tenant
 > storefront read-back, and catalog-retrieval-at-scale — is now **merged to `main` but ships dark / flag-gated**;
-> there is still **no production deployment** (staging only), the **control-plane is deployed nowhere**,
+> there is still **no production deployment** (staging only); the **control-plane is deployed on internal staging** (`palup-control-staging`, IAM-gated) but **not in production**,
 > `packages/agent-runtime` **does not exist yet** (design + ADR-0005 only), and commerce runs on fixtures.
 > Enabling any of it is a human-gated config/infra step, not a single flag flip.
 
@@ -123,11 +123,11 @@ which is the foundational gap under everything in this track. To make it *operab
 
 | Item | Owner | Status | Note |
 |------|-------|--------|------|
-| **Deploy the control-plane as its own service** | INFRA | DEPLOYED-NOWHERE — `control-plane/src/server.ts:443` (binds `127.0.0.1`; container CMD is widget-backend, `Dockerfile:15` `pnpm backend`) | **the single biggest self-improve blocker** — every approve/promote/monitor/Approval-Center surface is unreachable |
+| **Deploy the control-plane as its own service** | INFRA | **DONE on staging** — `palup-control-staging` (IAM-gated, shared `DATABASE_URL`; `Dockerfile.control-plane`, `HOST=0.0.0.0` bind at `control-plane/src/server.ts:519`); **not in production** | staging approve/promote/monitor/Approval-Center surfaces are reachable via IAM; the **production** deploy is the remaining infra step |
 | Live-quality measurement (real signal, not operator-attested) | BUILD | pending — `control-plane/src/champion-promoter.ts:216-228` | monitor/rollback react to a **REPORTED/attested** signal today, not a measured one (the caller supplies `observed`) |
 | Verify the cross-family (Claude) gating judge live | INFRA(keys)+BUILD | in_progress — `judge/src/anthropic-api.ts:3` | **UNVERIFIED-LIVE** until run with a key present; CI dormant |
 | Wire the eval/shadow gates into CI (currently manual) | BUILD | in_progress — `.github/workflows/eval-quality.yml` | so gates run automatically |
-| ADR-0014 auto-optimize enablement | BIZ/LEGAL | pending — orchestrator built+merged but **DORMANT and deployed nowhere**; ADR still Proposed, reviewers BLOCK, baseline ~0.55 < floor | human-only enablement; keep dormant until the quality baseline clears the floor |
+| ADR-0014 auto-optimize enablement | BIZ/LEGAL | pending — orchestrator built+merged but **DORMANT and not deployed in production**; ADR still Proposed, reviewers BLOCK, baseline ~0.55 < floor | human-only enablement; keep dormant until the quality baseline clears the floor |
 
 Governance guardrail (all phases): prod is human-promoted; the control-plane deploy and any auto-optimize
 enablement are governance-touching (§3) and stay human-owned. Nothing here auto-ships to shoppers.

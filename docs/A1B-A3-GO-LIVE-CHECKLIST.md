@@ -70,7 +70,7 @@ statically (§3.2). `eval:full` still runs alongside for the no-regression suite
 - Compare per turn: price deltas, staleness triggers, added latency from the `getMany` hydrate call.
 - Exit: ≥ a chosen turn count with **zero fabricated prices**, latency within budget, P1 fail-honest firing
   where expected.
-- **HONEST CAVEAT:** the control-plane canary surface is **built but deployed nowhere** (CLAUDE.md §6), so
+- **HONEST CAVEAT:** the control-plane canary surface is **deployed on internal staging** (`palup-control-staging`, IAM-gated; not in production — CLAUDE.md §6), so
   "shadow" is realistically a **staging + traffic-replay** run against `reports/`/`.palup-state/`
   transcripts, NOT a live 0% split. The approver must be told this; do not imply a live splitter exists.
 
