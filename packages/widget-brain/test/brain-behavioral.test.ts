@@ -114,6 +114,46 @@ describe("PR-4 — behavioral one-strike + cross-turn counters (flag DISPOSITION
       expect(d.flags).toContain("behavioral:rage");
       expect(spy).not.toHaveBeenCalled();
     });
+
+    // F11 — before this fix, rage handling existed ONLY on the reactive sales path (above) and the
+    // proactive exit-intent path, never in the support branch. A raging shopper whose message ALSO
+    // names a concrete support issue (correctly routed to mode:support, via handleSupport when a
+    // CommercePort is wired) got ZERO rage-specific escalation: "damaged" with no stated order id/amount
+    // resolves an order under the refund ceiling, so handleSupport's own escalate stays false — a raging
+    // shopper ended up LESS escalated than the reactive-sales-path rage case above. Mirrors the eval
+    // harness's t10-multiturn-rage-escalation case (packages/eval/cases/widget-behavioral.json), whose
+    // final turn has no CommercePort wired and hits brain.ts's own no-commerce support fallback instead —
+    // covered by the case's own "no_pitch"/"escalate" pairing; this test pins the commerce-backed
+    // handleSupport call site named directly in finding F11.
+    describe("rage also escalates the SUPPORT path (handleSupport call site)", () => {
+      const SUPPORT_MESSAGE = "My order arrived broken and nobody has fixed it.";
+
+      it("flag ON + rage: a support-routed message (damaged, under the refund ceiling) still escalates and carries behavioral:rage", async () => {
+        const { brain } = spyBrain(true);
+        const d = await brain.decide({ behavioral: ["rage"] }, SUPPORT_MESSAGE);
+        expect(d.mode).toBe("support");
+        expect(d.pitch).toBe("none");
+        expect(d.escalateToHuman).toBe(true);
+        expect(d.flags).toContain("behavioral:rage");
+        expect(d.flags).toContain("no_pitch");
+      });
+
+      it("flag ON, no rage: the SAME support message keeps handleSupport's own (non-escalating) decision — normal support behavior unchanged", async () => {
+        const { brain } = spyBrain(true);
+        const d = await brain.decide({}, SUPPORT_MESSAGE);
+        expect(d.mode).toBe("support");
+        expect(d.escalateToHuman).toBe(false); // damaged, order under the refund ceiling -> handleSupport itself does not escalate
+        expect(d.flags).not.toContain("behavioral:rage");
+      });
+
+      it("flag OFF, rage present: ignored, exactly like the reactive/proactive rage cases above", async () => {
+        const { brain } = spyBrain(false);
+        const d = await brain.decide({ behavioral: ["rage"] }, SUPPORT_MESSAGE);
+        expect(d.mode).toBe("support");
+        expect(d.escalateToHuman).toBe(false);
+        expect(d.flags).not.toContain("behavioral:rage");
+      });
+    });
   });
 
   describe("repeat_question -> recall, don't re-ask directive (systemExtra only)", () => {

@@ -1534,6 +1534,17 @@ export function createBrain(
         };
       }
 
+      // F11 — hoisted ABOVE the support branch (not just the reactive-sales rung below) so an enraged
+      // shopper gets the SAME rage treatment (escalate + behavioral:rage + no_pitch) no matter which
+      // branch their message routes to. Before this fix the check only existed on the reactive sales
+      // path (below) and the proactive exit-intent rung (4a above); a rage message that ALSO named a
+      // concrete support issue (e.g. "nobody has fixed my broken order") correctly routed to
+      // mode:support but then fell straight through this rung with escalateToHuman:false and no rage
+      // flag at all — a raging shopper with a real issue got LESS escalation than one without one.
+      // Single source of truth: the reactive-sales rung below now reads this same const instead of
+      // recomputing it (see the removed second declaration there).
+      const rageDetected = dispositionBehavioralEnabled && (signals.behavioral?.includes("rage") ?? false);
+
       // 2. Open support issue OR a support intent — suppresses sales (INV-B).
       const supportIntent = classifySupportIntent(text, subscriptionSelfServeEnabled);
       // Word-boundary match: substring scanning mis-routed "returning"/"cancellation" (and browsing
@@ -1559,18 +1570,35 @@ export function createBrain(
             // classifier-chosen intent can never make a money/subscription action auto-execute.
             serverGuardSignalsEnabled ? signals.serverSupportIntent : undefined,
           );
-          return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
+          // F11 — apply the SAME rage treatment the sales path already applies (escalate + a
+          // behavioral:rage flag). handleSupport already never pitches (its own "no_pitch" flag is
+          // always present), so this only ever ADDS an escalation + a flag; it never changes which
+          // support reply/action handleSupport chose (ownership/refund-ceiling/cancel gates untouched).
+          const rFlags = rageDetected ? [...r.flags, "behavioral:rage"] : r.flags;
+          return {
+            mode: "support",
+            reply: r.reply,
+            pitch: "none",
+            escalateToHuman: rageDetected ? true : r.escalate,
+            outbound: false,
+            safetyClass: "none",
+            flags: rFlags,
+            model: "support",
+          };
         }
         // Fallback when no commerce port is wired: generic grounded reply.
         flags.push("mode_support", "no_pitch");
         const stuck = text.includes("just fix it") || text.includes("need help") || text.includes("none of this");
         if (stuck) flags.push("escalate");
+        // F11 — same rage treatment as above: an enraged shopper escalates and is flagged even when no
+        // "stuck" phrasing is present in this turn's text.
+        if (rageDetected) flags.push("behavioral:rage", "escalate");
         const gen = await model.complete({ messages: await groundedMessages(message, tenantId, "", history, signals.pageContext), temperature: 0, tenantId });
         if (await offersUngroundedDiscount(gen.text, tenantId)) return discountGuardrail(); // (a) never serve an invented/injected discount (keyword floor + semantic backstop when 3b on)
         const reply = stuck
           ? "I'm sorry this has been frustrating — I've flagged this for a person on our team who can resolve it."
           : `Let me help with that. ${gen.text}`;
-        return { mode: "support", reply, pitch: "none", escalateToHuman: stuck, outbound: false, safetyClass: "none", flags, model: gen.model };
+        return { mode: "support", reply, pitch: "none", escalateToHuman: stuck || rageDetected, outbound: false, safetyClass: "none", flags, model: gen.model };
       }
 
       // 3. Honest uncertainty — never fabricate a fact we can't ground.
@@ -1930,7 +1958,8 @@ export function createBrain(
       // buy pitch; help/escalate instead. Checked FIRST so it overrides even an explicit buy signal. This
       // only ever SUPPRESSES pitch (forces none) and escalates to a human — it never adds an offer and
       // never touches price/outbound beyond the pitch it drops (FAIR-1, Inv 10).
-      const rageDetected = dispositionBehavioralEnabled && (signals.behavioral?.includes("rage") ?? false);
+      // F11 — `rageDetected` is now hoisted above the support branch (~line 1546) so both the support
+      // and sales paths share one rage decision; this rung just reuses it, byte-identical otherwise.
       if (rageDetected) {
         flags.push("behavioral:rage", "no_pitch", "escalate");
         escalate = true;
