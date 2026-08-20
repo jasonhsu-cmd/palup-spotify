@@ -148,6 +148,10 @@ jobs:
           # CATALOG_WEBHOOKS is ALSO gated by the derived SHOPIFY_WEBHOOKS_ENABLED (app secret + merchant
           # registry present), so this env alone stays inert until the install config is complete.
           CATALOG_WEBHOOKS: ${{ vars.CATALOG_WEBHOOKS || 'false' }}
+          # ORDER_ATTRIBUTION_WEBHOOKS mounts /checkout/join-token + the orders/refunds webhooks (Pillar 4
+          # flywheel attribution). Like CATALOG_WEBHOOKS it is ALSO gated by the derived SHOPIFY_WEBHOOKS_ENABLED
+          # (server.ts:1213), so this env alone stays inert until the install config is complete.
+          ORDER_ATTRIBUTION_WEBHOOKS: ${{ vars.ORDER_ATTRIBUTION_WEBHOOKS || 'false' }}
           # VECTOR_ANN selects S1's pgvector HNSW store over the brute-force scan (vector-factory.ts).
           # Enabling it REQUIRES a pgvector-enabled DATABASE_URL and an indexed corpus; default-false keeps
           # the in-memory scan path. Serving a corpus >5000 SKUs requires it.
@@ -228,7 +232,7 @@ jobs:
                       "SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}" "OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}" \
                       "SHOPPER_AUTH=${SHOPPER_AUTH}" "SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}" \
                       "GREETING_PROACTIVE=${GREETING_PROACTIVE}" \
-                      "CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}" "VECTOR_ANN=${VECTOR_ANN}" \
+                      "CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}" "ORDER_ATTRIBUTION_WEBHOOKS=${ORDER_ATTRIBUTION_WEBHOOKS}" "VECTOR_ANN=${VECTOR_ANN}" \
                       "MEMORY_ENABLED=${MEMORY_ENABLED}" "MEMORY_SEMANTIC_RECALL=${MEMORY_SEMANTIC_RECALL}" \
                       "SHOPIFY_APP_CLIENT_ID=${SHOPIFY_APP_CLIENT_ID:-}" \
                       "SHOPIFY_INSTALL_REDIRECT_URI=${SHOPIFY_INSTALL_REDIRECT_URI:-}" \
@@ -314,6 +318,7 @@ jobs:
           ENVS="${ENVS}@SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}"
           ENVS="${ENVS}@GREETING_PROACTIVE=${GREETING_PROACTIVE}"
           ENVS="${ENVS}@CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}"
+          ENVS="${ENVS}@ORDER_ATTRIBUTION_WEBHOOKS=${ORDER_ATTRIBUTION_WEBHOOKS}"
           ENVS="${ENVS}@VECTOR_ANN=${VECTOR_ANN}"
           ENVS="${ENVS}@MEMORY_ENABLED=${MEMORY_ENABLED}"
           ENVS="${ENVS}@MEMORY_SEMANTIC_RECALL=${MEMORY_SEMANTIC_RECALL}"
