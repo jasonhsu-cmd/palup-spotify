@@ -32,7 +32,7 @@ describe("widget-behavioral corpus", () => {
     const families = new Set(cases.map((c) => c.family));
     for (const f of [
       "safety", "aggression", "voice", "situational", "grounding-integrity", "support", "persona-role",
-      "language", "timing", "memory", "multi-turn", "mode-backbone",
+      "language", "timing", "memory", "multi-turn", "mode-backbone", "moat-gap",
     ]) {
       expect(families.has(f), `missing family: ${f}`).toBe(true);
     }
