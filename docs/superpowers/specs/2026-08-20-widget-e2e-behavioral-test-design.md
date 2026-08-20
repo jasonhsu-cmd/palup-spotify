@@ -1,9 +1,12 @@
-# Design: End-to-End Behavioral Test of the Live-Chat Sales Widget
+# Design: End-to-End Behavioral Test of the Live-Chat Sales Widget + Governed Autonomous Fix Loop
 
 - **Date:** 2026-08-20
 - **Status:** Approved design — ready for implementation plan (`/superpowers:write-plan`)
-- **Agent plane:** Build-time (a test harness). It exercises a **run-time** agent's behavior but
-  changes no run-time behavior, autonomy, or governance surface. Does not cross a HITL boundary.
+- **Agent plane:** Build-time. It exercises the **run-time** sales agent's behavior (test harness)
+  and, in the expansion (§11–§12), drives a **build-time** autonomous find→fix→verify loop. It does
+  **not** implement the run-time *self-improvement/evolution* pipeline (a separate product feature,
+  out of scope). Fixing agent-behavior *code* against this approved spec is ordinary build-time
+  development — see §11 governance.
 - **Staging target:** `https://palup-widget-staging-270594351425.us-central1.run.app/`
 
 ## 1. Goal
@@ -13,7 +16,9 @@ the conversation's arc over time, and the agent's own response style — and jud
 against the bar of a **top-tier US sales agent** and the product's **defensive moat**: right mode,
 right grounding discipline, right proactivity, on-brand voice, appropriate pitch (closing when it
 should, holding when it shouldn't), correct service handling, correct multilingual handling, and
-correct lifecycle/continuity timing. Produce a defect report and a fix plan.
+correct lifecycle/continuity timing. Produce a defect report, then (§11) drive a **governed
+autonomous find→fix→verify loop** that fixes those defects and self-merges gate-green PRs, with (§12)
+meta-tests proving the loop stays inside its governance guardrails.
 
 ## 2. The load-bearing constraint (why two layers)
 
@@ -342,16 +347,25 @@ UI cases).
 ## 8. Deliverables & flow
 
 1. Run step-0 spike → facts note (+ finding #1 if the widget/catalog/flags are off).
-2. Build Layer 1 corpus + single-turn & multi-turn runners; build Layer 2 Playwright harness; wire
-   the judge.
+2. Build Layer 1 corpus + single-turn & multi-turn runners + injectable grounding ports; build
+   Layer 2 Playwright harness; wire the judge. Build the §11 autonomous loop + §12 meta-tests.
 3. Run all cases (pause to confirm Layer-2 spend); write `docs/widget-test-report.md`.
-4. `/superpowers:write-plan` → fix plan, one item per P0/P1 (+ any flagged P2), each with a
-   machine-checkable acceptance criterion.
+4. **Run the §11 autonomous find→fix→verify loop** over the issue set: fix, gate, self-merge
+   gate-green PRs, re-verify. Anything that cannot self-merge (governance-document edits, or a fix
+   that fails a gate it can't satisfy) → `/superpowers:write-plan` fix plan for a human, one item per
+   issue with a machine-checkable acceptance criterion.
+5. Report the loop's run: issues found → fixed/merged → deferred-to-human, with the audit trail.
 
 ## 9. Non-goals
 
-- Not changing any run-time behavior, prompt, model, or governance surface (build-time only).
-- Not enabling any off-by-default flag on staging or production.
+- Not implementing the run-time **self-improvement / evolution pipeline** (eval→shadow→canary→
+  human-promote) — that is a separate product feature; fixing agent-behavior *code* against this
+  approved spec is ordinary build-time development, not that feature.
+- **No autonomous prod promotion/deploy** — the loop merges to `main`/staging only; prod stays
+  human-promoted.
+- **The loop may not edit the governance documents/gates themselves** (`HITL-POLICY.md`, the
+  operating manual, the merge-gate/no-weaken logic) — those go to a human.
+- Not enabling any off-by-default run-time flag on staging or production (enablement is human-only).
 - Not adding a test-injection hook to the staging service.
 - No `locale`/`language` field assertion (language is not a field — text-driven only).
 - Not judging voice on Layer 1 (mock prose is canned).
@@ -371,5 +385,55 @@ UI cases).
   memory is contingent on staging flags; step-0 verifies and the report states what was contingent.
 - **Language:** deterministic non-English handling needs `SERVER_GUARD_SIGNALS`; the Chinese-health
   case may pass live-but-not-in-code (or neither) — that discrepancy is itself the finding.
-- **Layer-2 spend:** multi-turn inflates calls to ~110-130; owner re-confirms before the live run.
+- **Layer-2 spend:** multi-turn inflates calls to ~120-140; owner re-confirms before the live run.
 - **Playwright** may not be a current dependency; confirm before adding (dev-only, portability-neutral).
+- **Autonomous-loop blast radius:** a self-merging fix loop editing agent-behavior code is powerful;
+  the §12 meta-tests + kill switch + audit log + `merge-gate` no-weaken rule are the containment. A
+  fix that repeatedly fails its gate must **stop and defer to a human**, never loosen the gate.
+- **Fix-vs-report confusion:** the loop must only fix defects that map to an approved acceptance
+  criterion; a novel/ambiguous defect is reported for human triage, not auto-fixed on a guess.
+
+## 11. Autonomous find→fix→verify loop (Part A)
+
+Turns the one-shot report into a governed build-time loop, reusing existing machinery (the ATDD
+subagents, the `triage` skill + `docs/design/build-automation.md` loop, `merge-gate.sh`, the audit
+log). **Governance basis:** fixing agent-behavior *code* (prompt/policy/model) against this approved
+spec is ordinary build-time development — it does **not** route through the run-time evolution
+pipeline (that governs a run-time agent self-modifying on live traffic, out of scope).
+
+**Per-issue micro-loop (severity order P0→P3):**
+1. `solution-architect` — issue `expected`/`actual` → fix task + machine-checkable acceptance
+   criterion.
+2. `test-engineer` — the red behavioral case *is* the test; extend unit/E2E coverage from the
+   criterion (test-first).
+3. `backend-builder` / `frontend-builder` — implement to green.
+4. `security-reviewer` — **required** on any fix touching safety/consent/credentials/agent-autonomy/
+   customer data (§4.4); a build-time gate, not a human bottleneck.
+5. `fact-checker` — verify claims before commit.
+6. Full CI gate set (the 4 commands) + `pnpm eval` + `merge-gate.sh`.
+7. **Self-merge gate-green PRs** — including agent prompt/policy/model code.
+8. **Verify:** re-run the affected harness cases → confirm fixed + no regression; loop until the
+   issue set drains or a token/iteration budget hits. A durable state file makes it resumable.
+
+**Guardrails (non-negotiable):**
+- No autonomous prod promotion/deploy (merges to `main`/staging only; prod human-promoted).
+- The loop may not edit the governance documents/gates themselves → deferred to a human.
+- Kill switch halts the loop instantly; every autonomous fix/merge is written to the immutable audit
+  log (actor, input, decision, reversal path).
+- `merge-gate` no-weaken rule holds — a fix may never loosen/`|| true`/remove a gate to pass; a
+  persistently failing fix stops and defers to a human.
+- Nothing self-merges below the coverage bar or with a red governance/HITL test.
+
+## 12. Meta-governance tests (Part B)
+
+Build-time tests (unit/integration on the loop harness + gate scripts) proving the loop cannot
+escape its box:
+- **No auto-prod:** the loop cannot trigger a production deploy/promotion; it only merges to
+  `main`/staging.
+- **Governance-doc guard:** a PR that edits `HITL-POLICY.md` / the operating manual / the
+  merge-gate/no-weaken logic is **not** auto-merged — it requires a human.
+- **No-weaken:** a PR that removes or `|| true`s a gate step is rejected by the gate.
+- **Security gate:** a safety/consent-regressing fix is blocked by `security-reviewer`; nothing
+  self-merges below the coverage bar or with a red governance test.
+- **Kill switch:** halts a mid-run loop; in-flight work is left in a resumable, un-merged state.
+- **Audit completeness:** every autonomous action produces an audit-log entry with a reversal path.
