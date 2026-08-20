@@ -190,9 +190,12 @@ describe("POST /cart/checkout-url NN#5 audit — line count only, never a varian
       method: "POST",
       url: "/cart/checkout-url",
       payload: {
+        // Long, DISTINCTIVE variant ids on purpose: the audit row also serializes a timestamp + seq, and a
+        // SHORT numeric needle like "111" collides with those digits by chance — that was the #397 CI flake
+        // (nothing actually leaked; the audit input is line-count-only, buildCartCheckoutAuditInput).
         items: [
-          { variantId: "111", quantity: 2 },
-          { variantId: "222", quantity: 1 },
+          { variantId: "9876543210", quantity: 2 },
+          { variantId: "8765432019", quantity: 1 },
         ],
       },
     });
@@ -201,8 +204,8 @@ describe("POST /cart/checkout-url NN#5 audit — line count only, never a varian
     const audit = await h.store.readAudit({ tenantId: TENANT });
     const row = audit.find((r) => r.action === "cart-checkout-url");
     expect(row, "expected a cart-checkout-url audit row").toBeDefined();
-    expect(JSON.stringify(row)).not.toContain("111");
-    expect(JSON.stringify(row)).not.toContain("222");
+    expect(JSON.stringify(row)).not.toContain("9876543210");
+    expect(JSON.stringify(row)).not.toContain("8765432019");
     expect(JSON.stringify(row)).not.toContain(SHOP);
     expect((row as { actor: string }).actor).toBe("shopper"); // no verified shopper on this request
   });
