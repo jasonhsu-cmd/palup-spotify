@@ -4,8 +4,11 @@
 > assessment.** It states what the code does, cites where, and identifies the decision that a qualified
 > attorney and the **Compliance/Legal owner** must make. It reaches **no legal conclusion** anywhere, and
 > nothing here should be read as a claim that any option is permitted or prohibited. Nothing in this
-> document changes ADR-0015's status (still **Proposed — NOT enacted**) or the
-> `MEMORY_ADR_ACCEPTED = false` gate.
+> document changes ADR-0015's status or the memory gate.
+> **(2026-08-20 factual update:** ADR-0015 is now "Accepted for internal staging" and the `MEMORY_ADR_ACCEPTED`
+> const is now `true` (`packages/widget-memory/src/flag.ts:18`) — memory is live on the staging service for **internal users only**
+> (tenant `palup-skincare-jason`). **Production / external-shopper enablement remains NOT enacted and legally
+> gated** — the questions in this document are exactly that gate.)
 >
 > Companions: `memory-privacy-notice-draft.md`, `memory-dpa-addendum-draft.md`, `provisions-brief.md`.
 > Line numbers are as of commit `fea7c0d`.

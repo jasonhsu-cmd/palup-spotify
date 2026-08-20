@@ -1,6 +1,8 @@
-# ADR-0018: Shopper authorization via the Shopify Customer Account API (OAuth) — Proposed
+# ADR-0018: Shopper authorization via the Shopify Customer Account API (OAuth) — Accepted (built, inert)
 
-- **Status: Proposed.** Add the Shopify **Customer Account API (CAA) OAuth** as an additive, third
+- **Status: Accepted — built and merged, INERT behind `CAA_ENABLED`/`SHOPPER_AUTH`, not yet cut over live**
+  (OAuth adapter + `/auth/customer/login|callback|logout` routes registered in `widget-backend/src/server.ts`;
+  live CAA commerce read adapter also behind `CAA_ENABLED`). Add the Shopify **Customer Account API (CAA) OAuth** as an additive, third
   shopper-identity adapter behind the vendor-neutral `IdentityPort` (ADR-0001), so the widget can read a
   shopper's **own** orders + subscriptions with a **per-shopper, least-privilege** token. **Hybrid** with
   the App-Proxy adapter (ADR-0017) — not a replacement. **INERT** behind `SHOPPER_AUTH` (default off,

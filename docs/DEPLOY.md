@@ -577,9 +577,10 @@ provide. It fails the gate rather than passing quietly.
 ## How to halt the live agent
 
 Governance non-negotiable #4 — *any agent, at any scope, halted instantly*. The three commands below are
-the supported way to do it; they are the **only** arming path that works against the current deployment
-(the control-plane operator console — `POST /api/runtime-kill` — is the same registry, but that service
-**is not deployed**; `deploy-staging.yml` deploys only `palup-widget-staging`).
+the supported, always-available arming path (the control-plane operator route — `POST /api/runtime-kill` —
+is the same registry; that service is now **deployed on internal staging** as `palup-control-staging`
+(IAM-gated, needs `run.invoker`) but **not in production**, and `deploy-staging.yml` deploys only
+`palup-widget-staging` — so the CLI is what works from a plain operator shell, and the only path in production).
 
 ```bash
 export DATABASE_URL=…                                  # MUST be the store the backend uses (see below)
@@ -668,8 +669,9 @@ person lifts one. Adjusting the COGS cap **number** is a Policy change and is no
 **Not built yet, so that nobody assumes otherwise:** nothing automatically converts measured spend into a
 cap. The control plane measures cost, but an **operator sets the cap today**. The control-plane routes
 (`POST /api/cost-cap`, `POST /api/cost-cap/clear`) are the same registry, but that service is **not
-deployed** by `deploy-staging.yml`, so the CLI above is the only path that works — which is why the audit's
-`reversalPath` names the CLI first.
+deployed by `deploy-staging.yml`** (it runs separately as the IAM-gated `palup-control-staging` on staging,
+and nowhere in production), so the CLI above is the path that works from a plain operator shell — which is
+why the audit's `reversalPath` names the CLI first.
 - A halt propagates to every serving instance because the registry lives in the shared Cloud SQL store —
   which is exactly why `DATABASE_URL` must be the deployment's own.
 

@@ -15,12 +15,14 @@
 
 ## 0. Status and scope of this addendum
 
-The processing described is **not occurring**. `MEMORY_ADR_ACCEPTED` is a hardcoded `false`
-(`packages/widget-memory/src/flag.ts:12`) and `isMemoryEnabled()` requires that constant **and** the
-operator flag (`flag.ts:16-18`), so in production the memory service is never constructed
-(`packages/widget-backend/src/server.ts:200-217`) and no fact is written or read. This addendum describes
-the processing that **would** occur after a human-only flip of that constant. Line numbers are as of commit
-`fea7c0d`.
+**(2026-08-20 update.)** The processing described is **not occurring in production**, but IS live on the
+internal **staging** service (internal users only, tenant `palup-skincare-jason`). `MEMORY_ADR_ACCEPTED` is now
+a hardcoded `true` (`packages/widget-memory/src/flag.ts:18`) and `isMemoryEnabled()` requires that constant
+**and** the operator flag `MEMORY_ENABLED === "true"`, which is set only on staging — so in **production** the
+memory service is never constructed (`MEMORY_ENABLED` unset; production is deployed nowhere) and no fact is
+written or read. This addendum describes the processing that occurs on staging and that **would** occur in
+production after a human-only production/external enablement (legal §A + the operator flag). Line numbers may
+lag; verify against the cited files.
 
 Scope: cross-visit shopper memory only. Other processing (chat serving, the traffic/shadow-grading log,
 telemetry, Shopify order lookups, marketing comms) is out of scope here and belongs in the base DPA.
@@ -299,7 +301,7 @@ Each item below was a gap in the code as of commit `fea7c0d`.
 
 | Right | Status |
 |---|---|
-| Erasure ("forget me") | Implemented per subject, audited, and reachable even while the feature is off (`server.ts:655-659,708`; `erasure.ts:63-69`). **Not a durable-deletion guarantee today:** it deletes from the in-memory store held by the instance that receives the call (§0, §7 item 2), and it does not clear the subject's consent record (§7 item 10). |
+| Erasure ("forget me") | Implemented per subject, audited, and reachable even while the feature is off (`server.ts:655-659,708`; `erasure.ts:63-69`). **On staging (and any `DATABASE_URL`-configured deployment) it deletes from the durable Postgres vector store** — `vector-factory.ts` returns `PostgresVectorStore` when `DATABASE_URL` is set (the in-memory store is only the no-`DATABASE_URL` fallback, which production refuses to boot into via `PALUP_REQUIRE_DATABASE_URL`, precisely to avoid a false erasure confirmation). It does **not** clear the subject's consent record (§7 item 10). |
 | Withdrawal of consent | Recorded and forward-effective; **does not purge** (§7 item 4) |
 | Access / portability | Not implemented (§7 item 5) |
 | Objection / restriction | No dedicated mechanism beyond withdrawal + erasure |
