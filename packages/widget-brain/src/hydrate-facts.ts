@@ -67,19 +67,6 @@ export function hydrateProductFacts(products: Product[], facts: ProductFact[], s
   const byId = new Map<string, ProductFact>();
   // Last write wins on a duplicate id — matches ProductFactsPort.getMany's own de-dup contract.
   for (const f of facts) byId.set(f.productId, f);
-  const isStale = (fact: ProductFact): boolean => {
-    if (!staleness) return false; // no ceiling configured ⇒ never stale (pre-D2 behaviour)
-    // Pillar 1 — the freshness CHANNEL must be provably live to quote a confirmed price. When channel health
-    // is supplied and NOT healthy, a matched fact is unconfirmed regardless of its own `updatedAt`: a recent
-    // row proves only that it was written recently, not that the webhook/producer keeping it fresh is still
-    // alive (money/NN#1 fail-honest). `channelHealthy` omitted/true ⇒ judged on `updatedAt` alone (unchanged).
-    if (staleness.channelHealthy === false) return true;
-    // No updatedAt ⇒ freshness UNPROVABLE ⇒ treat as stale (fail-honest); a malformed date does too.
-    if (!fact.updatedAt) return true;
-    const at = new Date(fact.updatedAt).getTime();
-    if (Number.isNaN(at)) return true;
-    return staleness.now.getTime() - at > staleness.maxAgeMs;
-  };
   return products.map((p) => {
     const fact = byId.get(p.id);
     if (!fact) return p;
@@ -88,10 +75,30 @@ export function hydrateProductFacts(products: Product[], facts: ProductFact[], s
     // is DROPPED (set undefined), not left at the product's own last-known value: the fact's existence
     // means an availability-affecting event fired for this product, so the pre-fact value can no longer be
     // trusted either — "unknown" is honest, a stale "true"/"false" is not.
-    if (isStale(fact)) return { ...p, priceConfirmed: false, availableForSale: undefined };
+    if (isFactStale(fact, staleness)) return { ...p, priceConfirmed: false, availableForSale: undefined };
     const next: Product = { ...p, price: fact.price };
     // Only an explicitly-stated availability overwrites; an absent fact value leaves the product's own.
     if (fact.availableForSale !== undefined) next.availableForSale = fact.availableForSale;
     return next;
   });
+}
+
+/**
+ * Pillar 1 (serve-time read-through) — the SAME staleness predicate `hydrateProductFacts` applies to a
+ * matched fact, exported so the serving path can decide WHICH ids need an on-demand refresh (brain.ts)
+ * without duplicating (and risking drift from) this rule. `staleness` omitted ⇒ never stale, exactly as
+ * `hydrateProductFacts` itself treats a missing ceiling (pre-D2 behaviour).
+ */
+export function isFactStale(fact: ProductFact, staleness?: HydrationStaleness): boolean {
+  if (!staleness) return false; // no ceiling configured ⇒ never stale (pre-D2 behaviour)
+  // Pillar 1 — the freshness CHANNEL must be provably live to quote a confirmed price. When channel health
+  // is supplied and NOT healthy, a matched fact is unconfirmed regardless of its own `updatedAt`: a recent
+  // row proves only that it was written recently, not that the webhook/producer keeping it fresh is still
+  // alive (money/NN#1 fail-honest). `channelHealthy` omitted/true ⇒ judged on `updatedAt` alone (unchanged).
+  if (staleness.channelHealthy === false) return true;
+  // No updatedAt ⇒ freshness UNPROVABLE ⇒ treat as stale (fail-honest); a malformed date does too.
+  if (!fact.updatedAt) return true;
+  const at = new Date(fact.updatedAt).getTime();
+  if (Number.isNaN(at)) return true;
+  return staleness.now.getTime() - at > staleness.maxAgeMs;
 }

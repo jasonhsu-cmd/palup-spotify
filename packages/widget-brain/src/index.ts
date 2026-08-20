@@ -7,6 +7,7 @@ export {
   HISTORY_MAX_TURNS,
   HISTORY_MAX_CHARS,
   TURN_EMBED_AGENT_TYPE,
+  READ_THROUGH_TIMEOUT_MS,
 } from "./brain.js";
 export type { Brain } from "./brain.js";
 export {

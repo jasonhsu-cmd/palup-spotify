@@ -765,6 +765,15 @@ export async function buildServer(opts?: {
   // withholding is still a shopper-visible behaviour change (money/NN#1). OFF ⇒ channelHealthFor is never
   // read by createBrain and the CATALOG block is byte-identical.
   const PRICE_REQUIRES_LIVE_CHANNEL = process.env.PRICE_REQUIRES_LIVE_CHANNEL === "true";
+  // Pillar 1 (serve-time read-through) — PRODUCT_FACTS_READ_THROUGH: when the serve path is about to quote a
+  // SKU whose Tier-2 fact is stale or missing, trigger a TARGETED on-demand refresh of just those ids BEFORE
+  // quoting — instead of only hedging (priceConfirmed:false) — so the price can be CONFIRMED this turn.
+  // Bounded to the retrieved top-K (never a catalog crawl); the brain enforces its own timeout and falls back
+  // to the existing hedge on any failure/timeout, so this can only ever get a price confirmed SOONER, never
+  // invent one. Same governed posture-flag discipline as every flag above: env-read here, default OFF,
+  // turning it on is a human promotion (HITL-POLICY §5) — it changes whether/when a price is confirmed
+  // (money/NN#1). OFF ⇒ `refreshFacts` is never passed to the brain and the hydration path is byte-identical.
+  const PRODUCT_FACTS_READ_THROUGH = process.env.PRODUCT_FACTS_READ_THROUGH === "true";
   // Pillar 3 (opener) — PROACTIVE_OPENER: upgrade the first-touch greeting to a fit-first opener (code-owned
   // quick-reply chips today; a best-fit card in a follow-on). Default OFF ⇒ the plain greeting is
   // byte-identical. A new shopper-reaching proactive surface + agent-behaviour change ⇒ eval gate → shadow →
@@ -831,6 +840,38 @@ export async function buildServer(opts?: {
   const offerCheckModel = OUTGOING_OFFER_CHECK
     ? createMeteringModelPort(activeModelPort, telemetry, { agentType: OFFER_CHECK_AGENT_TYPE })
     : undefined;
+  // Pillar 1 (serve-time read-through) — `reconcileDeps` built UNCONDITIONALLY (moved out of the
+  // CATALOG_WEBHOOKS/pubsub-push block below, which still builds nothing else early) so `refreshFacts`
+  // (below) can be wired into `brainFor` regardless of whether the webhook/pubsub worker is enabled. Cheap
+  // and side-effect-free to construct: `shopifyCatalogSource`/`shopifyCatalogByIdSource` are pure closures
+  // over `secrets` (no I/O until actually called), and the facts-store migrate mirrors the same idempotent
+  // migration `productFactsPort` already runs above. The block at CATALOG_WEBHOOKS below now reuses this
+  // same object instead of building its own — no behavior change there beyond this object now existing
+  // earlier.
+  const reconcileFactsStore = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
+  if (reconcileFactsStore instanceof PostgresProductFactsStore) await reconcileFactsStore.migrate();
+  const reconcileDeps = {
+    store,
+    vector: vectorPort,
+    model: createMeteringModelPort(activeModelPort, telemetry, { agentType: "catalog-index" }),
+    catalog: shopifyCatalogSource(secrets),
+    catalogById: shopifyCatalogByIdSource(secrets),
+    productFacts: reconcileFactsStore,
+    // Pillar 1b — a successful money-fact upsert here is a live producer run; record it for channel-health
+    // regardless of PRICE_REQUIRES_LIVE_CHANNEL (see channelHealth's own construction comment above).
+    onProducerOk: (t: string) => channelHealth.recordProducerOk(t),
+  };
+  // Pillar 1 (serve-time read-through) — the PORT-CLEAN callback wired into the brain (createBrain position
+  // 28): a vendor-neutral `(tenantId, productIds) => Promise<void>` that re-fetches just the named SKUs
+  // through the SAME targeted reconcile the catalog webhook path uses (reconcileByReason → reconcileProducts:
+  // by-id fetch, re-embed only what changed, upsert fresh Tier-2 facts), tagged `reason: "read-through"` for
+  // the audit trail. The brain gates purely on `refreshFacts !== undefined`, so it is provided ONLY when the
+  // flag is on — `reconcileDeps` itself is always constructible (see above), so there is no additional
+  // partial-availability case to gate on here. No Shopify (or other vendor) type crosses into widget-brain:
+  // the callback's own signature is the only thing the brain ever sees.
+  const refreshFacts = PRODUCT_FACTS_READ_THROUGH
+    ? (tenantId: string, productIds: string[]) => reconcileByReason(reconcileDeps, tenantId, { productIds, reason: "read-through" })
+    : undefined;
   // THE COST OF WIRING THESE, MADE VISIBLE. Before this change, enabling Wave 4 required editing code;
   // now an env var suffices. That is a real reduction in friction and it is the honest trade for making
   // shadow/canary possible at all (HITL-POLICY §5). The compensating control is that an enabled flag can
@@ -838,7 +879,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER })
+  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER, PRODUCT_FACTS_READ_THROUGH })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -905,6 +946,10 @@ export async function buildServer(opts?: {
         // Position 27 — Pillar 3 PROACTIVE_OPENER. Default OFF ⇒ the greeting rung uses the plain
         // GREETING_PROMPT and mints no chips ⇒ the greeting Decision + /chat wire are byte-identical.
         PROACTIVE_OPENER,
+        // Position 28 — Pillar 1 (serve-time read-through). `refreshFacts` is `undefined` unless
+        // PRODUCT_FACTS_READ_THROUGH is set, so the hydration step's stale/missing-id refresh never fires and
+        // the CATALOG block's hedge (priceConfirmed:false) is byte-identical to today.
+        refreshFacts,
       );
       brains.set(key, b);
     }
@@ -1281,21 +1326,11 @@ export async function buildServer(opts?: {
 
   // The reconcile-by-re-fetch worker (the SAME path the poll job runs, with its own metered model + a durable
   // facts store when a pool exists) is shared by the consume (push route) and the in-memory publish path, so
-  // build it when EITHER is active.
+  // build it when EITHER is active. `reconcileDeps` itself is now built UNCONDITIONALLY, above (Pillar 1
+  // serve-time read-through) — reused here rather than rebuilt, so a deployment with CATALOG_WEBHOOKS/pubsub
+  // push both off still gets exactly the worker/routes it got before (nothing), while one with either on
+  // gets the SAME reconcileDeps the read-through callback would already be using.
   if (CATALOG_WEBHOOKS || pubsubPushConfigured) {
-    const factsStore = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
-    if (factsStore instanceof PostgresProductFactsStore) await factsStore.migrate();
-    const reconcileDeps = {
-      store,
-      vector: vectorPort,
-      model: createMeteringModelPort(activeModelPort, telemetry, { agentType: "catalog-index" }),
-      catalog: shopifyCatalogSource(secrets),
-      catalogById: shopifyCatalogByIdSource(secrets),
-      productFacts: factsStore,
-      // Pillar 1b — a successful money-fact upsert here is a live producer run; record it for channel-health
-      // regardless of PRICE_REQUIRES_LIVE_CHANNEL (see channelHealth's own construction comment above).
-      onProducerOk: (t: string) => channelHealth.recordProducerOk(t),
-    };
     // S3 §C — `reconcileByReason` (catalog-index.ts) owns the routing: named product ids ⇒ the TARGETED
     // reconcile (fetch+embed+upsert+ledger for just those SKUs, S3·T5); a bare "inventory" tick is a NO-OP
     // — inventory freshness is covered by the hourly poll backstop (PRODUCT_FACTS_POLL) + the serve-time

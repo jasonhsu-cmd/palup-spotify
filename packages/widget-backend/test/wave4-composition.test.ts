@@ -33,7 +33,7 @@ import { MANIFEST_COLLECTION, MANIFEST_KEY } from "../src/jobs/catalog-index.js"
 // model actually received, a manifest read the retriever alone performs — and each one is paired with a
 // flag-off probe proving the observation was the flag's doing.
 
-const WAVE4_ENV = ["CATALOG_RETRIEVAL_K", "PRODUCT_CITATIONS", "PRODUCT_CARDS", "CART_LINE_ITEMS", "PRODUCT_FACTS_HYDRATION", "OUTGOING_OFFER_CHECK"];
+const WAVE4_ENV = ["CATALOG_RETRIEVAL_K", "PRODUCT_CITATIONS", "PRODUCT_CARDS", "CART_LINE_ITEMS", "PRODUCT_FACTS_HYDRATION", "OUTGOING_OFFER_CHECK", "PRODUCT_FACTS_READ_THROUGH"];
 afterEach(() => {
   WAVE4_ENV.forEach((k) => delete process.env[k]);
   vi.restoreAllMocks();
@@ -144,6 +144,22 @@ describe("an enabled Wave 4 flag can never be silent", () => {
     try {
       const said = warn.mock.calls.flat().join(" ");
       expect(said).toContain("PRODUCT_FACTS_HYDRATION");
+      expect(said).toMatch(/named human/i);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("Pillar 1 — names PRODUCT_FACTS_READ_THROUGH when it is on (reconcileDeps composes + refreshFacts reaches the brain)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.PRODUCT_FACTS_READ_THROUGH = "true";
+    // buildServer succeeding here also proves reconcileDeps (now built unconditionally) composes without a
+    // DB (the in-memory reference adapter) and without CATALOG_WEBHOOKS/pubsub push configured — a
+    // construction error would have thrown before this returned.
+    const app = await buildServer({ store: new InMemoryRuntimeStore(), modelPort: new SpyModel() });
+    try {
+      const said = warn.mock.calls.flat().join(" ");
+      expect(said).toContain("PRODUCT_FACTS_READ_THROUGH");
       expect(said).toMatch(/named human/i);
     } finally {
       await app.close();
