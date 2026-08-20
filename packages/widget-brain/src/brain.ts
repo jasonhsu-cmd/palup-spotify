@@ -1175,8 +1175,33 @@ export function createBrain(
     if (onRetrievalPath) {
       const built = await retrieveViaShell(catalogRetriever!, tenantId, retrieval!.query, retrieval!.flags, retrieval!.queryVector, retrieval!.pin);
       ({ ctx, rendered: retrieved, corpusTotal } = built);
+    } else if (grounding) {
+      // F2 — NEVER THROWS. In production `grounding` is always `createCachingGroundingPort`'s wrapper,
+      // which already catches every `getContext` failure and fails closed to stale-while-error or a
+      // safe-empty context (packages/platform-ports/src/grounding-cache.ts) — so this call is not
+      // expected to reject there. But a grounding adapter used WITHOUT that wrapper (a misconfigured
+      // deployment, a direct/eval caller, a future call site) had no local guard here, so the throw
+      // propagated out of `decide()` uncaught and crashed the turn (see the "throwOnGetContext" case this
+      // fixes in grounding-stub.test.ts).
+      //
+      // On failure we deliberately fall back to `ctx = undefined`, NOT a synthesized empty-products
+      // context: `systemPrompt`'s `if (!ctx) return [...]` branch renders the plain "online store's
+      // shopping assistant" prompt with no CATALOG block at all, so the model never asserts anything
+      // about what the store carries — the existing rule "If a fact isn't there, say you're not certain
+      // and will check" governs the reply. An explicit empty product list, by contrast, would let the
+      // model confidently say "we don't carry that" about a product the merchant actually has — exactly
+      // the "CONFIDENT FALSE ONE" risk the catalog-ceiling comment in shopify-grounding.ts warns about.
+      // That risk is why this degrade must never be silent: `grounding:unavailable` is pushed onto the
+      // turn's own `flags` (via `retrieval.flags`, present at the one clean-sales call site this finding
+      // is scoped to) so the outage is audit-visible, mirroring `retrieveViaShell`'s `retrieval:unavailable`.
+      try {
+        ctx = await grounding.getContext(tenantId);
+      } catch {
+        ctx = undefined;
+        retrieval?.flags.push("grounding:unavailable");
+      }
     } else {
-      ctx = grounding ? await grounding.getContext(tenantId) : undefined;
+      ctx = undefined;
     }
     // A1b — overlay fresh Tier-2 money-facts onto the RETRIEVED subset (never the full catalog). Runs only
     // behind PRODUCT_FACTS_HYDRATION and only when retrieval actually produced a subset, so with the flag

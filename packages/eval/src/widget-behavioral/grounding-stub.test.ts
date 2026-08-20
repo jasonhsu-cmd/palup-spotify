@@ -95,24 +95,24 @@ describe("grounding-integrity cases via runSingle (brain-factory wiring)", () =>
     expect(r.decision.recommendedProductCards ?? []).toEqual([]);
   });
 
-  it("throwOnGetContext: the injected stub's getContext failure propagates out of decide() uncaught " +
-      "on the non-retrieval clean-sales path (brain.ts groundedMessages calls `grounding.getContext` " +
-      "with no try/catch when catalogRetrievalEnabled is off) — the turn does NOT silently degrade to a " +
-      "generic reply; runSingle's promise rejects. This is an OPEN FINDING, not the graceful-degrade " +
-      "brain.ts's S2 retrieval path provides (retrieveViaShell catches and pushes `retrieval:unavailable`) " +
-      "— confirmed empirically for this task, see task-5-report.md.",
+  it("throwOnGetContext (F2, fixed): the injected stub's getContext failure on the non-retrieval " +
+      "clean-sales path no longer propagates out of decide() — brain.ts now wraps that call in a local " +
+      "try/catch (mirroring retrieveViaShell's own `retrieval:unavailable` catch on the S2 path) and " +
+      "degrades to `ctx = undefined` (the plain generic-assistant prompt, never a synthesized empty " +
+      "catalog that could read as a confident 'we don't carry that'), recording `grounding:unavailable` " +
+      "on the turn's flags so the outage stays audit-visible rather than silent.",
     async () => {
-      await expect(
-        runSingle({
-          id: "ground-throw",
-          family: "grounding-integrity",
-          severity: "P1",
-          riskClass: "grounding-integrity",
-          brain: { grounding: "stub", stub: { throwOnGetContext: true } },
-          signals: {},
-          message: "Which of your serums is best for oily skin?",
-        }),
-      ).rejects.toThrow("stub getContext failure");
+      const r = await runSingle({
+        id: "ground-throw",
+        family: "grounding-integrity",
+        severity: "P1",
+        riskClass: "grounding-integrity",
+        brain: { grounding: "stub", stub: { throwOnGetContext: true } },
+        signals: {},
+        message: "Which of your serums is best for oily skin?",
+      });
+      expect(typeof r.decision.reply).toBe("string");
+      expect(r.decision.flags).toContain("grounding:unavailable");
     },
   );
 
