@@ -76,17 +76,21 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
 
     const launcher = document.createElement("button");
     launcher.type = "button";
-    launcher.setAttribute("aria-label", "Open chat");
+    // Labeled PILL, not a bare icon: the visible text tells shoppers what it does, which invites engagement
+    // (feeding memory + the attribution flywheel) without interrupting. `aria-label` carries the same words
+    // so the accessible name contains the visible text (WCAG 2.5.3 Label in Name). 💬 is decorative.
+    launcher.setAttribute("aria-label", "Ask the expert");
     // a11y: the launcher toggles the panel it controls, so assistive tech needs to know whether that
     // panel is currently open. Starts "false" (panel closed at mount); open()/close() below keep it in
     // sync with the SAME state their `display` toggle tracks.
     launcher.setAttribute("aria-expanded", "false");
     launcher.setAttribute(
       "style",
-      "width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;" +
-        "background:#4f46e5;color:#fff;font-size:20px;box-shadow:0 6px 20px rgba(0,0,0,.25);",
+      "display:inline-flex;align-items:center;gap:8px;height:48px;padding:0 18px;" +
+        "border-radius:999px;border:none;cursor:pointer;white-space:nowrap;line-height:1;" +
+        "background:#4f46e5;color:#fff;font-size:15px;font-weight:600;box-shadow:0 6px 20px rgba(0,0,0,.25);",
     );
-    launcher.textContent = "\u{1F4AC}"; // 💬
+    launcher.textContent = "\u{1F4AC} Ask the expert"; // 💬 Ask the expert
 
     const dot = document.createElement("span");
     dot.setAttribute(
@@ -265,6 +269,12 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
     // forward the updated context to the panel (no-op until the panel iframe has mounted).
     const onContextChange = (): void => postContext();
     window.addEventListener("palup:contextchange", onContextChange);
+    // Host-open hook: the storefront hero "Ask the expert" CTA runs on the HOST page and cannot call open()
+    // directly (the LoaderApi is not exposed as a global — I-3, single namespaced guard only). It dispatches
+    // a `palup:open` window CustomEvent; the loader opens the panel here, mirroring the palup:contextchange
+    // host→loader pattern. Distinct channel from the loader→panel `palup:open` postMessage in open().
+    const onHostOpen = (): void => open();
+    window.addEventListener("palup:open", onHostOpen);
 
     launcher.addEventListener("click", open);
 
@@ -272,6 +282,7 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       destroyed = true;
       window.removeEventListener("message", onMessage);
       window.removeEventListener("palup:contextchange", onContextChange);
+      window.removeEventListener("palup:open", onHostOpen);
       launcher.removeEventListener("click", open);
       host.remove();
     }

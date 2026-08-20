@@ -59,7 +59,7 @@ async function openEmbedPanel(page: Page): Promise<Frame> {
   await page.evaluate(() => {
     type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
     const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
-    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement | null;
     if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
     launcher.click();
   });
@@ -125,12 +125,12 @@ test("embed: loader on a host page -> launcher mounts -> open -> panel iframe ->
 
   // --- "open" ---------------------------------------------------------------------------------------
   // Reach into the CLOSED shadow root via loader-core.ts's own `__palupRoot` test seam and click the
-  // REAL launcher button (aria-label "Open chat"), running the REAL open() handler.
+  // REAL launcher button (aria-label "Ask the expert"), running the REAL open() handler.
   await page.evaluate(() => {
     type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
     const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
     const root = hostEl?.__palupRoot;
-    const launcher = root?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    const launcher = root?.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement | null;
     if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
     launcher.click();
   });
@@ -179,7 +179,7 @@ test("embed: /embed/panel's real, on-the-wire CSP response header includes the s
     type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
     const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
     const root = hostEl?.__palupRoot;
-    const launcher = root?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    const launcher = root?.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement | null;
     if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
     launcher.click();
   });
@@ -229,7 +229,7 @@ test("embed: the host cart (window.PALUP.cart) reaches /chat as signals.cartItem
   await page.evaluate(() => {
     type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
     const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
-    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement | null;
     if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
     launcher.click();
   });
@@ -281,7 +281,7 @@ test("embed: opening the panel delivers palup:open so the first-touch greeting t
   await page.evaluate(() => {
     type HostWithRoot = HTMLElement & { __palupRoot?: ShadowRoot };
     const hostEl = document.querySelector("[data-palup-host]") as HostWithRoot | null;
-    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Open chat"]') as HTMLButtonElement | null;
+    const launcher = hostEl?.__palupRoot?.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement | null;
     if (!launcher) throw new Error("launcher button not found inside the closed shadow root");
     launcher.click();
   });
