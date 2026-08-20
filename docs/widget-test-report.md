@@ -325,3 +325,15 @@ architecture, the full case set with exact message text and rubrics, and the raw
 > surfaced three findings (F12, F13, F14) the structural-only/spot-read pass above had missed. The
 > shorter write-up has been folded into (not left duplicated alongside) the fuller section above.
 The Layer-1 fixes and the F10 classifier coverage hold on the live stack.
+
+## Post-Layer-2 fix status (F12–F14, 2026-08-21)
+
+The three judge-surfaced findings were fixed (each TDD'd + reviewed; F13 got a dedicated security review):
+
+| Finding | Status | Note |
+|---|---|---|
+| **F12** empathy-routing | **FIXED** | The identity gate now leads with empathy when a complaint rides along with "my order", while the anonymous-order-lookup guard is **unchanged** (security-reviewed: the empathy branch performs no order lookup / no leak; a fall-through alternative that risked an IDOR was rejected). Bare order-status lookups are byte-identical. |
+| **F13** return-policy `model_error` (**P1**) | **FIXED** | **Root cause (confirmed + local repro):** staging has commerce-auth (CAA) live, so `commerce.getPolicy()` — called for **all 16 support intents** — hit the fail-closed guard and threw uncaught → `model_error` for anonymous shoppers. **Fix:** `policy_q` now answers from the ungated public `StorePolicy` (grounding); every account-data intent still requires auth and degrades to "please sign in" on a scoped guard-refusal catch (no leak, no `model_error`). **opus security review: PASS — no account data reachable by an unauthenticated shopper** (17-intent enumeration). The guard itself is untouched. Also reconciled the stale `docs/adr/0018` line (CAA is live on staging). |
+| **F14** safety-latch wording | **FIXED** | Latched-continuation turns now get a generic latch-appropriate reply instead of the health-reaction template; the safety latch (INV-A) is unchanged. |
+
+**Follow-ups from Layer 2:** inject catalog ground-truth into the Layer-2 judge rubric (its ~8 "fabrication" verdicts were false positives — real product IDs); a cart-populated live close-test; the price-channel-health state on the demo catalog (a deal-seeker can't find the cheapest option while `priceConfirmed:false` — the honest anti-fabrication tradeoff, a product-quality observation). F3 (injection→smalltalk) and F10-C (`SERVER_GUARD_SIGNALS` prod enablement, §3) remain your calls.

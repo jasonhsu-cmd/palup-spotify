@@ -1,12 +1,18 @@
-# ADR-0018: Shopper authorization via the Shopify Customer Account API (OAuth) — Accepted (built, inert)
+# ADR-0018: Shopper authorization via the Shopify Customer Account API (OAuth) — Accepted (built; live on staging)
 
-- **Status: Accepted — built and merged, INERT behind `CAA_ENABLED`/`SHOPPER_AUTH`, not yet cut over live**
-  (OAuth adapter + `/auth/customer/login|callback|logout` routes registered in `widget-backend/src/server.ts`;
-  live CAA commerce read adapter also behind `CAA_ENABLED`). Add the Shopify **Customer Account API (CAA) OAuth** as an additive, third
+- **Status: Accepted — built and merged.** `CAA_ENABLED`/`SHOPPER_AUTH` is **live on internal staging** (confirmed
+  via `gcloud run services describe palup-widget-staging`, 2026-08-20: `WIDGET_AUTH_REQUIRED=true`,
+  `SHOPPER_AUTH=true`, `CAA_REDIRECT_URI` and `SHOPPER_TOKEN_SECRET` both set) — this superseded the original
+  "not yet cut over live" status, which was stale against that config (see the F13 investigation,
+  `.superpowers/sdd/2026-08-20-widget-behavioral-harness-layer1/f13-investigation.md`). **INERT in production**
+  (unset there). (OAuth adapter + `/auth/customer/login|callback|logout` routes registered in
+  `widget-backend/src/server.ts`; live CAA commerce read adapter also behind `CAA_ENABLED`). Add the Shopify
+  **Customer Account API (CAA) OAuth** as an additive, third
   shopper-identity adapter behind the vendor-neutral `IdentityPort` (ADR-0001), so the widget can read a
   shopper's **own** orders + subscriptions with a **per-shopper, least-privilege** token. **Hybrid** with
-  the App-Proxy adapter (ADR-0017) — not a replacement. **INERT** behind `SHOPPER_AUTH` (default off,
-  honored only with `WIDGET_AUTH_REQUIRED` per ADR-0017 F4) until built and a live cutover.
+  the App-Proxy adapter (ADR-0017) — not a replacement. Behind `SHOPPER_AUTH` (default off, honored only
+  with `WIDGET_AUTH_REQUIRED` per ADR-0017 F4) — **still INERT (unset) in production; live on internal
+  staging** since the cutover confirmed 2026-08-20 above.
 - **Owner (named):** jason.hsu@framy.co. **Plane:** run-time (shopper identity/authorization).
 - **Governance-touching** (customer data + a durable server-side credential). `security-reviewer`
   required; **human-merged.** Ships **NO new autonomy**; preserves ADR-0016 human-routed skip/pause.

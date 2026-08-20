@@ -38,7 +38,7 @@ import type {
   SafetyClass,
   Signals,
 } from "./types.js";
-import { classifySupportIntent, handleSupport } from "./support.js";
+import { classifySupportIntent, handleSupport, hasComplaintSignal } from "./support.js";
 
 /** The shipping baseline policy (current champion). Candidates are variations of this. */
 export const DEFAULT_POLICY: Policy = {
@@ -1413,10 +1413,26 @@ export function createBrain(
         if (isInjection) flags.push("injection_blocked");
         const escalate = cls !== "regulated_claim" && cls !== "abuse";
         if (escalate) flags.push("escalate");
+        // F14 — a turn that carries NO safety content of its own (safetyClass === "none") but is here
+        // only because an EARLIER turn latched (INV-A: session.ts never un-latches, signals.safetyLatched
+        // stays true for the rest of the conversation) is a LATCH CONTINUATION, not a fresh disclosure.
+        // `cls` above still defaults it to "product_safety" purely so the existing escalate/flag math
+        // above stays byte-identical (unchanged — that's the INV-A invariant and it's correct); what
+        // was wrong is REUSING the "product_safety"/"reaction" reply TEXT below for it, which is a
+        // real, class-specific canned string ("...medical advice on a reaction...") for a topic this
+        // turn never raised (docs/widget-test-report.md F14, L2-21 turn 2: a self-harm disclosure
+        // latched, then "what do you recommend for oily skin?" got the health-reaction string
+        // verbatim). The ORIGINAL latching class isn't preserved across turns (only the boolean latch
+        // is), so no classed reply here would be honest — a generic, latch-appropriate reply is used
+        // instead. Mode/pitch/escalate are untouched; only this turn's reply text changes.
+        const isLatchContinuation = safetyClass === "none" && signals.safetyLatched === true;
         // AI-disclosed, empathetic, escalates, and DEFERS health to a doctor (the agent never gives
         // medical advice itself) — recommends no product and never downplays.
         let reply: string;
-        if (cls === "distress") {
+        if (isLatchContinuation) {
+          reply =
+            "As an AI assistant, I want to stay with what you told me earlier rather than move on to something else right now — I've already flagged this for a person on our team. If you're in danger please contact your local emergency services or a crisis line. I'm here for anything else as soon as you're ready.";
+        } else if (cls === "distress") {
           // The emergency signpost is the load-bearing content and must never be diluted. What changed:
           // "I'm connecting you with a person now" told someone in distress that help was arriving on
           // this channel — the single most harmful place in the product to claim a handoff that does not
@@ -1544,12 +1560,27 @@ export function createBrain(
 
       // 1.5c Own-order/account request while NOT identified — never guess about their account; invite the
       // shopper to sign in (identity is required to see order history).
+      //
+      // F12 — this regex alone can't tell a bare status lookup ("where's my order?") from a genuine
+      // service complaint that happens to contain the phrase "my order" ("this is the third time my
+      // order has been wrong and I'm really frustrated"). Both used to get the IDENTICAL, word-for-word
+      // sign-in script with zero acknowledgment of the complaint/emotion (docs/widget-test-report.md
+      // F12, L2-05 — judge-failed on all 3/3 reps for exactly this). The GATE itself — never guessing at
+      // an unverified account, never doing a real order lookup here — is the actual security property
+      // and does NOT change: this still can't route to handleSupport (an anonymous shopper falling
+      // through to a real order/account lookup would be a worse bug, an IDOR onto whichever shopperId
+      // happens to be the default). Only the REPLY differs: when the same message also carries a
+      // complaint/frustration signal (reusing handleSupport's own existing annoyance detector via
+      // `hasComplaintSignal` — no new keyword list), lead with empathy before the sign-in ask.
       if (signals.relationship === "anonymous" && !/#\s?\d{3,}/.test(text) /* an order number CAN be looked up */ && /\b(my (last |previous |past |recent )?orders?|my order history|what did i (order|buy)|my (subscription|account|purchases?))\b/.test(text)) {
         flags.push("identity_required", "no_pitch");
+        const complaint = hasComplaintSignal(message, signals.mood);
+        if (complaint) flags.push("identity_required_with_complaint");
         return {
           mode: "support",
-          reply:
-            "I'd love to pull that up, but I can't see your order history unless you're signed in — I don't want to guess about your account. If you sign in (or share your order number), I can look it up right away. In the meantime I'm glad to help with anything about our products.",
+          reply: complaint
+            ? "I'm really sorry — that's frustrating, especially if it's happened more than once, and I don't want that to feel brushed off. I can't pull up your order details here unless you're signed in — I don't want to guess about your account — but if you sign in (or share your order number) I can look into this properly, and I'm glad to bring in a person on our team too if that would help."
+            : "I'd love to pull that up, but I can't see your order history unless you're signed in — I don't want to guess about your account. If you sign in (or share your order number), I can look it up right away. In the meantime I'm glad to help with anything about our products.",
           pitch: "none",
           escalateToHuman: false,
           outbound: false,
@@ -1596,6 +1627,11 @@ export function createBrain(
       if (isSupport) {
         // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
         if (commerce) {
+          // F13 — source the PUBLIC return/shipping policy from the ungated grounding shell (S2's cheap
+          // brand+policy-only read; fails closed to an empty policy, never throws — grounding-cache.ts)
+          // so `handleSupport`'s `policy_q` branch can answer an anonymous shopper without ever touching
+          // the auth-guarded CommercePort. Every other support intent is unaffected by this value.
+          const groundedPolicy = grounding ? (await grounding.getShell(tenantId)).policy : undefined;
           const r = await handleSupport(
             commerce,
             currentShopperId,
@@ -1610,6 +1646,7 @@ export function createBrain(
             // refund-ceiling HITL, the two ADR-0016 skip/pause controls, cancel→escalate), so a
             // classifier-chosen intent can never make a money/subscription action auto-execute.
             serverGuardSignalsEnabled ? signals.serverSupportIntent : undefined,
+            groundedPolicy,
           );
           // F11 — apply the SAME rage treatment the sales path already applies (escalate + a
           // behavioral:rage flag). handleSupport already never pitches (its own "no_pitch" flag is

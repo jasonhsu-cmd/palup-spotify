@@ -43,6 +43,21 @@ export interface CommercePolicy {
   shipping: string;
 }
 
+/**
+ * F13 — the structured refusal `guardCommercePort` (widget-backend/src/commerce-guard.ts) throws when a
+ * LIVE CommercePort call is attempted without a server-verified shopper principal (ADR-0016/ADR-0017).
+ * Lives here, not in widget-backend, so a PORT CONSUMER (widget-brain's support.ts) can catch it
+ * specifically and degrade gracefully — mirroring `CommsRejection` in comms-port.ts, the same pattern for
+ * a different port's fail-closed gate. widget-brain has no dependency on widget-backend (only on this
+ * package), so the error type must be defined on the port's own side of that boundary.
+ */
+export class CommerceGuardRefusalError extends Error {
+  constructor(method: string) {
+    super(`commerce-guard: live commerce access to ${method} requires a verified shopper principal (ADR-0016)`);
+    this.name = "CommerceGuardRefusalError";
+  }
+}
+
 /** ADR-0016 #4 — per-subscription cap on consecutive auto-executed skips. Once
  * `Subscription.consecutiveSkips` reaches this, the caller (support.ts) MUST route to a human instead
  * of auto-skipping again — repeated skipping can never become a stealth cancel. Small and conservative

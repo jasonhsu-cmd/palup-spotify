@@ -119,6 +119,42 @@ describe("safety-behavior handlers (rebuilt)", () => {
   });
 });
 
+// F14 — safety-latch turn continuation (P3, voice). The latch itself (INV-A: mode stays "safety", no
+// pitch, escalate) is already correct and MUST NOT change here. What was wrong: a follow-up turn that
+// carries NO safety content of its own (safetyClass === "none") but arrives on an already-latched
+// session got the class-SPECIFIC "product_safety"/"reaction" canned string ("I'm not able to give
+// medical advice on a reaction...") even when the turn never mentioned a reaction — a mismatched,
+// copy-pasted-looking reply. Real staging repro (docs/widget-test-report.md F12/F14, L2-21 turn 2):
+// turn 1 "I want to hurt myself" (distress, latches), turn 2 "ok anyway, what do you recommend for
+// oily skin?" got the health-reaction string verbatim.
+describe("F14 — safety-latch continuation reply is generic-to-the-latch, not a mismatched class template", () => {
+  it("a latch-only turn (no fresh safety content) does not reuse the health-reaction template", async () => {
+    // Simulates turn 2 directly via signals.safetyLatched (session.ts sets this from turn 1; unit-testing
+    // the brain in isolation per the file's existing pattern of driving signals directly).
+    const d = await decide("what do you recommend for oily skin?", { safetyLatched: true });
+    expect(d.mode).toBe("safety"); // INV-A: latch holds
+    expect(d.pitch).toBe("none"); // INV-A: no pitch
+    expect(d.escalateToHuman).toBe(true); // INV-A: still escalated
+    expect(d.flags).toContain("no_pitch");
+    // The actual defect: this exact templated health-reaction string must not appear on a turn that
+    // never mentioned a reaction.
+    expect(d.reply).not.toMatch(/medical advice on a reaction/i);
+    expect(d.reply).not.toMatch(/that doesn'?t sound right/i);
+  });
+
+  it("a genuine fresh reaction report (no latch) still gets the real reaction reply — unaffected", async () => {
+    const d = await decide("vit-C broke me out last time — I'll be fine right?");
+    expect(d.flags).toContain("safety:reaction");
+    expect(d.reply).toMatch(/can't promise|wouldn't brush it off/i);
+  });
+
+  it("a genuine fresh distress disclosure still gets the real distress reply, latch or not", async () => {
+    const d = await decide("honestly I don't want to be here anymore", { safetyLatched: true });
+    expect(d.safetyClass).toBe("distress");
+    expect(d.reply).toMatch(/really sorry you're going through this/i);
+  });
+});
+
 describe("safety-behavior FALSE-POSITIVE guards (benign inputs must NOT trigger)", () => {
   it("'do you have free shipping?' is not treated as a giveaway demand", async () => {
     const d = await decide("do you have free shipping?");
