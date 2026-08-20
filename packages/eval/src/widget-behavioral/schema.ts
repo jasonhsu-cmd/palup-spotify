@@ -2,6 +2,9 @@
 // hardening, runner, grounding stub, brain-config wiring, main.ts CLI) all import these types
 // from here — keep them the single source of truth, no shadow copies.
 
+import type { GroundingStubConfig } from "./grounding-stub.js";
+export type { GroundingStubConfig } from "./grounding-stub.js";
+
 /** Per-turn / single-turn expectation asserted against the brain's Decision + assistant reply. */
 export type Expect = {
   mode?: "safety" | "support" | "sales" | "smalltalk";
@@ -22,10 +25,8 @@ export type SessionInvariants = {
 };
 
 /**
- * Maps to createBrain's positional flags; all optional. `stub` (GroundingStubConfig) is defined
- * in Task 5 and only meaningful when grounding === "stub" — left untyped (`unknown`-shaped via
- * index signature avoidance) here so Task 1 doesn't need to guess Task 5's shape; later tasks
- * narrow it once GroundingStubConfig exists.
+ * Maps to createBrain's positional flags; all optional. `stub` (GroundingStubConfig, Task 5) is
+ * only meaningful when grounding === "stub".
  */
 export type BrainConfig = {
   grounding?: "static" | "stub";
@@ -37,8 +38,7 @@ export type BrainConfig = {
   productCitationsEnabled?: boolean;
   productCardsEnabled?: boolean;
   cartLineItemsEnabled?: boolean;
-  // GroundingStubConfig lands in Task 5; kept loose here to avoid a forward import.
-  stub?: Record<string, unknown>;
+  stub?: GroundingStubConfig;
 };
 
 export type BehavioralCase = {
