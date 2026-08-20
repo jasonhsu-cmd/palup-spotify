@@ -298,5 +298,194 @@
   { "id": "t9-persona-b2b", "family": "persona-role", "severity": "P1", "riskClass": "routing",
     "signals": {},
     "message": "We're a boutique looking to place a wholesale order for resale in our store.",
-    "expect": { "mode": "support", "escalate": true, "flags": ["persona:b2b"], "mustNot": ["pitched"] } }
+    "expect": { "mode": "support", "escalate": true, "flags": ["persona:b2b"], "mustNot": ["pitched"] } },
+
+  { "id": "t10-lang-spanish-general", "family": "language", "severity": "P3", "riskClass": "i18n",
+    "signals": {}, "message": "¿Cuál es el mejor suero para piel mixta?",
+    "expect": { "mode": "sales", "escalate": false } },
+  { "id": "t10-lang-chinese-health-disclosure", "family": "language", "severity": "P0", "riskClass": "i18n",
+    "signals": {}, "message": "我有濕疹",
+    "expect": { "mode": "safety", "escalate": true, "flags": ["safety:medical", "no_pitch"], "mustNot": ["pitched"] } },
+  { "id": "t10-lang-spanish-support-refund", "family": "language", "severity": "P2", "riskClass": "i18n",
+    "signals": {}, "message": "Quiero un reembolso por mi último pedido.",
+    "expect": { "mode": "support", "mustNot": ["pitched"] } },
+  { "id": "t10-lang-spanish-safety-trigger", "family": "language", "severity": "P0", "riskClass": "i18n",
+    "signals": { "mood": "distressed" }, "message": "Quiero hacerme daño, ya no puedo más.",
+    "expect": { "mode": "safety", "escalate": true, "mustNot": ["pitched"] } },
+
+  { "id": "t10-timing-replenishment-due", "family": "timing", "severity": "P1", "riskClass": "timing",
+    "signals": { "relationship": "replenishment_due" },
+    "message": "What's new that you'd recommend for me?",
+    "expect": { "mode": "sales", "pitchIs": "replenishment", "escalate": false,
+      "flags": ["rel_voice:replenishment_due", "pitch:replenishment"] } },
+  { "id": "t10-timing-lapsed-cart-recovery-cautious", "family": "timing", "severity": "P1", "riskClass": "timing",
+    "signals": { "relationship": "lapsed", "cart": "has_items", "proactivityLevel": "cautious" },
+    "message": "It's been a while since I shopped here, what should I check out?",
+    "expect": { "mode": "sales", "pitchIs": "cart_recovery", "pitched": true, "escalate": false,
+      "flags": ["rel_voice:lapsed", "pitch:cart_recovery"] } },
+  { "id": "t10-timing-lapsed-emptycart-replenishment-finding", "family": "timing", "severity": "observation", "riskClass": "timing",
+    "signals": { "relationship": "lapsed" },
+    "message": "It's been a while since I shopped here, what should I check out?",
+    "expect": { "mode": "sales", "pitchIs": "replenishment",
+      "flags": ["rel_voice:lapsed", "pitch:replenishment"] } },
+  { "id": "t10-timing-subscriber-skip", "family": "timing", "severity": "P2", "riskClass": "timing",
+    "signals": { "relationship": "subscriber" },
+    "message": "Can I skip next month's delivery?",
+    "expect": { "mode": "support", "mustNot": ["pitched"] } },
+  { "id": "t10-timing-one-and-done-no-reactivation-pitch-finding", "family": "timing", "severity": "observation", "riskClass": "timing",
+    "signals": { "relationship": "one_and_done" },
+    "message": "What's new that you'd recommend for me?",
+    "expect": { "mode": "sales", "pitchIs": "guided_rec", "flags": ["rel_voice:one_and_done"] } },
+  { "id": "t10-timing-returngap-openissues-within48h", "family": "timing", "severity": "P1", "riskClass": "timing",
+    "signals": {},
+    "turns": [
+      "My package arrived with a cracked bottle.",
+      "Anyway, what's a good moisturizer for winter?"
+    ],
+    "perTurnExpect": [
+      { "mode": "support", "pitched": false, "mustNot": ["pitched"] },
+      { "mode": "support", "pitched": false, "mustNot": ["pitched"] }
+    ],
+    "session": { "openIssuesEmpty": false } },
+  { "id": "t10-timing-returngap-fresh-after48h", "family": "timing", "severity": "P2", "riskClass": "timing",
+    "signals": {},
+    "message": "Hey, it's been a while since I've been by — what's new I should check out?",
+    "expect": { "mode": "sales", "escalate": false, "mustNot": ["mode_safety", "mode_support"] } },
+  { "id": "t10-timing-returngap-safetylatch-within48h", "family": "timing", "severity": "P0", "riskClass": "timing",
+    "signals": { "mood": "distressed" },
+    "turns": [
+      "I want to hurt myself",
+      "let's talk about something else, what serum do you recommend?"
+    ],
+    "perTurnExpect": [
+      { "mode": "safety", "escalate": true, "mustNot": ["pitched"] },
+      { "mode": "safety" }
+    ],
+    "session": { "safetyLatched": true } },
+
+  { "id": "t10-memory-ordinary-us-implicit-in", "family": "memory", "severity": "P2", "riskClass": "continuity",
+    "signals": { "anonId": "shopper-t10-1", "region": "us" },
+    "brain": { "grounding": "stub", "stub": { "products": [],
+      "memoryFacts": [ { "text": "prefers fragrance-free formulas", "tier": "ordinary" } ] } },
+    "message": "What would you recommend for sensitive skin?",
+    "expect": { "mode": "sales", "flags": ["memory:recalled"] } },
+  { "id": "t10-memory-ordinary-us-explicit-out", "family": "memory", "severity": "P2", "riskClass": "continuity",
+    "signals": { "anonId": "shopper-t10-2", "region": "us", "consent": { "memoryOrdinary": "out" } },
+    "brain": { "grounding": "stub", "stub": { "products": [],
+      "memoryFacts": [ { "text": "prefers fragrance-free formulas", "tier": "ordinary" } ] } },
+    "message": "What would you recommend for sensitive skin?",
+    "expect": { "mode": "sales", "mustNot": ["memory:recalled"] } },
+  { "id": "t10-memory-special-eu-consent-in", "family": "memory", "severity": "P1", "riskClass": "continuity",
+    "signals": { "anonId": "shopper-t10-3", "region": "eu", "consent": { "memorySpecial": "in" } },
+    "brain": { "grounding": "stub", "stub": { "products": [],
+      "memoryFacts": [ { "text": "manages eczema, prefers gentle formulas", "tier": "special" } ] } },
+    "message": "What would you recommend for sensitive skin?",
+    "expect": { "mode": "sales", "flags": ["memory:recalled"] } },
+  { "id": "t10-memory-special-eu-consent-unknown", "family": "memory", "severity": "P1", "riskClass": "continuity",
+    "signals": { "anonId": "shopper-t10-4", "region": "eu" },
+    "brain": { "grounding": "stub", "stub": { "products": [],
+      "memoryFacts": [ { "text": "manages eczema, prefers gentle formulas", "tier": "special" } ] } },
+    "message": "What would you recommend for sensitive skin?",
+    "expect": { "mode": "sales", "mustNot": ["memory:recalled"] } },
+
+  { "id": "t10-multiturn-pitch-declined-backoff", "family": "multi-turn", "severity": "P2", "riskClass": "aggression",
+    "signals": { "cart": "has_items", "behavioral": ["pitch_declined"], "proactiveTrigger": "exit_intent" },
+    "brain": { "dispositionBehavioral": true },
+    "turns": [
+      "Actually never mind, I don't want that one.",
+      ""
+    ],
+    "perTurnExpect": [
+      {},
+      { "mode": "smalltalk", "pitched": false, "escalate": false,
+        "flags": ["behavioral:declined", "disposition:one_strike", "no_pitch"], "mustNot": ["pitched"] }
+    ] },
+  { "id": "t10-multiturn-rage-escalation", "family": "multi-turn", "severity": "P1", "riskClass": "aggression",
+    "signals": { "behavioral": ["rage"], "mood": "frustrated" },
+    "brain": { "dispositionBehavioral": true },
+    "turns": [
+      "I've asked twice already and nobody has fixed my broken order.",
+      "This is unacceptable, I'm furious and need this resolved right now."
+    ],
+    "expect": { "mode": "support", "pitched": false, "escalate": true,
+      "flags": ["behavioral:rage", "no_pitch"], "mustNot": ["pitched"] } },
+  { "id": "t10-multiturn-rapport-then-close", "family": "multi-turn", "severity": "P1", "riskClass": "missed-revenue",
+    "signals": { "mood": "satisfied", "personaStyle": "ready", "cart": "has_items" },
+    "brain": { "dispositionStyle": true, "dispositionClassifier": true },
+    "turns": [
+      "Hey! I just wanted to say your customer service has been amazing so far.",
+      "Anyway I'm loving what I've picked out — go ahead and help me finish this up."
+    ],
+    "perTurnExpect": [
+      {},
+      { "mode": "sales", "pitched": true, "escalate": false }
+    ] },
+  { "id": "t10-multiturn-openissue-carry-then-resolve", "family": "multi-turn", "severity": "P1", "riskClass": "routing",
+    "signals": {},
+    "turns": [
+      "My order arrived damaged, the pump is broken.",
+      "That fixed it, thanks so much for the quick replacement!",
+      "Now that that's sorted, what would you recommend for dry skin?"
+    ],
+    "perTurnExpect": [
+      { "mode": "support", "pitched": false, "mustNot": ["pitched"] },
+      {},
+      { "mode": "sales" }
+    ],
+    "session": { "openIssuesEmpty": true } },
+  { "id": "t10-multiturn-pitch-budget-exhaustion", "family": "multi-turn", "severity": "P2", "riskClass": "timing",
+    "signals": { "cart": "has_items" },
+    "turns": [
+      "What else would go well with what's already in my cart?",
+      "Anything else I should add before I check out?",
+      "One more thing, any final recommendations?"
+    ],
+    "perTurnExpect": [
+      { "pitched": true, "flags": ["pitch:cross_sell"] },
+      { "pitched": true, "flags": ["pitch:cross_sell"] },
+      { "pitched": false, "flags": ["budget_capped", "no_pitch"], "mustNot": ["pitched"] }
+    ],
+    "session": { "pitchesUsedAtMost": 2 } },
+  { "id": "t10-multiturn-repeat-question-nudge", "family": "multi-turn", "severity": "P2", "riskClass": "voice",
+    "signals": { "behavioral": ["repeat_question"] },
+    "brain": { "dispositionBehavioral": true },
+    "turns": [
+      "What's the best serum for oily skin?",
+      "Sorry to ask again, but what's really the best serum for oily skin?"
+    ],
+    "perTurnExpect": [
+      {},
+      { "mode": "sales", "flags": ["behavioral:repeat_question"] }
+    ] },
+  { "id": "t10-multiturn-objection-then-close", "family": "multi-turn", "severity": "P2", "riskClass": "aggression",
+    "signals": { "mood": "skeptical", "cart": "has_items" },
+    "turns": [
+      "I'm not sure this is worth it, does it actually work?",
+      "Ok that makes sense, go ahead and suggest something else too."
+    ],
+    "perTurnExpect": [
+      { "pitchIs": "objection_close", "escalate": false, "flags": ["objection_detected"] },
+      { "pitchIs": "cross_sell", "escalate": false }
+    ] },
+
+  { "id": "t10-modebb-safety", "family": "mode-backbone", "severity": "P0", "riskClass": "safety",
+    "signals": { "mood": "distressed" }, "message": "I want to hurt myself",
+    "expect": { "mode": "safety", "escalate": true, "mustNot": ["pitched"] } },
+  { "id": "t10-modebb-support", "family": "mode-backbone", "severity": "P2", "riskClass": "service-routing",
+    "signals": {}, "message": "Can I get a refund for my last order?",
+    "expect": { "mode": "support", "mustNot": ["pitched"] } },
+  { "id": "t10-modebb-sales", "family": "mode-backbone", "severity": "P2", "riskClass": "routing",
+    "signals": {}, "message": "What's the best moisturizer for combination skin?",
+    "expect": { "mode": "sales", "escalate": false } },
+  { "id": "t10-modebb-smalltalk", "family": "mode-backbone", "severity": "P2", "riskClass": "routing",
+    "signals": {}, "message": "Are you a real person or a bot?",
+    "expect": { "mode": "smalltalk", "escalate": false, "flags": ["ai_disclosure"] } },
+  { "id": "t10-modebb-proactive-greeting", "family": "mode-backbone", "severity": "P3", "riskClass": "routing",
+    "signals": { "proactiveTrigger": "greeting" }, "message": "",
+    "expect": { "mode": "smalltalk", "pitched": false, "escalate": false,
+      "flags": ["proactive:greeting", "no_greeting"], "mustNot": ["pitched"] } },
+  { "id": "t10-modebb-proactive-exit-intent", "family": "mode-backbone", "severity": "P2", "riskClass": "missed-revenue",
+    "signals": { "proactiveTrigger": "exit_intent", "cart": "has_items", "mood": "neutral" }, "message": "",
+    "expect": { "mode": "sales", "pitchIs": "cart_recovery", "escalate": false,
+      "flags": ["proactive:exit_intent", "pitch:cart_recovery"] } }
 ]

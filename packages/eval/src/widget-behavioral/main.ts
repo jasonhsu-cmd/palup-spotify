@@ -14,6 +14,7 @@ import { loadCases } from "./load.js";
 import { runSingle } from "./run-single.js";
 import { runMulti } from "./run-multi.js";
 import { aggregate } from "./aggregate.js";
+import { genPairwiseCases } from "./gen-pairwise-cases.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // here = packages/eval/src/widget-behavioral — 4 levels below repo root (contrast run.ts at
@@ -32,7 +33,10 @@ type Row = {
 };
 
 async function main() {
-  const cases = loadCases(casesPath);
+  // Slice B (spec §4/§6): the pairwise corpus is generated at runtime, not hand-authored into
+  // widget-behavioral.json — concatenated here so the full harness run (and the aggregated report)
+  // includes it under family "pairwise".
+  const cases = [...loadCases(casesPath), ...genPairwiseCases()];
   const rows: Row[] = [];
   for (const c of cases) {
     const o = c.turns ? await runMulti(c) : await runSingle(c);
