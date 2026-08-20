@@ -262,7 +262,23 @@ const SUPPORT = [
   "need help", "none of this", "just fix it", "not working",
 ];
 
-const UNKNOWN_FACT = ["competitor", "brand x", "cheaper elsewhere", "other store", "price of their"];
+const UNKNOWN_FACT = ["brand x", "cheaper elsewhere", "other store", "price of their"];
+
+// F9 fix: a bare "competitor" is DELIBERATELY not in UNKNOWN_FACT above. It used to be, which meant
+// the single most natural competitor-comparison phrasing ("how do you compare to your competitors?")
+// was intercepted by honest-uncertainty (step 3, below) BEFORE it ever reached the groundingMode-aware
+// competitor block (~line 1790) — silently defeating the merchant's off/general/full competitor
+// policy and never emitting `competitor:<mode>`. A generic "competitors" comparison with no named
+// rival and no volatile-fact ask is exactly what that later block is FOR, and it already carries its
+// own "you have NO web access ... never assert a live competitor fact" guardrail — routing it there
+// does not reopen any fabrication risk.
+//
+// What must still stay on THIS rung: a message that pairs "competitor(s)" with an explicit request
+// for a volatile, unverifiable FACT (price/cost/discount/stock) — e.g. "what's the competitor price
+// on this?" (core.json GRND-1) — is genuinely something we cannot know, not a comparison opinion, and
+// must keep hitting honest-uncertainty exactly as before.
+const COMPETITOR_FACT_QUERY =
+  /\bcompetitors?\b.*\b(price|cost|cheaper|discount|sale|stock|inventory)\b|\b(price|cost|cheaper|discount|sale|stock|inventory)\b.*\bcompetitors?\b/;
 
 // Price/fit/trust OBJECTION in the CURRENT shopper message → the reactive "objection→close" moment
 // (docs/design/shopper-widget.md §5, the 8 pitch kinds). Deterministic + low-false-positive: specific
@@ -1602,7 +1618,7 @@ export function createBrain(
       }
 
       // 3. Honest uncertainty — never fabricate a fact we can't ground.
-      if (UNKNOWN_FACT.some((p) => text.includes(p))) {
+      if (UNKNOWN_FACT.some((p) => text.includes(p)) || COMPETITOR_FACT_QUERY.test(text)) {
         flags.push("honest_uncertainty", "no_pitch");
         return {
           mode: "sales",
@@ -1788,6 +1804,10 @@ export function createBrain(
       }
 
       // Competitor-comparison handling per the merchant "discuss competitors" mode (default full).
+      // F9: this is now genuinely reachable for the bare word "competitor" (see UNKNOWN_FACT/
+      // COMPETITOR_FACT_QUERY above) — step 3 only intercepts a request for a specific volatile fact
+      // (price/cost/etc.), so a plain comparison question lands HERE and gets the merchant's actual
+      // policy instead of a generic "can't verify" deflection.
       let systemExtra = "";
       if (/compare[ds]? (to|with)|compared to| versus | vs\b|better than|brand [a-z]\b|competitor/.test(text)) {
         const mode = signals.groundingMode ?? "full";
