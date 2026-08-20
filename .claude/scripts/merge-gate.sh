@@ -156,6 +156,22 @@ if printf '%s\n' "$FILES" | grep -qE '^docs/(HITL-POLICY|AGENT-GOVERNANCE)\.md$'
   fi
 fi
 
+# 5. governance RULES files — an exact, small, precise set (packages/eval/src/governance-guard.ts is the
+# single source of truth for the list and the decision, tested in packages/eval/test/governance-guard.test.ts):
+# CLAUDE.md, docs/HITL-POLICY.md, this gate script itself, and the two gate/pipeline modules (eval-gate
+# run.ts, evolution engine.ts). Any OTHER change to these needs a human's explicit say-so via
+# GOVERNANCE_HUMAN_APPROVED=1 — unlike checks 1-4 above (which detect a specific weakening PATTERN in the
+# diff), this refuses on touching the file AT ALL, additive or not, because these files ARE the rules.
+# docs/adr/* and ordinary code/docs are deliberately excluded (see the file list's own comments) so an ADR
+# reconcile or routine PR is never forced through this gate.
+GOV_OUT=$(printf '%s\n' "$FILES" | GOVERNANCE_HUMAN_APPROVED="${GOVERNANCE_HUMAN_APPROVED:-}" pnpm exec tsx packages/eval/src/governance-guard.ts)
+GOV_STATUS=$?
+if [ "$GOV_STATUS" -ne 0 ]; then
+  die "touches governance rules ($(printf '%s' "$GOV_OUT" | tr '\n' ',' | sed 's/,$//')); set GOVERNANCE_HUMAN_APPROVED=1 to confirm a human authorized this merge."
+elif [ -n "$GOV_OUT" ]; then
+  echo "GOVERNANCE_HUMAN_APPROVED=1 — merging governance-rules change(s) with explicit human authorization: $(printf '%s' "$GOV_OUT" | tr '\n' ',' | sed 's/,$//')"
+fi
+
 MAIN2=$(gh api "repos/$R/git/ref/heads/main" --jq .object.sha)
 [ "$MAIN2" = "$MAIN" ] || die "main moved mid-check ($MAIN -> $MAIN2); re-run the gate"
 
