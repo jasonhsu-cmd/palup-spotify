@@ -91,6 +91,25 @@ describe("the shopper-promise guard", () => {
     }
   });
 
+  // Pillar 2a (in-chat checkout) — CLOSES A REAL GAP: before this, "completed-action" had zero cart/
+  // checkout coverage, even though the feature it accompanies (POST /cart/checkout-url) makes NO
+  // completion claim — it only ever hands back a checkout LINK the shopper still has to open and complete
+  // on Shopify themselves. No ALLOWED_CLAIMS entry is registered for any of these: there is no mechanism
+  // that adds to a cart or completes a purchase server-side, so a false claim like these must stay red.
+  it("MUTATION — a false cart/checkout completion claim goes red (Pillar 2a gap closed)", () => {
+    const samples = [
+      'const r = "I\'ve added it to your cart and checked out for you.";',
+      'const r = "I\'ve added that to your basket.";',
+      'const r = "I\'ve bought the serum for you.";',
+      'const r = "I\'ve purchased that on your behalf.";',
+      'const r = "All added them to the cart already!";',
+    ];
+    for (const source of samples) {
+      const ids = scan([{ path: "packages/widget-brain/src/brain.ts", source }]).map((x) => x.klass.id);
+      expect(ids, `expected completed-action to fire on: ${source}`).toContain("completed-action");
+    }
+  });
+
   it("the guard cannot be satisfied by moving the string somewhere it does not look", () => {
     // The surface list is a GLOB over the three packages that can render shopper text, so a file added
     // tomorrow is scanned automatically — the list is computed, never written down.

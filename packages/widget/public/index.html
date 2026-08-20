@@ -127,6 +127,16 @@
   #in{ flex:1; padding:11px 14px; border:1px solid #94a3b8; border-radius:12px; background:var(--panel); color:var(--fg); font:inherit }
   #in:focus{ outline:2px solid var(--brand-text); outline-offset:1px }
   form button{ padding:0 16px; border:0; border-radius:12px; background:var(--brand); color:var(--brand-ink); cursor:pointer; font-weight:600 }
+  /* Pillar 2 — in-chat checkout. The per-card "Add" control is low-key (like the chips/consent-secondary),
+     the bar's Checkout is the one primary action. Bar hidden until the selection is non-empty. */
+  #checkoutbar{ border-top:1px solid var(--line); padding:10px 14px; display:flex; align-items:center; justify-content:space-between; gap:10px; background:var(--panel) }
+  #checkoutbar[hidden]{ display:none }
+  .cob-count{ font-size:12.5px; color:var(--muted) }
+  #checkoutbtn{ padding:7px 16px; border:0; border-radius:12px; background:var(--brand); color:var(--brand-ink); cursor:pointer; font-weight:600; font:inherit; font-size:13px }
+  #checkoutbtn:focus-visible{ outline:2px solid var(--brand-text); outline-offset:2px }
+  #checkoutbtn:disabled{ opacity:.6; cursor:default }
+  .rec-add{ margin-top:6px; font:inherit; font-size:12px; padding:4px 11px; border-radius:999px; border:1px solid var(--line); background:var(--panel); color:var(--brand-text); cursor:pointer }
+  .rec-add:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
   form button:disabled{ opacity:.5 }
   /* Powered-by PalUp attribution (third-party mark; merchant identity stays in the header) */
   .powered{ display:flex; align-items:center; justify-content:center; gap:6px; padding:7px 12px; border-top:1px solid var(--line); background:var(--panel); font-size:11px; letter-spacing:.02em; color:var(--muted); user-select:none }
@@ -229,6 +239,12 @@
     <!-- SHOPPER tools — always present, never gated on the demo drawer. -->
     <div id="tools" data-testid="shopper-tools">
       <button type="button" id="signin" data-testid="signin-btn" title="Sign in to view your orders">Sign in to view your orders</button>
+    </div>
+    <!-- Pillar 2 — in-chat checkout selection bar. Hidden until the shopper adds an item AND the server
+         enabled the feature (checkoutEnabled). Opens a Shopify checkout PERMALINK — a link, never a purchase. -->
+    <div id="checkoutbar" data-testid="checkout-bar" role="group" aria-label="Your checkout selection" hidden>
+      <span class="cob-count" data-testid="checkout-count"></span>
+      <button type="button" id="checkoutbtn" data-testid="checkout-btn" aria-label="Review your selection in Shopify checkout">Checkout</button>
     </div>
     <form id="f">
       <input id="in" data-testid="chat-input" type="text" aria-label="Type a message to the assistant" placeholder="Ask about a product or your order…" autocomplete="off" />
@@ -899,6 +915,18 @@
         link.textContent = "View in cart";
         li.appendChild(link);
       }
+      // Pillar 2 — in-chat checkout "Add" control. Only when the server enabled it (checkoutEnabled, learned
+      // from the /chat response) AND this card carries a variant to check out with. Adds the item to the
+      // in-chat selection; the checkout bar (above the input) opens a Shopify checkout PERMALINK on tap. A
+      // control that builds a checkout LINK — it never adds-to-cart or purchases on the shopper's behalf.
+      if (checkoutEnabled && typeof c.variantId === "string" && c.variantId){
+        const vid = c.variantId, ctitle = c.title;
+        const addBtn = document.createElement("button");
+        addBtn.type = "button"; addBtn.className = "rec-add"; addBtn.setAttribute("data-testid","product-card-add");
+        addBtn.textContent = "Add to checkout";
+        addBtn.addEventListener("click", () => addToCheckout(vid, ctitle));
+        li.appendChild(addBtn);
+      }
       list.appendChild(li); rendered++;
     }
     if (!rendered) return;
@@ -1052,6 +1080,57 @@
     } catch { /* never disrupt chat or checkout */ }
   }
 
+  // Pillar 2 — in-chat checkout. `checkoutEnabled` is learned ONLY from a /chat response (never client-guessed),
+  // so when the server flag is off it stays false: no "Add" control renders and no bar shows ⇒ byte-identical.
+  // The shopper assembles a selection of the cited products; one tap opens a Shopify checkout PERMALINK built
+  // server-side (POST /cart/checkout-url — the widget never knows the shop domain). A LINK that pre-fills a
+  // checkout; it never adds-to-cart or purchases on the shopper's behalf (reversible; the shopper still acts).
+  let checkoutEnabled = false;
+  const checkoutSel = new Map();            // variantId -> { qty, title }
+  const CHECKOUT_MAX_QTY = 99;              // matches the permalink adapter's server-side clamp
+  function learnCheckout(d){ if (d && typeof d.checkoutEnabled === "boolean") checkoutEnabled = d.checkoutEnabled; }
+  function checkoutItemCount(){ let n = 0; for (const v of checkoutSel.values()) n += v.qty; return n; }
+  function renderCheckoutBar(){
+    const bar = $("#checkoutbar"); if (!bar) return;
+    const n = checkoutItemCount();
+    if (n <= 0){ bar.hidden = true; return; }
+    const label = $("#checkoutbar .cob-count");
+    if (label) label.textContent = n === 1 ? "1 item selected" : (n + " items selected");
+    bar.hidden = false;
+  }
+  function addToCheckout(variantId, title){
+    if (typeof variantId !== "string" || !variantId) return;
+    const cur = checkoutSel.get(variantId) || { qty: 0, title: typeof title === "string" ? title : "" };
+    cur.qty = Math.min(cur.qty + 1, CHECKOUT_MAX_QTY);
+    checkoutSel.set(variantId, cur);
+    renderCheckoutBar();
+  }
+  async function doCheckout(){
+    const items = [];
+    for (const [variantId, v] of checkoutSel.entries()) items.push({ variantId, quantity: v.qty });
+    if (!items.length) return;
+    const btn = $("#checkoutbtn"); if (btn) btn.disabled = true;
+    try {
+      await ensureToken(false);
+      const headers = { "content-type": "application/json" };
+      if (widgetToken) headers["authorization"] = "Bearer " + widgetToken;
+      if (shopperToken) headers["x-shopper-token"] = shopperToken;
+      const r = await fetch("/cart/checkout-url", { method:"POST", headers, body: JSON.stringify({ items }) });
+      if (!r.ok) return;                     // 400/401/404/429/503 ⇒ do nothing (never break the panel)
+      const d = await r.json().catch(() => null);
+      const url = d && typeof d.checkoutUrl === "string" ? d.checkoutUrl : "";
+      // DEFENCE IN DEPTH (mirrors the per-card cartUrl check): re-validate the MULTI-LINE permalink shape
+      // (comma-joined <digits>:<1-3 digit qty> pairs) before it becomes a navigation target, so a spoofed
+      // response can never smuggle a cross-origin or javascript: URL onto the shopper.
+      if (!/^https:\/\/[a-z0-9][a-z0-9-]*\.myshopify\.com\/cart\/[0-9]{1,20}:[0-9]{1,3}(,[0-9]{1,20}:[0-9]{1,3})*$/i.test(url)) return;
+      const a = document.createElement("a");
+      a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch { /* never disrupt the panel */ }
+    finally { if (btn) btn.disabled = false; }
+  }
+  $("#checkoutbtn") && $("#checkoutbtn").addEventListener("click", doCheckout);
+
   async function send(message, isRetry){
     if (!isRetry) add(message, "user");
     if (!isRetry) clearChips();                                // a typed message is the shopper acting ⇒ clear stale chips
@@ -1086,6 +1165,7 @@
       if (r.status === 401){ await ensureToken(true); r = await doFetch(); } // token expired → refresh once
       if (!r.ok) throw new Error("http " + r.status);
       const d = await r.json();
+      learnCheckout(d);          // Pillar 2 — learn checkoutEnabled BEFORE addProductCards renders this turn's cards
       add(d.reply, "agent", d);
       // E3 — the cited products, as an aside directly BELOW the reply (never spliced into it). Rendered
       // BEFORE onChatMeta so the memory/consent card can never wedge itself between the reply and its own
@@ -1182,6 +1262,7 @@
       const r = await fetch("/chat", { method:"POST", headers, body: JSON.stringify({ message: "", signals, sessionId, idempotencyKey, history: recentHistory() }) });
       if (!r.ok) return;
       const d = await r.json();
+      learnCheckout(d);          // Pillar 2 — learn checkoutEnabled before the greeting/opener card renders
       // Only a real, non-empty server greeting is shown (flag ON). Flag OFF ⇒ empty reply ⇒ nothing added.
       if (d && d.reply){
         // Collapse to ONE greeting: replace the instant static placeholder with the real server greeting
