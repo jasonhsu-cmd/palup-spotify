@@ -5,7 +5,7 @@
 > CLAUDE.md §3.2: `eval gate → shadow(0%) → canary(1–5%) → human approve → promote → monitored`, with
 > automatic rollback. **Nothing here auto-applies; every stage transition is a named-human action.**
 
-## Reality of the stages (control plane is deployed nowhere)
+## Reality of the stages (control plane deployed on staging, not production)
 
 - **shadow** = staging + traffic-replay against `reports/` / `.palup-state/` graded transcripts — NOT a live
   0% splitter. Tell any approver this; do not imply a live splitter exists.

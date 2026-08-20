@@ -162,12 +162,15 @@ Admin token to hold the **`read_orders`** scope (`shopify-webhook-identity.ts`'s
 deployment's env only** (e.g. `unauthenticated_read_product_listings,read_orders`), never by adding it to
 `shopify.app.toml`'s `[access_scopes]` (shared across every deployment, including a future production one —
 `order-attribution-scope-pinning.test.ts` pins that this file stays untouched). Two further gates before any
-of this is meaningful in real Shopify traffic: (1) Shopify's **protected-customer-data review** must clear for
-`read_orders` on this app, and (2) a shop must actually be re-installed (or have its subscriptions refreshed)
-after the scope is granted, so the legacy-install-flow's per-shop `webhookSubscriptionCreate` call
-(`registerWebhookSubscriptions`) can subscribe the three topics with it. Until both clear, the routes are
-registered but receive no live deliveries — the same "dark by construction, not by a separate flag" posture
-CATALOG_WEBHOOKS documents above.
+of this is meaningful in real Shopify traffic: (1) on a **production/live** store Shopify's
+**protected-customer-data review** must clear for `read_orders` (a **development store is exempt** — no review
+needed); and (2) a shop must actually be re-installed (or have its subscriptions refreshed) after the scope is
+granted, so the legacy-install-flow's per-shop `webhookSubscriptionCreate` call (`registerWebhookSubscriptions`)
+can subscribe the three topics with it. On the internal **staging dev store this is now enabled and live**
+(2026-08-20: `ORDER_ATTRIBUTION_WEBHOOKS=true` + `read_orders` threaded through `deploy-staging.yml`, the app
+re-installed, `orders/create`+`orders/updated` delivering, a dev-store order attributed to a holdout arm); on a
+fresh or production store the routes stay registered but receive no live deliveries until the applicable gate(s)
+clear — the same "dark by construction, not by a separate flag" posture CATALOG_WEBHOOKS documents above.
 
 `AUDIT_HMAC_SECRET` is the keyed-HMAC key for audit `subjectRef`s, so a low-entropy numeric customer id is
 never recorded as a bare hash. It is **optional to BOOT** and falls back to `SHOPPER_TOKEN_SECRET` — but
