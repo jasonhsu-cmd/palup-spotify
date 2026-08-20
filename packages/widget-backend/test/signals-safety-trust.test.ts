@@ -35,4 +35,20 @@ describe("signals trust — the client cannot set the server-derived guardrail s
     const fromServer = deriveServingSignals(undefined, { ...ctx, serverSupportIntent: "return" });
     expect(fromServer.serverSupportIntent).toBe("return");
   });
+
+  // F10-D — serverGuardDegraded is the same trust boundary: a shopper cannot forge "the classifier
+  // degraded" to try to suppress their own pitch/steer behavior, and the flag-off / not-degraded case
+  // must stay byte-identical (key ABSENT, not present-and-false).
+  it("drops a client-supplied serverGuardDegraded; only the server ctx can set it", () => {
+    const hostile = { serverGuardDegraded: true, mood: "neutral" } as Signals;
+    expect("serverGuardDegraded" in deriveServingSignals(hostile, ctx)).toBe(false);
+    // …but the server ctx IS the sole legitimate origin
+    const fromServer = deriveServingSignals(undefined, { ...ctx, serverGuardDegraded: true });
+    expect(fromServer.serverGuardDegraded).toBe(true);
+  });
+
+  it("omits serverGuardDegraded entirely when the ctx says false/absent (byte-identical key-absent)", () => {
+    expect("serverGuardDegraded" in deriveServingSignals(undefined, ctx)).toBe(false);
+    expect("serverGuardDegraded" in deriveServingSignals(undefined, { ...ctx, serverGuardDegraded: false })).toBe(false);
+  });
 });

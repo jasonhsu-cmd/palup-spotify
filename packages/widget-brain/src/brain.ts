@@ -2054,6 +2054,15 @@ export function createBrain(
         // cart or an ordinary cart keeps mode:"sales" unchanged (t8-aggr-frustrated-moodonly) — the
         // pitch is still suppressed either way, this is purely which label the reply carries.
         if (signals.cart === "high_value") mode = "support";
+      } else if (serverGuardSignalsEnabled && signals.serverGuardDegraded) {
+        // F10-D — the server guard classifier failed/timed out/returned unparseable output THIS turn, so
+        // the language-agnostic safety/injection/support backstop is silently MISSING for whatever
+        // language this message is in (the English keyword floor above already ran and still governs
+        // safety/escalation, but it is only a floor — it can miss a non-English safety or support turn).
+        // FAIL TOWARD SAFETY rather than fall open: suppress the sales pitch rather than risk one riding
+        // alongside an undetected turn. Flag OFF (serverGuardSignalsEnabled false) or a normal
+        // (non-degraded) classification never reaches this branch — byte-identical either way.
+        flags.push("guard:degraded", "no_pitch");
       } else if (buySignal) {
         flags.push("buy_signal", "no_pitch"); // pitch stays "none" — move to checkout, don't pitch
       } else if (browsing) {

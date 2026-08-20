@@ -42,11 +42,14 @@ export interface GuardSignals {
    * auto-execute. Consumed only when SERVER_GUARD_SIGNALS is on; absent ⇒ brain's keyword classifier decides.
    */
   supportIntent?: SupportIntent;
-  /** True when the classification could not be trusted (error/timeout/unparseable/out-of-enum). Today this
+  /** True when the classification could not be trusted (error/timeout/unparseable/out-of-enum). This
    * yields NO server signal (safetyClass undefined, injection false, supportIntent undefined), so the brain
-   * falls back to its English keyword floor — fail-safe (never a false "safe"), but no better than today's
-   * baseline for a non-English turn. A stronger degraded-safe posture (actively SUPPRESS the pitch on
-   * degraded) is a planned follow-up; it is NOT yet wired — no caller reads this field beyond logging. */
+   * falls back to its English keyword floor — fail-safe (never a false "safe"), but no better than the
+   * baseline for a non-English turn. F10-D closes the residual gap: server.ts also passes this field
+   * through to `Signals.serverGuardDegraded` (via deriveServingSignals), and when SERVER_GUARD_SIGNALS is
+   * on the brain SUPPRESSES the sales pitch on a degraded turn (fail toward not-selling) rather than
+   * silently falling open to a possible sales pitch alongside an undetected non-English safety/support
+   * message. See brain.ts's `serverGuardDegraded` rung and types.ts's field doc. */
   degraded: boolean;
 }
 
@@ -85,8 +88,8 @@ function extractJson(text: string): { safetyClass?: unknown; injection?: unknown
  * Classify one shopper message into server-derived guard signals via a single model-port call. NEVER
  * throws. On any failure (error/timeout/unparseable/out-of-enum) returns
  * `{ safetyClass: undefined, injection: false, degraded: true }` — no server signal, so the brain falls
- * back to its keyword floor (fail-safe, never a false "safe"). `degraded` is a telemetry marker today;
- * a suppress-pitch-on-degraded posture is a planned follow-up, not yet wired (see the field doc above).
+ * back to its keyword floor (fail-safe, never a false "safe"). `degraded` is also wired (F10-D) to a
+ * pitch-suppressing brain rung — see the field doc above.
  */
 export async function classifyGuardSignals(model: ModelPort, message: string, tenantId: string): Promise<GuardSignals> {
   let text: string;

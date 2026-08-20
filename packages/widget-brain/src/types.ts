@@ -357,6 +357,18 @@ export interface Signals {
    * action auto-execute regardless of what the classifier emitted.
    */
   serverSupportIntent?: SupportIntent;
+  /**
+   * F10-D — true when the SERVER guard classifier could not be trusted THIS turn (model error/timeout/
+   * unparseable/out-of-enum — `GuardSignals.degraded` in widget-backend/src/guard-classifier.ts). Same
+   * trust boundary as the three fields above: `deriveServingSignals` is the only origin and REBUILDS its
+   * output, so a client-supplied value is dropped. Consumed ONLY when `serverGuardSignalsEnabled` is on;
+   * absent/false ⇒ no effect. FAIL TOWARD SAFETY: a degraded turn means the language-agnostic safety/
+   * injection/support backstop is silently MISSING for whatever language this message is in (the keyword
+   * floor alone may miss it), so the brain suppresses the sales pitch rather than risk a pitch riding
+   * alongside an undetected safety/support turn. It does not raise safetyClass or change mode/escalation —
+   * the keyword floor still governs those exactly as before; this only forces pitch:none.
+   */
+  serverGuardDegraded?: boolean;
   /** Marketing consent per channel; drives outbound gating (TCPA/CAN-SPAM). Also carries the two
    * cross-visit MEMORY consent tiers (ADR-0015 T12: `memoryOrdinary` = Consent 1, `memorySpecial` =
    * Consent 2 — independent of each other and of email/sms). Server/CMP-derived, never client-set;

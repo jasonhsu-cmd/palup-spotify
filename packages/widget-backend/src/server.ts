@@ -3128,6 +3128,11 @@ export async function buildServer(opts?: {
         // broaden — the same classifier's whitelisted support intent (undefined when it said "general" /
         // was out-of-enum / it failed ⇒ key omitted ⇒ brain's keyword classifier decides, byte-identical).
         serverSupportIntent: guardSignals?.supportIntent,
+        // F10-D — the classifier's own degraded marker for THIS turn (undefined when the classifier
+        // didn't run, e.g. flag off/killed/cost-capped/empty message; false when it ran cleanly; true on
+        // any error/timeout/unparseable/out-of-enum). deriveServingSignals only ever sets the key when
+        // truthy, so the flag-off / clean-classification path stays byte-identical.
+        serverGuardDegraded: guardSignals?.degraded,
         // E4 — THE SECOND GATE. `cartLineItemsEnabled` appears twice by design: here it decides whether a
         // client's `cartItems` is PARSED AT ALL (parsing untrusted input is its own attack surface), and in
         // `createBrain` above it decides whether the parsed value is CONSUMED. One env var must open both,
