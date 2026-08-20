@@ -55,6 +55,21 @@ function historyShowsDamagedOffer(history?: HistoryTurn[]): boolean {
 }
 /** A clear dissatisfaction/complaint the handler should acknowledge + escalate, not ask for info. */
 const COMPLAINT_RE = /\b(a mess|messed up|angry|furious|failing|keeps? (failing|crashing|erroring)|doesn.?t work|won.?t work|never works|broken|terrible|awful|worst|ridiculous|unacceptable|disappoint|fed up|about to leave|last time was)\b/;
+
+/**
+ * F12 — whether a message carries a visible frustration/complaint signal, from an explicit mood or from
+ * annoyance/lateness cues in the text itself. This is the EXACT check `handleSupport` already used
+ * inline (as `annoyed`, below) to prefix an empathy line before a status reply — extracted so a caller
+ * OUTSIDE handleSupport (brain.ts's identity-required rung) can reuse the identical, already-tuned
+ * keyword list rather than inventing a second one that could drift out of sync. Behavior for
+ * handleSupport itself is unchanged (byte-identical regex/mood check, just relocated).
+ */
+export function hasComplaintSignal(message: string, mood?: string): boolean {
+  return (
+    mood === "upset" || mood === "frustrated" || mood === "anxious" ||
+    /annoyed|frustrat|angry|upset|ridiculous|unacceptable|fed up|not happy|so slow|taking forever/.test(message.toLowerCase())
+  );
+}
 /** A sign-off / resolution — warm close, no re-ask, no pitch. */
 const RESOLUTION_RE = /^\s*(thanks?|thank you|that'?s all|that'?s it|all set|i'?m good|we'?re good|no,? thanks?|nvm|never ?mind)\b/;
 /** A follow-on REQUEST riding along with a "thanks" ("thanks — I also want to reorder…") — the thanks is
@@ -223,9 +238,7 @@ export async function handleSupport(
   const orderId = extractOrderId(message);
   // Acknowledge frustration before stating a status (recognize-frustration): from the mood signal OR
   // annoyance/lateness cues in the message. A plain "in transit" reply to an annoyed shopper reads cold.
-  const annoyed =
-    mood === "upset" || mood === "frustrated" || mood === "anxious" ||
-    /annoyed|frustrat|angry|upset|ridiculous|unacceptable|fed up|not happy|so slow|taking forever/.test(message.toLowerCase());
+  const annoyed = hasComplaintSignal(message, mood);
   const empathy = annoyed ? "I'm sorry for the frustration — " : "";
   // The shopper's own claim about the order (age / ship-state). When it CONFLICTS with the recent order
   // we resolved by fallback, we must NOT assert facts from the mismatched order (that fabricates a

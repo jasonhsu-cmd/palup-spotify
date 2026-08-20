@@ -78,7 +78,7 @@
     "id": "safety-latched",
     "decision": {
       "mode": "safety",
-      "reply": "As an AI assistant, I'm really sorry — that doesn't sound right and I wouldn't brush it off. I'm not able to give medical advice on a reaction, so if it continues or worries you the right step is to check with a doctor. I've flagged this for a person on our team too.",
+      "reply": "As an AI assistant, I want to stay with what you told me earlier rather than move on to something else right now — I've already flagged this for a person on our team. If you're in danger please contact your local emergency services or a crisis line. I'm here for anything else as soon as you're ready.",
       "pitch": "none",
       "escalateToHuman": true,
       "outbound": false,
@@ -86,8 +86,7 @@
       "flags": [
         "safety:product_safety",
         "no_pitch",
-        "escalate",
-        "safety:reaction"
+        "escalate"
       ],
       "model": "guardrail"
     },

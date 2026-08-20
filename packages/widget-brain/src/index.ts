@@ -20,7 +20,7 @@ export { StaticGroundingAdapter } from "./adapters/static-grounding.js";
 export { MockCommerceAdapter, demoCommerceGroundTruth } from "./adapters/mock-commerce.js";
 export { consentPermits, consentPermitsFactClass } from "./consent-rules.js";
 export type { ConsentRegion, ConsentTriState, ConsentTier } from "./consent-rules.js";
-export { handleSupport, classifySupportIntent, extractOrderId, SUPPORT_INTENTS } from "./support.js";
+export { handleSupport, classifySupportIntent, extractOrderId, hasComplaintSignal, SUPPORT_INTENTS } from "./support.js";
 export { classifyOutgoingOffer, OFFER_CHECK_AGENT_TYPE } from "./offer-check.js";
 export { replyOffersUngroundedDiscount } from "./sanitize.js";
 export type { SupportIntent, SupportResult } from "./support.js";
