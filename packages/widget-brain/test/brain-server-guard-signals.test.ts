@@ -94,3 +94,51 @@ describe("T1 flag OFF — server signals are ignored (byte-identical to today)",
     expect(d.flags).not.toContain("injection_blocked");
   });
 });
+
+// F10-D — the residual gap: on ANY guard-classifier failure/timeout/unparseable/out-of-enum output, the
+// classifier returns `degraded:true` with NO safety/injection/support signal, so a non-English safety or
+// support turn could silently fall through to the English-only keyword floor and still get a sales pitch.
+// The fix is a conservative FAIL-SAFE: a degraded turn suppresses the pitch outright (fail toward not-
+// selling) rather than risk one riding alongside an undetected turn. It must NOT change the normal
+// (non-degraded) path, and must have NO effect while the SERVER_GUARD_SIGNALS flag is off.
+//
+// BUY_SIGNAL carries clear purchase intent and no English safety/injection keyword, so absent the
+// degraded flag it takes the normal "buy_signal" branch (pitch stays "none" for its own reason, flagged
+// "buy_signal") — using it here proves degraded is what's suppressing, not some other rung, since a plain
+// sales message would already keep pitch:"none" via a DIFFERENT flag for a different reason. A message
+// that would otherwise reach `selectPitch` and return a NON-"none" pitch is used below so the assertion is
+// meaningful rather than vacuously true (BENIGN alone always resolves to pitch:"none" regardless of this
+// change, per selectPitch's defaults).
+const REPEAT_SHOPPER_SIGNALS = { relationship: "repeat" as const, cart: "has_items" as const };
+
+describe("F10-D — guard classifier degraded ⇒ fail-safe pitch suppression", () => {
+  it("flag ON + degraded:true forces pitch:none and flags it, even on a message that would otherwise pitch", async () => {
+    const { brain } = spyBrain(true);
+    const withoutDegraded = await brain.decide(REPEAT_SHOPPER_SIGNALS, "what do you recommend for dry skin?");
+    // Sanity: without the degraded signal this message DOES reach selectPitch and get a real pitch —
+    // otherwise the assertion below (that degraded suppresses it) would be vacuous.
+    expect(withoutDegraded.pitch).not.toBe("none");
+
+    const degraded = await brain.decide({ ...REPEAT_SHOPPER_SIGNALS, serverGuardDegraded: true }, "what do you recommend for dry skin?");
+    expect(degraded.pitch).toBe("none");
+    expect(degraded.flags).toContain("guard:degraded");
+    expect(degraded.flags).toContain("no_pitch");
+    // Fail-safe only removes the pitch — it must NOT fabricate a safety classification or escalation.
+    expect(degraded.safetyClass).toBe("none");
+    expect(degraded.escalateToHuman).toBe(false);
+  });
+
+  it("flag ON + degraded:false (normal turn) leaves pitch UNCHANGED", async () => {
+    const { brain } = spyBrain(true);
+    const normal = await brain.decide({ ...REPEAT_SHOPPER_SIGNALS, serverGuardDegraded: false }, "what do you recommend for dry skin?");
+    expect(normal.pitch).not.toBe("none");
+    expect(normal.flags).not.toContain("guard:degraded");
+  });
+
+  it("flag OFF ⇒ serverGuardDegraded:true has NO effect (byte-identical to today)", async () => {
+    const { brain } = spyBrain(false);
+    const d = await brain.decide({ ...REPEAT_SHOPPER_SIGNALS, serverGuardDegraded: true }, "what do you recommend for dry skin?");
+    expect(d.pitch).not.toBe("none");
+    expect(d.flags).not.toContain("guard:degraded");
+  });
+});

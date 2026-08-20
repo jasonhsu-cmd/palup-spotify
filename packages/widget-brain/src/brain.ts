@@ -262,7 +262,23 @@ const SUPPORT = [
   "need help", "none of this", "just fix it", "not working",
 ];
 
-const UNKNOWN_FACT = ["competitor", "brand x", "cheaper elsewhere", "other store", "price of their"];
+const UNKNOWN_FACT = ["brand x", "cheaper elsewhere", "other store", "price of their"];
+
+// F9 fix: a bare "competitor" is DELIBERATELY not in UNKNOWN_FACT above. It used to be, which meant
+// the single most natural competitor-comparison phrasing ("how do you compare to your competitors?")
+// was intercepted by honest-uncertainty (step 3, below) BEFORE it ever reached the groundingMode-aware
+// competitor block (~line 1790) — silently defeating the merchant's off/general/full competitor
+// policy and never emitting `competitor:<mode>`. A generic "competitors" comparison with no named
+// rival and no volatile-fact ask is exactly what that later block is FOR, and it already carries its
+// own "you have NO web access ... never assert a live competitor fact" guardrail — routing it there
+// does not reopen any fabrication risk.
+//
+// What must still stay on THIS rung: a message that pairs "competitor(s)" with an explicit request
+// for a volatile, unverifiable FACT (price/cost/discount/stock) — e.g. "what's the competitor price
+// on this?" (core.json GRND-1) — is genuinely something we cannot know, not a comparison opinion, and
+// must keep hitting honest-uncertainty exactly as before.
+const COMPETITOR_FACT_QUERY =
+  /\bcompetitors?\b.*\b(price|cost|cheaper|discount|sale|stock|inventory)\b|\b(price|cost|cheaper|discount|sale|stock|inventory)\b.*\bcompetitors?\b/;
 
 // Price/fit/trust OBJECTION in the CURRENT shopper message → the reactive "objection→close" moment
 // (docs/design/shopper-widget.md §5, the 8 pitch kinds). Deterministic + low-false-positive: specific
@@ -1159,8 +1175,33 @@ export function createBrain(
     if (onRetrievalPath) {
       const built = await retrieveViaShell(catalogRetriever!, tenantId, retrieval!.query, retrieval!.flags, retrieval!.queryVector, retrieval!.pin);
       ({ ctx, rendered: retrieved, corpusTotal } = built);
+    } else if (grounding) {
+      // F2 — NEVER THROWS. In production `grounding` is always `createCachingGroundingPort`'s wrapper,
+      // which already catches every `getContext` failure and fails closed to stale-while-error or a
+      // safe-empty context (packages/platform-ports/src/grounding-cache.ts) — so this call is not
+      // expected to reject there. But a grounding adapter used WITHOUT that wrapper (a misconfigured
+      // deployment, a direct/eval caller, a future call site) had no local guard here, so the throw
+      // propagated out of `decide()` uncaught and crashed the turn (see the "throwOnGetContext" case this
+      // fixes in grounding-stub.test.ts).
+      //
+      // On failure we deliberately fall back to `ctx = undefined`, NOT a synthesized empty-products
+      // context: `systemPrompt`'s `if (!ctx) return [...]` branch renders the plain "online store's
+      // shopping assistant" prompt with no CATALOG block at all, so the model never asserts anything
+      // about what the store carries — the existing rule "If a fact isn't there, say you're not certain
+      // and will check" governs the reply. An explicit empty product list, by contrast, would let the
+      // model confidently say "we don't carry that" about a product the merchant actually has — exactly
+      // the "CONFIDENT FALSE ONE" risk the catalog-ceiling comment in shopify-grounding.ts warns about.
+      // That risk is why this degrade must never be silent: `grounding:unavailable` is pushed onto the
+      // turn's own `flags` (via `retrieval.flags`, present at the one clean-sales call site this finding
+      // is scoped to) so the outage is audit-visible, mirroring `retrieveViaShell`'s `retrieval:unavailable`.
+      try {
+        ctx = await grounding.getContext(tenantId);
+      } catch {
+        ctx = undefined;
+        retrieval?.flags.push("grounding:unavailable");
+      }
     } else {
-      ctx = grounding ? await grounding.getContext(tenantId) : undefined;
+      ctx = undefined;
     }
     // A1b — overlay fresh Tier-2 money-facts onto the RETRIEVED subset (never the full catalog). Runs only
     // behind PRODUCT_FACTS_HYDRATION and only when retrieval actually produced a subset, so with the flag
@@ -1534,6 +1575,17 @@ export function createBrain(
         };
       }
 
+      // F11 — hoisted ABOVE the support branch (not just the reactive-sales rung below) so an enraged
+      // shopper gets the SAME rage treatment (escalate + behavioral:rage + no_pitch) no matter which
+      // branch their message routes to. Before this fix the check only existed on the reactive sales
+      // path (below) and the proactive exit-intent rung (4a above); a rage message that ALSO named a
+      // concrete support issue (e.g. "nobody has fixed my broken order") correctly routed to
+      // mode:support but then fell straight through this rung with escalateToHuman:false and no rage
+      // flag at all — a raging shopper with a real issue got LESS escalation than one without one.
+      // Single source of truth: the reactive-sales rung below now reads this same const instead of
+      // recomputing it (see the removed second declaration there).
+      const rageDetected = dispositionBehavioralEnabled && (signals.behavioral?.includes("rage") ?? false);
+
       // 2. Open support issue OR a support intent — suppresses sales (INV-B).
       const supportIntent = classifySupportIntent(text, subscriptionSelfServeEnabled);
       // Word-boundary match: substring scanning mis-routed "returning"/"cancellation" (and browsing
@@ -1559,22 +1611,39 @@ export function createBrain(
             // classifier-chosen intent can never make a money/subscription action auto-execute.
             serverGuardSignalsEnabled ? signals.serverSupportIntent : undefined,
           );
-          return { mode: "support", reply: r.reply, pitch: "none", escalateToHuman: r.escalate, outbound: false, safetyClass: "none", flags: r.flags, model: "support" };
+          // F11 — apply the SAME rage treatment the sales path already applies (escalate + a
+          // behavioral:rage flag). handleSupport already never pitches (its own "no_pitch" flag is
+          // always present), so this only ever ADDS an escalation + a flag; it never changes which
+          // support reply/action handleSupport chose (ownership/refund-ceiling/cancel gates untouched).
+          const rFlags = rageDetected ? [...r.flags, "behavioral:rage"] : r.flags;
+          return {
+            mode: "support",
+            reply: r.reply,
+            pitch: "none",
+            escalateToHuman: rageDetected ? true : r.escalate,
+            outbound: false,
+            safetyClass: "none",
+            flags: rFlags,
+            model: "support",
+          };
         }
         // Fallback when no commerce port is wired: generic grounded reply.
         flags.push("mode_support", "no_pitch");
         const stuck = text.includes("just fix it") || text.includes("need help") || text.includes("none of this");
         if (stuck) flags.push("escalate");
+        // F11 — same rage treatment as above: an enraged shopper escalates and is flagged even when no
+        // "stuck" phrasing is present in this turn's text.
+        if (rageDetected) flags.push("behavioral:rage", "escalate");
         const gen = await model.complete({ messages: await groundedMessages(message, tenantId, "", history, signals.pageContext), temperature: 0, tenantId });
         if (await offersUngroundedDiscount(gen.text, tenantId)) return discountGuardrail(); // (a) never serve an invented/injected discount (keyword floor + semantic backstop when 3b on)
         const reply = stuck
           ? "I'm sorry this has been frustrating — I've flagged this for a person on our team who can resolve it."
           : `Let me help with that. ${gen.text}`;
-        return { mode: "support", reply, pitch: "none", escalateToHuman: stuck, outbound: false, safetyClass: "none", flags, model: gen.model };
+        return { mode: "support", reply, pitch: "none", escalateToHuman: stuck || rageDetected, outbound: false, safetyClass: "none", flags, model: gen.model };
       }
 
       // 3. Honest uncertainty — never fabricate a fact we can't ground.
-      if (UNKNOWN_FACT.some((p) => text.includes(p))) {
+      if (UNKNOWN_FACT.some((p) => text.includes(p)) || COMPETITOR_FACT_QUERY.test(text)) {
         flags.push("honest_uncertainty", "no_pitch");
         return {
           mode: "sales",
@@ -1760,6 +1829,10 @@ export function createBrain(
       }
 
       // Competitor-comparison handling per the merchant "discuss competitors" mode (default full).
+      // F9: this is now genuinely reachable for the bare word "competitor" (see UNKNOWN_FACT/
+      // COMPETITOR_FACT_QUERY above) — step 3 only intercepts a request for a specific volatile fact
+      // (price/cost/etc.), so a plain comparison question lands HERE and gets the merchant's actual
+      // policy instead of a generic "can't verify" deflection.
       let systemExtra = "";
       if (/compare[ds]? (to|with)|compared to| versus | vs\b|better than|brand [a-z]\b|competitor/.test(text)) {
         const mode = signals.groundingMode ?? "full";
@@ -1889,8 +1962,20 @@ export function createBrain(
       }
       // Choose the pitch BEFORE generating so the reply can actually reflect it (RC1). The pitch
       // directive lands on the sales path only — after every guardrail short-circuit above.
-      const negativeMood =
-        signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
+      // F4 — split the mood brake by GRANULARITY, not by presence/absence: frustrated/upset stay the
+      // HARD brake (blanket pitch:none, unchanged), but anxious is a SOFT brake — a top-tier rep still
+      // gently guides an anxious shopper (guided_rec only), it just never hard-sells them
+      // (objection_close/cross_sell/cart_recovery/replenishment/upsell/subscription/promo all stay
+      // blocked while anxious). This is driven ONLY by mood + cart, never by PersonaStyle (FAIR-1,
+      // Inv 10) — see the persona-invariance test in brain.test.ts.
+      const hardNegativeMood = signals.mood === "frustrated" || signals.mood === "upset";
+      // F4/F5/F6 reconciliation: an anxious shopper with a HIGH-VALUE cart still gets the FULL hard
+      // brake (mode:support, no pitch at all) — F5/F6's whole point is not to push a big basket on an
+      // anxious shopper, and the soft brake below must never re-open that. Only an anxious shopper with
+      // an ordinary/empty cart gets the softened treatment.
+      const anxiousHardBrake = signals.mood === "anxious" && signals.cart === "high_value";
+      const negativeMood = hardNegativeMood || anxiousHardBrake;
+      const anxiousSoftBrake = signals.mood === "anxious" && !anxiousHardBrake;
       // Explicit buy/checkout signal — the shopper has DECIDED. Honor it and add NO upsell/cross-sell/
       // bundle nudge: the system prompt already forbids this, but the pitch DIRECTIVE would still reach
       // the model and contradict it, so we force pitch=none in code (restraint-after-close, §5). Narrow
@@ -1901,6 +1986,26 @@ export function createBrain(
       // Idle browser (NOT "no idea where to start", which wants a discovery rec) — a light greeting, no
       // proactive pitch (no-proactive-pitch / build-trust). Narrow to unambiguous "just looking" phrasing.
       const browsing = /just browsing|just looking|looking around|only browsing|not buying (anything |any )?today|not ready to buy|no thanks,? just/.test(text);
+      // F7 — a plain ingredient/composition question ("what ingredients are in the daily moisturizer?",
+      // "does this contain retinol?", "is there anything with nuts in it?") is a catalog-fact lookup, not
+      // a sales opening. The grounded, honest answer already comes from the CATALOG regardless of this
+      // flag — the ingredient-breakdown rule in systemPrompt (line ~185) plus each item's real
+      // "Ingredients:" line already make the reply answer composition from the catalog, never fabricated.
+      // INGREDIENT_Q only strips the PITCH, so a shopper checking composition/allergens doesn't also get
+      // a guided-rec pitch riding along on what may be a safety-adjacent question (FAIR-1: this
+      // suppression is UNCONDITIONAL — it never varies by persona/mood, same as buySignal/browsing
+      // above). Deliberately narrow to ingredient/composition wording, not every catalog-answerable
+      // attribute (price/size/SPF/stock stay on the normal pitch path).
+      //
+      // Deliberately kept on the SALES path (mode stays "sales") rather than routed to support:
+      // t9-ground-ingredients-present/absent pin mode:"sales" for the identical phrasing ("What
+      // ingredients are in the cleanser?"), so re-routing composition questions to support would
+      // regress them — see classifySupportIntent's own comment on why ingredient questions are
+      // deliberately excluded from the support classifier.
+      const ingredientQuestion =
+        /\bingredients?\b|\bingredient list\b|\bwhat'?s in (?:it|this|the)\b|\b(?:does|do)\b.*\bcontains?\b|\banything with\b.*\bin it\b/i.test(
+          text,
+        );
       if (browsing) {
         flags.push("browsing");
         systemExtra +=
@@ -1919,29 +2024,75 @@ export function createBrain(
       let pitch: PitchKind = "none";
       let outbound = false;
       let escalate = false;
+      // F5/F6 — this reactive turn's returned `mode` label. Defaults to the normal sales labeling and is
+      // ONLY ever overridden to "support" below, on the two guardrail branches whose whole point is that
+      // the shopper is not being sold to right now (rage / mood_brake-with-a-high-value-cart). Nothing
+      // else in this function touches it, so every other branch (buySignal, browsing, plain negative mood
+      // with an ordinary cart, and the clean sales path) stays byte-identical mode:"sales" (Inv 10 —
+      // FAIR-1 pitch/price/outbound are untouched by this; it is purely the label on the final return).
+      let mode: "sales" | "support" = "sales";
       // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL) — an enraged shopper NEVER gets a
       // buy pitch; help/escalate instead. Checked FIRST so it overrides even an explicit buy signal. This
       // only ever SUPPRESSES pitch (forces none) and escalates to a human — it never adds an offer and
       // never touches price/outbound beyond the pitch it drops (FAIR-1, Inv 10).
-      const rageDetected = dispositionBehavioralEnabled && (signals.behavioral?.includes("rage") ?? false);
+      // F11 — `rageDetected` is now hoisted above the support branch (~line 1546) so both the support
+      // and sales paths share one rage decision; this rung just reuses it, byte-identical otherwise.
       if (rageDetected) {
         flags.push("behavioral:rage", "no_pitch", "escalate");
         escalate = true;
+        mode = "support"; // F5/F6 — de-escalation, not a sales reply; matches t8-sit-rage-multiturn / t10-multiturn-rage-escalation
         systemExtra +=
           "\nBEHAVIORAL - rage: The shopper is highly frustrated or angry this session. Prioritize genuine help and de-escalation, and offer to bring in a person - do not sell, pitch, or upsell anything right now.";
       } else if (negativeMood) {
+        // This branch is the HARD brake only: frustrated/upset (always) plus anxious-with-a-
+        // high-value-cart (F4/F5/F6 reconciliation — anxiousHardBrake). Plain anxious with an
+        // ordinary/empty cart never reaches here; it falls through to anxiousSoftBrake in the
+        // clean-sales `else` below, where a gentle guided_rec (and ONLY that) is still allowed.
         flags.push("mood_brake", "no_pitch");
+        // F5/F6 — only the negative-mood + HIGH-VALUE-cart combination relabels the turn as support
+        // (t8-aggr-upset-cart-high-value, t8-aggr-anxious-cart-high-value). Plain negative mood with no
+        // cart or an ordinary cart keeps mode:"sales" unchanged (t8-aggr-frustrated-moodonly) — the
+        // pitch is still suppressed either way, this is purely which label the reply carries.
+        if (signals.cart === "high_value") mode = "support";
+      } else if (serverGuardSignalsEnabled && signals.serverGuardDegraded) {
+        // F10-D — the server guard classifier failed/timed out/returned unparseable output THIS turn, so
+        // the language-agnostic safety/injection/support backstop is silently MISSING for whatever
+        // language this message is in (the English keyword floor above already ran and still governs
+        // safety/escalation, but it is only a floor — it can miss a non-English safety or support turn).
+        // FAIL TOWARD SAFETY rather than fall open: suppress the sales pitch rather than risk one riding
+        // alongside an undetected turn. Flag OFF (serverGuardSignalsEnabled false) or a normal
+        // (non-degraded) classification never reaches this branch — byte-identical either way.
+        flags.push("guard:degraded", "no_pitch");
       } else if (buySignal) {
         flags.push("buy_signal", "no_pitch"); // pitch stays "none" — move to checkout, don't pitch
       } else if (browsing) {
         flags.push("no_pitch"); // pitch stays "none" — idle browser
+      } else if (ingredientQuestion) {
+        flags.push("ingredient_q", "no_pitch"); // F7 — pitch stays "none"; the catalog answer is unaffected
       } else {
         // Deterministic OBJECTION trigger: a price/fit/trust objection in THIS message routes the
         // otherwise-selected pitch to objection_close (still under every cap — see selectPitch). Audit
         // the detection either way, even when a later cap (budget, session.ts) drops the pitch to none.
         const isObjection = OBJECTION.test(text);
         if (isObjection) flags.push("objection_detected");
-        pitch = selectPitch(signals, policy, isObjection);
+        const rawPitch = selectPitch(signals, policy, isObjection);
+        // F4 — the anxious SOFT brake caps selectPitch's own result: only a gentle guided_rec is
+        // allowed through for an anxious shopper (ordinary/empty cart only — anxiousSoftBrake is
+        // false whenever cart is high_value, which stays on the hard-brake branch above). Every
+        // harder pitch selectPitch could otherwise return here — objection_close, cross_sell,
+        // cart_recovery, replenishment, upsell, subscription, promo — is suppressed back to "none".
+        // Driven ONLY by mood + cart (both already folded into anxiousSoftBrake above), never by
+        // PersonaStyle (FAIR-1, Inv 10 — see the persona-invariance test in brain.test.ts): this cap
+        // runs strictly AFTER selectPitch and never consults signals.personaStyle/personaRole.
+        if (anxiousSoftBrake) {
+          // "mood_brake" (the same flag the hard brake emits, e.g. MOOD-3/core.json) plus
+          // "mood_brake_soft" so an audit/log consumer can still tell soft from hard apart.
+          flags.push("mood_brake", "mood_brake_soft");
+          pitch = rawPitch === "guided_rec" ? "guided_rec" : "none";
+          if (pitch === "none") flags.push("no_pitch");
+        } else {
+          pitch = rawPitch;
+        }
         if (pitch !== "none") flags.push(`pitch:${pitch}`);
         // Consent-gated outbound: replenishment/cart-recovery imply an email/SMS follow-up, which is
         // only permitted with valid consent (unknown = no-consent). Never do outbound otherwise.
@@ -2103,7 +2254,7 @@ export function createBrain(
         if (refused > 0) flags.push("citations:dropped");
       }
       return {
-        mode: "sales",
+        mode, // F5/F6 — "support" on the mood_brake(+high-value-cart)/rage guardrail branches; "sales" otherwise
         reply,
         pitch,
         // Shopper-disposition program PR-4 — `escalate` is false unless rage forced it true above; every

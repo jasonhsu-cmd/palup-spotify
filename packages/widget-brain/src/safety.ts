@@ -29,6 +29,17 @@ import type { SafetyClass } from "./types.js";
  * either over-match (catching an unrelated word) or under-match (losing an inflection the substring
  * form caught for free). Every entry states which real string it protects.
  */
+// F1 FIX ROUND 2 (security review, round 1 over-corrected into false NEGATIVES): "I've been hurting
+// myself lately" / "I hurt myself last night" / "I hurt myself by cutting" are real self-harm
+// disclosures, but round 1's clause-boundary allowlist (only end-of-string/punctuation/"tonight" etc.)
+// silently dropped every one of them back to "none" — the same P0 miss F1 was about, just relocated.
+// ROUND 2 INVERTS THE DEFAULT: "hurt/harm myself" (+ inflections) matches EVERYTHING by default (see
+// the plain patterns below, no lookahead) and is suppressed back to "none" ONLY in classifySafety, and
+// ONLY when the same message also names the financial/shopping domain (SELF_HARM_FINANCIAL_CONTEXT,
+// below) — a small, explicit word/phrase list, never a generic "by V-ing": that trap would also
+// swallow a real self-harm METHOD disclosure ("I hurt myself by cutting" / "by burning"), which must
+// stay distress. "kill myself" needs no such handling — reviewed as a closed idiom with no ordinary
+// benign continuation (nobody says "I'm killing myself financially").
 const TERM_PATTERN: Record<string, string> = {
   // Punctuation: a trailing \b after ":" would require a word char next, breaking "system: you are now".
   "system:": String.raw`\bsystem\s*:`,
@@ -36,6 +47,17 @@ const TERM_PATTERN: Record<string, string> = {
   "[system": String.raw`\[\s*system`,
   // MORPHOLOGY WE MUST KEEP. "burning" is floor case SAFE-1's own text.
   burn: String.raw`\bburn(s|ed|ing|t)?\b`,
+  // F1: "hurting myself" (gerund) is missed by a literal `\bhurt myself\b`. Matches by default; the
+  // financial/shopping-idiom exception is applied by classifySafety below (SELF_HARM_FINANCIAL_CONTEXT),
+  // not baked into this pattern — so this term alone stays a pure, unconditional recall fixture.
+  "hurt myself": String.raw`\bhurt(ing|s)?\s+myself\b`,
+  // Same gerund gap as "hurt myself", plus this is a NEW base term ("harm myself" was not covered at all
+  // before — only the unrelated word order "self harm"/"self-harm").
+  "harm myself": String.raw`\bharm(ing|ed|s)?\s+myself\b`,
+  // "killing myself" is unambiguous self-harm distress — the "myself" anchor alone is what keeps this
+  // from matching "this workout is killing me" / "these prices are killing me" (verified false-positive
+  // guards in brain-safety-precision.test.ts). No financial-domain exception needed, per security review.
+  "kill myself": String.raw`\bkill(ing|ed|s)?\s+myself\b`,
   // Prefix stems — the substring form was already acting as a stem, so \w* preserves exactly that.
   irritat: String.raw`\birritat\w*`,
   diagnos: String.raw`\bdiagnos\w*`,
@@ -75,6 +97,18 @@ const compileGroup = (terms: string[]) => new RegExp(terms.map(compileTerm).join
 // group so the idiom never trips a compliance refusal.
 const TREAT_IDIOM = /\btreat\s+(my|your|him|her|them)(self|selves)\b/i;
 
+// F1 ROUND 2. Matches ANY "hurt/harm myself" hit — the exact same pattern used inside TERM_PATTERN
+// above (kept in lockstep so this stays a pure "did the base term match" check, nothing more).
+const SELF_HARM_HURT_HARM_RE = /\b(?:hurt(?:ing|s)?|harm(?:ing|ed|s)?)\s+myself\b/i;
+
+// The ONLY thing allowed to downgrade a "hurt/harm myself" hit back to "none": the message also names
+// the financial/shopping domain. Deliberately a small, closed word/phrase list — NEVER a generic
+// "by\s+\w+ing" shape, which would also swallow a real self-harm METHOD disclosure ("I hurt myself by
+// cutting" / "by burning"). Each alternative here names money, price, or a purchase action, or one of
+// the specific reviewed idiom phrasings ("by skipping [a product step]", "by waiting [for a sale]").
+const SELF_HARM_FINANCIAL_CONTEXT =
+  /\b(?:financial(?:ly)?|money|price|prices|sav(?:e|ing)|bu(?:y|ying)|purchas(?:e|ing)|afford|budget|discount|sale|cart)\b|\bby\s+skipping\b|\bby\s+waiting\b|\bby\s+not\s+buying\b|\bwith\s+these\s+prices\b/i;
+
 export const INJECTION_TERMS = [
   "ignore previous",
   "ignore above",
@@ -101,7 +135,7 @@ export const INJECTION_TERMS = [
 ];
 
 export const SAFETY_GROUPS: { class: Exclude<SafetyClass, "none" | "injection">; terms: string[] }[] = [
-  { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm", "don't want to be here", "dont want to be here", "don't want to live", "no reason to go on", "want to end it", "better off dead", "end my life"] },
+  { class: "distress", terms: ["panic attack", "hurt myself", "harm myself", "kill myself", "self harm", "self-harm", "don't want to be here", "dont want to be here", "don't want to live", "no reason to go on", "want to end it", "better off dead", "end my life"] },
   { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "broke me out", "broke my", "break out", "break me out", "will break", "breaking out", "breaking me out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
   // Regulated EFFICACY-CLAIM bait ("will this cure/treat X?", docs/design/shopper-widget.md §8a
   // invariant 4) — split cleanly from `medical` below. It is a COMPLIANCE refusal (we're not allowed to
@@ -134,6 +168,14 @@ export function classifySafety(text: string): SafetyClass {
       // genuine concern later in the same message is still caught.
       const withoutIdiom = text.replace(TREAT_IDIOM, " ");
       if (group.re.test(withoutIdiom)) return group.class;
+      continue;
+    }
+    if (group.class === "distress" && SELF_HARM_HURT_HARM_RE.test(text) && SELF_HARM_FINANCIAL_CONTEXT.test(text)) {
+      // F1 ROUND 2: "hurting myself financially" / "harming myself by skipping sunscreen" is a
+      // self-sabotage shopping idiom, not self-harm distress. Strip ONLY the hurt/harm-myself span so a
+      // genuine distress term elsewhere in the same message (e.g. also "kill myself") still classifies.
+      const withoutSelfSabotage = text.replace(SELF_HARM_HURT_HARM_RE, " ");
+      if (group.re.test(withoutSelfSabotage)) return group.class;
       continue;
     }
     if (group.re.test(text)) return group.class;

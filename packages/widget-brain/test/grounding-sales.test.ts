@@ -76,6 +76,27 @@ describe("grounding / honesty system prompt", () => {
     expect(sys(spy)).toMatch(/BROWSING/);
   });
 
+  // F7 — a plain ingredient/composition question is a catalog-fact lookup, not a sales opening: it
+  // must still be ANSWERED (grounded from the catalog, mode stays "sales" — see classifySupportIntent's
+  // own comment on why this deliberately does NOT route to support) but must carry NO pitch, since a
+  // shopper checking composition/allergens is not signaling buying intent.
+  it("an ingredient question gets no pitch (F7)", async () => {
+    const { brain, spy } = spyBrain();
+    const d = await brain.decide({}, "What ingredients are in the daily moisturizer?");
+    expect(d.mode).toBe("sales");
+    expect(d.pitch).toBe("none");
+    expect(d.flags).toContain("ingredient_q");
+    expect(sys(spy)).not.toMatch(/PITCH - guided recommendation/);
+  });
+
+  it("a 'does this contain X' composition question gets no pitch (F7)", async () => {
+    const { brain } = spyBrain();
+    const d = await brain.decide({}, "Does this contain retinol?");
+    expect(d.mode).toBe("sales");
+    expect(d.pitch).toBe("none");
+    expect(d.flags).toContain("ingredient_q");
+  });
+
   it("a deliberating question is NOT a buy signal (false-positive boundary)", async () => {
     const { brain } = spyBrain();
     const d = await brain.decide({ cart: "has_items" }, "should I buy it, or is the other one better?");
@@ -122,4 +143,30 @@ describe("competitor-mode handling", () => {
       expect(sys(spy)).toMatch(/[Nn]ever disparage/);
     });
   }
+
+  // F9 (repro): the most natural competitor-comparison phrasing literally contains the word
+  // "competitor" — and UNKNOWN_FACT's bare "competitor" trigger (honest_uncertainty, step 3 in
+  // decide()) sits ABOVE this groundingMode-aware block, so it intercepted the message first and
+  // silently defeated the merchant's off/general/full policy (no `competitor:<mode>` flag ever
+  // emitted, and the model was never even called — model stays "guardrail", not the real model).
+  // This must resolve like the "Brand Y" cases above, not like a generic unverifiable-fact question.
+  it("F9: a comparison naming 'competitors' (not a specific rival) still reaches the groundingMode block", async () => {
+    const { brain, spy } = spyBrain();
+    const d = await brain.decide({ groundingMode: "general" }, "How do you compare to your competitors?");
+    expect(d.flags).toContain("competitor:general");
+    expect(d.flags).not.toContain("honest_uncertainty");
+    expect(d.model).toBe("spy"); // reached the real model call, not the guardrail short-circuit
+    expect(sys(spy)).toMatch(/GENERAL comparison/);
+  });
+
+  // F9 boundary: a message asking for a specific, volatile competitor FACT (price) must still be
+  // caught by honest_uncertainty — the fix only redirects generic comparison phrasing, it must not
+  // let the agent try to answer an unverifiable price question.
+  it("F9 boundary: a competitor PRICE question still hits honest_uncertainty, unchanged", async () => {
+    const { brain } = spyBrain();
+    const d = await brain.decide({}, "what's the competitor price on this?");
+    expect(d.flags).toContain("honest_uncertainty");
+    expect(d.flags).not.toContain("competitor:full");
+    expect(d.pitch).toBe("none");
+  });
 });

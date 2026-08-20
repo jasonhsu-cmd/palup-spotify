@@ -18,6 +18,19 @@ describe("support intent classification", () => {
     expect(classifySupportIntent("has it arrived yet?")).toBe("order_status");
     expect(classifySupportIntent("you sent toner, I ordered serum")).toBe("wrong_item");
   });
+  // F4 — "picking/choosing the wrong product" is pre-purchase discovery anxiety about a choice the
+  // SHOPPER hasn't made yet, not a report that the merchant already shipped the wrong thing. It must
+  // NOT collide with the wrong_item intent (which would otherwise divert an anxious shopper who just
+  // wants guidance into the support flow before brain.ts's mood-brake logic ever runs). A genuine
+  // wrong-item complaint using the bare "wrong item/product/thing" phrasing (no sent/received context)
+  // still classifies correctly as long as it isn't paired with pick/choose language.
+  it("does not classify pre-purchase 'picking/choosing the wrong X' anxiety as a wrong_item complaint", () => {
+    expect(classifySupportIntent("I'm anxious about picking the wrong product, can you guide me?")).toBe("general");
+    expect(classifySupportIntent("I'm worried I'll choose the wrong thing")).toBe("general");
+  });
+  it("still classifies a genuine bare 'wrong item/product' complaint as wrong_item", () => {
+    expect(classifySupportIntent("I got the wrong product in my order")).toBe("wrong_item");
+  });
   it("does not read a price as an order id", () => {
     expect(extractOrderId("refund my $180 order #2000")).toBe("2000");
     expect(extractOrderId("where's my order #1042?")).toBe("1042");

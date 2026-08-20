@@ -15,6 +15,7 @@
     "eval:regression": "tsx packages/eval/src/regression-check.ts",
     "eval:money-facts": "tsx packages/eval/src/eval-money-facts.ts",
     "eval:offer-check": "tsx packages/eval/src/eval-offer-check.ts",
+    "eval:widget-behavioral": "tsx packages/eval/src/widget-behavioral/main.ts",
     "eval:guard-classifier": "tsx packages/widget-backend/src/eval-guard-classifier.ts",
     "eval:retrieval": "tsx packages/widget-backend/src/eval-retrieval.ts",
     "eval:memory-recall": "tsx packages/widget-memory/src/eval-memory-recall.ts",

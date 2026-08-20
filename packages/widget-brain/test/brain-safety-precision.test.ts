@@ -46,6 +46,20 @@ describe("safety precision — ordinary English must not read as a safety incide
     "I'd like to reorder the toner", // control: plain sales
     "what's your shipping time?", // control
     "do you have a fragrance-free option?", // control
+    "this workout is killing me", // F1 guard: "killing me" must not match the "kill myself" morphology
+    "these prices are killing me", // F1 guard: same idiom, different context
+    // F1 FIX ROUND 1/2 (security review, HIGH false-positive): "hurt/harm myself" is suppressed back to
+    // "none" ONLY when the message also names the financial/shopping domain — ordinary self-sabotage
+    // idiom, not self-harm distress. (Round 2 moved this from a clause-boundary allowlist on the term
+    // itself to a domain-word check in classifySafety — see SELF_HARM_FINANCIAL_CONTEXT in safety.ts —
+    // because the allowlist version silently dropped real disclosures that ended a clause any other way.)
+    "hurting myself financially",
+    "harming myself by skipping sunscreen",
+    "I'm harming myself by skipping sunscreen",
+    "I'm hurting myself financially by buying this today",
+    "I only hurt myself by waiting for the sale to end",
+    "I'm just hurting myself not buying the bigger size",
+    "I keep hurting myself trying to save money on skincare",
   ];
 
   it.each(benign)("%s -> NOT a safety incident", async (msg) => {
@@ -81,6 +95,29 @@ describe("safety recall — every real concern still classifies, including infle
     ["I'm pregnancy-safe only right now", "medical"],
     ["can you diagnose this?", "medical"],
     ["I need a diagnosis", "medical"],
+    // F1: the gerund/inflected self-harm phrasings a naive `\bhurt myself\b` term misses.
+    ["I feel like hurting myself", "distress"],
+    ["I want to hurt myself", "distress"],
+    ["I'm going to hurt myself", "distress"],
+    ["I've been harming myself", "distress"],
+    ["I've been hurting myself lately", "distress"],
+    ["I want to harm myself", "distress"],
+    ["I keep harming myself", "distress"],
+    ["I want to kill myself", "distress"],
+    ["I keep thinking about killing myself", "distress"],
+    // F1 FIX ROUND 1: a clause-ending continuation must still read as distress, not just bare end-of-string.
+    ["I want to hurt myself tonight", "distress"],
+    ["I keep harming myself again", "distress"],
+    // F1 FIX ROUND 2 (security review, ROUND 1 over-corrected into false NEGATIVES): these all disclose
+    // real self-harm and continue past "myself" in ways round 1's clause-boundary allowlist silently
+    // dropped to "none". Now the default (no financial/shopping domain word present) stays distress.
+    ["I hurt myself last night", "distress"],
+    ["I want to hurt myself because nothing matters anymore", "distress"],
+    ["I keep wanting to hurt myself and I don't know why", "distress"],
+    ["hurt myself", "distress"],
+    // THE TRAP the review named explicitly: this is a self-harm METHOD disclosure ("by cutting"), not a
+    // financial/shopping recontextualizer — must NEVER be caught by a generic "by V-ing" blocklist.
+    ["I hurt myself by cutting", "distress"],
   ];
 
   it.each(morphology)("%s -> %s", async (msg, cls) => {

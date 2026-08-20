@@ -150,6 +150,11 @@ export interface ServingSignalContext {
    *  boundary as the two above). Passed through so the SERVER is the sole origin of
    *  `Signals.serverSupportIntent`; the client's own value is never read (this function rebuilds). */
   serverSupportIntent?: SupportIntent;
+  /** F10-D — the guard classifier's `degraded` flag for THIS turn (same source + trust boundary as the
+   *  three fields above): true when the model call errored/timed out/returned unparseable or out-of-enum
+   *  output, so no server safety/injection/support signal exists this turn. Passed through so the SERVER
+   *  is the sole origin of `Signals.serverGuardDegraded`; the client's own value is never read. */
+  serverGuardDegraded?: boolean;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -252,5 +257,9 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     ...(ctx.serverSafetyClass !== undefined ? { serverSafetyClass: ctx.serverSafetyClass } : {}),
     ...(ctx.serverInjection !== undefined ? { serverInjection: ctx.serverInjection } : {}),
     ...(ctx.serverSupportIntent !== undefined ? { serverSupportIntent: ctx.serverSupportIntent } : {}),
+    // F10-D — same spread discipline: ABSENT (not present-and-false) whenever the classifier didn't run
+    // or didn't degrade, so the SERVER_GUARD_SIGNALS-off path AND a normal (non-degraded) turn stay
+    // byte-identical, and a client-supplied value is dropped (rebuild-not-spread).
+    ...(ctx.serverGuardDegraded ? { serverGuardDegraded: true } : {}),
   };
 }
