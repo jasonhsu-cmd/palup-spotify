@@ -114,6 +114,26 @@ test.describe("sample storefront — populated cart (localStorage-driven, determ
     await expect(checkout).toHaveAttribute("rel", /noopener/);
   });
 
+  test("checkout permalink carries the join token as a cart attribute when window.PALUP.joinToken is set", async ({ page }) => {
+    // Pillar-4 flywheel attribution (S4 / ADR-0020): the PANEL mints the opaque, PII-free join token and the
+    // loader exposes it on window.PALUP.joinToken (loader-core.ts `palup:jointoken`). The storefront threads it
+    // onto the Shopify checkout permalink as a cart attribute; Shopify carries `?attributes[...]` to the order's
+    // note_attributes, which the backend order webhook reads to attribute the sale to its holdout arm. The token
+    // is base64url, so it passes through url-encoding unchanged. Dark until ORDER_ATTRIBUTION_WEBHOOKS is enabled
+    // (the panel latches on the 404 and never emits), so on a live-attribution store this is the only new state.
+    await page.addInitScript(() => {
+      const w = window as unknown as { PALUP?: Record<string, unknown> };
+      w.PALUP = Object.assign(w.PALUP || {}, { joinToken: "dG9rZW4tXy0xMjM" });
+    });
+    await seedCart(page, [{ productId: "gid://p1", variantId: "987654", title: "X", price: "$1", quantity: 2 }]);
+    await page.goto("/cart");
+    const checkout = page.locator('[data-testid="checkout"]');
+    await expect(checkout).toHaveAttribute(
+      "href",
+      "https://palup-skincare-jason.myshopify.com/cart/987654:2?attributes[_palup_join_token]=dG9rZW4tXy0xMjM",
+    );
+  });
+
   test("checkout permalink is disabled (no navigable href) when no line has a numeric variant", async ({ page }) => {
     await seedCart(page, [{ productId: "gid://p1", variantId: "not-a-number", title: "X", price: "$1", quantity: 1 }]);
     await page.goto("/cart");
