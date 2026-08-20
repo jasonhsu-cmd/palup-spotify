@@ -1962,8 +1962,20 @@ export function createBrain(
       }
       // Choose the pitch BEFORE generating so the reply can actually reflect it (RC1). The pitch
       // directive lands on the sales path only — after every guardrail short-circuit above.
-      const negativeMood =
-        signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
+      // F4 — split the mood brake by GRANULARITY, not by presence/absence: frustrated/upset stay the
+      // HARD brake (blanket pitch:none, unchanged), but anxious is a SOFT brake — a top-tier rep still
+      // gently guides an anxious shopper (guided_rec only), it just never hard-sells them
+      // (objection_close/cross_sell/cart_recovery/replenishment/upsell/subscription/promo all stay
+      // blocked while anxious). This is driven ONLY by mood + cart, never by PersonaStyle (FAIR-1,
+      // Inv 10) — see the persona-invariance test in brain.test.ts.
+      const hardNegativeMood = signals.mood === "frustrated" || signals.mood === "upset";
+      // F4/F5/F6 reconciliation: an anxious shopper with a HIGH-VALUE cart still gets the FULL hard
+      // brake (mode:support, no pitch at all) — F5/F6's whole point is not to push a big basket on an
+      // anxious shopper, and the soft brake below must never re-open that. Only an anxious shopper with
+      // an ordinary/empty cart gets the softened treatment.
+      const anxiousHardBrake = signals.mood === "anxious" && signals.cart === "high_value";
+      const negativeMood = hardNegativeMood || anxiousHardBrake;
+      const anxiousSoftBrake = signals.mood === "anxious" && !anxiousHardBrake;
       // Explicit buy/checkout signal — the shopper has DECIDED. Honor it and add NO upsell/cross-sell/
       // bundle nudge: the system prompt already forbids this, but the pitch DIRECTIVE would still reach
       // the model and contradict it, so we force pitch=none in code (restraint-after-close, §5). Narrow
@@ -2032,6 +2044,10 @@ export function createBrain(
         systemExtra +=
           "\nBEHAVIORAL - rage: The shopper is highly frustrated or angry this session. Prioritize genuine help and de-escalation, and offer to bring in a person - do not sell, pitch, or upsell anything right now.";
       } else if (negativeMood) {
+        // This branch is the HARD brake only: frustrated/upset (always) plus anxious-with-a-
+        // high-value-cart (F4/F5/F6 reconciliation — anxiousHardBrake). Plain anxious with an
+        // ordinary/empty cart never reaches here; it falls through to anxiousSoftBrake in the
+        // clean-sales `else` below, where a gentle guided_rec (and ONLY that) is still allowed.
         flags.push("mood_brake", "no_pitch");
         // F5/F6 — only the negative-mood + HIGH-VALUE-cart combination relabels the turn as support
         // (t8-aggr-upset-cart-high-value, t8-aggr-anxious-cart-high-value). Plain negative mood with no
@@ -2050,7 +2066,24 @@ export function createBrain(
         // the detection either way, even when a later cap (budget, session.ts) drops the pitch to none.
         const isObjection = OBJECTION.test(text);
         if (isObjection) flags.push("objection_detected");
-        pitch = selectPitch(signals, policy, isObjection);
+        const rawPitch = selectPitch(signals, policy, isObjection);
+        // F4 — the anxious SOFT brake caps selectPitch's own result: only a gentle guided_rec is
+        // allowed through for an anxious shopper (ordinary/empty cart only — anxiousSoftBrake is
+        // false whenever cart is high_value, which stays on the hard-brake branch above). Every
+        // harder pitch selectPitch could otherwise return here — objection_close, cross_sell,
+        // cart_recovery, replenishment, upsell, subscription, promo — is suppressed back to "none".
+        // Driven ONLY by mood + cart (both already folded into anxiousSoftBrake above), never by
+        // PersonaStyle (FAIR-1, Inv 10 — see the persona-invariance test in brain.test.ts): this cap
+        // runs strictly AFTER selectPitch and never consults signals.personaStyle/personaRole.
+        if (anxiousSoftBrake) {
+          // "mood_brake" (the same flag the hard brake emits, e.g. MOOD-3/core.json) plus
+          // "mood_brake_soft" so an audit/log consumer can still tell soft from hard apart.
+          flags.push("mood_brake", "mood_brake_soft");
+          pitch = rawPitch === "guided_rec" ? "guided_rec" : "none";
+          if (pitch === "none") flags.push("no_pitch");
+        } else {
+          pitch = rawPitch;
+        }
         if (pitch !== "none") flags.push(`pitch:${pitch}`);
         // Consent-gated outbound: replenishment/cart-recovery imply an email/SMS follow-up, which is
         // only permitted with valid consent (unknown = no-consent). Never do outbound otherwise.

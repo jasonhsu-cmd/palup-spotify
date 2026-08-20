@@ -60,6 +60,13 @@ const RESOLUTION_RE = /^\s*(thanks?|thank you|that'?s all|that'?s it|all set|i'?
 /** A follow-on REQUEST riding along with a "thanks" ("thanks — I also want to reorder…") — the thanks is
  * courtesy, not a sign-off. When present, do NOT treat the message as a close (that swallowed the request). */
 const FOLLOWON_REQUEST_RE = /\b(also|as well|reorder|re-order|order|buy|want|need|another|can you|could you|one more|question|how (do|much|long|often)|what about)\b/i;
+/** F4 — a shopper worried about a FUTURE self-made choice ("anxious about picking the wrong
+ * product", "afraid I'll choose the wrong thing") is not reporting an already-happened wrong-item
+ * shipment; it's pre-purchase discovery anxiety and must stay on the sales/guidance path, not divert
+ * to support. Scoped narrowly to "pick(ing)/choos(ing)" immediately governing "wrong (item|product|
+ * thing)" so a genuine complaint ("you sent the wrong item") is unaffected — that phrasing never
+ * pairs pick/choose with wrong item/product/thing. */
+const FUTURE_CHOICE_WRONG_RE = /\b(pick(?:ing)?|choos(?:e|ing))\b[^.!?]{0,30}\bwrong (item|product|thing)\b/;
 const ISSUE_LABELS: Record<string, string> = { shipping_issue: "shipping issue", shipping: "shipping issue", order_status: "order status", damaged_item: "damaged item", damaged: "damaged item", defective: "damaged item", lost_package: "missing package", subscription: "subscription", refund: "refund", return: "return" };
 const humanizeIssue = (code: string): string => ISSUE_LABELS[code] ?? code.replace(/_/g, " ");
 /** A dollar amount the shopper stated (e.g. "$180", "180 dollars") — for the D5 above-ceiling refund gate. */
@@ -107,7 +114,11 @@ export function classifySupportIntent(text: string, selfServeEnabled = false): S
   if (/charged twice|double.?charg|charged me twice|why (was|am) i charged|two charges/.test(t)) return "billing";
   if (/(change|update).*(shipping )?address/.test(t)) return "address_change";
   if (/wrong (shade|colou?r)|swap.*(shade|for)|different shade|\bexchange\b/.test(t)) return "exchange";
-  if (/wrong (item|product|thing)|sent (me )?the wrong|you sent me|you sent\b.*\bi ordered|sent .* instead of/.test(t)) return "wrong_item";
+  if (
+    (/wrong (item|product|thing)/.test(t) && !FUTURE_CHOICE_WRONG_RE.test(t)) ||
+    /sent (me )?the wrong|you sent me|you sent\b.*\bi ordered|sent .* instead of/.test(t)
+  )
+    return "wrong_item";
   if (/return (window|policy)|shipping policy|how long.*(return|ship|take)/.test(t)) return "policy_q";
   if (/refund/.test(t)) return "refund";
   if (/\breturn\b/.test(t)) return "return";
