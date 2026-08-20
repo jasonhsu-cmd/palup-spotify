@@ -419,6 +419,18 @@
     co.target = "_blank";
     if (href) {
       co.href = href;
+      // Pillar-4 attribution: the join token is minted ASYNC (only after a /chat turn) and lands on
+      // window.PALUP.joinToken AFTER this render, with no cart re-render — so the href built above can be
+      // tag-less in the real shopper flow (land on cart -> chat -> checkout). Recompute from the LIVE cart +
+      // token on pointer/click, just before navigation, so an attributed permalink is used whenever the token
+      // is present by click time. checkoutUrl() reads window.PALUP.joinToken live and returns byte-identical
+      // when no token is set, so this is a no-op until one exists.
+      var refreshCheckoutHref = function () {
+        var fresh = checkoutUrl(readCart());
+        if (fresh) co.href = fresh;
+      };
+      co.addEventListener("pointerdown", refreshCheckoutHref);
+      co.addEventListener("click", refreshCheckoutHref);
     } else {
       co.setAttribute("aria-disabled", "true");
       co.style.pointerEvents = "none";

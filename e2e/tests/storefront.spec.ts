@@ -134,6 +134,30 @@ test.describe("sample storefront — populated cart (localStorage-driven, determ
     );
   });
 
+  test("checkout permalink picks up a join token that arrives AFTER render (async), on pointer interaction", async ({ page }) => {
+    // Regression for the async-ordering gap found in the LIVE storefront: the panel mints the token only after a
+    // /chat turn, so it lands on window.PALUP.joinToken AFTER renderCart has already built the checkout href — and
+    // the cart does not re-render. Without a click-time refresh, the real shopper flow (land on cart -> chat ->
+    // checkout) ships a tag-less link and the order is UNATTRIBUTED. The href must refresh from the live token on
+    // pointer interaction. (The #395 test above injects the token BEFORE load, so it never caught this.)
+    await seedCart(page, [{ productId: "gid://p1", variantId: "987654", title: "X", price: "$1", quantity: 1 }]);
+    await page.goto("/cart");
+    const checkout = page.locator('[data-testid="checkout"]');
+    // Starting state (the bug): token absent at render -> no attribute on the href.
+    await expect(checkout).toHaveAttribute("href", "https://palup-skincare-jason.myshopify.com/cart/987654:1");
+    // The loader sets the token AFTER load, with NO cart re-render — exactly the live race.
+    await page.evaluate(() => {
+      const w = window as unknown as { PALUP?: Record<string, unknown> };
+      w.PALUP = Object.assign(w.PALUP || {}, { joinToken: "late-ARRIVAL_tok123" });
+    });
+    // A pointer interaction just before navigation refreshes the href from the live token.
+    await checkout.dispatchEvent("pointerdown");
+    await expect(checkout).toHaveAttribute(
+      "href",
+      "https://palup-skincare-jason.myshopify.com/cart/987654:1?attributes[_palup_join_token]=late-ARRIVAL_tok123",
+    );
+  });
+
   test("checkout permalink is disabled (no navigable href) when no line has a numeric variant", async ({ page }) => {
     await seedCart(page, [{ productId: "gid://p1", variantId: "not-a-number", title: "X", price: "$1", quantity: 1 }]);
     await page.goto("/cart");
