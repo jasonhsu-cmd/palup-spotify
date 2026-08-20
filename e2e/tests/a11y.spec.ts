@@ -72,9 +72,9 @@ async function scan(page: Page): Promise<AxeResults> {
   // so removing the fixture cannot move or resize either of them.
   await page.addStyleTag({ content: ".store{ display:none !important }" });
   // Let the bubble entry animation settle before sampling. `.msg` fades in from opacity:0 over 180ms,
-  // and axe samples the CURRENT composited colour — mid-fade, a user bubble reads as #7972eb rather
-  // than #4f46e5 and "fails" contrast at 3.87:1. That is the scan catching a 180ms transition, not a
-  // defect, and it makes the result depend on timing. Settled state only. (`pop` is finite, so this
+  // and axe samples the CURRENT composited colour — mid-fade, a user bubble reads as a lighter,
+  // semi-transparent tint of the evergreen --brand rather than its settled #0c4a3c, so the ratio
+  // depends on timing. Settled state only. (`pop` is finite, so this
   // always resolves; the typing dots' infinite animation is excluded because it only animates
   // decorative aria-hidden <i> elements that carry no text.)
   await page.waitForFunction(() =>
@@ -92,12 +92,12 @@ async function scan(page: Page): Promise<AxeResults> {
  * up on classifying the CONTENT as text, which no change of colour can fix:
  *
  *  - `.avatar` — a one-character merchant monogram ("A"). axe: "content is too short to determine if
- *    it is actual text content". Measured 4.02:1 (white on a 22%-white disc over `--brand`), which is
- *    under the 4.5:1 floor. NOT fixed here, deliberately: WCAG 1.4.3 exempts logotypes and brand
- *    marks, and restyling a merchant's brand mark is the owner's call, not this PR's. Reported.
+ *    it is actual text content" — a length-based `incomplete`, independent of colour. NOT resolved by
+ *    restyling: WCAG 1.4.3 exempts logotypes and brand marks, and a merchant's brand mark is the
+ *    owner's call, not this PR's. Reported.
  *  - the send button — its label is the glyph "➤". axe: "content contains only non-text characters".
- *    Measured 6.3:1 (`--brand-ink` on `--brand`) and asserted numerically below, so this one is
- *    genuinely verified rather than merely tolerated.
+ *    Its ratio (`--brand-ink` white on the evergreen `--brand`, ~9.4:1) clears the 4.5:1 floor and is
+ *    asserted numerically below, so this one is genuinely verified rather than merely tolerated.
  *  - a message bubble scrolled partly out of the log — axe: "partially obscured by another element".
  *    The log auto-scrolls to the newest message, so an earlier bubble is clipped by the scroll
  *    container and axe will not sample it. Both bubble types are asserted numerically below instead,
@@ -246,6 +246,7 @@ test.describe("axe — WCAG 2.2 AA over the shopper widget's states", () => {
     await sendTurn(page, "tell me about the serum");
     await page.getByTestId("consent-primary").click(); // dismiss the card, leaving the manage panel
     await expect(page.getByTestId("manage-memory")).toBeVisible();
+    await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reveal the controls
     await expect(page.getByTestId("manage-memory-toggle-ordinary")).toBeVisible();
     await expectAxeClean(page, "manage-memory panel");
   });
@@ -315,6 +316,7 @@ test.describe("axe — WCAG 2.2 AA over the shopper widget's states", () => {
     await shopperLoad(page);
     await sendTurn(page, "tell me about the serum");
     await page.getByTestId("consent-primary").click();
+    await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reveal + scan the controls
     await expect(page.getByTestId("manage-memory-forget")).toBeVisible();
     await expectAxeClean(page, "dark scheme, manage-memory panel");
     await ctx.close();

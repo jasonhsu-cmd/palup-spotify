@@ -364,6 +364,7 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
     expect(Object.prototype.hasOwnProperty.call(consentBodies[0], "anonId")).toBe(false);
     expect(consentHeaders[0]["x-guest-token"]).toBe(guest.first());
 
+    await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reach the controls
     await page.locator('[data-testid="manage-memory-toggle-special"]').check();
     await expect.poll(() => consentBodies.length).toBe(2);
     expect(consentBodies[1]).toMatchObject({ memorySpecial: "in" });
@@ -496,6 +497,7 @@ test.describe("PR-11b — memory ON (mocked /chat seam): enabled-path UI", () =>
     await expect.poll(() => consentHeaders.length).toBe(1);
     expect(consentHeaders[0]["x-shopper-token"]).toBe(SHOPPER_TOKEN);
 
+    await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reach the controls
     await page.locator('[data-testid="manage-memory-forget"]').click(); // triggers forgetMe() -> POST /forget
     await expect.poll(() => forgetHeaders).toBeTruthy();
     expect((forgetHeaders as unknown as Record<string, string>)["x-shopper-token"]).toBe(SHOPPER_TOKEN);
@@ -864,6 +866,7 @@ test.describe("P10 — conversation continuity across a closed tab (the safety l
     expect(before.conv?.sessionId, "the conversation id is persisted durably").toBe(sid(bodies[0]));
     expect(before.mem?.guestToken).toBeTruthy();
 
+    await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reach the controls
     await page.getByTestId("manage-memory-forget").click();
     await expect(page.getByTestId("manage-memory-confirmation")).toBeVisible();
 
@@ -1036,6 +1039,7 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
     await expect.poll(() => guestTokenOf(page)).toBeTruthy();
     const before = await guestTokenOf(page);
 
+    await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reach the controls
     await page.getByTestId("manage-memory-forget").click();
     const confirmation = page.getByTestId("manage-memory-confirmation");
     await expect(confirmation).toBeVisible();
@@ -1058,6 +1062,7 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
     await expect.poll(() => guestTokenOf(page)).toBeTruthy();
     const before = await guestTokenOf(page);
 
+    await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reach the controls
     await page.getByTestId("manage-memory-forget").click();
     await expect(page.getByTestId("manage-memory-confirmation")).toContainText("Done — I've cleared what I remembered");
     await expect.poll(() => guestTokenOf(page)).not.toBe(before);
@@ -1070,6 +1075,7 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
     await page.getByTestId("chat-input").fill("hello");
     await page.getByTestId("send").click();
 
+    await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reveal the helper text
     const helper = page.getByTestId("manage-memory-helper");
     await expect(helper).toBeVisible();
     const text = (await helper.textContent()) ?? "";
@@ -1078,6 +1084,35 @@ test.describe("P6 — the erasure control reports what actually happened", () =>
     // (widget-backend/src/canary.ts `logTraffic`) and cannot be keyed by anonId at all.
     expect(text).toMatch(/chat|message|log/i);
     expect(text).not.toMatch(/everything about you|all your data|permanently/i);
+  });
+
+  // The fix for the "first message buries the chat under a memory dashboard" defect: the manage panel
+  // is a COLLAPSED <details> disclosure. Its summary line is present the moment memory is enabled, but
+  // the toggles / Forget control / helper paragraph are hidden until the shopper opens it — still one
+  // click away (data-rights reachable, no lock-in), just not spread open over the conversation.
+  test("the memory panel is a COLLAPSED disclosure — controls one click away, not spread open", async ({ page }) => {
+    const guest = mockGuestToken(page);
+    await guest.route();
+    await memoryOnChat(page);
+    await page.goto("/widget");
+    await page.getByTestId("chat-input").fill("hello");
+    await page.getByTestId("send").click();
+
+    // Present, but only the one quiet summary line — not the dashboard.
+    const panel = page.getByTestId("manage-memory");
+    await expect(panel).toBeVisible();
+    await expect(panel).toHaveJSProperty("open", false); // closed by default — THE fix
+    await expect(page.getByTestId("manage-memory-heading")).toBeVisible();
+    await expect(page.getByTestId("manage-memory-toggle-ordinary")).toBeHidden();
+    await expect(page.getByTestId("manage-memory-forget")).toBeHidden();
+    await expect(page.getByTestId("manage-memory-helper")).toBeHidden();
+
+    // One click reveals every control (fully reachable — no lock-in).
+    await page.getByTestId("manage-memory-heading").click();
+    await expect(panel).toHaveJSProperty("open", true);
+    await expect(page.getByTestId("manage-memory-toggle-ordinary")).toBeVisible();
+    await expect(page.getByTestId("manage-memory-forget")).toBeVisible();
+    await expect(page.getByTestId("manage-memory-helper")).toBeVisible();
   });
 });
 
