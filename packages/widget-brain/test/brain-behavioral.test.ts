@@ -80,6 +80,19 @@ describe("PR-4 — behavioral one-strike + cross-turn counters (flag DISPOSITION
       expect(sys(spy)).not.toMatch(/PITCH - /); // no pitch playbook text reaches the model
     });
 
+    // F5/F6 — rage on the reactive path must relabel `mode` as "support" (the harness's own aggregate
+    // cases, t8-sit-rage-multiturn / t10-multiturn-rage-escalation, pin "support" — not "sales" and not
+    // "safety", which stays reserved for the safety classifier / self-harm latch). escalate/pitch/flags
+    // are unchanged by this fix — only the mode label moves.
+    it("F5: rage on the reactive sales path relabels mode to support", async () => {
+      const { brain } = spyBrain(true);
+      const d = await brain.decide(
+        { cart: "has_items", proactivityLevel: "confident", behavioral: ["rage"] },
+        "tell me about the serum",
+      );
+      expect(d.mode).toBe("support");
+    });
+
     it("flag ON: rage overrides an explicit buy signal too - never a buy", async () => {
       const { brain } = spyBrain(true);
       const d = await brain.decide(

@@ -1919,6 +1919,13 @@ export function createBrain(
       let pitch: PitchKind = "none";
       let outbound = false;
       let escalate = false;
+      // F5/F6 — this reactive turn's returned `mode` label. Defaults to the normal sales labeling and is
+      // ONLY ever overridden to "support" below, on the two guardrail branches whose whole point is that
+      // the shopper is not being sold to right now (rage / mood_brake-with-a-high-value-cart). Nothing
+      // else in this function touches it, so every other branch (buySignal, browsing, plain negative mood
+      // with an ordinary cart, and the clean sales path) stays byte-identical mode:"sales" (Inv 10 —
+      // FAIR-1 pitch/price/outbound are untouched by this; it is purely the label on the final return).
+      let mode: "sales" | "support" = "sales";
       // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL) — an enraged shopper NEVER gets a
       // buy pitch; help/escalate instead. Checked FIRST so it overrides even an explicit buy signal. This
       // only ever SUPPRESSES pitch (forces none) and escalates to a human — it never adds an offer and
@@ -1927,10 +1934,16 @@ export function createBrain(
       if (rageDetected) {
         flags.push("behavioral:rage", "no_pitch", "escalate");
         escalate = true;
+        mode = "support"; // F5/F6 — de-escalation, not a sales reply; matches t8-sit-rage-multiturn / t10-multiturn-rage-escalation
         systemExtra +=
           "\nBEHAVIORAL - rage: The shopper is highly frustrated or angry this session. Prioritize genuine help and de-escalation, and offer to bring in a person - do not sell, pitch, or upsell anything right now.";
       } else if (negativeMood) {
         flags.push("mood_brake", "no_pitch");
+        // F5/F6 — only the negative-mood + HIGH-VALUE-cart combination relabels the turn as support
+        // (t8-aggr-upset-cart-high-value, t8-aggr-anxious-cart-high-value). Plain negative mood with no
+        // cart or an ordinary cart keeps mode:"sales" unchanged (t8-aggr-frustrated-moodonly) — the
+        // pitch is still suppressed either way, this is purely which label the reply carries.
+        if (signals.cart === "high_value") mode = "support";
       } else if (buySignal) {
         flags.push("buy_signal", "no_pitch"); // pitch stays "none" — move to checkout, don't pitch
       } else if (browsing) {
@@ -2103,7 +2116,7 @@ export function createBrain(
         if (refused > 0) flags.push("citations:dropped");
       }
       return {
-        mode: "sales",
+        mode, // F5/F6 — "support" on the mood_brake(+high-value-cart)/rage guardrail branches; "sales" otherwise
         reply,
         pitch,
         // Shopper-disposition program PR-4 — `escalate` is false unless rage forced it true above; every
