@@ -864,8 +864,14 @@ export async function buildServer(opts?: {
   // Pillar 1 (serve-time read-through) — the PORT-CLEAN callback wired into the brain (createBrain position
   // 28): a vendor-neutral `(tenantId, productIds) => Promise<void>` that re-fetches just the named SKUs
   // through the SAME targeted reconcile the catalog webhook path uses (reconcileByReason → reconcileProducts:
-  // by-id fetch, re-embed only what changed, upsert fresh Tier-2 facts), tagged `reason: "read-through"` for
-  // the audit trail. The brain gates purely on `refreshFacts !== undefined`, so it is provided ONLY when the
+  // by-id fetch, re-embed only what changed, upsert fresh Tier-2 facts). That reconcile IS audited (a
+  // `catalog.index` row committed in the same tx as the fact write — §3.5 holds), but it does NOT yet record
+  // the read-through ORIGIN: the `reason: "read-through"` passed below reaches reconcileByReason and is then
+  // DISCARDED by reconcileProducts, so a shopper-triggered refresh is currently indistinguishable in the log
+  // from a scheduled poll. Recording that origin (for abuse-monitoring) — together with cross-turn coalescing
+  // / a per-tenant read-through cap — is a NAMED PRECONDITION for promoting PRODUCT_FACTS_READ_THROUGH past
+  // shadow (§5), not a blocker for merging this flag-off code.
+  // The brain gates purely on `refreshFacts !== undefined`, so it is provided ONLY when the
   // flag is on — `reconcileDeps` itself is always constructible (see above), so there is no additional
   // partial-availability case to gate on here. No Shopify (or other vendor) type crosses into widget-brain:
   // the callback's own signature is the only thing the brain ever sees.
