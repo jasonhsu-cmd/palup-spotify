@@ -46,6 +46,8 @@ describe("safety precision — ordinary English must not read as a safety incide
     "I'd like to reorder the toner", // control: plain sales
     "what's your shipping time?", // control
     "do you have a fragrance-free option?", // control
+    "this workout is killing me", // F1 guard: "killing me" must not match the "kill myself" morphology
+    "these prices are killing me", // F1 guard: same idiom, different context
   ];
 
   it.each(benign)("%s -> NOT a safety incident", async (msg) => {
@@ -81,6 +83,12 @@ describe("safety recall — every real concern still classifies, including infle
     ["I'm pregnancy-safe only right now", "medical"],
     ["can you diagnose this?", "medical"],
     ["I need a diagnosis", "medical"],
+    // F1: the gerund/inflected self-harm phrasings a naive `\bhurt myself\b` term misses.
+    ["I feel like hurting myself", "distress"],
+    ["I want to hurt myself", "distress"],
+    ["I've been harming myself", "distress"],
+    ["I want to harm myself", "distress"],
+    ["I keep thinking about killing myself", "distress"],
   ];
 
   it.each(morphology)("%s -> %s", async (msg, cls) => {

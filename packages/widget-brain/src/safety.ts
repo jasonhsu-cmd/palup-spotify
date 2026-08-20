@@ -36,6 +36,17 @@ const TERM_PATTERN: Record<string, string> = {
   "[system": String.raw`\[\s*system`,
   // MORPHOLOGY WE MUST KEEP. "burning" is floor case SAFE-1's own text.
   burn: String.raw`\bburn(s|ed|ing|t)?\b`,
+  // F1: "hurting myself" (gerund) is missed by a literal `\bhurt myself\b`. Anchoring on "myself" (not
+  // just "me") keeps this from over-matching idioms like "this workout is killing me" — see the sibling
+  // `kill myself` override below for the same reasoning applied to "killing myself".
+  "hurt myself": String.raw`\bhurt(ing|s)?\s+myself\b`,
+  // Same gerund gap as "hurt myself", plus this is a NEW base term ("harm myself" was not covered at all
+  // before — only the unrelated word order "self harm"/"self-harm").
+  "harm myself": String.raw`\bharm(ing|ed|s)?\s+myself\b`,
+  // "killing myself" is unambiguous self-harm distress; the "myself" anchor is what keeps this from
+  // matching "this workout is killing me" / "these prices are killing me" (verified false-positive guards
+  // in brain-safety-precision.test.ts).
+  "kill myself": String.raw`\bkill(ing|ed|s)?\s+myself\b`,
   // Prefix stems — the substring form was already acting as a stem, so \w* preserves exactly that.
   irritat: String.raw`\birritat\w*`,
   diagnos: String.raw`\bdiagnos\w*`,
@@ -101,7 +112,7 @@ export const INJECTION_TERMS = [
 ];
 
 export const SAFETY_GROUPS: { class: Exclude<SafetyClass, "none" | "injection">; terms: string[] }[] = [
-  { class: "distress", terms: ["panic attack", "hurt myself", "kill myself", "self harm", "self-harm", "don't want to be here", "dont want to be here", "don't want to live", "no reason to go on", "want to end it", "better off dead", "end my life"] },
+  { class: "distress", terms: ["panic attack", "hurt myself", "harm myself", "kill myself", "self harm", "self-harm", "don't want to be here", "dont want to be here", "don't want to live", "no reason to go on", "want to end it", "better off dead", "end my life"] },
   { class: "product_safety", terms: ["burn", "rash", "reaction", "reacted", "allergic", "allergy", "broke out", "broke me out", "broke my", "break out", "break me out", "will break", "breaking out", "breaking me out", "irritat", "swelling", "swollen", "sting", "hives", "peeling", "flaking", "blister"] },
   // Regulated EFFICACY-CLAIM bait ("will this cure/treat X?", docs/design/shopper-widget.md §8a
   // invariant 4) — split cleanly from `medical` below. It is a COMPLIANCE refusal (we're not allowed to
