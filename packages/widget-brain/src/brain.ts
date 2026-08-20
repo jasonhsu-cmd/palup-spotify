@@ -277,8 +277,16 @@ const UNKNOWN_FACT = ["brand x", "cheaper elsewhere", "other store", "price of t
 // for a volatile, unverifiable FACT (price/cost/discount/stock) — e.g. "what's the competitor price
 // on this?" (core.json GRND-1) — is genuinely something we cannot know, not a comparison opinion, and
 // must keep hitting honest-uncertainty exactly as before.
+//
+// F9 follow-up nit: "charge" and "how much" are the same volatile-price ask phrased differently
+// ("what does my competitor charge for this?", "how much is it at my competitor?") and were missing,
+// so they fell through to the groundingMode comparison block instead of honest_uncertainty. "currently"
+// is added too — it's the time-sensitivity marker on an otherwise-bare competitor question ("what's my
+// competitor currently offering?") and belongs on the same unverifiable-fact side. This must NOT catch
+// plain comparison phrasing ("how do you compare to your competitors?") — that has none of these words
+// and keeps reaching the groundingMode block unchanged (see the F9 tests in grounding-sales.test.ts).
 const COMPETITOR_FACT_QUERY =
-  /\bcompetitors?\b.*\b(price|cost|cheaper|discount|sale|stock|inventory)\b|\b(price|cost|cheaper|discount|sale|stock|inventory)\b.*\bcompetitors?\b/;
+  /\bcompetitors?\b.*\b(price|cost|cheaper|discount|sale|stock|inventory|charge|currently|how much)\b|\b(price|cost|cheaper|discount|sale|stock|inventory|charge|currently|how much)\b.*\bcompetitors?\b/;
 
 // Price/fit/trust OBJECTION in the CURRENT shopper message → the reactive "objection→close" moment
 // (docs/design/shopper-widget.md §5, the 8 pitch kinds). Deterministic + low-false-positive: specific
@@ -1567,11 +1575,19 @@ export function createBrain(
       // sign-in script with zero acknowledgment of the complaint/emotion (docs/widget-test-report.md
       // F12, L2-05 — judge-failed on all 3/3 reps for exactly this). The GATE itself — never guessing at
       // an unverified account, never doing a real order lookup here — is the actual security property
-      // and does NOT change: this still can't route to handleSupport (an anonymous shopper falling
-      // through to a real order/account lookup would be a worse bug, an IDOR onto whichever shopperId
-      // happens to be the default). Only the REPLY differs: when the same message also carries a
-      // complaint/frustration signal (reusing handleSupport's own existing annoyance detector via
-      // `hasComplaintSignal` — no new keyword list), lead with empathy before the sign-in ask.
+      // and does NOT change: only the REPLY differs, adding empathy before the sign-in ask when the same
+      // message also carries a complaint/frustration signal (reusing handleSupport's own existing
+      // annoyance detector via `hasComplaintSignal` — no new keyword list).
+      //
+      // Note this rung's regex is narrower than the `order_status` support-intent classifier: a message
+      // that classifies as order_status but doesn't match THIS regex (e.g. "track my package") skips
+      // this rung entirely and reaches handleSupport while still anonymous. That is fine — this rung is
+      // one layer of a layered backstop, not the sole one: handleSupport itself never trusts the message
+      // text for identity. It refuses real account data via `commerce.isFixtureData` (support.ts's
+      // ACCOUNT_DATA_INTENTS guard) and, underneath that, widget-backend's commerce-guard.ts resolves the
+      // REQUEST's verified principal (never the message) and fails CLOSED to anonymous by default — so an
+      // anonymous shopper reaching handleSupport still cannot pull up another shopper's (or any) real
+      // order.
       if (signals.relationship === "anonymous" && !/#\s?\d{3,}/.test(text) /* an order number CAN be looked up */ && /\b(my (last |previous |past |recent )?orders?|my order history|what did i (order|buy)|my (subscription|account|purchases?))\b/.test(text)) {
         flags.push("identity_required", "no_pitch");
         const complaint = hasComplaintSignal(message, signals.mood);

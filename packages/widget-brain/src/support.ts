@@ -80,8 +80,16 @@ const FOLLOWON_REQUEST_RE = /\b(also|as well|reorder|re-order|order|buy|want|nee
  * shipment; it's pre-purchase discovery anxiety and must stay on the sales/guidance path, not divert
  * to support. Scoped narrowly to "pick(ing)/choos(ing)" immediately governing "wrong (item|product|
  * thing)" so a genuine complaint ("you sent the wrong item") is unaffected — that phrasing never
- * pairs pick/choose with wrong item/product/thing. */
+ * pairs pick/choose with wrong item/product/thing.
+ *
+ * F4 residual — this pattern alone can't tell WHO is doing the picking/choosing: it also matches a
+ * present-tense complaint about the MERCHANT's own fulfillment ("you keep picking the wrong item
+ * every time you fulfill my order"), which is a genuine wrong-item-received complaint, not the
+ * shopper's own pre-purchase anxiety. MERCHANT_FULFILLMENT_WRONG_RE below detects "you" governing the
+ * same pick/choose verb (the store/warehouse doing the picking) and, when present, overrides this
+ * exclusion so the message still routes to wrong_item. */
 const FUTURE_CHOICE_WRONG_RE = /\b(pick(?:ing)?|choos(?:e|ing))\b[^.!?]{0,30}\bwrong (item|product|thing)\b/;
+const MERCHANT_FULFILLMENT_WRONG_RE = /\byou\b[^.!?]{0,20}\b(pick(?:ing)?|choos(?:e|ing))\b[^.!?]{0,30}\bwrong (item|product|thing)\b/;
 const ISSUE_LABELS: Record<string, string> = { shipping_issue: "shipping issue", shipping: "shipping issue", order_status: "order status", damaged_item: "damaged item", damaged: "damaged item", defective: "damaged item", lost_package: "missing package", subscription: "subscription", refund: "refund", return: "return" };
 const humanizeIssue = (code: string): string => ISSUE_LABELS[code] ?? code.replace(/_/g, " ");
 /** A dollar amount the shopper stated (e.g. "$180", "180 dollars") — for the D5 above-ceiling refund gate. */
@@ -130,7 +138,8 @@ export function classifySupportIntent(text: string, selfServeEnabled = false): S
   if (/(change|update).*(shipping )?address/.test(t)) return "address_change";
   if (/wrong (shade|colou?r)|swap.*(shade|for)|different shade|\bexchange\b/.test(t)) return "exchange";
   if (
-    (/wrong (item|product|thing)/.test(t) && !FUTURE_CHOICE_WRONG_RE.test(t)) ||
+    (/wrong (item|product|thing)/.test(t) &&
+      (!FUTURE_CHOICE_WRONG_RE.test(t) || MERCHANT_FULFILLMENT_WRONG_RE.test(t))) ||
     /sent (me )?the wrong|you sent me|you sent\b.*\bi ordered|sent .* instead of/.test(t)
   )
     return "wrong_item";
