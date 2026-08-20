@@ -61,7 +61,7 @@ import { registerStorefrontCatalogRoutes } from "./routes/storefront-catalog.js"
 // The flags still default OFF, so an environment that sets nothing behaves exactly as before.
 // See recommendation-telemetry.ts for the not-a-billing-basis constraint that governs the telemetry half.
 import { recommendationTelemetryFields, recommendationWireFields, suggestedChipsWireField } from "./recommendation-telemetry.js";
-import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput, buildCartCheckoutAuditInput } from "./audit.js";
+import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput, buildCartCheckoutAuditInput, buildOpenerAuditInput } from "./audit.js";
 import { createCartPermalinkAdapter } from "./cart-permalink-adapter.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
@@ -3414,6 +3414,12 @@ export async function buildServer(opts?: {
           await t.audit(
             buildIdentityAuditInput({ shopperId: shopperPrincipal.shopperId, source: shopperPrincipal.source, tenantId, hmacKey: AUDIT_HMAC_SECRET }),
           );
+        }
+        // §3.5 — the proactive OPENER is agent-initiated and shopper-reaching, so it is logged even though it
+        // is a benign smalltalk turn (buildAuditInput above returns null for it). PII-safe (hashed sessionRef +
+        // code-owned chip actions), reversal n/a. Committed in the SAME tx so state never advances unaudited.
+        if (Array.isArray(d.flags) && d.flags.includes("opener")) {
+          await t.audit(buildOpenerAuditInput({ sessionId, decision: d }));
         }
         return rec;
       });

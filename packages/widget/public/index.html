@@ -301,15 +301,19 @@
   // read it in panel mode. Standalone (`/widget`), PANEL_MODE is false and window.PALUP is read directly.
   let hostCtx = { cart: undefined, pageContext: undefined };
   // WS10 — merchant brand. The brand COLOUR is applied FOUC-free by the injected <style> (see the
-  // PALUP_THEME marker in the head); this reads the injected name/logo for the header + greeting. Defaults to
-  // "Auria" when no theme is injected (the /widget harness), so standalone behaviour is byte-unchanged.
+  // PALUP_THEME marker in the head); this reads the injected name/logo for the header + greeting. When no
+  // brand name is injected — a fresh merchant whose real shop name hasn't resolved yet (5a resolves it
+  // server-side into THEME.brandName), or the /widget harness — BRAND_NAME is "" and the UI falls back to a
+  // NEUTRAL "Shopping Assistant" / "your shopping assistant". 5c: the old `|| "Auria"` default leaked ONE
+  // merchant's brand ("Auria") onto every un-resolved store; a neutral default never impersonates a brand.
   const THEME = (window.PALUP && window.PALUP.theme) || {};
-  const BRAND_NAME = (typeof THEME.brandName === "string" && THEME.brandName) || "Auria";
+  const BRAND_NAME = (typeof THEME.brandName === "string" && THEME.brandName) || "";
   (function applyBrand(){
     try {
       // Query by class (NOT an id) so axe's contrast target for the monogram stays `.avatar` — the
       // a11y suite's KNOWN_INCOMPLETE allow-lists the one-char brand mark by that exact target.
-      const b = document.querySelector(".wh .t b"); if (b) b.textContent = BRAND_NAME + " Assistant";
+      const b = document.querySelector(".wh .t b"); if (b) b.textContent = BRAND_NAME ? BRAND_NAME + " Assistant" : "Shopping Assistant";
+      try { document.title = BRAND_NAME ? BRAND_NAME + " — Shopper Assistant" : "Shopper Assistant"; } catch {} // 5c — no "Auria" in a real merchant's tab title
       const av = document.querySelector(".wh .avatar");
       if (av){
         if (typeof THEME.logoUrl === "string" && THEME.logoUrl){
@@ -317,7 +321,7 @@
           img.src = THEME.logoUrl; img.alt = ""; img.style.cssText = "width:100%;height:100%;object-fit:cover;border-radius:50%";
           av.appendChild(img);
         } else {
-          av.textContent = BRAND_NAME.slice(0, 1).toUpperCase();
+          av.textContent = BRAND_NAME ? BRAND_NAME.slice(0, 1).toUpperCase() : "S";
         }
       }
     } catch {}
@@ -1282,7 +1286,7 @@
   if (transcript.length){
     for (const t of transcript){ add(t.content, t.role === "agent" ? "agent" : "user"); }
   } else {
-    staticGreetingEl = add("Hi! I'm " + BRAND_NAME + "'s assistant — ask me about a product or your order.", "agent");
+    staticGreetingEl = add(BRAND_NAME ? ("Hi! I'm " + BRAND_NAME + "'s assistant — ask me about a product or your order.") : "Hi! I'm your shopping assistant — ask me about a product or your order.", "agent");
   }
   // Stamp the sessionId now, so a reload OR a closed tab before the first turn still continues this
   // conversation rather than opening a second one the server can't connect to the first.

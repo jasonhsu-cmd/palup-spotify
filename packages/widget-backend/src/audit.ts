@@ -112,6 +112,31 @@ export function buildAuditInput(args: {
   };
 }
 
+/**
+ * §3.5 — audit the proactive OPENER turn. `buildAuditInput` above deliberately skips benign smalltalk turns
+ * (no audit noise for ordinary replies), but the opener is an AGENT-INITIATED, shopper-reaching proactive
+ * surface, so §3.5 ("every autonomous action is logged") requires a row. Read-only — a reply only, no
+ * state-changing action — so the reversal path is explicitly "n/a". PII-safe: the client sessionId is hashed
+ * to an opaque ref (same as `buildAuditInput`), and only the CODE-OWNED chip actions + whether a card was
+ * shown are recorded — never raw catalog text, a product title, or a shopper message. The caller commits it
+ * in the same tx as the session-state write (F11), only when the decision carried the `opener` flag.
+ */
+export function buildOpenerAuditInput(args: { sessionId: string; decision: Decision }): AuditInput {
+  const d = args.decision;
+  const sessionRef = createHash("sha256").update(args.sessionId).digest("hex").slice(0, 16);
+  return {
+    actor: "agent:shopper",
+    action: "opener.served",
+    input: {
+      sessionRef, // hashed, never the raw client sessionId
+      chips: (d.suggestedChips ?? []).map((c) => c.action), // the closed-enum actions only, never labels/catalog text
+      carded: Array.isArray(d.flags) && d.flags.includes("opener:card"),
+    },
+    decision: { mode: d.mode, pitch: d.pitch, flags: d.flags },
+    reversalPath: "n/a — a proactive greeting reply; no state-changing action taken",
+  };
+}
+
 // --- ADR-0017 T8 — identity-resolution audit (PII-safe) --------------------------------------------
 //
 // F7: the shopperId (`shopify:<knownMerchant>:<numeric cid>`) is LOW-ENTROPY — a bare/unsalted hash of

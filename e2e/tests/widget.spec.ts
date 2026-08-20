@@ -696,7 +696,7 @@ test.describe("P10 — conversation continuity across a closed tab (the safety l
     // Proof the simulation is faithful (and the privacy split is real): the per-tab TRANSCRIPT is gone
     // — tab 2 renders only the ordinary greeting, not the reaction report the shopper typed in tab 1.
     await expect(tab2.getByTestId("agent-msg")).toHaveCount(1);
-    await expect(tab2.getByTestId("agent-msg")).toContainText("Auria's assistant");
+    await expect(tab2.getByTestId("agent-msg")).toContainText("your shopping assistant"); // 5c — neutral default (no THEME injected on /widget)
 
     // The agent's own state, however, must be unchanged and unfaked: still latched, still not selling.
     await tab2.getByTestId("chat-input").fill("anyway, just add the cleanser to my cart");
@@ -898,7 +898,7 @@ test.describe("P10 — conversation continuity across a closed tab (the safety l
     // it as `history` would push the previous conversation's content into a session the server has never
     // seen, and would show the shopper a transcript the agent has no state for.
     await expect(page.getByTestId("agent-msg")).toHaveCount(1);
-    await expect(page.getByTestId("agent-msg")).toContainText("Auria's assistant");
+    await expect(page.getByTestId("agent-msg")).toContainText("your shopping assistant"); // 5c — neutral default (no THEME injected on /widget)
 
     await page.getByTestId("chat-input").fill("anyway, just add the cleanser to my cart");
     await page.getByTestId("send").click();
@@ -1829,4 +1829,17 @@ test.describe("Pillar 2 — in-chat checkout (mocked seam)", () => {
     await page.waitForTimeout(300);
     expect(opened).toBe(false);
   });
+});
+
+// 5c — a store whose real brand name has not resolved (no THEME.brandName injected — a fresh merchant, or
+// the /widget harness) must show a NEUTRAL assistant identity, never the old hardcoded "Auria" default that
+// impersonated one specific merchant on every un-resolved store. (The server-resolved name still wins when
+// present — Pillar 5a; this only governs the fallback.)
+test("5c — an un-resolved store shows a neutral default, never the hardcoded 'Auria'", async ({ page }) => {
+  await page.goto("/widget"); // the standalone harness injects no THEME.brandName
+  await expect(page.locator(".wh .t b")).toHaveText("Shopping Assistant"); // neutral header, not "Auria Assistant"
+  await expect(page.getByTestId("agent-msg").first()).toContainText("your shopping assistant"); // neutral greeting
+  // nothing in the assistant's OWN chrome (header + conversation) impersonates a brand it isn't
+  await expect(page.locator(".wh")).not.toContainText("Auria");
+  await expect(page.getByTestId("messages")).not.toContainText("Auria");
 });
