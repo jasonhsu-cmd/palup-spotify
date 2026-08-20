@@ -14,7 +14,8 @@
 - **147 cases** exercised (91 authored + 56 generated pairwise), across 13 families
   (safety, aggression, voice, situational, grounding-integrity, support, persona-role, language,
   timing, memory, multi-turn, mode-backbone, pairwise).
-- **136 / 147 passed; 11 failing cases → the findings below** (F1–F11), plus 2 observations (O1–O2).
+- Initial run: **136 / 147 passed; 11 findings** (F1–F11) + 2 observations (O1–O2).
+- **After the fix phase (2026-08-20): 143 / 148 passed.** 6 clear-cut findings FIXED + reviewed (F1, F5/F6, F7, F9, F11, F2); 5 remaining failures are the 3 HELD findings awaiting an owner decision (F3, F4, F10×3). See "Fix status" below.
 - Harness self-tests: 10 files / 26 unit tests green; `tsc` clean. The harness suite is green
   **by design** — it verifies the *test machinery*; found *product* defects are reported as the
   findings below (a green suite never means "the agent is safe/correct").
@@ -111,6 +112,24 @@ safety-coverage) · P2 medium (routing/UX/mode-taxonomy) · P3 low · observatio
   **not** in `handleSupport` (which returns early). So a raging shopper whose message also names a
   concrete support issue (correctly routing to `mode:support`) gets **zero** rage-specific escalation.
 - **Fix direction:** apply rage handling before/within the support early-return.
+
+## Fix status (2026-08-20 fix phase)
+
+Each fix was TDD'd, security-reviewed where safety-touching, gated (`pnpm eval` floor 100% + full widget-brain suite), and committed to `test/widget-behavioral-e2e`. The fixes accumulate on the branch; the branch→main merge is a separate owner decision.
+
+| Finding | Status | Commit | Note |
+|---|---|---|---|
+| F1 self-harm gerund | **FIXED** | `ca7aabf` | default-distress + financial-domain suppress blocklist; residual (crisis that also mentions money) is an accepted floor limitation — the live semantic guard classifier is the backstop (owner decision: floor = reasonable pre-check). |
+| F5/F6 mode label | **FIXED** | `7a8a000` | mood_brake(high-value cart)/rage now set `mode:support`; pitch/FAIR-1 untouched. |
+| F11 rage-in-support | **FIXED** | `82994f6` | rage escalation applied on the support path; single `rageDetected` source. |
+| F7 ingredient pitch | **FIXED** | `110daf4` | pitch suppressed on ingredient/allergy Q, kept grounded on the sales path; §5's `mode:support` assumption corrected to `mode:sales` (the grounded path), `mustNot:pitched` preserved. |
+| F9 competitor ordering | **FIXED** | `59168af` | comparison→grounding-policy block; live-fact asks stay on the uncertainty guard; block's no-live-fact rule intact. |
+| F2 grounding degrade | **FIXED** | `bf55d47` | brain-level `getContext` catch → generic prompt + observable `grounding:unavailable` flag (never a silent "we don't carry that"). |
+| **F3 injection→smalltalk** | **HELD — owner** | — | money-safety intact; is smalltalk-deflection acceptable, or should it be support/sales? UX/taxonomy call. |
+| **F4 anxious over-suppression** | **HELD — owner** | — | fix MUST be mood-granularity (anxious ≠ frustrated/upset), NOT a persona carve-out (FAIR-1). Confirm the desired behavior. |
+| **F10 non-English (×3)** | **HELD — owner** | — | English keyword floors miss non-English; this is the semantic guard classifier's job (confirmed firing live), not the keyword floor — same principle as F1's residual. Fix = strengthen/route via the classifier, a larger change. |
+
+**Follow-up minors (logged, not fixed):** F9-followup — `COMPETITOR_FACT_QUERY` misses price synonyms "charge"/"how much" (mitigated by the block's prompt-level no-live-fact rule); F2 — the shared `getContext` catch crash-proofs 3 other call sites without a flag (matches existing convention). Plus the Plan-A cosmetic minors (type casts, `main()` no `.catch`, pairwise empty bar).
 
 ## Observations (spec-vs-code, for human triage — not asserted defects)
 
