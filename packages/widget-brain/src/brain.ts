@@ -1,6 +1,6 @@
 import type { CommercePort, EmbedRequest, GroundingContext, GroundingPort, ModelPort, Product, ProductFactsPort } from "@palup/platform-ports";
 import { canEmbed, requireEmbedAlignment, requireEmbedInputs } from "@palup/platform-ports";
-import { hydrateProductFacts } from "./hydrate-facts.js";
+import { hydrateProductFacts, isFactStale } from "./hydrate-facts.js";
 import { classifyOutgoingOffer } from "./offer-check.js";
 import {
   CATALOG_CITATION_RULE,
@@ -721,6 +721,16 @@ function pickOpenerProduct(products: readonly Product[] | undefined, pageContext
 export const DEFAULT_CATALOG_RETRIEVAL_K = 12;
 
 /**
+ * Pillar 1 (serve-time read-through) — the hard bound on how long the on-demand refresh (`refreshFacts`) may
+ * hold up a reply before falling back to the existing hedge (priceConfirmed:false). This runs on the
+ * shopper's hot reply path (`groundedMessages`), so the ceiling must stay well under any shopper-facing
+ * request timeout. Not a tuned value — a conservative starting point, overridable only by editing this
+ * constant (there is no per-deployment env knob here; the flag itself, `PRODUCT_FACTS_READ_THROUGH`, is the
+ * governed on/off switch — see server.ts).
+ */
+export const READ_THROUGH_TIMEOUT_MS = 1_500;
+
+/**
  * E3 — turn the ids a reply CITED into the cards a widget renders, using ONLY the `Product` objects
  * `systemPrompt` actually put in this turn's CATALOG block (`rendered`).
  *
@@ -1023,6 +1033,17 @@ export function createBrain(
   // the discount backstop still applies. Default OFF ⇒ the plain GREETING_PROMPT path is byte-identical. A new
   // shopper-reaching proactive surface ⇒ eval gate → shadow → canary → named-human approval (HITL §5).
   proactiveOpenerEnabled = false,
+  // Pillar 1 (ADR-0020) — serve-time READ-THROUGH: a vendor-neutral, PORT-CLEAN callback (no Shopify or
+  // other vendor type crosses this boundary) that re-fetches just the named ids' Tier-2 facts on demand.
+  // Threaded exactly like every flag/port above: positional, defaulted `undefined`, no env read in this
+  // package. The brain gates purely on `refreshFacts !== undefined` — there is no separate boolean, because
+  // the server only ever constructs and supplies this callback when its own PRODUCT_FACTS_READ_THROUGH
+  // posture flag is on (server.ts), so presence IS the posture. Default `undefined` ⇒ every existing call
+  // site keeps working UNCHANGED and byte-identical: the hydration block below never attempts a refresh, and
+  // a stale/missing fact renders exactly the existing hedge (priceConfirmed:false) it does today. Changing
+  // WHETHER/WHEN a price gets confirmed is a money/NN#1 run-time behaviour change ⇒ eval gate → shadow →
+  // canary → named-human promotion (HITL §5) before this is ever supplied in a real environment.
+  refreshFacts?: (tenantId: string, productIds: string[]) => Promise<void>,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -1163,8 +1184,45 @@ export function createBrain(
         const staleness = productFactsMaxAgeMs !== undefined
           ? { now: new Date(), maxAgeMs: productFactsMaxAgeMs, ...(priceRequiresLiveChannelEnabled ? { channelHealthy } : {}) }
           : undefined;
-        hydrated = hydrateProductFacts(retrieved, await productFactsPort.getMany(tenantId, retrieved.map((p) => p.id)), staleness);
+        const facts = await productFactsPort.getMany(tenantId, retrieved.map((p) => p.id));
+        hydrated = hydrateProductFacts(retrieved, facts, staleness);
         retrieval?.flags.push(channelHealthy === false ? "hydration:channel_unhealthy" : "hydration:applied");
+
+        // Pillar 1 (serve-time read-through) — a BOUNDED, best-effort refresh of just the STALE/MISSING ids
+        // among THIS turn's retrieved subset, before the reply is generated, so a price can be CONFIRMED this
+        // turn instead of only hedged. Gated purely on `refreshFacts !== undefined` (the server supplies it
+        // only behind its own PRODUCT_FACTS_READ_THROUGH posture flag) — flag OFF ⇒ this whole block is
+        // unreachable and the hydration path above is BYTE-IDENTICAL to before this change. NEVER THROWS
+        // INTO THE REPLY: a refresh failure, or one that does not resolve within READ_THROUGH_TIMEOUT_MS,
+        // simply keeps the hedge `hydrated` already computed above — the reply always proceeds.
+        if (refreshFacts) {
+          const factsById = new Map(facts.map((f) => [f.productId, f] as const));
+          const staleIds = retrieved
+            .filter((p) => {
+              const fact = factsById.get(p.id);
+              return !fact || isFactStale(fact, staleness);
+            })
+            .map((p) => p.id);
+          if (staleIds.length > 0) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              await Promise.race([
+                refreshFacts(tenantId, staleIds),
+                new Promise<never>((_resolve, reject) => {
+                  timer = setTimeout(() => reject(new Error("read-through timeout")), READ_THROUGH_TIMEOUT_MS);
+                }),
+              ]);
+              const fresh = await productFactsPort.getMany(tenantId, retrieved.map((p) => p.id));
+              hydrated = hydrateProductFacts(retrieved, fresh, staleness);
+              retrieval?.flags.push("hydration:read_through");
+            } catch {
+              // Refresh failed, or timed out — keep the already-hedged `hydrated`; the reply proceeds as if
+              // read-through had never been attempted (the flag-off baseline).
+            } finally {
+              if (timer !== undefined) clearTimeout(timer);
+            }
+          }
+        }
       } catch {
         hydrated = retrieved;
         retrieval?.flags.push("hydration:unavailable");

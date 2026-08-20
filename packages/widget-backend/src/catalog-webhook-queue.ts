@@ -25,8 +25,11 @@ export const SHOPIFY_PRODUCT_GID_PREFIX = "gid://shopify/Product/";
 
 /** Why a reconcile fired, so the worker can target (or fall back to a full crawl). `product` = precise ids
  *  present; `inventory` = a coarse inventory tick (no product id derivable from the Storefront token — see
- *  §C); `full` = re-derive the whole catalog (the backstop path). */
-export type ReconcileReason = "product" | "inventory" | "full";
+ *  §C); `full` = re-derive the whole catalog (the backstop path); `read-through` = Pillar 1 serve-time —
+ *  the brain is about to quote a stale/missing SKU and triggered a targeted refresh synchronously on the
+ *  shopper's own turn (never queued/webhook-sourced, so it never reaches `catalogReconcileMessage` or
+ *  `subscribeCatalogReconcile` below). */
+export type ReconcileReason = "product" | "inventory" | "full" | "read-through";
 
 /**
  * Build the reconcile message for a verified catalog/inventory delivery. `id` is Shopify's delivery id when
