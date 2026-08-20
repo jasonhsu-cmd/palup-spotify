@@ -182,3 +182,21 @@ export function buildCaaRevokeAuditInput(args: { shopperId: string; source: "sho
     reversalPath: "n/a — credential deleted; the shopper re-authorizes to re-grant",
   };
 }
+
+/**
+ * Pillar 2a — audit one call to `POST /cart/checkout-url` (NN#5: every autonomous action gets an
+ * immutable row). PII/URL-safe by construction: `input` carries ONLY the line count — never a
+ * variantId, never the built checkoutUrl (the permalink itself, like a variantId, identifies exactly
+ * what the shopper was looking at). `actor` is the server-VERIFIED shopper id when one resolved, else
+ * the literal "shopper" for the (today, common) anonymous case — never a client-claimed identity.
+ * Read-only: cart-permalink-adapter.ts is a pure string builder (no fetch, no Shopify SDK, no
+ * add-to-cart I/O, no purchase), so the honest reversal path is "n/a".
+ */
+export function buildCartCheckoutAuditInput(args: { actor: string; lineCount: number }): AuditInput {
+  return {
+    actor: args.actor,
+    action: "cart-checkout-url",
+    input: { lineCount: args.lineCount },
+    reversalPath: "n/a — read-only: builds a Shopify checkout permalink, adds nothing to a cart and makes no purchase",
+  };
+}

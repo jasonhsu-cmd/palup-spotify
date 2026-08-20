@@ -1730,3 +1730,103 @@ test.describe("Pillar 3 — opener chips (mocked /chat seam)", () => {
     await expect(page.getByTestId("opener-chips")).toHaveCount(0);
   });
 });
+
+// Pillar 2 — in-chat checkout. The shopper assembles cited products into a selection and one tap opens a
+// Shopify checkout PERMALINK (built server-side via POST /cart/checkout-url). Gated on the server flag,
+// learned client-side as `checkoutEnabled` on the /chat response: flag OFF ⇒ no Add control, no bar, no
+// change to the existing card block (the E3 "no button / no checkout copy" tests above still hold). A LINK,
+// never an add-to-cart or purchase; the client re-validates the multi-line permalink before opening it.
+test.describe("Pillar 2 — in-chat checkout (mocked seam)", () => {
+  const CARDS = [
+    { productId: "serum-vc", title: "Vitamin-C Brightening Serum", price: "$34", availableForSale: true, variantId: "4567" },
+    { productId: "moist-daily", title: "Daily Moisturizer", price: "$24", availableForSale: true, variantId: "8899" },
+  ];
+  const chatWith = (page: Page, extra: Record<string, unknown>) =>
+    page.route("**/chat", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          reply: "The vitamin-C serum is the one I'd pick, and the moisturizer pairs with it.",
+          mode: "sales", pitch: "guided_rec", escalate: false, outbound: false, flags: [], servedBy: "prop-0",
+          memoryEnabled: false, consentMode: "opt_out", ...extra,
+        }),
+      }),
+    );
+  const send = async (page: Page) => {
+    await page.goto("/widget");
+    await page.getByTestId("chat-input").fill("what do you recommend?");
+    await page.getByTestId("send").click();
+  };
+
+  test("checkoutEnabled + a card variant ⇒ one Add control per card that has a variant", async ({ page }) => {
+    await chatWith(page, { checkoutEnabled: true, recommendedProductCards: CARDS });
+    await send(page);
+    await expect(page.getByTestId("product-card")).toHaveCount(2);
+    await expect(page.getByTestId("product-card-add")).toHaveCount(2);
+  });
+
+  test("flag OFF is byte-identical: no Add control, no checkout bar (server omitted checkoutEnabled)", async ({ page }) => {
+    await chatWith(page, { recommendedProductCards: CARDS });
+    await send(page);
+    await expect(page.getByTestId("product-card")).toHaveCount(2);
+    await expect(page.getByTestId("product-card-add")).toHaveCount(0);
+    await expect(page.getByTestId("checkout-bar")).toBeHidden();
+  });
+
+  test("a card with NO variantId gets no Add control even when checkoutEnabled (can't check out what has no variant)", async ({ page }) => {
+    await chatWith(page, { checkoutEnabled: true, recommendedProductCards: [{ productId: "x", title: "No-variant Product", price: "$5" }] });
+    await send(page);
+    await expect(page.getByTestId("product-card")).toHaveCount(1);
+    await expect(page.getByTestId("product-card-add")).toHaveCount(0);
+  });
+
+  test("adding items reveals the checkout bar with a running count; re-adding increments quantity", async ({ page }) => {
+    await chatWith(page, { checkoutEnabled: true, recommendedProductCards: CARDS });
+    await send(page);
+    await expect(page.getByTestId("checkout-bar")).toBeHidden();
+    await page.getByTestId("product-card-add").nth(0).click();
+    await expect(page.getByTestId("checkout-bar")).toBeVisible();
+    await expect(page.getByTestId("checkout-count")).toHaveText("1 item selected");
+    await page.getByTestId("product-card-add").nth(1).click();
+    await expect(page.getByTestId("checkout-count")).toHaveText("2 items selected");
+    await page.getByTestId("product-card-add").nth(0).click();
+    await expect(page.getByTestId("checkout-count")).toHaveText("3 items selected");
+  });
+
+  test("Checkout POSTs exactly the assembled selection to /cart/checkout-url and opens the returned permalink", async ({ page, context }) => {
+    let postBody: { items?: Array<{ variantId: string; quantity: number }> } | null = null;
+    await page.route("**/cart/checkout-url", async (route) => {
+      postBody = route.request().postDataJSON() as typeof postBody;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ checkoutUrl: "https://palup-skincare-jason.myshopify.com/cart/4567:1,8899:1" }) });
+    });
+    await chatWith(page, { checkoutEnabled: true, recommendedProductCards: CARDS });
+    await send(page);
+    await page.getByTestId("product-card-add").nth(0).click();
+    await page.getByTestId("product-card-add").nth(1).click();
+    const popupPromise = context.waitForEvent("page");
+    await page.getByTestId("checkout-btn").click();
+    const popup = await popupPromise;
+    expect(postBody).toBeTruthy();
+    expect(postBody!.items).toEqual([{ variantId: "4567", quantity: 1 }, { variantId: "8899", quantity: 1 }]);
+    // A popup opened on the merchant's own Shopify store. We assert the DOMAIN, not the full path: the real
+    // store is live and password-protects, so it 302s the /cart/… permalink to /password — `popup.url()` is
+    // the post-redirect URL. That the exact server URL is what opened is guaranteed by the code (it hrefs
+    // `d.checkoutUrl` verbatim after the strict regex) + the spoofed-URL test below (only a valid permalink opens).
+    expect(popup.url()).toContain("palup-skincare-jason.myshopify.com");
+    await popup.close();
+  });
+
+  test("a spoofed / cross-origin checkout-url from the server is refused — nothing opens", async ({ page, context }) => {
+    await page.route("**/cart/checkout-url", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ checkoutUrl: "https://evil.example/cart/1:1" }) }));
+    await chatWith(page, { checkoutEnabled: true, recommendedProductCards: CARDS });
+    await send(page);
+    await page.getByTestId("product-card-add").nth(0).click();
+    let opened = false;
+    context.on("page", () => { opened = true; });
+    await page.getByTestId("checkout-btn").click();
+    await page.waitForTimeout(300);
+    expect(opened).toBe(false);
+  });
+});

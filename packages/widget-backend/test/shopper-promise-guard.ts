@@ -319,6 +319,12 @@ const CLAIM_CLASSES: ClaimClass[] = [
       /\bDone\s*[—-]\s*I'?ve\b/i,
       /\bI'?ve (deleted|erased|cleared|wiped|purged|recorded|logged)\b/i,
       /\bI'?ve (skipped|paused|resumed|cancelled|canceled|refunded) (your|the|this)\b/i,
+      // Pillar 2a (in-chat checkout) — POST /cart/checkout-url only ever hands back a checkout LINK
+      // (cart-permalink-adapter.ts is a pure string builder: no fetch, no Shopify SDK, no add-to-cart
+      // I/O, no purchase). Before these two patterns, this claim class had zero cart/checkout coverage —
+      // a false "I've added/bought/purchased" would have shipped undetected.
+      /\bI'?ve (added|checked out|bought|purchased)\b/i,
+      /\badded (it|them|that) to (your|the) (cart|bag|basket|checkout)\b/i,
     ],
   },
 ];

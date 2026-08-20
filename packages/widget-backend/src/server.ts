@@ -14,7 +14,7 @@ import {
 import { DEFAULT_POLICY, normalizeHistory, OFFER_CHECK_AGENT_TYPE } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
 import { classifyGuardSignals, GUARD_CLASSIFIER_AGENT_TYPE } from "./guard-classifier.js";
-import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort, Arm } from "@palup/platform-ports";
+import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort, Arm, CartLine } from "@palup/platform-ports";
 import {
   createWidgetTokenIdentity,
   mintWidgetToken,
@@ -61,7 +61,8 @@ import { registerStorefrontCatalogRoutes } from "./routes/storefront-catalog.js"
 // The flags still default OFF, so an environment that sets nothing behaves exactly as before.
 // See recommendation-telemetry.ts for the not-a-billing-basis constraint that governs the telemetry half.
 import { recommendationTelemetryFields, recommendationWireFields, suggestedChipsWireField } from "./recommendation-telemetry.js";
-import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput } from "./audit.js";
+import { buildAuditInput, buildIdentityAuditInput, buildCaaGrantAuditInput, buildCaaRevokeAuditInput, buildCartCheckoutAuditInput } from "./audit.js";
+import { createCartPermalinkAdapter } from "./cart-permalink-adapter.js";
 import { allowRequest, clientIpKey, underLimit } from "./rate-limit.js";
 import { assignCanary, logTraffic } from "./canary.js";
 import { readActiveChampion } from "./champion.js";
@@ -727,6 +728,16 @@ export async function buildServer(opts?: {
   const PRODUCT_CITATIONS = process.env.PRODUCT_CITATIONS === "true";
   const PRODUCT_CARDS = process.env.PRODUCT_CARDS === "true";
   const CART_LINE_ITEMS = process.env.CART_LINE_ITEMS === "true";
+  // Pillar 2a — IN_CHAT_CHECKOUT: wires the INERT CartPort + Shopify checkout-permalink adapter
+  // (platform-ports/src/cart-port.ts, cart-permalink-adapter.ts) to `POST /cart/checkout-url`, gated
+  // the SAME inert-by-absence way ORDER_ATTRIBUTION_WEBHOOKS gates /checkout/join-token below: off ⇒
+  // the route does not exist (404), never a half-working 403/501. Also adds `checkoutEnabled: true` to
+  // the /chat wire (spread-conditional, so a flag-off turn stays byte-identical — chat-wire-flag-off
+  // golden). Default OFF ⇒ no behavior change until a human promotion flips it (HITL-POLICY §5). NOT a
+  // completion claim: the adapter is a pure string builder (no fetch, no Shopify SDK, no add-to-cart
+  // I/O, no purchase) — it only ever hands the shopper a checkout LINK they still open and complete on
+  // Shopify themselves (see the shopper-promise-guard's new completed-action cart/checkout patterns).
+  const IN_CHAT_CHECKOUT = process.env.IN_CHAT_CHECKOUT === "true";
   // WS6 — the first-touch greeting posture flag (§5 run-time agent-behaviour change; default OFF ⇒ the
   // greeting trigger is inert and the brain is byte-identical). Threaded into every brain like every flag.
   const GREETING_PROACTIVE = process.env.GREETING_PROACTIVE === "true";
@@ -1575,6 +1586,115 @@ export async function buildServer(opts?: {
       // PII-free by construction: `token` is `mintOrderJoinToken`'s own `randomBytes(24)` opaque value,
       // carrying no shopper identity (see that file's header for why). This is the ENTIRE response body.
       return { ok: true, joinToken: token };
+    });
+  }
+
+  // Pillar 2a — POST /cart/checkout-url: turns recommended lines into a Shopify checkout permalink
+  // (CartPort + cart-permalink-adapter.ts, previously wired to nothing). Registered ONLY when
+  // IN_CHAT_CHECKOUT is on — inert-by-absence, byte-identical (404) to before this route existed while
+  // off. Mirrors /checkout/join-token's own prologue: per-IP rate limit (fail-open), widget Bearer→
+  // tenant, per-tenant rate limit (fail-open), kill switch. Makes NO completion claim: this only ever
+  // returns a checkout LINK the shopper opens and completes on Shopify themselves — no cart is created
+  // server-side and no purchase is made (see the shopper-promise-guard's cart/checkout patterns).
+  if (IN_CHAT_CHECKOUT) {
+    app.post("/cart/checkout-url", async (req, reply) => {
+      // Same per-IP rate-limit posture as /checkout/join-token — fail-open on the limiter itself so a
+      // broken limiter cannot block a shopper's checkout.
+      const xff = req.headers["x-forwarded-for"];
+      const ipKey = clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+      try {
+        if (!(await underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW))) {
+          reply.code(429);
+          return { error: "rate limited" };
+        }
+      } catch {
+        /* fail-open, mirrors /consent and /checkout/join-token */
+      }
+
+      const body = (req.body ?? {}) as {
+        items?: unknown;
+        widgetToken?: string;
+        shopperToken?: string;
+      };
+      const authHeader = req.headers["authorization"];
+      const widgetToken =
+        typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+          ? authHeader.slice(7)
+          : typeof body.widgetToken === "string"
+            ? body.widgetToken
+            : undefined;
+      const principal = await widgetIdentity.authenticate(widgetToken);
+      if (principal.kind !== "merchant" && WIDGET_AUTH_REQUIRED) {
+        reply.code(401);
+        return { error: "unauthenticated" };
+      }
+      const tenantId = principal.kind === "merchant" ? principal.merchantId : RUNTIME_TENANT;
+
+      // Per-tenant ceiling — backstop against a distributed-IP flood inside one tenant, mirrors
+      // /checkout/join-token's own "checkout-join-token" bucket.
+      try {
+        if (!(await underLimit(store, { tenantId }, "cart-checkout-url", RL_TENANT, RL_WINDOW))) {
+          reply.code(429);
+          return { error: "rate limited" };
+        }
+      } catch {
+        /* fail-open, as above */
+      }
+
+      // NN#4 — the same operator kill switch every other governed write in this file honours.
+      if (await matchedKill(store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) {
+        reply.code(503);
+        return { error: "paused" };
+      }
+
+      const rawItems = Array.isArray(body.items) ? body.items : undefined;
+      if (!rawItems || rawItems.length === 0) {
+        reply.code(400);
+        return { error: "no valid items" };
+      }
+      // Hard cap BEFORE resolving lines — a caller cannot force an unbounded permalink build.
+      const capped = rawItems.slice(0, 50);
+      const lines: CartLine[] = [];
+      for (const raw of capped) {
+        const item = raw as { variantId?: unknown; quantity?: unknown };
+        if (typeof item.variantId !== "string" || !item.variantId.trim()) continue; // dropped, never guessed
+        const quantity =
+          typeof item.quantity === "number" && Number.isInteger(item.quantity) && item.quantity >= 1
+            ? item.quantity
+            : 1;
+        lines.push({ variantId: item.variantId.trim(), quantity });
+      }
+      if (lines.length === 0) {
+        reply.code(400);
+        return { error: "no valid items" };
+      }
+
+      const shopDomain = await merchants.shopDomainFor(tenantId);
+      if (!shopDomain) {
+        reply.code(400);
+        return { error: "checkout unavailable" };
+      }
+
+      const checkout = await createCartPermalinkAdapter(shopDomain).createCheckout(lines);
+      if (!checkout) {
+        // Every candidate line failed to resolve to a real Shopify variant (adapter-level refusal,
+        // distinct from — but reported identically to — the route's own pre-check above).
+        reply.code(400);
+        return { error: "no valid items" };
+      }
+
+      // NN#5 — audit the build. PII/URL-safe: only the LINE COUNT is recorded, never a variantId or the
+      // built checkoutUrl. `actor` is the server-VERIFIED shopper id when one resolved, else "shopper"
+      // for the (today, common) anonymous case. Fail-safe like `auditOnce` (merchant-resolver.ts): a
+      // broken audit chain must not break a shopper's checkout, but the failure is never silent either.
+      const verifiedShopperId = await verifiedShopperIdFor(principal, tenantId, req.headers["x-shopper-token"], body.shopperToken);
+      try {
+        await store.audit({ tenantId }, buildCartCheckoutAuditInput({ actor: verifiedShopperId ?? "shopper", lineCount: lines.length }));
+      } catch {
+        console.error(`[cart-checkout-url] could not record audit for tenant "${tenantId}"; the checkout link is still returned.`);
+      }
+
+      return { checkoutUrl: checkout.checkoutUrl };
     });
   }
 
@@ -3350,6 +3470,10 @@ export async function buildServer(opts?: {
         // key unless the decision carried chips), so every turn today — PROACTIVE_OPENER off, no opener rung
         // yet mints any — serializes byte-identically to before this seam existed (chat-wire-flag-off golden).
         ...suggestedChipsWireField(d),
+        // Pillar 2a — tells the widget it may call POST /cart/checkout-url. Spread-conditional on the
+        // FLAG (not on the decision), so the key is absent — not present-and-false — for every turn
+        // while IN_CHAT_CHECKOUT is off, keeping the response byte-identical (chat-wire-flag-off golden).
+        ...(IN_CHAT_CHECKOUT ? { checkoutEnabled: true } : {}),
       };
       if (idemStoreKey) await store.put(serving, "idem", idemStoreKey, response, { ttlSeconds: IDEM_TTL_SECONDS });
       return response;
