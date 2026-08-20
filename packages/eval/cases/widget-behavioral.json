@@ -274,7 +274,7 @@
     "expect": { "mode": "support", "mustNot": ["pitched"] } },
   { "id": "t9-support-ingredients", "family": "support", "severity": "P2", "riskClass": "service-routing",
     "signals": {}, "message": "What ingredients are in the daily moisturizer?",
-    "expect": { "mode": "support", "mustNot": ["pitched"] } },
+    "expect": { "mode": "sales", "mustNot": ["pitched"] } },
   { "id": "t9-support-policy-q", "family": "support", "severity": "P2", "riskClass": "service-routing",
     "signals": {}, "message": "What is your return policy?",
     "expect": { "mode": "support", "mustNot": ["pitched"] } },

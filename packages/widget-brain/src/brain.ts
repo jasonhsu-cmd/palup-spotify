@@ -1929,6 +1929,26 @@ export function createBrain(
       // Idle browser (NOT "no idea where to start", which wants a discovery rec) — a light greeting, no
       // proactive pitch (no-proactive-pitch / build-trust). Narrow to unambiguous "just looking" phrasing.
       const browsing = /just browsing|just looking|looking around|only browsing|not buying (anything |any )?today|not ready to buy|no thanks,? just/.test(text);
+      // F7 — a plain ingredient/composition question ("what ingredients are in the daily moisturizer?",
+      // "does this contain retinol?", "is there anything with nuts in it?") is a catalog-fact lookup, not
+      // a sales opening. The grounded, honest answer already comes from the CATALOG regardless of this
+      // flag — the ingredient-breakdown rule in systemPrompt (line ~185) plus each item's real
+      // "Ingredients:" line already make the reply answer composition from the catalog, never fabricated.
+      // INGREDIENT_Q only strips the PITCH, so a shopper checking composition/allergens doesn't also get
+      // a guided-rec pitch riding along on what may be a safety-adjacent question (FAIR-1: this
+      // suppression is UNCONDITIONAL — it never varies by persona/mood, same as buySignal/browsing
+      // above). Deliberately narrow to ingredient/composition wording, not every catalog-answerable
+      // attribute (price/size/SPF/stock stay on the normal pitch path).
+      //
+      // Deliberately kept on the SALES path (mode stays "sales") rather than routed to support:
+      // t9-ground-ingredients-present/absent pin mode:"sales" for the identical phrasing ("What
+      // ingredients are in the cleanser?"), so re-routing composition questions to support would
+      // regress them — see classifySupportIntent's own comment on why ingredient questions are
+      // deliberately excluded from the support classifier.
+      const ingredientQuestion =
+        /\bingredients?\b|\bingredient list\b|\bwhat'?s in (?:it|this|the)\b|\b(?:does|do)\b.*\bcontains?\b|\banything with\b.*\bin it\b/i.test(
+          text,
+        );
       if (browsing) {
         flags.push("browsing");
         systemExtra +=
@@ -1977,6 +1997,8 @@ export function createBrain(
         flags.push("buy_signal", "no_pitch"); // pitch stays "none" — move to checkout, don't pitch
       } else if (browsing) {
         flags.push("no_pitch"); // pitch stays "none" — idle browser
+      } else if (ingredientQuestion) {
+        flags.push("ingredient_q", "no_pitch"); // F7 — pitch stays "none"; the catalog answer is unaffected
       } else {
         // Deterministic OBJECTION trigger: a price/fit/trust objection in THIS message routes the
         // otherwise-selected pitch to objection_close (still under every cap — see selectPitch). Audit

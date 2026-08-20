@@ -76,6 +76,27 @@ describe("grounding / honesty system prompt", () => {
     expect(sys(spy)).toMatch(/BROWSING/);
   });
 
+  // F7 — a plain ingredient/composition question is a catalog-fact lookup, not a sales opening: it
+  // must still be ANSWERED (grounded from the catalog, mode stays "sales" — see classifySupportIntent's
+  // own comment on why this deliberately does NOT route to support) but must carry NO pitch, since a
+  // shopper checking composition/allergens is not signaling buying intent.
+  it("an ingredient question gets no pitch (F7)", async () => {
+    const { brain, spy } = spyBrain();
+    const d = await brain.decide({}, "What ingredients are in the daily moisturizer?");
+    expect(d.mode).toBe("sales");
+    expect(d.pitch).toBe("none");
+    expect(d.flags).toContain("ingredient_q");
+    expect(sys(spy)).not.toMatch(/PITCH - guided recommendation/);
+  });
+
+  it("a 'does this contain X' composition question gets no pitch (F7)", async () => {
+    const { brain } = spyBrain();
+    const d = await brain.decide({}, "Does this contain retinol?");
+    expect(d.mode).toBe("sales");
+    expect(d.pitch).toBe("none");
+    expect(d.flags).toContain("ingredient_q");
+  });
+
   it("a deliberating question is NOT a buy signal (false-positive boundary)", async () => {
     const { brain } = spyBrain();
     const d = await brain.decide({ cart: "has_items" }, "should I buy it, or is the other one better?");
