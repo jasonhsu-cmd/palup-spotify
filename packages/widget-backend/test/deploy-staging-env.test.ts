@@ -71,6 +71,11 @@ const REQUIRED_ENV: Array<[name: string, why: string]> = [
   // CATALOG_WEBHOOKS is ALSO gated by the derived SHOPIFY_WEBHOOKS_ENABLED (app secret + merchant registry
   // present), so this env alone is inert until the install config is complete — safe to default-false thread.
   ["CATALOG_WEBHOOKS", "live catalog-freshness producer; additionally gated by SHOPIFY_WEBHOOKS_ENABLED (server.ts)"],
+  // ORDER_ATTRIBUTION_WEBHOOKS mounts /checkout/join-token + the orders/refunds webhooks (Pillar 4 flywheel
+  // attribution). Like CATALOG_WEBHOOKS it is ALSO gated by the derived SHOPIFY_WEBHOOKS_ENABLED (server.ts:1213),
+  // so this env alone is inert until the install config is complete — safe to default-false thread. Absent from
+  // the deploy list = the mint endpoint is silently 404 on every deploy (the trap that reverted a manual enable).
+  ["ORDER_ATTRIBUTION_WEBHOOKS", "flywheel order attribution: mounts /checkout/join-token + orders/refunds webhooks; additionally gated by SHOPIFY_WEBHOOKS_ENABLED (server.ts)"],
   // VECTOR_ANN selects S1's pgvector HNSW store (vector-factory.ts). Enabling it REQUIRES a pgvector-enabled
   // DATABASE_URL and an indexed corpus; default-false keeps the in-memory scan path. Serving >5000 SKUs needs it.
   ["VECTOR_ANN", "retrieval backend: selects the pgvector HNSW store over the brute-force scan (vector-factory.ts)"],
