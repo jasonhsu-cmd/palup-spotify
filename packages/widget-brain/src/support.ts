@@ -1,4 +1,4 @@
-import { SUBSCRIPTION_SKIP_CAP, type CommercePort, type Order } from "@palup/platform-ports";
+import { SUBSCRIPTION_SKIP_CAP, CommerceGuardRefusalError, type CommercePort, type Order, type StorePolicy } from "@palup/platform-ports";
 import type { HistoryTurn } from "./types.js";
 
 // Real support handling grounded in the commerce port. The guardrails are in CODE: verify ownership
@@ -195,6 +195,14 @@ export async function handleSupport(
   // byte-identical to today (the English keyword classifier decides). Typed to the closed `SupportIntent`
   // union, so a caller can only pass a valid intent; the producing classifier whitelists at its boundary.
   serverIntent?: SupportIntent,
+  // F13 — the UNGATED public store policy (returns/shipping), sourced by the caller from grounding
+  // (GroundingPort.getShell, never the auth-guarded CommercePort). `policy_q` answers a MERCHANT-level
+  // fact, not an account fact, so it must work for a fully anonymous shopper even when live commerce
+  // auth (ADR-0016/ADR-0018) is active and would otherwise refuse `commerce.getPolicy()`. Optional so
+  // every existing call site (tests, the no-commerce fallback) is unaffected: absent, `policy_q` falls
+  // back to `commerce.getPolicy()` exactly as before (see below), still guarded by the CommerceGuardRefusalError
+  // catch — never a crash, just a narrower "policy unavailable" degrade instead of the ungated answer.
+  groundedPolicy?: StorePolicy,
 ): Promise<SupportResult> {
   const intent = serverIntent ?? classifySupportIntent(message, Boolean(selfServe?.enabled));
   const flags = ["mode_support", "no_pitch", `support:${intent}`];
@@ -234,7 +242,40 @@ export async function handleSupport(
     };
   }
 
-  const policy = await commerce.getPolicy();
+  // F13 — `policy_q` (return/shipping policy) is PUBLIC merchant info, not a fact about THIS shopper's
+  // account (see the fixture-data-guard comment above: it is deliberately excluded from
+  // ACCOUNT_DATA_INTENTS for exactly this reason). It must therefore be answerable for a fully
+  // anonymous shopper even when live commerce auth (ADR-0016/ADR-0018) is active on the CommercePort.
+  // Answer it from the caller-supplied, UNGATED `groundedPolicy` (grounding/getShell) BEFORE touching
+  // `commerce` at all, so this intent never depends on the auth-guarded port. Only when no grounded
+  // policy was supplied does this fall back to `commerce.getPolicy()` — still wrapped so a live-guard
+  // refusal there degrades to an honest "not available" reply instead of throwing uncaught.
+  if (intent === "policy_q") {
+    if (groundedPolicy) {
+      return { reply: `Our return policy: ${groundedPolicy.returns} Shipping: ${groundedPolicy.shipping}`, escalate: false, flags };
+    }
+    try {
+      const policy = await commerce.getPolicy();
+      return { reply: `Our return policy: ${policy.returns} Shipping: ${policy.shipping}`, escalate: false, flags };
+    } catch (err) {
+      if (!(err instanceof CommerceGuardRefusalError)) throw err;
+      flags.push("policy_unavailable");
+      return {
+        reply:
+          "I don't have our return/shipping policy on hand right now, sorry — you can find it on our policy page, or I can connect you with a member of our team.",
+        escalate: false,
+        flags,
+      };
+    }
+  }
+
+  // F13 — every remaining branch may call a live-guarded CommercePort method (order/subscription reads
+  // AND the policy fields `return`/`refund`/`damaged` still need — returnWindowDays, refundCeiling).
+  // Those genuinely concern an order or subscription, so requiring a verified shopper for them is
+  // correct; the bug was letting that refusal crash the turn (`model_error`) instead of degrading to a
+  // plain "please sign in" reply. Catch ONLY the guard's own refusal type — anything else (a real
+  // adapter outage, a bug) still propagates and is NOT silently swallowed.
+  try {
   const orderId = extractOrderId(message);
   // Acknowledge frustration before stating a status (recognize-frustration): from the mood signal OR
   // annoyance/lateness cues in the message. A plain "in transit" reply to an annoyed shopper reads cold.
@@ -292,10 +333,10 @@ export async function handleSupport(
       if (late) { flags.push("escalate"); return { reply: `${empathy}I've confirmed order #${o.id} is on your account — it's ${o.status}${eta}. Since it's running late, I can start a reship or a refund per our policy, or connect you with a person — which would you prefer?`, escalate: true, flags }; }
       return { reply: `${empathy}I've confirmed order #${o.id} is on your account — it's ${o.status}${eta}.`, escalate: false, flags };
     }
-    case "policy_q":
-      return { reply: `Our return policy: ${policy.returns} Shipping: ${policy.shipping}`, escalate: false, flags };
+    // "policy_q" is handled earlier, before this try — it never reaches the switch (see above).
     case "return": {
       if (namedButUnavailable) return denyOrder("start a return on");
+      const policy = await commerce.getPolicy();
       const o = await resolveOwned();
       // Past-window if the RESOLVED order is old OR the shopper states an age beyond the window — either
       // way honesty wins; never quote a mismatched order's age as if it were the one they mean.
@@ -313,6 +354,7 @@ export async function handleSupport(
     }
     case "refund": {
       if (namedButUnavailable) return denyOrder("refund");
+      const policy = await commerce.getPolicy();
       // D1b — a refund request that also reports damage ("the serum leaked — refund") is a damage claim
       // first: lead with empathy, waive proof, frame the (within-policy) refund path, and flag a
       // duplicate-charge check — a bare "which order?" reads cold and drops the empathy/duplicate signal.
@@ -356,6 +398,7 @@ export async function handleSupport(
     }
     case "damaged": {
       if (namedButUnavailable) return denyOrder("act on");
+      const policy = await commerce.getPolicy();
       const o = await resolveOwned();
       const above = o ? o.total > policy.refundCeiling : false;
       if (above) flags.push("refund_hitl", "escalate");
@@ -598,5 +641,21 @@ export async function handleSupport(
       }
       return { reply: `I'd like to help — could you tell me a bit more, or share your order number if it's about an order?`, escalate: false, flags };
     }
+  }
+  } catch (err) {
+    // F13 — a live-guarded CommercePort refused this call because the shopper isn't a server-verified
+    // principal (ADR-0016/ADR-0017). Every intent reaching this point genuinely concerns an order or
+    // subscription (policy_q already returned earlier without ever entering this try), so the correct,
+    // non-leaking degrade is an honest "please sign in" — never a crash into the generic model_error
+    // fallback, and never a guess at the account state. Only THIS specific refusal is caught; any other
+    // error (a real adapter outage, a bug elsewhere in this block) still propagates uncaught.
+    if (!(err instanceof CommerceGuardRefusalError)) throw err;
+    flags.push("sign_in_required");
+    return {
+      reply:
+        "I can't look that up without verifying it's your account — could you sign in? Once you're signed in I can check that for you right away. Is there anything else I can help with in the meantime?",
+      escalate: false,
+      flags,
+    };
   }
 }

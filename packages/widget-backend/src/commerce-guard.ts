@@ -1,5 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { CommerceGuardRefusalError } from "@palup/platform-ports";
 import type { CommercePort, Principal } from "@palup/platform-ports";
+
+// F13 — re-exported so existing local imports (`../src/commerce-guard.js`, this file's own tests) keep
+// working unchanged. The class itself now lives in @palup/platform-ports (commerce-port.ts) so a PORT
+// CONSUMER on the other side of the workspace boundary — widget-brain's support.ts, which has no
+// dependency on widget-backend — can catch it specifically instead of only widget-backend being able to
+// name the type. Behavior/message is byte-identical; this is a relocation, not a change.
+export { CommerceGuardRefusalError };
 
 // ADR-0016 fail-closed guard (ADR-0017 §3 "Wiring"), T7. ANY non-mock/live commerce (or subscription)
 // adapter — READS as well as writes (F2: a live cross-account READ like getRecentOrder/getOrder against
@@ -31,13 +39,6 @@ export function currentPrincipal(): Principal {
 
 export function isVerifiedShopper(principal: Principal): principal is Extract<Principal, { kind: "shopper" }> {
   return principal.kind === "shopper" && principal.verified === true;
-}
-
-export class CommerceGuardRefusalError extends Error {
-  constructor(method: string) {
-    super(`commerce-guard: live commerce access to ${method} requires a verified shopper principal (ADR-0016)`);
-    this.name = "CommerceGuardRefusalError";
-  }
 }
 
 /**

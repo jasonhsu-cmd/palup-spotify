@@ -1627,6 +1627,11 @@ export function createBrain(
       if (isSupport) {
         // Real, grounded support with the guardrails in code (ownership, refund ceiling=HITL, escalate).
         if (commerce) {
+          // F13 — source the PUBLIC return/shipping policy from the ungated grounding shell (S2's cheap
+          // brand+policy-only read; fails closed to an empty policy, never throws — grounding-cache.ts)
+          // so `handleSupport`'s `policy_q` branch can answer an anonymous shopper without ever touching
+          // the auth-guarded CommercePort. Every other support intent is unaffected by this value.
+          const groundedPolicy = grounding ? (await grounding.getShell(tenantId)).policy : undefined;
           const r = await handleSupport(
             commerce,
             currentShopperId,
@@ -1641,6 +1646,7 @@ export function createBrain(
             // refund-ceiling HITL, the two ADR-0016 skip/pause controls, cancel→escalate), so a
             // classifier-chosen intent can never make a money/subscription action auto-execute.
             serverGuardSignalsEnabled ? signals.serverSupportIntent : undefined,
+            groundedPolicy,
           );
           // F11 — apply the SAME rage treatment the sales path already applies (escalate + a
           // behavioral:rage flag). handleSupport already never pitches (its own "no_pitch" flag is
