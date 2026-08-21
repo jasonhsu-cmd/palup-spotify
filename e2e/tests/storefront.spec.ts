@@ -102,7 +102,8 @@ test.describe("sample storefront — populated cart (localStorage-driven, determ
     await expect(rows).toHaveCount(2);
     await expect(rows.nth(0)).toContainText("Alpha Serum");
     await expect(rows.nth(0)).toContainText("$20.0");
-    await expect(rows.nth(0).locator("img")).toHaveAttribute("src", "https://cdn.shopify.com/s/files/1/x.jpg");
+    // display-sized CDN request (Task 3): a bare cdn.shopify.com URL with no width param gets ?width=350 appended.
+    await expect(rows.nth(0).locator("img")).toHaveAttribute("src", "https://cdn.shopify.com/s/files/1/x.jpg?width=350");
     await expect(rows.nth(1).locator("img")).toHaveCount(0); // no imageUrl → "No image" placeholder, never a broken <img>
     await expect(page.locator("[data-cart-count]").first()).toHaveText("3"); // 2 + 1
   });
