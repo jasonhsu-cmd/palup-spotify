@@ -132,9 +132,16 @@
     var box = el("div", cls || "thumb");
     if (typeof imageUrl === "string" && imageUrl) {
       var img = document.createElement("img");
-      img.src = imageUrl;
+      // request the CDN image at ~2x the ~175px display box; Shopify CDN honours ?width=
+      img.src = imageUrl.indexOf("cdn.shopify.com") >= 0 && imageUrl.indexOf("width=") < 0
+        ? imageUrl + (imageUrl.indexOf("?") >= 0 ? "&" : "?") + "width=350"
+        : imageUrl;
       img.alt = alt || "";
       img.loading = "lazy";
+      img.decoding = "async";
+      img.addEventListener("error", function () {
+        if (img.parentNode === box) { box.removeChild(img); box.appendChild(el("span", "ph", "No image")); }
+      });
       box.appendChild(img);
     } else {
       box.appendChild(el("span", "ph", "No image"));
