@@ -110,6 +110,37 @@ describe("deriveServingSignals — client signals are untrusted", () => {
     });
   });
 
+  // WS-B2b: ctx.relationship carries the server-computed lifecycle stage (deriveLifecycle, lifecycle.ts)
+  // through to signals.relationship, winning over the old new/anonymous-only default.
+  describe("WS-B2b: ctx.relationship (lifecycle)", () => {
+    it("ctx.relationship='vip' wins over the old verified-shopper default of 'new'", () => {
+      const out = deriveServingSignals(undefined, {
+        ...ctx,
+        shopperId: "shopify:acme:48291",
+        shopperVerified: true,
+        relationship: "vip",
+      });
+      expect(out.relationship).toBe("vip");
+    });
+
+    it("ctx.relationship absent ⇒ falls back to the old verified/anonymous default, byte-identical", () => {
+      const verified = deriveServingSignals(undefined, {
+        ...ctx,
+        shopperId: "shopify:acme:48291",
+        shopperVerified: true,
+      });
+      expect(verified.relationship).toBe("new");
+
+      const anon = deriveServingSignals(undefined, ctx);
+      expect(anon.relationship).toBe("anonymous");
+    });
+
+    it("a client-sent signals.relationship is still ignored even when ctx.relationship is absent", () => {
+      const out = deriveServingSignals({ relationship: "vip" } as Signals, ctx);
+      expect(out.relationship).toBe("anonymous");
+    });
+  });
+
   // PR-11a (ADR-0015 T12) — ctx.consent is the server's OWN consent-store lookup result, threaded in by
   // the caller (server.ts, BEFORE this function runs). This closes the old hardcode: memoryOrdinary/
   // memorySpecial now reflect ctx.consent when the caller supplies it, and still fail closed to

@@ -10,6 +10,7 @@ import {
   type Policy,
   type Signals,
   type Consent,
+  type Relationship,
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY, normalizeHistory, OFFER_CHECK_AGENT_TYPE } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
@@ -52,6 +53,7 @@ import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, cat
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
+import { deriveLifecycle } from "./lifecycle.js";
 import { registerEmbedRoutes, bundleLoader } from "./routes/embed.js";
 import { resolveTheme } from "./widget-theme.js";
 import { registerStorefrontCatalogRoutes, projectStorefrontCatalog, STOREFRONT_PAGE_LIMIT } from "./routes/storefront-catalog.js";
@@ -3202,6 +3204,26 @@ export async function buildServer(opts?: {
           consentPrompt: consentPrompt ?? "none",
         }),
       );
+      // WS-B2b — lifecycle derivation (ADR-0015 Tier 2): VERIFIED-ONLY (never called for an anonymous
+      // shopper) and FAIL-OPEN (any throw — including CommerceGuardRefusalError on a live adapter, or a
+      // real adapter error/timeout — leaves `relationship` undefined, so deriveServingSignals below falls
+      // back to its old new/anonymous-only default; the chat turn never breaks on this). Bound via
+      // `withRequestPrincipal` (same mechanism `session.send` uses further down) so a LIVE commerce
+      // adapter's guard — which requires the ALS-bound principal to be this verified shopper — actually
+      // passes, rather than always refusing because no principal was bound yet at this point in the
+      // handler. Adds 2 commerce calls per verified-shopper turn — acceptable for staging; a per-session
+      // cache is a future optimization, not built here.
+      let relationship: Relationship | undefined;
+      if (verifiedShopperId) {
+        try {
+          const [hist, sub] = await withRequestPrincipal(shopperPrincipal, () =>
+            Promise.all([commerce.getOrderHistory(verifiedShopperId), commerce.getSubscription(verifiedShopperId)]),
+          );
+          relationship = deriveLifecycle(hist, sub, true);
+        } catch {
+          relationship = undefined; // FAIL-OPEN: any commerce error ⇒ fall back to the old default
+        }
+      }
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
         kill: Boolean(kill),
@@ -3240,6 +3262,8 @@ export async function buildServer(opts?: {
         // token, or the F1 re-binding check above failed).
         shopperId: shopperPrincipal.kind === "shopper" ? shopperPrincipal.shopperId : undefined,
         shopperVerified: shopperPrincipal.kind === "shopper" ? shopperPrincipal.verified : undefined,
+        // WS-B2b — server-computed lifecycle stage (undefined ⇒ deriveServingSignals's old default).
+        relationship,
         consent: consentRecord,
         // The SAME subject the consent lookup above used — so recall, remember(), the sweep and the
         // consent gate all key off one namespace (security review F1/F2).

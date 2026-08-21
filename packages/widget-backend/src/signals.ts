@@ -1,4 +1,4 @@
-import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Mood, BehavioralEvent } from "@palup/widget-brain";
+import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Mood, BehavioralEvent, Relationship } from "@palup/widget-brain";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -193,6 +193,14 @@ export interface ServingSignalContext {
    * `signals.mood` echo rather than dropping mood entirely — safe because mood only ever restrains.
    */
   serverMood?: Mood;
+  /**
+   * WS-B2b — the server-computed lifecycle stage for a verified shopper (deriveLifecycle, lifecycle.ts —
+   * derived from order history + subscription, itself fetched from the guarded commerce port, never the
+   * client). Absent when no lifecycle was computed this turn (anonymous shopper, or the commerce lookup
+   * failed — server.ts fails OPEN on any error) ⇒ the old verified/anonymous-only default below still
+   * applies, byte-identical to before this field existed.
+   */
+  relationship?: Relationship;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -255,7 +263,10 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // Gate the id on the VERIFIED flag too (not just relationship) — an (id-set, unverified) ctx (e.g. a
     // future OTP adapter mid-verify) must never key the ownership check on an unverified id.
     shopperId: ctx.shopperVerified && ctx.shopperId ? ctx.shopperId : undefined,
-    relationship: ctx.shopperVerified && ctx.shopperId ? "new" : "anonymous",
+    // WS-B2b — ctx.relationship (server-computed lifecycle, deriveLifecycle) wins when present; absent
+    // (no lifecycle computed this turn) falls back to the old verified/anonymous-only default exactly as
+    // before, so the inert path (lifecycle fetch never happens) stays byte-identical.
+    relationship: ctx.relationship ?? (ctx.shopperVerified && ctx.shopperId ? "new" : "anonymous"),
     consent: {
       email: "unknown",
       sms: "unknown",
