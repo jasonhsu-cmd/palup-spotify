@@ -93,4 +93,13 @@ test.describe("sample storefront — head hygiene", () => {
     const outline = await page.locator(".skip").evaluate((el) => getComputedStyle(el).outlineStyle);
     expect(outline).not.toBe("auto"); // was the browser default; now a solid themed ring
   });
+
+  test("the hero 'Ask the expert' CTA is evergreen, matching the launcher", async ({ page }) => {
+    await page.goto("/");
+    const bg = await page.getByTestId("hero-ask").evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(bg).toBe("rgb(12, 74, 60)"); // #0c4a3c
+    // Browse-all stays the storefront accent (terracotta), not evergreen
+    const browse = await page.locator(".hero-cta a.btn-outline").evaluate((el) => getComputedStyle(el).color);
+    expect(browse).not.toBe("rgb(12, 74, 60)");
+  });
 });

@@ -125,6 +125,10 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 32px 24px 96px; }
 .btn-outline { background: transparent; color: var(--accent); border-color: var(--line-strong); }
 .btn-outline:hover { background: var(--accent-soft); border-color: var(--accent); }
 
+/* The "Ask the expert" affordance is PalUp's, not the merchant's terracotta accent — match the launcher. */
+.btn[data-testid="hero-ask"] { background: #0c4a3c; border-color: #0c4a3c; color: #ffffff; }
+.btn[data-testid="hero-ask"]:hover { background: #0a3d32; border-color: #0a3d32; }
+
 /* Cart page */
 .cart-list { list-style: none; margin: 28px 0 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
 .cart-row { display: grid; grid-template-columns: 80px 1fr auto; gap: 16px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow-sm); }
