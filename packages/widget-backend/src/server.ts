@@ -54,7 +54,8 @@ import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
 import { registerEmbedRoutes, bundleLoader } from "./routes/embed.js";
 import { resolveTheme } from "./widget-theme.js";
-import { registerStorefrontCatalogRoutes } from "./routes/storefront-catalog.js";
+import { registerStorefrontCatalogRoutes, projectStorefrontCatalog, STOREFRONT_PAGE_LIMIT } from "./routes/storefront-catalog.js";
+import { injectStorefrontFirstPage, inlineStorefrontScript } from "./storefront-ssr.js";
 // E3 — both functions return `{}` unless the `Decision` already carries cited products, so they are inert
 // for any turn E2 did not cite on. They are no longer inert BY CONSTRUCTION: this composition root now
 // reads PRODUCT_CITATIONS/PRODUCT_CARDS and can produce such a Decision (see the Wave 4 flag block below).
@@ -1751,11 +1752,148 @@ export async function buildServer(opts?: {
   // it names a mode, never a key, a tenant or a domain.
   app.get("/health", async () => ({ ok: true, model: modelName, store: runtimeResult.kind, vector: vectorResult.kind, merchants: merchants.resolutionMode }));
 
+  // WS2 — public storefront catalog read endpoint. Renders the SAME live catalog the assistant is grounded
+  // on (getContext → the 30-min cache; no new fetch path), so the sample storefront's grid/PDP/cart and the
+  // widget finally agree. Injected deps mirror routes/embed.ts. Rate-limited per-IP (fail-open, like the
+  // /widget/token mint) AND per-tenant (fail-CLOSED cost backstop — security-review MEDIUM: the per-IP
+  // limiter is XFF-spoofable, so the unspoofable per-tenant ceiling is what stops a cold-fetch stampede on
+  // a merchant's private Shopify token). Uniform 404 for every non-ok tenant (no existence oracle).
+  // WS-storefront — the paginated grid reader (a browsable subset + cursor). Resolves the tenant's creds the
+  // SAME way grounding does, then fetches ONE page — never the whole-catalog ceiling — so the storefront
+  // renders even the >1000-SKU stores where the assistant's getContext fails closed to empty. A non-live
+  // tenant (dev/fixtures) falls back to the grounding port's own catalog, bounded to one page.
+  //
+  // HOISTED ABOVE `GET /` (Workstream B SSR): the `/` route below server-renders the first catalog page
+  // into the static shell, and reuses these SAME `StorefrontCatalogDeps` functions — never a second
+  // catalog-fetch path — so this block (and the `resolveTenant`/`shopDomainFor` closures, pulled out to
+  // named consts so `/` can call them directly) must be constructed before `GET /` is registered.
+  const storefrontPageFetch = storefrontCatalogPageFetch();
+  const getCatalogPage = async (tenantId: string, first: number, after?: string) => {
+    const outcome = await resolveStorefrontCredential(tenantId, {
+      secrets,
+      credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
+      readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
+      shopDomainFor: (t) => merchants.shopDomainFor(t),
+    });
+    if (outcome.status === "live") {
+      const data = await storefrontPageFetch(outcome.creds, first, after);
+      const ctx = mapStorefrontToContext(tenantId, data);
+      const pi = data.products?.pageInfo;
+      return { context: ctx, nextCursor: pi?.hasNextPage && pi?.endCursor ? pi.endCursor : undefined };
+    }
+    if (outcome.status === "refuse") throw new Error("storefront credential unreadable");
+    const ctx = await grounding.getContext(tenantId);
+    return { context: { ...ctx, products: ctx.products.slice(0, first) }, nextCursor: undefined };
+  };
+  // WS-storefront — resolve ONE product by handle for a direct PDP hit. Live path: a single Storefront
+  // `product(handle:)` call (never the whole-catalog ceiling). Non-live (dev/fixtures): find it in the
+  // grounding port's own catalog by handle/id. `null` when it resolves to nothing → the route's 404.
+  const productByHandleFetch = storefrontProductByHandleFetch();
+  const getProductByHandle = async (tenantId: string, handle: string) => {
+    const outcome = await resolveStorefrontCredential(tenantId, {
+      secrets,
+      credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
+      readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
+      shopDomainFor: (t) => merchants.shopDomainFor(t),
+    });
+    if (outcome.status === "live") {
+      const data = await productByHandleFetch(outcome.creds, handle);
+      const ctx = mapStorefrontToContext(tenantId, data);
+      return ctx.products.length ? { context: ctx } : null;
+    }
+    if (outcome.status === "refuse") throw new Error("storefront credential unreadable");
+    const ctx = await grounding.getContext(tenantId);
+    const p = ctx.products.find((x) => x.handle === handle || x.id === handle);
+    return p ? { context: { ...ctx, products: [p] } } : null;
+  };
+  // Pulled out to named consts (rather than inlined in the `registerStorefrontCatalogRoutes` call below,
+  // as before) so `GET /`'s SSR handler can call the identical resolver/domain-lookup functions.
+  const storefrontResolveTenant = async (shop: string | undefined) => {
+    const r = await merchants.tenantForShopDomain(shop ?? "");
+    return { ok: r.kind === "ok", tenantId: r.kind === "ok" ? r.tenantId : undefined };
+  };
+  const storefrontShopDomainFor = (tenantId: string) => merchants.shopDomainFor(tenantId);
+  // Dedicated counter key ("storefront-catalog") so it never shares the /chat per-tenant bucket.
+  // Fail-CLOSED: a store error denies rather than silently disabling the cost ceiling. Pulled out to a
+  // named const (like `storefrontResolveTenant`/`storefrontShopDomainFor` above) so `GET /`'s SSR path
+  // reuses the IDENTICAL per-tenant denial-of-wallet backstop `/storefront/catalog` uses — never a second,
+  // divergent limiter, and never an unthrottled live-Shopify-fetch path on the highest-traffic route.
+  const storefrontAllowTenant = async (tenantId: string) => {
+    try {
+      return await underLimit(store, { tenantId }, "storefront-catalog", RL_TENANT, RL_WINDOW);
+    } catch {
+      return false;
+    }
+  };
+  registerStorefrontCatalogRoutes(app, {
+    resolveTenant: storefrontResolveTenant,
+    getCatalogPage,
+    getProductByHandle,
+    shopDomainFor: storefrontShopDomainFor,
+    allowIp: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
+    allowTenant: storefrontAllowTenant,
+    ipKeyFor: (req) => {
+      const xff = req.headers["x-forwarded-for"];
+      return clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
+    },
+  });
+
+  // Workstream B — the default storefront tenant `GET /` server-renders for: the single configured
+  // `SHOPIFY_STORES` shop domain (there is no `?shop=` on `/`), matching the domain `app.js` itself
+  // defaults its `SHOP` constant to when a page carries no `data-shop` (home.html's loader snippet
+  // always sets `data-shop`, so this is the same store in practice). No live store configured → this
+  // falls back to the same fixture-store domain `app.js` hardcodes, and `storefrontResolveTenant` above
+  // then just as honestly fails to resolve it (dev/local/test posture — never a hard dependency).
+  // TODO: assumes a single configured store — `Object.values(...)[0]` is order-ambiguous (object key
+  // iteration order, not a declared "primary" store) the moment a second entry is added to `SHOPIFY_STORES`.
+  const DEFAULT_STOREFRONT_SHOP = Object.values(parseStoreDomains())[0] ?? "palup-skincare-jason.myshopify.com";
+
   // WS3 — the sample storefront replaces the old inlined widget demo at the root. The widget is now embedded
   // via the REAL loader (each storefront page carries the /embed/loader.js snippet → shadow-DOM launcher +
   // /embed/panel iframe). The standalone widget harness moves to /widget (test/dev only; the panel HTML is
   // also served at /embed/panel). `/storefront/catalog` (WS2) is registered separately above.
+  //
+  // Workstream B (SSR first page) — server-render the first catalog page into the static shell so the
+  // grid + footer are at final height on first paint (kills the CLS/LCP/`{brand}` FOUC the UX review
+  // flagged). Reuses the SAME `StorefrontCatalogDeps` functions `/storefront/catalog` uses — no second
+  // catalog-fetch path, AND the SAME per-tenant `storefrontAllowTenant` denial-of-wallet backstop, since
+  // `/` is the highest-traffic UNAUTHENTICATED route (bots/crawlers/refreshes) and would otherwise be an
+  // uncached, unthrottled way to trigger a live Shopify GraphQL call at each cache-TTL boundary. Cached
+  // response either way (`cache-control`, same as `/storefront/catalog`) so a CDN/browser absorbs most of
+  // that traffic before it ever reaches this handler. GRACEFUL DEGRADATION IS MANDATORY: any failure
+  // (default tenant unresolved, the per-tenant limiter denying/throwing, the catalog fetch throwing)
+  // falls through to serving the raw, unmodified `storefrontHome` string, still a 200 — SSR is an
+  // enhancement here, never a hard dependency for the storefront to render at all, and `/` must never 429
+  // (the client-side fetch fallback + its own `/storefront/catalog` limiter handle that case).
   app.get("/", async (_req, reply) => {
+    reply.header("cache-control", "public, max-age=300, stale-while-revalidate=600");
+    try {
+      const resolved = await storefrontResolveTenant(DEFAULT_STOREFRONT_SHOP);
+      if (resolved.ok && resolved.tenantId && (await storefrontAllowTenant(resolved.tenantId))) {
+        const page = await getCatalogPage(resolved.tenantId, STOREFRONT_PAGE_LIMIT);
+        const shopDomain = await storefrontShopDomainFor(resolved.tenantId).catch(() => undefined);
+        const wire = projectStorefrontCatalog(page.context, shopDomain, page.nextCursor);
+        const ssrHtml = injectStorefrontFirstPage(storefrontHome, wire);
+        // Workstream B / Task 3 CLS fix: inline app.js's hydration script (see inlineStorefrontScript's
+        // doc comment) so the grid renders from `#palup-ssr` before first paint — no external-script
+        // fetch + task-boundary gap for Chromium to paint the still-empty grid through. Same file
+        // content either way; only this SSR-success response delivers it inline instead of deferred.
+        //
+        // CSP DEPENDENCY: this relies on `/` carrying NO Content-Security-Policy `script-src` that would
+        // block inline scripts (none is set today — this route sets no CSP header at all). If a strict
+        // CSP is ever added in front of the storefront (edge/proxy/CDN, or a future header here), this
+        // inline `<script>` gets blocked outright and the empty-grid CLS this exists to prevent comes
+        // straight back, silently — a blocked inline script is not a 4xx/5xx, so nothing here would
+        // notice. The real guard is the e2e's `data-ready="1"` assertions on the grid (they fail if
+        // hydration didn't run), NOT the `script[src="/storefront/app.js"]` `toHaveCount(0)` check, which
+        // stays green either way (that assertion only proves the tag isn't external, not that the inline
+        // script executed).
+        reply.type("text/html").send(inlineStorefrontScript(ssrHtml, storefrontJs));
+        return;
+      }
+    } catch {
+      /* fall through to the static shell — SSR is an enhancement, never a hard dependency. */
+    }
     reply.type("text/html").send(storefrontHome);
   });
   app.get("/product/:handle", async (_req, reply) => {
@@ -1844,79 +1982,6 @@ export async function buildServer(opts?: {
       if (!shop) return undefined;
       const r = await merchants.tenantForShopDomain(shop);
       return r.kind === "ok" ? await brandNameFor(r.tenantId) : undefined;
-    },
-  });
-
-  // WS2 — public storefront catalog read endpoint. Renders the SAME live catalog the assistant is grounded
-  // on (getContext → the 30-min cache; no new fetch path), so the sample storefront's grid/PDP/cart and the
-  // widget finally agree. Injected deps mirror routes/embed.ts. Rate-limited per-IP (fail-open, like the
-  // /widget/token mint) AND per-tenant (fail-CLOSED cost backstop — security-review MEDIUM: the per-IP
-  // limiter is XFF-spoofable, so the unspoofable per-tenant ceiling is what stops a cold-fetch stampede on
-  // a merchant's private Shopify token). Uniform 404 for every non-ok tenant (no existence oracle).
-  // WS-storefront — the paginated grid reader (a browsable subset + cursor). Resolves the tenant's creds the
-  // SAME way grounding does, then fetches ONE page — never the whole-catalog ceiling — so the storefront
-  // renders even the >1000-SKU stores where the assistant's getContext fails closed to empty. A non-live
-  // tenant (dev/fixtures) falls back to the grounding port's own catalog, bounded to one page.
-  const storefrontPageFetch = storefrontCatalogPageFetch();
-  const getCatalogPage = async (tenantId: string, first: number, after?: string) => {
-    const outcome = await resolveStorefrontCredential(tenantId, {
-      secrets,
-      credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
-      readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
-      shopDomainFor: (t) => merchants.shopDomainFor(t),
-    });
-    if (outcome.status === "live") {
-      const data = await storefrontPageFetch(outcome.creds, first, after);
-      const ctx = mapStorefrontToContext(tenantId, data);
-      const pi = data.products?.pageInfo;
-      return { context: ctx, nextCursor: pi?.hasNextPage && pi?.endCursor ? pi.endCursor : undefined };
-    }
-    if (outcome.status === "refuse") throw new Error("storefront credential unreadable");
-    const ctx = await grounding.getContext(tenantId);
-    return { context: { ...ctx, products: ctx.products.slice(0, first) }, nextCursor: undefined };
-  };
-  // WS-storefront — resolve ONE product by handle for a direct PDP hit. Live path: a single Storefront
-  // `product(handle:)` call (never the whole-catalog ceiling). Non-live (dev/fixtures): find it in the
-  // grounding port's own catalog by handle/id. `null` when it resolves to nothing → the route's 404.
-  const productByHandleFetch = storefrontProductByHandleFetch();
-  const getProductByHandle = async (tenantId: string, handle: string) => {
-    const outcome = await resolveStorefrontCredential(tenantId, {
-      secrets,
-      credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
-      readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
-      shopDomainFor: (t) => merchants.shopDomainFor(t),
-    });
-    if (outcome.status === "live") {
-      const data = await productByHandleFetch(outcome.creds, handle);
-      const ctx = mapStorefrontToContext(tenantId, data);
-      return ctx.products.length ? { context: ctx } : null;
-    }
-    if (outcome.status === "refuse") throw new Error("storefront credential unreadable");
-    const ctx = await grounding.getContext(tenantId);
-    const p = ctx.products.find((x) => x.handle === handle || x.id === handle);
-    return p ? { context: { ...ctx, products: [p] } } : null;
-  };
-  registerStorefrontCatalogRoutes(app, {
-    resolveTenant: async (shop) => {
-      const r = await merchants.tenantForShopDomain(shop ?? "");
-      return { ok: r.kind === "ok", tenantId: r.kind === "ok" ? r.tenantId : undefined };
-    },
-    getCatalogPage,
-    getProductByHandle,
-    shopDomainFor: (tenantId) => merchants.shopDomainFor(tenantId),
-    allowIp: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
-    allowTenant: async (tenantId) => {
-      // Dedicated counter key ("storefront-catalog") so it never shares the /chat per-tenant bucket.
-      // Fail-CLOSED: a store error denies rather than silently disabling the cost ceiling.
-      try {
-        return await underLimit(store, { tenantId }, "storefront-catalog", RL_TENANT, RL_WINDOW);
-      } catch {
-        return false;
-      }
-    },
-    ipKeyFor: (req) => {
-      const xff = req.headers["x-forwarded-for"];
-      return clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
     },
   });
 
