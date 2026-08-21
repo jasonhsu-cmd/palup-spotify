@@ -73,6 +73,46 @@ test.describe("sample storefront", () => {
 });
 
 /**
+ * Task 4 — product names as headings. The mock CI backend resolves no tenant (see the file-level note
+ * above), so the default GET / response carries an EMPTY catalog: home.html's SSR island then holds
+ * `products: []`, and app.js's own hydrate-from-SSR branch requires a NON-EMPTY `ssr.products` array
+ * (`ssr && Array.isArray(ssr.products) && ssr.products.length`), so it falls through to the normal
+ * `fetchPage(null)` client fetch for page 1. That gives a real (non-vacuous) mocking seam here — mock
+ * `/storefront/catalog` with several products and the grid renders from it, same as the real flow.
+ */
+test.describe("sample storefront — product grid headings (Task 4, mocked catalog)", () => {
+  const MOCK_CATALOG = {
+    brandName: "Auria",
+    policy: {},
+    products: [
+      { id: "gid://p1", title: "Alpha Serum", price: "$20.00", handle: "alpha" },
+      { id: "gid://p2", title: "Beta Cream", price: "$35.00", handle: "beta" },
+      { id: "gid://p3", title: "Gamma Toner", price: "$18.00", handle: "gamma" },
+      { id: "gid://p4", title: "Delta Balm", price: "$22.00", handle: "delta" },
+    ],
+    nextCursor: null,
+  };
+
+  test("each grid card's title is an <h3> heading, so screen-reader heading navigation reaches every product", async ({
+    page,
+  }) => {
+    await page.route("**/storefront/catalog**", (route) => route.fulfill({ json: MOCK_CATALOG }));
+    await page.goto("/");
+    await expect(page.locator("#grid")).toHaveAttribute("data-ready", "1");
+    await expect(page.locator("#grid .card h3.title").first()).toBeVisible();
+    expect(await page.locator("#grid h3").count()).toBeGreaterThan(3);
+  });
+
+  test("a populated grid with heading titles stays WCAG 2.2 AA clean", async ({ page }) => {
+    await page.route("**/storefront/catalog**", (route) => route.fulfill({ json: MOCK_CATALOG }));
+    await page.goto("/");
+    await expect(page.locator("#grid")).toHaveAttribute("data-ready", "1");
+    const results = await new AxeBuilder({ page }).withTags(WCAG22AA).analyze();
+    expect(results.violations).toEqual([]);
+  });
+});
+
+/**
  * The cart page renders entirely from localStorage (app.js readCart → renderCart) — it does NOT need the
  * catalog API — so the POPULATED cart flow (rows, qty +/-, remove, badge sync, checkout permalink) is fully
  * deterministic in the mock CI backend and belongs here, not only on staging. This closes the audit gaps
@@ -125,6 +165,38 @@ test.describe("sample storefront — populated cart (localStorage-driven, determ
     await page.getByRole("button", { name: "Remove Alpha Serum" }).click();
     await expect(page.locator("#cart")).toHaveAttribute("data-ready", "empty");
     await expect(page.locator("[data-cart-count]").first()).toBeHidden();
+  });
+
+  test("changing a cart quantity keeps keyboard focus on the control (Task 3 — focus is not dropped to body)", async ({
+    page,
+  }) => {
+    // renderCart() rebuilds the whole <ul> from scratch on every mutation (textContent = "" then re-append),
+    // which destroys the DOM node that had focus. Without a focus hint restored after the rebuild, focus
+    // silently falls back to <body> — a real keyboard-user regression (screen reader/keyboard-only shoppers
+    // lose their place after every +/- click).
+    await seedCart(page, LINES);
+    await page.goto("/cart");
+    const rows = page.locator('[data-testid="cart-list"] > li');
+    const inc = rows.filter({ hasText: "Alpha Serum" }).getByRole("button", { name: "Increase quantity of Alpha Serum" });
+    await inc.focus();
+    await inc.press("Enter");
+    const active = await page.evaluate(
+      () => document.activeElement?.getAttribute("aria-label") || document.activeElement?.tagName,
+    );
+    expect(active).toMatch(/Increase quantity/);
+  });
+
+  test("removing the last remaining cart line moves focus to the cart heading, never to body (Task 3)", async ({
+    page,
+  }) => {
+    await seedCart(page, [LINES[0]]);
+    await page.goto("/cart");
+    const removeBtn = page.getByRole("button", { name: "Remove Alpha Serum" });
+    await removeBtn.focus();
+    await removeBtn.click();
+    await expect(page.locator("#cart")).toHaveAttribute("data-ready", "empty");
+    const activeTag = await page.evaluate(() => document.activeElement?.tagName);
+    expect(activeTag).toBe("H1");
   });
 
   test("checkout permalink is enabled for numeric variants and clamps quantity to 99", async ({ page }) => {
