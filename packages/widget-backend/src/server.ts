@@ -55,7 +55,7 @@ import { deriveServingSignals } from "./signals.js";
 import { registerEmbedRoutes, bundleLoader } from "./routes/embed.js";
 import { resolveTheme } from "./widget-theme.js";
 import { registerStorefrontCatalogRoutes, projectStorefrontCatalog, STOREFRONT_PAGE_LIMIT } from "./routes/storefront-catalog.js";
-import { injectStorefrontFirstPage } from "./storefront-ssr.js";
+import { injectStorefrontFirstPage, inlineStorefrontScript } from "./storefront-ssr.js";
 // E3 — both functions return `{}` unless the `Decision` already carries cited products, so they are inert
 // for any turn E2 did not cite on. They are no longer inert BY CONSTRUCTION: this composition root now
 // reads PRODUCT_CITATIONS/PRODUCT_CARDS and can produce such a Decision (see the Wave 4 flag block below).
@@ -1873,7 +1873,12 @@ export async function buildServer(opts?: {
         const page = await getCatalogPage(resolved.tenantId, STOREFRONT_PAGE_LIMIT);
         const shopDomain = await storefrontShopDomainFor(resolved.tenantId).catch(() => undefined);
         const wire = projectStorefrontCatalog(page.context, shopDomain, page.nextCursor);
-        reply.type("text/html").send(injectStorefrontFirstPage(storefrontHome, wire));
+        const ssrHtml = injectStorefrontFirstPage(storefrontHome, wire);
+        // Workstream B / Task 3 CLS fix: inline app.js's hydration script (see inlineStorefrontScript's
+        // doc comment) so the grid renders from `#palup-ssr` before first paint — no external-script
+        // fetch + task-boundary gap for Chromium to paint the still-empty grid through. Same file
+        // content either way; only this SSR-success response delivers it inline instead of deferred.
+        reply.type("text/html").send(inlineStorefrontScript(ssrHtml, storefrontJs));
         return;
       }
     } catch {

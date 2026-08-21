@@ -40,7 +40,13 @@ describe("GET / server-renders the first catalog page (SSR)", () => {
       // Shopify credential is provisioned in this test, so grounding falls back to it (same posture as
       // server-readback.test.ts's "flag OFF" case).
       expect(res.body).toContain("<title>Auria");
-      expect(res.body).not.toContain("{brand}");
+      // Check the visible `{brand}` FOUC surface (the <title>), not the whole body — the CLS fix
+      // (Task 3) inlines app.js's own source into this response (storefront-ssr.ts
+      // `inlineStorefrontScript`), and app.js legitimately carries the literal string `"{brand}"` as
+      // its own client-side fallback substitution for non-SSR pages; that text lives inside a <script>
+      // tag and is never rendered, so it isn't a FOUC.
+      const title = res.body.match(/<title>([^<]*)<\/title>/)?.[1] ?? "";
+      expect(title).not.toContain("{brand}");
       const jsonMatch = res.body.match(/<script id="palup-ssr" type="application\/json">([^<]*)<\/script>/);
       expect(jsonMatch).not.toBeNull();
       const payload = JSON.parse(jsonMatch![1]!);

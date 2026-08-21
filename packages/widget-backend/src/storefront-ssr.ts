@@ -55,3 +55,20 @@ export function injectStorefrontFirstPage(html: string, data: StorefrontCatalogW
     .replace(/<p data-policy-returns>[^<]*<\/p>/, () => renderPolicyParagraphs("data-policy-returns", data.policy.returns))
     .replace("<!--PALUP_SSR-->", () => `<script id="palup-ssr" type="application/json">${json}</script>`);
 }
+
+// A `<script src="…" defer>` for the home page's hydration script leaves a real network-fetch + task-
+// boundary gap between the HTML parser finishing and the script actually running — during which Chromium
+// can (and, measured live via the storefront-catalog E2E CLS assertion, reliably does) paint the still-
+// empty grid before the SSR-hydration branch (app.js `renderHome`) runs, producing a real, visible layout
+// shift the instant the grid is then populated. A literal inline `<script>` (no `src`, so no fetch; no
+// task boundary, since the parser executes it synchronously in place) closes that gap entirely: the grid
+// is populated before the document's first paint, so there is nothing to shift. This delivers the EXACT
+// SAME app.js file content the external tag would have loaded (no duplicated logic, no second source of
+// truth) — only inline, and only for this one SSR-success response. `</script>` is defensively escaped
+// (app.js carries none today, but this guards any future edit); it is our own trusted, server-owned
+// static file, never user input, so this is a correctness guard, not an XSS control.
+const HOME_SCRIPT_TAG = /<script src="\/storefront\/app\.js" defer><\/script>/;
+export function inlineStorefrontScript(html: string, js: string): string {
+  const safeJs = js.replace(/<\/script/gi, "<\\/script");
+  return html.replace(HOME_SCRIPT_TAG, () => `<script>${safeJs}</script>`);
+}

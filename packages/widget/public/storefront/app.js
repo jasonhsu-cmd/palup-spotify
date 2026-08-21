@@ -128,7 +128,7 @@
     if (text != null) n.textContent = text;
     return n;
   }
-  function thumb(imageUrl, alt, cls) {
+  function thumb(imageUrl, alt, cls, eager) {
     var box = el("div", cls || "thumb");
     if (typeof imageUrl === "string" && imageUrl) {
       var img = document.createElement("img");
@@ -137,7 +137,12 @@
         ? imageUrl + (imageUrl.indexOf("?") >= 0 ? "&" : "?") + "width=350"
         : imageUrl;
       img.alt = alt || "";
-      img.loading = "lazy";
+      if (eager) {
+        img.loading = "eager";
+        img.fetchPriority = "high";
+      } else {
+        img.loading = "lazy";
+      }
       img.decoding = "async";
       img.addEventListener("error", function () {
         if (img.parentNode === box) { box.removeChild(img); box.appendChild(el("span", "ph", "No image")); }
@@ -165,14 +170,14 @@
     if (r && p.returns) r.textContent = p.returns;
     if (s && p.shipping) s.textContent = p.shipping;
   }
-  function productCard(p) {
+  function productCard(p, eager) {
     var a = document.createElement("a");
     a.className = "card";
     a.href = productHref(p);
     a.addEventListener("click", function () {
       stash(p);
     });
-    a.appendChild(thumb(p.imageUrl, p.title));
+    a.appendChild(thumb(p.imageUrl, p.title, null, eager));
     var body = el("div", "body");
     body.appendChild(el("span", "title", p.title));
     body.appendChild(el("span", "price", p.price || ""));
@@ -190,8 +195,8 @@
 
     function appendPage(data) {
       var products = data.products || [];
-      products.forEach(function (p) {
-        grid.appendChild(productCard(p));
+      products.forEach(function (p, idx) {
+        grid.appendChild(productCard(p, idx === 0 && grid.children.length === 0));
       });
       cursor = data.nextCursor || null;
       if (!grid.children.length) grid.appendChild(el("p", "empty", "No products are available right now."));
@@ -210,6 +215,33 @@
         moreBtn.disabled = false;
         moreBtn.textContent = "Load more";
       });
+    }
+
+    // Workstream B (SSR first page) — GET / may have injected a `<script id="palup-ssr">` hydration
+    // island holding the SAME wire shape `fetchPage` would otherwise fetch (brandName/policy/products/
+    // nextCursor). When present, render page 1 from it synchronously — no network round trip, no
+    // layout shift while that round trip is in flight. Absent, malformed, or empty ⇒ unchanged fetch path.
+    var ssrEl = document.getElementById("palup-ssr");
+    var ssr = null;
+    try {
+      ssr = ssrEl ? JSON.parse(ssrEl.textContent) : null;
+    } catch (e) {
+      ssr = null;
+    }
+    if (ssr && Array.isArray(ssr.products) && ssr.products.length) {
+      setBrand(ssr.brandName);
+      setPolicy(ssr.policy);
+      var ssrWrap = document.getElementById("grid-more");
+      if (ssrWrap) {
+        moreBtn = el("button", "btn btn-outline", "Load more");
+        moreBtn.type = "button";
+        moreBtn.setAttribute("data-testid", "load-more");
+        moreBtn.hidden = true;
+        moreBtn.addEventListener("click", loadMore);
+        ssrWrap.appendChild(moreBtn);
+      }
+      appendPage(ssr); // sets cursor from ssr.nextCursor, ready flags, More visibility
+      return; // page 1 already on screen from HTML — no fetch, no shift
     }
 
     fetchPage(null).then(function (data) {

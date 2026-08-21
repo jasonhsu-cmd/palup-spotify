@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { injectStorefrontFirstPage } from "../src/storefront-ssr.js";
+import { injectStorefrontFirstPage, inlineStorefrontScript } from "../src/storefront-ssr.js";
 
 const HTML = `<title>{brand} — x</title><span data-brand>Auria</span><p data-policy-shipping>old</p><p data-policy-returns>old</p><!--PALUP_SSR-->`;
 
@@ -82,5 +82,33 @@ describe("injectStorefrontFirstPage", () => {
     });
     expect(out).toContain("<p data-policy-shipping>free ship</p>");
     expect(out).toContain("<p data-policy-returns>30 days</p>");
+  });
+});
+
+// A `<script src="…" defer>` for the home page's hydration script leaves a real network-fetch +
+// task-boundary gap between the parser finishing and the script running, during which Chromium can (and,
+// per the storefront-catalog E2E CLS measurement, reliably does) paint the still-empty grid before Task
+// 3's SSR-hydration branch runs — a real, visible layout shift the moment the grid then populates. A
+// literal inline `<script>` (no `src`, so no fetch; no task boundary since the parser runs it in place)
+// closes that gap: the grid is populated before the document's first paint. Reuses the SAME app.js file
+// content the external tag would have loaded — no duplicated logic, just delivered inline for this route.
+describe("inlineStorefrontScript", () => {
+  const HOME = `<body>\n  <script src="/storefront/app.js" defer></script>\n</body>`;
+
+  it("replaces the external deferred script tag with the SAME code inlined", () => {
+    const out = inlineStorefrontScript(HOME, "console.log('hi');");
+    expect(out).not.toContain('<script src="/storefront/app.js" defer>');
+    expect(out).toContain("<script>console.log('hi');</script>");
+  });
+
+  it("escapes a literal </script> inside the script source so it can't break out of the tag", () => {
+    const out = inlineStorefrontScript(HOME, "var s = '</script>';");
+    expect(out).not.toContain("</script>';");
+    expect(out).toContain("<\\/script>");
+  });
+
+  it("is a no-op when the external script tag is absent (e.g. already inlined, or a different template)", () => {
+    const out = inlineStorefrontScript("<body>no script here</body>", "console.log('hi');");
+    expect(out).toBe("<body>no script here</body>");
   });
 });
