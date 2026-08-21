@@ -73,3 +73,17 @@ test.describe("sample storefront — image robustness (mocked catalog)", () => {
     await expect(page.locator("#grid .card .thumb img")).toHaveCount(0);
   });
 });
+
+test.describe("sample storefront — head hygiene", () => {
+  test("no favicon 404 and app.js is deferred", async ({ page }) => {
+    const resp404: string[] = [];
+    page.on("response", (r) => {
+      if (r.url().includes("favicon") && r.status() === 404) resp404.push(r.url());
+    });
+    await page.goto("/");
+    await page.locator("#grid .card").first().waitFor();
+    expect(resp404).toHaveLength(0);
+    await expect(page.locator('head link[rel="icon"]')).toHaveCount(1);
+    await expect(page.locator('script[src="/storefront/app.js"]')).toHaveAttribute("defer", "");
+  });
+});
