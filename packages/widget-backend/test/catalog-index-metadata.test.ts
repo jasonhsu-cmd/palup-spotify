@@ -29,13 +29,14 @@ function catalogOf(products: GroundingContext["products"]): GroundingContext {
 }
 
 describe("catalog-index producer — render metadata", () => {
-  it("writes title and variantId into each corpus record's metadata", async () => {
+  it("writes title, variantId and imageUrl into each corpus record's metadata", async () => {
     const vector = createInMemoryVectorStore();
     const store = new InMemoryRuntimeStore();
+    const img = "https://cdn.shopify.com/s/files/1/0001/vc.jpg";
     const catalog = async () =>
       catalogOf([
-        { id: "p1", title: "Vitamin-C Serum", description: "d", price: "$34", variantId: "111", tags: ["serum"] },
-        { id: "p2", title: "Daily Cleanser", description: "d", price: "$18" }, // no variantId
+        { id: "p1", title: "Vitamin-C Serum", description: "d", price: "$34", variantId: "111", tags: ["serum"], imageUrl: img },
+        { id: "p2", title: "Daily Cleanser", description: "d", price: "$18" }, // no variantId, no image
       ]);
 
     const [report] = await runCatalogIndex({ store, vector, model: fakeEmbedModel(), catalog }, ["t1"]);
@@ -43,11 +44,13 @@ describe("catalog-index producer — render metadata", () => {
 
     const rows = await vector.query(catalogNamespace("t1"), { text: "", k: 10 });
     const byId = new Map(rows.map((r) => [(r.metadata as any).productId, r.metadata as any]));
-    expect(byId.get("p1")).toMatchObject({ kind: "product", productId: "p1", title: "Vitamin-C Serum", variantId: "111" });
+    // imageUrl is a STABLE render field (like title/variantId), carried so a retrieval-path card shows a thumbnail.
+    expect(byId.get("p1")).toMatchObject({ kind: "product", productId: "p1", title: "Vitamin-C Serum", variantId: "111", imageUrl: img });
     expect(byId.get("p1").contentHash).toEqual(expect.any(String));
-    // variantId is OMITTED (not undefined-valued) when the source has none.
+    // variantId and imageUrl are OMITTED (not undefined-valued) when the source has none.
     expect(byId.get("p2")).toMatchObject({ kind: "product", productId: "p2", title: "Daily Cleanser" });
     expect("variantId" in byId.get("p2")).toBe(false);
+    expect("imageUrl" in byId.get("p2")).toBe(false);
   });
 
   it("prunes a delisted product's row on the next index run (corpus is the authoritative set)", async () => {

@@ -1166,6 +1166,40 @@ test.describe("E3 — product cards (mocked /chat seam)", () => {
     await expect(cards.nth(1)).toContainText("Daily Moisturizer");
   });
 
+  test("a card with a valid Shopify-CDN imageUrl renders a thumbnail with an empty alt (the title is the name)", async ({ page }) => {
+    const IMG = "https://cdn.shopify.com/s/files/1/0001/serum.jpg";
+    // Serve a real 1x1 PNG so the good-UX onerror-removes-broken-image handler doesn't fire on a fake URL.
+    await page.route(IMG, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "image/png",
+        body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"),
+      }),
+    );
+    await chatWith(page, {
+      recommendedProducts: ["serum-vc"],
+      recommendedProductCards: [{ productId: "serum-vc", title: "Vitamin-C Brightening Serum", price: "$34", imageUrl: IMG }],
+    });
+    await send(page);
+    const img = page.getByTestId("product-card").first().getByTestId("product-card-image");
+    await expect(img).toHaveCount(1);
+    await expect(img).toHaveAttribute("src", IMG);
+    await expect(img).toHaveAttribute("alt", ""); // decorative: the adjacent title carries the accessible name
+  });
+
+  test("a non-Shopify or javascript: imageUrl is REFUSED by the client — the card renders, but with no <img>", async ({ page }) => {
+    await chatWith(page, {
+      recommendedProducts: ["a", "b"],
+      recommendedProductCards: [
+        { productId: "a", title: "Tracking Host", price: "$1", imageUrl: "https://evil.example.com/track.gif" },
+        { productId: "b", title: "Script URL", price: "$2", imageUrl: "javascript:alert(1)" },
+      ],
+    });
+    await send(page);
+    await expect(page.getByTestId("product-card")).toHaveCount(2); // both cards still render their text
+    await expect(page.getByTestId("product-card-image")).toHaveCount(0); // but no image from a disallowed host/scheme
+  });
+
   test("the heading claims only what the mechanism knows: MENTIONED, not 'recommended for you'", async ({ page }) => {
     // `recommendedProducts` is really "products the reply CITED" — the prompt rule asks the model to tag
     // anything it "recommends, names, or discusses", so a product the agent talked a shopper OUT of is

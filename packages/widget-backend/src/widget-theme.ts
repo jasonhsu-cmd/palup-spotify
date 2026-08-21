@@ -46,17 +46,20 @@ const AA = 4.5;
 
 type Rgb = [number, number, number];
 
-/** Today's widget indigo — the safe default when a tenant has no curated theme or a config is malformed. */
-export const DEFAULT_THEME: ThemeConfig = { brand: "#4f46e5" };
+/** The console evergreen — the safe default when a tenant has no curated theme or a config is malformed.
+ *  Matches the panel's baked-in default --brand (packages/widget/public/index.html), so an unresolved
+ *  tenant's injected theme agrees with the un-injected default instead of overriding it back to indigo. */
+export const DEFAULT_THEME: ThemeConfig = { brand: "#0c4a3c" };
 
-// Curated per-tenant brand COLOUR (the staging demo tenant matches the sample storefront's terracotta so the
-// widget reads as native to the store). The brand NAME is deliberately NOT hardcoded here — it is resolved
-// from the merchant's real Shopify shop name and cached (Pillar 5, `brand-cache.ts`), threaded in as
-// `fallbackBrandName` by `resolveThemeFor`, so it scales to every merchant with no per-tenant edit. (Colour +
-// logo from Shopify Shop.brand at install are the next enrichment behind this same `resolveTheme` seam.)
+// Curated per-tenant brand COLOUR. The staging demo tenants use the PalUp merchant-console evergreen (owner
+// directive, 2026-08-21) so the widget reads as PalUp-native rather than the old storefront terracotta. The
+// brand NAME is deliberately NOT hardcoded here — it is resolved from the merchant's real Shopify shop name
+// and cached (Pillar 5, `brand-cache.ts`), threaded in as `fallbackBrandName` by `resolveThemeFor`, so it
+// scales to every merchant with no per-tenant edit. (Colour + logo from Shopify Shop.brand at install are the
+// next enrichment behind this same `resolveTheme` seam.)
 const THEME_CONFIGS: Record<string, ThemeConfig> = {
-  "palup-skincare-jason": { brand: "#a44a34" },
-  demo: { brand: "#a44a34" },
+  "palup-skincare-jason": { brand: "#0c4a3c" },
+  demo: { brand: "#0c4a3c" },
 };
 
 function hexToRgb(hex: string): Rgb | null {

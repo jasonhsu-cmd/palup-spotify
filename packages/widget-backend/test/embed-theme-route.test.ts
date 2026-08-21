@@ -43,11 +43,11 @@ describe("WS10 — GET /embed/theme", () => {
     await app.close();
   });
 
-  it("falls back to the default indigo theme for an unknown shop (no oracle, no error)", async () => {
+  it("falls back to the default evergreen theme for an unknown shop (no oracle, no error)", async () => {
     const app = await server();
     const res = await app.inject({ method: "GET", url: "/embed/theme?shop=stranger.myshopify.com" });
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body).brand).toBe("#4f46e5"); // DEFAULT_THEME
+    expect(JSON.parse(res.body).brand).toBe("#0c4a3c"); // DEFAULT_THEME (console evergreen)
     await app.close();
   });
 });
@@ -68,11 +68,11 @@ describe("WS10 — /embed/panel theme injection", () => {
     await app.close();
   });
 
-  it("injects the default indigo theme + NO brand name for an unknown/absent shop (no hardcoding)", async () => {
+  it("injects the default evergreen theme + NO brand name for an unknown/absent shop (no hardcoding)", async () => {
     const app = await server();
     const res = await app.inject({ method: "GET", url: "/embed/panel" });
     expect(res.body).toContain('id="palup-theme"');
-    expect(res.body).toMatch(/--brand:#4f46e5/i);
+    expect(res.body).toMatch(/--brand:#0c4a3c/i);
     // Pillar 5 — an unresolved shop injects an EMPTY theme meta: no brand name is hardcoded or invented, the
     // client falls back to its neutral default. (Was: a curated "Auria" leaked here from THEME_CONFIGS.)
     expect(res.body).toContain("{theme:{}}");
