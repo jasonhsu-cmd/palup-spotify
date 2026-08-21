@@ -3214,6 +3214,10 @@ export async function buildServer(opts?: {
         // any error/timeout/unparseable/out-of-enum). deriveServingSignals only ever sets the key when
         // truthy, so the flag-off / clean-classification path stays byte-identical.
         serverGuardDegraded: guardSignals?.degraded,
+        // WS-B1 — mood, folded into the SAME classifyGuardSignals call above (no second model.complete).
+        // Undefined when the classifier didn't run / omitted mood / emitted out-of-enum ⇒
+        // deriveServingSignals falls back to the client's own mood echo (safe: mood only restrains).
+        serverMood: guardSignals?.mood,
         // E4 — THE SECOND GATE. `cartLineItemsEnabled` appears twice by design: here it decides whether a
         // client's `cartItems` is PARSED AT ALL (parsing untrusted input is its own attack surface), and in
         // `createBrain` above it decides whether the parsed value is CONSUMED. One env var must open both,

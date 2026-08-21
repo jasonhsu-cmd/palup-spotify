@@ -51,4 +51,19 @@ describe("signals trust — the client cannot set the server-derived guardrail s
     expect("serverGuardDegraded" in deriveServingSignals(undefined, ctx)).toBe(false);
     expect("serverGuardDegraded" in deriveServingSignals(undefined, { ...ctx, serverGuardDegraded: false })).toBe(false);
   });
+
+  // WS-B1 — mood becomes server-derived via the SAME guard-classifier call. It is NON-trust-bearing (it
+  // can only make the brain MORE restrained, never grant treatment), so unlike safetyClass/supportIntent
+  // the client's own mood echo remains as the flag-off/degraded FALLBACK — but whenever the server has a
+  // mood for this turn (ctx.serverMood), it wins over whatever the client claimed.
+  it("ctx.serverMood overrides a client-supplied mood", () => {
+    const hostile = { mood: "satisfied" } as Signals;
+    const out = deriveServingSignals(hostile, { ...ctx, serverMood: "frustrated" });
+    expect(out.mood).toBe("frustrated");
+  });
+
+  it("falls back to the client mood when ctx.serverMood is absent (flag-off/degraded turn)", () => {
+    const clientOnly = { mood: "anxious" } as Signals;
+    expect(deriveServingSignals(clientOnly, ctx).mood).toBe("anxious");
+  });
 });

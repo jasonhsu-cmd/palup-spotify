@@ -1,4 +1,4 @@
-import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent } from "@palup/widget-brain";
+import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Mood } from "@palup/widget-brain";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -155,6 +155,15 @@ export interface ServingSignalContext {
    *  output, so no server safety/injection/support signal exists this turn. Passed through so the SERVER
    *  is the sole origin of `Signals.serverGuardDegraded`; the client's own value is never read. */
   serverGuardDegraded?: boolean;
+  /**
+   * WS-B1 — the guard classifier's whitelisted mood for THIS turn (same source + call as the safety/
+   * support fields above — folded into the SAME classifyGuardSignals model call, no second round-trip).
+   * Unlike safetyClass/supportIntent, mood is NON-trust-bearing (it can only make the brain MORE
+   * restrained via the mood brake — never grant treatment), so when this is absent (flag off, classifier
+   * degraded, or the model omitted/mis-emitted mood) `deriveServingSignals` falls back to the client's own
+   * `signals.mood` echo rather than dropping mood entirely — safe because mood only ever restrains.
+   */
+  serverMood?: Mood;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -164,8 +173,11 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
   // POSITIVE statement that the cart is empty.
   const cartItems = ctx.cartLineItemsEnabled ? sanitizeCartItems((r as { cartItems?: unknown }).cartItems) : undefined;
   return {
-    // Accepted shopper/UI context — only when a valid enum value.
-    mood: typeof r.mood === "string" && MOODS.has(r.mood) ? r.mood : undefined,
+    // WS-B1 — mood is now SERVER-derived when the guard classifier ran cleanly for this turn
+    // (ctx.serverMood, folded into the same classifyGuardSignals call): the server-classified mood wins.
+    // The client's own enum-checked echo remains only as the flag-off/degraded fallback — safe because
+    // mood is non-trust-bearing (it only ever restrains the brain, never grants treatment).
+    mood: ctx.serverMood ?? (typeof r.mood === "string" && MOODS.has(r.mood) ? r.mood : undefined),
     // E4 — a supplied line-item list RE-DERIVES this and overrides whatever the client claimed. Only two
     // outputs are reachable from it, so a shopper cannot manufacture `high_value` out of a cart payload;
     // see the trust note above `sanitizeCartItems`, including what this deliberately does NOT close.

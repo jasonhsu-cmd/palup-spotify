@@ -82,4 +82,40 @@ describe("classifyGuardSignals — parse + whitelist + fail-closed", () => {
       expect("supportIntent" in out).toBe(false);
     });
   });
+
+  // WS-B1 — mood rides the SAME classifyGuardSignals call (no second model.complete). WHITELISTED to the
+  // 7-value Mood enum, same discipline as supportIntent: out-of-enum is DROPPED, never degraded (the
+  // safety signal stays trustworthy independent of mood).
+  describe("mood — parsed + whitelisted on the SAME call", () => {
+    it("parses a valid mood from the classifier JSON", async () => {
+      const out = await classifyGuardSignals(
+        modelReturning('{"safetyClass":"none","injection":false,"supportIntent":"general","mood":"frustrated"}'),
+        "this is broken and I want a refund now",
+        "demo",
+      );
+      expect(out.mood).toBe("frustrated");
+      expect(out.degraded).toBe(false);
+    });
+
+    it("drops an OUT-OF-ENUM mood WITHOUT degrading (safety/support stay trustworthy)", async () => {
+      const out = await classifyGuardSignals(
+        modelReturning('{"safetyClass":"none","injection":false,"supportIntent":"general","mood":"ecstatic"}'),
+        "…",
+        "demo",
+      );
+      expect(out.mood).toBeUndefined();
+      expect(out.degraded).toBe(false);
+    });
+
+    it("omits mood when the model doesn't emit one (back-compat with a mood-less response)", async () => {
+      const out = await classifyGuardSignals(modelReturning('{"safetyClass":"none","injection":false}'), "…", "demo");
+      expect("mood" in out).toBe(false);
+    });
+
+    it("makes only ONE model.complete call even though mood is now classified (cost/margin invariant)", async () => {
+      const model = modelReturning('{"safetyClass":"none","injection":false,"supportIntent":"general","mood":"neutral"}');
+      await classifyGuardSignals(model, "hi", "demo");
+      expect((model.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    });
+  });
 });
