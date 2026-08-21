@@ -1878,6 +1878,16 @@ export async function buildServer(opts?: {
         // doc comment) so the grid renders from `#palup-ssr` before first paint — no external-script
         // fetch + task-boundary gap for Chromium to paint the still-empty grid through. Same file
         // content either way; only this SSR-success response delivers it inline instead of deferred.
+        //
+        // CSP DEPENDENCY: this relies on `/` carrying NO Content-Security-Policy `script-src` that would
+        // block inline scripts (none is set today — this route sets no CSP header at all). If a strict
+        // CSP is ever added in front of the storefront (edge/proxy/CDN, or a future header here), this
+        // inline `<script>` gets blocked outright and the empty-grid CLS this exists to prevent comes
+        // straight back, silently — a blocked inline script is not a 4xx/5xx, so nothing here would
+        // notice. The real guard is the e2e's `data-ready="1"` assertions on the grid (they fail if
+        // hydration didn't run), NOT the `script[src="/storefront/app.js"]` `toHaveCount(0)` check, which
+        // stays green either way (that assertion only proves the tag isn't external, not that the inline
+        // script executed).
         reply.type("text/html").send(inlineStorefrontScript(ssrHtml, storefrontJs));
         return;
       }
