@@ -725,6 +725,10 @@ async function indexOneTenant(
         contentHash: p.hash,
         title: src?.title ?? "",
         ...(src?.variantId ? { variantId: src.variantId } : {}),
+        // Stable render field (like title/variantId, never price): the product's primary image URL, already
+        // https/Shopify-CDN-validated at the grounding source (shopify-grounding.ts `safeImageUrl`). Lets a
+        // retrieval-path card show a thumbnail with no second catalog fetch. Carried only when present.
+        ...(src?.imageUrl ? { imageUrl: src.imageUrl } : {}),
       },
     };
   });
@@ -1040,7 +1044,7 @@ export async function reconcileProducts(
     return {
       id: p.recordId,
       vector: vectors.get(p.recordId)!,
-      metadata: { kind: "product", productId: p.productId, contentHash: p.hash, title: src?.title ?? "", ...(src?.variantId ? { variantId: src.variantId } : {}) },
+      metadata: { kind: "product", productId: p.productId, contentHash: p.hash, title: src?.title ?? "", ...(src?.variantId ? { variantId: src.variantId } : {}), ...(src?.imageUrl ? { imageUrl: src.imageUrl } : {}) },
     };
   });
   if (records.length > 0) await deps.vector.upsert(ns, records);

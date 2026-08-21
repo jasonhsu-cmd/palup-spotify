@@ -193,7 +193,13 @@
   .recs{ align-self:stretch; max-width:100%; margin:2px 0 }
   .recs-h{ display:block; font-size:11.5px; color:var(--muted); margin:0 0 6px 2px }
   .rec-list{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px }
-  .rec{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; padding:9px 11px; border:1px solid var(--line); border-radius:12px; background:var(--panel) }
+  .rec{ display:flex; align-items:flex-start; gap:11px; padding:9px 11px; border:1px solid var(--line); border-radius:12px; background:var(--panel) }
+  /* Product thumbnail (optional): a fixed 52px square that never squeezes the text. object-fit:cover keeps
+     any aspect ratio tidy; the --agent tint + --line border give an empty/slow-loading image a calm frame. */
+  .rec-img{ flex:0 0 auto; width:52px; height:52px; border-radius:8px; object-fit:cover; background:var(--agent); border:1px solid var(--line) }
+  /* The text/controls column; reproduces the card's original wrap behaviour (title+price on one row,
+     availability / cart / add wrapping to their own full-width rows below) beside the thumbnail. */
+  .rec-body{ flex:1 1 auto; min-width:0; display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 8px }
   .rec-t{ font-size:13px; color:var(--fg); font-weight:600; flex:1 1 auto; min-width:0; overflow-wrap:anywhere }
   .rec-p{ font-size:13px; color:var(--fg); flex:0 0 auto }
   .rec-a{ flex-basis:100%; font-size:11.5px; color:var(--muted) }
@@ -889,6 +895,20 @@
   //
   // All merchant text goes in via textContent, never innerHTML: the title arrives from the merchant's own
   // catalog, which is untrusted content.
+  //
+  // Re-validate a product image URL before it becomes an <img src>. DEFENCE IN DEPTH: the grounding source
+  // already ran the SAME allowlist (widget-backend/src/shopify-grounding.ts `safeImageUrl` — https + a
+  // Shopify image-CDN host, bounded length), but a spoofed/compromised /chat response must not be able to
+  // point the browser at an arbitrary or `javascript:`/tracking host. A URL that fails yields no image and
+  // the card renders exactly as before. Mirrors the per-card cartUrl re-check directly below.
+  function safeCardImageUrl(url){
+    if (typeof url !== "string" || url.length === 0 || url.length > 2048) return null;
+    let u; try { u = new URL(url); } catch { return null; }
+    if (u.protocol !== "https:") return null;
+    const h = u.hostname.toLowerCase();
+    const ok = h === "cdn.shopify.com" || /\.shopifycdn\.net$/.test(h) || /\.myshopify\.com$/.test(h);
+    return ok ? url : null;
+  }
   function addProductCards(cards){
     if (!Array.isArray(cards) || cards.length === 0) return;   // absent, [] and malformed all render nothing
     const wrap = document.createElement("div");
@@ -907,11 +927,28 @@
       if (!c || typeof c !== "object" || typeof c.title !== "string") continue;
       const li = document.createElement("li");
       li.className = "rec"; li.setAttribute("data-testid","product-card"); li.setAttribute("role","listitem");
+      // Product thumbnail. Only when the server sent an imageUrl that re-validates (above). alt="" because
+      // the title beside it IS the accessible name — an alt of the title would double-announce; referrerpolicy
+      // keeps the widget origin off the CDN request; and a URL that passes the host check but 404s removes
+      // itself rather than leaving a broken-image icon. Absent ⇒ no image, and the card is byte-identical to
+      // before (the body below simply fills the card).
+      const imgUrl = safeCardImageUrl(c.imageUrl);
+      if (imgUrl){
+        const img = document.createElement("img");
+        img.className = "rec-img"; img.setAttribute("data-testid","product-card-image");
+        img.src = imgUrl; img.alt = ""; img.width = 52; img.height = 52;
+        img.loading = "lazy"; img.decoding = "async"; img.referrerPolicy = "no-referrer";
+        img.addEventListener("error", () => img.remove());
+        li.appendChild(img);
+      }
+      // The card's text/controls live in a body column beside the thumbnail; the title/price/availability/
+      // cart/add elements are unchanged, only their container moved from the <li> to this body.
+      const body = document.createElement("div"); body.className = "rec-body";
       const t = document.createElement("span"); t.className = "rec-t"; t.textContent = c.title;
-      li.appendChild(t);
+      body.appendChild(t);
       if (typeof c.price === "string" && c.price){
         const p = document.createElement("span"); p.className = "rec-p"; p.textContent = c.price;
-        li.appendChild(p);
+        body.appendChild(p);
       }
       // Three-state, exactly as the server sends it: true / false / key absent. Only an explicit boolean
       // produces a line, so "we don't know" stays silent rather than becoming a claim either way.
@@ -926,7 +963,7 @@
         // Neither word states or implies a stock COUNT (§8a invariant 11 forbids manufactured scarcity, and
         // no count exists in the data anyway).
         a.textContent = c.availableForSale ? "Available" : "Currently unavailable";
-        li.appendChild(a);
+        body.appendChild(a);
       }
       // C1 — a LOW-KEY cart link, only when the server sent a cartUrl (built server-side from the tenant's
       // shop domain + the card's variant; the widget never builds it, since it doesn't know the store's
@@ -941,7 +978,7 @@
         link.href = c.cartUrl;
         link.target = "_blank"; link.rel = "noopener noreferrer";
         link.textContent = "View in cart";
-        li.appendChild(link);
+        body.appendChild(link);
       }
       // Pillar 2 — in-chat checkout "Add" control. Only when the server enabled it (checkoutEnabled, learned
       // from the /chat response) AND this card carries a variant to check out with. Adds the item to the
@@ -953,8 +990,9 @@
         addBtn.type = "button"; addBtn.className = "rec-add"; addBtn.setAttribute("data-testid","product-card-add");
         addBtn.textContent = "Add to checkout";
         addBtn.addEventListener("click", () => addToCheckout(vid, ctitle));
-        li.appendChild(addBtn);
+        body.appendChild(addBtn);
       }
+      li.appendChild(body);
       list.appendChild(li); rendered++;
     }
     if (!rendered) return;

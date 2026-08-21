@@ -293,6 +293,12 @@ export interface RecommendedProductCard {
    *                set to undefined, so no renderer can read "absent" as "available".
    */
   availableForSale?: boolean;
+  /** The product's primary image URL, copied verbatim from `Product.imageUrl` — already validated
+   *  server-side to be an https Shopify-CDN URL (`shopify-grounding.ts` `safeImageUrl`). Absent when the
+   *  source published no image or the URL failed that check. The widget re-validates the host before it
+   *  ever becomes an `<img src>` (defense in depth, mirroring the cartUrl re-check), and this card carries
+   *  no other URL. Presentation only — never asserts price, stock, or any claim. */
+  imageUrl?: string;
 }
 
 /**

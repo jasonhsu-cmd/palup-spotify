@@ -122,6 +122,16 @@ describe("E3 — a cited product becomes a card built from THIS TURN's live cata
     ]);
   });
 
+  it("carries the product image URL when the source has one, and OMITS the key when it does not", async () => {
+    const img = "https://cdn.shopify.com/s/files/1/0001/serum.jpg";
+    const withImg = await brainWith(new ScriptedModelPort(citeNth(1)), groundingOf(catalogOf(2, { imageUrl: img })), { citations: true, cards: true }).decide(SALES, ASK);
+    expect(withImg.recommendedProductCards?.[0]).toEqual({ productId: "gid://shopify/Product/1", title: "Product 1", price: "$1", imageUrl: img });
+
+    // No image on the source ⇒ the key is OMITTED (never an undefined-valued imageUrl a renderer could trip on).
+    const noImg = await brainWith(new ScriptedModelPort(citeNth(1)), groundingOf(catalogOf(2)), { citations: true, cards: true }).decide(SALES, ASK);
+    expect(Object.prototype.hasOwnProperty.call(noImg.recommendedProductCards?.[0]!, "imageUrl")).toBe(false);
+  });
+
   it("cards are ordered as the reply cited them, deduplicated, and parallel to recommendedProducts", async () => {
     const model = new ScriptedModelPort((sys) => {
       const t = tagsIn(sys);
@@ -204,6 +214,25 @@ describe("E3 — a card can only ever describe a product the model was shown THI
     // hydrate-serving.test.ts), never from a live catalog re-fetch.
     expect(d.recommendedProductCards).toEqual([
       { productId: "gid://shopify/Product/17", title: "Product 17", price: "" },
+    ]);
+  });
+
+  it("the corpus image URL — a STABLE render field like title/variantId — rides onto the retrieval-path card", async () => {
+    const ctx = catalogOf(20);
+    const img = "https://cdn.shopify.com/s/files/1/0009/p17.jpg";
+    const retriever: CatalogRetrieverPort = {
+      async retrieve() {
+        return {
+          corpusProductCount: 1,
+          hits: [{ productId: "gid://shopify/Product/17", score: 0.9, metadata: { title: "Product 17", imageUrl: img } }],
+        };
+      },
+    };
+    const d = await brainWith(new ScriptedModelPort(citeNth(1)), groundingOf(ctx), {
+      citations: true, cards: true, retrieval: true, retriever, k: 1,
+    }).decide(SALES, ASK);
+    expect(d.recommendedProductCards).toEqual([
+      { productId: "gid://shopify/Product/17", title: "Product 17", price: "", imageUrl: img },
     ]);
   });
 

@@ -788,6 +788,9 @@ function buildProductCards(citedIds: readonly string[], rendered: readonly Produ
       ...(typeof p.availableForSale === "boolean" ? { availableForSale: p.availableForSale } : {}),
       // C1 — carry the opaque cart variant id (neutral) so the widget can build a one-tap cart link.
       ...(p.variantId ? { variantId: p.variantId } : {}),
+      // Carry the primary image URL (already https/Shopify-CDN-validated at the grounding source); the
+      // widget re-validates the host before rendering it. Absent when the source published no image.
+      ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
     });
   }
   return cards;
@@ -1129,7 +1132,7 @@ export function createBrain(
     const seen = new Set<string>();
     for (const hit of result.hits) {
       if (seen.has(hit.productId)) continue;
-      const md = (hit.metadata ?? {}) as { title?: unknown; variantId?: unknown };
+      const md = (hit.metadata ?? {}) as { title?: unknown; variantId?: unknown; imageUrl?: unknown };
       const title = typeof md.title === "string" ? md.title : "";
       if (!title) continue; // a row with no render title is unusable — drop it rather than render blank
       seen.add(hit.productId);
@@ -1139,6 +1142,10 @@ export function createBrain(
         description: "", // corpus carries no description for render; price filled by hydrate below
         price: "",
         ...(typeof md.variantId === "string" && md.variantId ? { variantId: md.variantId } : {}),
+        // The corpus carries the product image as a STABLE render field (like title/variantId — never
+        // price), so a retrieval-path card can show a thumbnail without a second catalog fetch. Already
+        // https/Shopify-CDN-validated at index time; the widget re-validates the host before rendering.
+        ...(typeof md.imageUrl === "string" && md.imageUrl ? { imageUrl: md.imageUrl } : {}),
       });
       if (rendered.length >= k) break; // the port's k is a request, not a promise — enforce it here too
     }

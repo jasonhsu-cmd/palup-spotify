@@ -51,11 +51,11 @@ describe("resolveTheme / resolveThemeConfig", () => {
     expect(withName.brand).toBe(noName.brand); // colour is unchanged (still the curated terracotta)
   });
 
-  it("falls back to the default indigo config + the grounding brandName for an unknown tenant", () => {
+  it("falls back to the default evergreen config + the grounding brandName for an unknown tenant", () => {
     expect(resolveThemeConfig("no-such-tenant")).toBe(DEFAULT_THEME);
     const t = resolveTheme("no-such-tenant", "Northwind Coffee");
     expect(t.brandName).toBe("Northwind Coffee");
-    expect(t.brand).toBe("#4f46e5");
+    expect(t.brand).toBe("#0c4a3c");
   });
 
   it("does not carry a logoUrl unless it is an https Shopify-CDN URL", () => {
