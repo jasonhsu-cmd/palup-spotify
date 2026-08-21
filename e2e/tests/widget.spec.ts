@@ -177,6 +177,17 @@ test("cold panel centers the greeting instead of leaving a large empty gap", asy
   expect(gapRatio).toBeLessThan(0.4);
 });
 
+// Workstream C1 task 3 — every control a shopper must read to decide or act renders at least 14px.
+test("decision-bearing panel controls are at least 14px", async ({ page }) => {
+  await page.goto("/embed/panel?shop=palup-skincare-jason.myshopify.com");
+  // opener chips are on the cold panel
+  const chip = page.getByTestId("opener-chip").first();
+  if (await chip.count()) {
+    const size = await chip.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+    expect(size).toBeGreaterThanOrEqual(14);
+  }
+});
+
 // ADR-0018 task 10 — the shopper sign-in control is GESTURE-triggered: a click synchronously opens the
 // OAuth login. (CAA is off in mock mode, so the popup lands on a 404 — we assert the URL, not the page.)
 // AC3: this used to require a `#gear` click first, because the shopper's own sign-in control lived inside

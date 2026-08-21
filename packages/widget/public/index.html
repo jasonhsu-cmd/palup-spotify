@@ -163,16 +163,16 @@
      mirrors this file's own existing token set — no new colors/spacing introduced). */
   .consent{ align-self:stretch; max-width:100%; padding:12px 13px; margin:2px 0; border:1px solid var(--line); border-radius:12px; background:var(--panel) }
   .consent b{ display:block; margin-bottom:6px; font-size:13.5px }
-  .consent [data-testid="consent-body"]{ color:var(--muted); font-size:12.5px; margin-bottom:10px }
+  .consent [data-testid="consent-body"]{ color:var(--muted); font-size:14px; margin-bottom:10px }
   .consent-actions{ display:flex; gap:8px; justify-content:flex-end }
-  .consent-actions button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
+  .consent-actions button{ font:inherit; font-size:14px; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
   .consent-actions button:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
   .consent-actions button[data-testid="consent-primary"]{ background:var(--brand); border-color:var(--brand); color:var(--brand-ink); font-weight:600 }
   /* Pillar 3 (opener) — tappable quick-reply chips. Same proven-AA palette as the consent-action pills
      (border --line / bg --panel / text --fg), just a wrapping pill row. Ignorable by design; NOT aggressive
      (no scarcity/urgency styling), and the label text is code-owned by the server, never model output. */
   .opener-chips{ display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 2px }
-  .opener-chips button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:999px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
+  .opener-chips button{ font:inherit; font-size:14px; padding:6px 12px; border-radius:999px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
   .opener-chips button:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
   /* Collapsed disclosure (see ensureManagePanel). The summary is ONE quiet line; the toggles/forget/
      helper are revealed only when the shopper opens it — so a first-turn shopper isn't met with the
@@ -185,7 +185,7 @@
   .manage-memory[open] > summary::before{ transform:rotate(90deg) }
   .manage-memory > summary:focus-visible{ outline:2px solid var(--brand-text); outline-offset:2px; border-radius:6px }
   .manage-memory > :not(summary){ margin-top:7px }
-  .mm-row{ display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--fg); cursor:pointer }
+  .mm-row{ display:flex; align-items:center; gap:6px; font-size:14px; color:var(--fg); cursor:pointer }
   .manage-memory button[data-testid="manage-memory-forget"]{ align-self:flex-start; font:inherit; font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand-text); cursor:pointer }
   .mm-helper{ font-size:11.5px; color:var(--muted) }
   .mm-confirm{ font-size:12px; color:var(--fg) }
