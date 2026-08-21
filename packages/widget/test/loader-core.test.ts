@@ -112,6 +112,21 @@ describe("initWidgetLoader", () => {
     expect(launcher.getAttribute("aria-expanded")).toBe("false");
   });
 
+  // a11y hardening — on a small viewport the panel goes full-screen (see the media-query test
+  // below), so it visually covers the host page; the host content behind it must be `inert`
+  // while open so a screen-reader/keyboard user can't tab into content hidden under the panel.
+  it("inerts host content while the mobile panel is open", () => {
+    (window as any).matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });
+    const sibling = document.createElement("div");
+    document.body.appendChild(sibling);
+    const c = cfg();
+    const api = initWidgetLoader(c)!;
+    api.open();
+    expect(sibling.hasAttribute("inert")).toBe(true);
+    api.close();
+    expect(sibling.hasAttribute("inert")).toBe(false);
+  });
+
   it("mounts the panel iframe only on open, pointing at origin/embed/panel?shop=", () => {
     const c = cfg();
     const api = initWidgetLoader(c)!;

@@ -190,6 +190,38 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       iframe.contentWindow.postMessage(Object.assign({ type: "palup:context" }, readHostContext()), origin);
     }
 
+    // a11y: on a small viewport the panel goes full-screen (see panelStyleSheet's media query),
+    // visually covering the host page — so while it's open, every OTHER direct child of
+    // document.body must be `inert` (unreachable by tab/AT) or a keyboard/screen-reader user
+    // could still reach content that's hidden underneath the panel. No-op on desktop/tablet,
+    // where the panel is a floating card and the host page stays fully usable.
+    //
+    // Mount derivation: `host` (this loader's own element, passed in via cfg.host) is what must
+    // stay OUT of the inert set — but a real embed may nest `host` a few levels under <body>, so
+    // walk up from it to find the ancestor that IS a direct child of document.body, and exclude
+    // that ancestor (not `host` itself, which may not be a body child). Falls back to `host`
+    // when it isn't under document.body at all (e.g. a detached host in a test).
+    function findBodyLevelMount(): Element {
+      let el: Element = host;
+      while (el.parentElement && el.parentElement !== document.body) {
+        el = el.parentElement;
+      }
+      return el;
+    }
+    function setHostInert(on: boolean): void {
+      try {
+        if (!window.matchMedia || !window.matchMedia("(max-width:480px)").matches) return;
+        const mount = findBodyLevelMount();
+        for (const child of Array.from(document.body.children)) {
+          if (child === mount) continue;
+          if (on) child.setAttribute("inert", "");
+          else child.removeAttribute("inert");
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+
     function open(): void {
       if (destroyed) return;
       const el = ensureIframe();
@@ -203,6 +235,7 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       // `palup:ready`; the ready handler flushes a pending open. Re-opens after readiness post at once.
       if (panelReady) el.contentWindow?.postMessage({ type: "palup:open" }, origin);
       else openPending = true;
+      setHostInert(true);
     }
 
     function close(): void {
@@ -216,6 +249,7 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       } catch {
         /* focus is best-effort */
       }
+      setHostInert(false);
     }
 
     function onMessage(e: MessageEvent): void {
