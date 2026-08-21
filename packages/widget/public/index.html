@@ -96,6 +96,13 @@
      backdrop of EVERY message bubble and of .handoff, so real contrast failures inside the log came
      back as "incomplete" instead of as violations. Declared as the flat colour it always was. */
   #messages{ flex:1; overflow-y:auto; padding:16px 14px; display:flex; flex-direction:column; gap:10px; background:var(--panel); }
+  /* Cold state: only the greeting (+ opener chips), no real shopper turn yet — center it instead of
+     leaving it stranded at the top with a large empty gap above the input. `flex:0 1 auto` + auto
+     top/bottom margins shrink the log to its own content and center that (now-small) box in the panel's
+     remaining vertical space — the standard flex auto-margin centering technique, so the log itself
+     never carries a large trailing gap. Removed the moment a real shopper turn lands (see add()); never
+     removed for the greeting or opener chips themselves. */
+  #messages.cold{ flex:0 1 auto; margin:auto 0; justify-content:center; }
   /* The log scrolls, so it must be reachable and scrollable by keyboard (SC 2.1.1) — hence the
      tabindex="0" + aria-label on the element. Inset outline: the panel clips overflow. */
   #messages:focus-visible{ outline:2px solid var(--brand-text); outline-offset:-2px }
@@ -156,28 +163,29 @@
      mirrors this file's own existing token set — no new colors/spacing introduced). */
   .consent{ align-self:stretch; max-width:100%; padding:12px 13px; margin:2px 0; border:1px solid var(--line); border-radius:12px; background:var(--panel) }
   .consent b{ display:block; margin-bottom:6px; font-size:13.5px }
-  .consent [data-testid="consent-body"]{ color:var(--muted); font-size:12.5px; margin-bottom:10px }
+  .consent [data-testid="consent-body"]{ color:var(--muted); font-size:14px; margin-bottom:10px }
   .consent-actions{ display:flex; gap:8px; justify-content:flex-end }
-  .consent-actions button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
+  .consent-actions button{ font:inherit; font-size:14px; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
   .consent-actions button:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
   .consent-actions button[data-testid="consent-primary"]{ background:var(--brand); border-color:var(--brand); color:var(--brand-ink); font-weight:600 }
   /* Pillar 3 (opener) — tappable quick-reply chips. Same proven-AA palette as the consent-action pills
      (border --line / bg --panel / text --fg), just a wrapping pill row. Ignorable by design; NOT aggressive
      (no scarcity/urgency styling), and the label text is code-owned by the server, never model output. */
   .opener-chips{ display:flex; flex-wrap:wrap; gap:8px; margin:6px 0 2px }
-  .opener-chips button{ font:inherit; font-size:12.5px; padding:6px 12px; border-radius:999px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
+  .opener-chips button{ font:inherit; font-size:14px; padding:6px 12px; border-radius:999px; border:1px solid var(--line); background:var(--panel); color:var(--fg); cursor:pointer }
   .opener-chips button:focus-visible{ outline:2px solid var(--brand-text); outline-offset:1px }
   /* Collapsed disclosure (see ensureManagePanel). The summary is ONE quiet line; the toggles/forget/
      helper are revealed only when the shopper opens it — so a first-turn shopper isn't met with the
      whole data-rights dashboard spread open above the chat. */
   .manage-memory{ width:100%; border-top:1px solid var(--line); margin-top:4px; padding-top:8px }
-  .manage-memory > summary{ list-style:none; cursor:pointer; font-size:12.5px; font-weight:600; color:var(--brand-text); display:flex; align-items:center; gap:7px; padding:2px 0; user-select:none }
+  .manage-memory > summary{ list-style:none; cursor:pointer; font-size:14px; font-weight:600; color:var(--brand-text); display:flex; align-items:center; gap:8px; padding:6px 0; user-select:none }
   .manage-memory > summary::-webkit-details-marker{ display:none }
-  .manage-memory > summary::before{ content:"\25B8"; font-size:10px; line-height:1; color:var(--muted); transition:transform .15s ease }
+  .manage-memory > summary:hover{ text-decoration:underline; text-underline-offset:2px }
+  .manage-memory > summary::before{ content:"\25B8"; font-size:12px; line-height:1; color:var(--brand-text); transition:transform .15s ease }
   .manage-memory[open] > summary::before{ transform:rotate(90deg) }
   .manage-memory > summary:focus-visible{ outline:2px solid var(--brand-text); outline-offset:2px; border-radius:6px }
   .manage-memory > :not(summary){ margin-top:7px }
-  .mm-row{ display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--fg); cursor:pointer }
+  .mm-row{ display:flex; align-items:center; gap:6px; font-size:14px; color:var(--fg); cursor:pointer }
   .manage-memory button[data-testid="manage-memory-forget"]{ align-self:flex-start; font:inherit; font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--brand-text); cursor:pointer }
   .mm-helper{ font-size:11.5px; color:var(--muted) }
   .mm-confirm{ font-size:12px; color:var(--fg) }
@@ -850,6 +858,9 @@
   }
 
   function add(text, who, decision){
+    // A real shopper turn ends the cold state (see #messages.cold) — but never for the greeting or
+    // opener chips, which also route through here as "agent" turns.
+    if (who === "user") msgs.classList.remove("cold");
     const el = document.createElement("div");
     el.className = "msg " + who + (decision && decision.mode === "safety" ? " safety" : "");
     if (who === "agent") el.setAttribute("data-testid", "agent-msg");
@@ -1350,6 +1361,7 @@
     for (const t of transcript){ add(t.content, t.role === "agent" ? "agent" : "user"); }
   } else {
     staticGreetingEl = add(BRAND_NAME ? ("Hi! I'm " + BRAND_NAME + "'s assistant — ask me about a product or your order.") : "Hi! I'm your shopping assistant — ask me about a product or your order.", "agent");
+    msgs.classList.add("cold"); // fresh session: only the greeting so far — center it (see #messages.cold)
   }
   // Stamp the sessionId now, so a reload OR a closed tab before the first turn still continues this
   // conversation rather than opening a second one the server can't connect to the first.

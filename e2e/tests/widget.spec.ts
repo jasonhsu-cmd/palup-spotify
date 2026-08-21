@@ -163,6 +163,94 @@ test("the surface carries its AI + PalUp disclosure on load", async ({ page }) =
   await expect(powered).toContainText("Powered by PalUp");
 });
 
+// Workstream C1 task 1 — cold-state panel: a fresh session (only the static greeting, no shopper turn
+// yet) should CENTER the greeting in the panel's available vertical band, not just avoid a trailing
+// gap inside #messages' own (now content-shrunk) box. Measuring only inside #messages is NOT enough:
+// if the auto-margin centering is removed, #messages (and everything below it — #tools/form/.powered,
+// none of which grow) simply packs against the header at the TOP of the panel, leaving the real dead
+// space below .powered instead — #messages' own internal gap stays tiny either way, so that alone
+// can't tell centered apart from top-anchored-and-broken. Verified: reproduced this exact failure mode
+// locally by dropping the `margin:auto 0` from `#messages.cold` — #tools/form/.powered all shifted up
+// with #messages, so a header->#tools band measurement passed anyway; only anchoring the expected
+// footer position to the PANEL's bottom (independent of where the footer actually drifted to) catches it.
+test("cold panel centers the greeting instead of leaving a large empty gap", async ({ page }) => {
+  await page.goto("/embed/panel?shop=palup-skincare-jason.myshopify.com");
+  const messages = page.locator("#messages");
+  await expect(messages).toHaveClass(/cold/);
+  const gaps = await page.evaluate(() => {
+    const widget = document.querySelector("#widget") as HTMLElement;
+    const header = document.querySelector(".wh") as HTMLElement;
+    const tools = document.querySelector("#tools") as HTMLElement;
+    const form = document.querySelector("form") as HTMLElement;
+    const powered = document.querySelector(".powered") as HTMLElement;
+    const m = document.querySelector("#messages") as HTMLElement;
+    const last = m.lastElementChild as HTMLElement;
+    const widgetRect = widget.getBoundingClientRect();
+    const headerRect = header.getBoundingClientRect();
+    const lastRect = last.getBoundingClientRect();
+    // The footer's own height never changes with the centering bug — only its POSITION does (it
+    // drifts up with #messages when auto-margin centering is broken). So derive where the footer
+    // SHOULD start (anchored to the panel's true bottom) from its intrinsic height, rather than
+    // trusting its live position, which is exactly what a broken layout would corrupt.
+    const footerHeight = tools.getBoundingClientRect().height + form.getBoundingClientRect().height + powered.getBoundingClientRect().height;
+    const expectedFooterTop = widgetRect.bottom - footerHeight;
+    return {
+      spaceAbove: lastRect.top - headerRect.bottom,
+      spaceBelow: expectedFooterTop - lastRect.bottom,
+    };
+  });
+  // roughly equal space above and below the greeting between the header and the panel's true bottom
+  // edge means it is actually vertically centered, not stranded flush against either edge.
+  expect(Math.abs(gaps.spaceAbove - gaps.spaceBelow)).toBeLessThan(40);
+});
+
+// Workstream C1 task 3 — every control a shopper must read to decide or act renders at least 14px.
+// Opener chips never render under this suite's default config (GREETING_PROACTIVE is off), so this
+// drives a real memory-ON turn instead (mirroring the PR-11b "memory ON" tests' /widget/guest + /chat
+// mocking below) to surface two of the four rules that genuinely render: the consent-prompt's primary
+// action button, and a "What I remember" toggle row (.mm-row).
+test("decision-bearing panel controls are at least 14px", async ({ page }) => {
+  const guest = mockGuestToken(page);
+  await guest.route();
+  await page.route("**/chat", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        reply: "hi there",
+        mode: "sales",
+        pitch: "none",
+        escalate: false,
+        outbound: false,
+        flags: [],
+        servedBy: "prop-0",
+        memoryEnabled: true,
+        consentMode: "opt_out",
+      }),
+    });
+  });
+
+  await page.goto("/widget");
+  await page.getByTestId("chat-input").fill("hello");
+  await page.getByTestId("send").click();
+
+  const prompt = page.locator('[data-testid="consent-prompt"]');
+  await expect(prompt).toBeVisible();
+  const consentPrimary = prompt.locator('[data-testid="consent-primary"]');
+  await expect(consentPrimary).toBeVisible();
+  const consentSize = await consentPrimary.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(consentSize).toBeGreaterThanOrEqual(14);
+
+  await prompt.locator('[data-testid="consent-secondary"]').click(); // "Don't remember me" — proceeds past the prompt
+  await expect(prompt).toHaveCount(0);
+
+  await page.getByTestId("manage-memory-heading").click(); // expand the disclosure to reach the toggle rows
+  const toggleRow = page.locator(".mm-row").first();
+  await expect(toggleRow).toBeVisible();
+  const rowSize = await toggleRow.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(rowSize).toBeGreaterThanOrEqual(14);
+});
+
 // ADR-0018 task 10 — the shopper sign-in control is GESTURE-triggered: a click synchronously opens the
 // OAuth login. (CAA is off in mock mode, so the popup lands on a 404 — we assert the URL, not the page.)
 // AC3: this used to require a `#gear` click first, because the shopper's own sign-in control lived inside
