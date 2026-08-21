@@ -190,6 +190,57 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       iframe.contentWindow.postMessage(Object.assign({ type: "palup:context" }, readHostContext()), origin);
     }
 
+    // a11y: on a small viewport the panel goes full-screen (see panelStyleSheet's media query),
+    // visually covering the host page — so while it's open, every OTHER direct child of
+    // document.body must be `inert` (unreachable by tab/AT) or a keyboard/screen-reader user
+    // could still reach content that's hidden underneath the panel. No-op on desktop/tablet,
+    // where the panel is a floating card and the host page stays fully usable.
+    //
+    // Mount derivation: `host` (this loader's own element, passed in via cfg.host) is what must
+    // stay OUT of the inert set — but a real embed may nest `host` a few levels under <body>, so
+    // walk up from it to find the ancestor that IS a direct child of document.body, and exclude
+    // that ancestor (not `host` itself, which may not be a body child). Falls back to `host`
+    // when it isn't under document.body at all (e.g. a detached host in a test).
+    function findBodyLevelMount(): Element {
+      let el: Element = host;
+      while (el.parentElement && el.parentElement !== document.body) {
+        el = el.parentElement;
+      }
+      return el;
+    }
+    // Tracks whether setHostInert(true) actually inerted the siblings, so the CLEAR path can
+    // always undo it — regardless of what matchMedia reports at close() time. Without this, a
+    // viewport change WHILE the panel is open (resize / orientation change) would make close()
+    // re-check matchMedia, see "not mobile" now, and skip clearing `inert` — stranding every
+    // body-level sibling `inert` (and therefore unclickable) until a page reload.
+    let hostInerted = false;
+    function setHostInert(on: boolean): void {
+      try {
+        if (on) {
+          // Mobile-only to inert: on desktop/tablet the panel is a floating card, so the host
+          // page stays fully usable and must NOT be touched.
+          if (!window.matchMedia || !window.matchMedia("(max-width:480px)").matches) return;
+          const mount = findBodyLevelMount();
+          for (const child of Array.from(document.body.children)) {
+            if (child === mount) continue;
+            child.setAttribute("inert", "");
+          }
+          hostInerted = true;
+        } else if (hostInerted) {
+          // Unconditional clear: undo exactly what the matching setHostInert(true) set, even if
+          // the CURRENT media query no longer matches mobile.
+          const mount = findBodyLevelMount();
+          for (const child of Array.from(document.body.children)) {
+            if (child === mount) continue;
+            child.removeAttribute("inert");
+          }
+          hostInerted = false;
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+
     function open(): void {
       if (destroyed) return;
       const el = ensureIframe();
@@ -203,11 +254,21 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       // `palup:ready`; the ready handler flushes a pending open. Re-opens after readiness post at once.
       if (panelReady) el.contentWindow?.postMessage({ type: "palup:open" }, origin);
       else openPending = true;
+      setHostInert(true);
     }
 
     function close(): void {
       if (iframe) iframe.style.display = "none";
       launcher.setAttribute("aria-expanded", "false");
+      // a11y: closing the panel (minimize, Escape, or palup:close) must not drop focus onto
+      // <body> — return it to the control that opened the panel. Best-effort: focus() can
+      // throw in exotic hosts (e.g. a detached launcher), never let that break close().
+      try {
+        launcher.focus();
+      } catch {
+        /* focus is best-effort */
+      }
+      setHostInert(false);
     }
 
     function onMessage(e: MessageEvent): void {

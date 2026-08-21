@@ -97,6 +97,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 32px 24px 96px; }
 .card .thumb .ph { color: var(--muted); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
 .card .body { padding: 16px 16px 18px; display: flex; flex-direction: column; gap: 5px; }
 .card .title { font-weight: 600; font-size: 15px; line-height: 1.35; }
+.card h3.title { margin: 0; }
 .card .price { color: var(--muted); font-size: 14px; }
 .grid-more { display: flex; justify-content: center; margin-top: 32px; }
 

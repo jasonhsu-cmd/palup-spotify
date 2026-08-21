@@ -179,7 +179,7 @@
     });
     a.appendChild(thumb(p.imageUrl, p.title, null, eager));
     var body = el("div", "body");
-    body.appendChild(el("span", "title", p.title));
+    body.appendChild(el("h3", "title", p.title));
     body.appendChild(el("span", "price", p.price || ""));
     a.appendChild(body);
     return a;
@@ -392,7 +392,29 @@
     }
     return url;
   }
-  function renderCart() {
+  // Focus lands on the equivalent control of the same item after a cart re-render (renderCart() rebuilds the
+  // whole list every time, which destroys whatever DOM node currently held focus). `focusHint` is
+  // { productId, kind: "dec"|"inc"|"remove" } — passed by the control that triggered the rebuild — so focus
+  // can be restored onto the SAME control for the SAME item, falling back to a remaining row's Remove
+  // control, then to the cart heading, rather than silently dropping to <body>.
+  function restoreCartFocus(mount, focusHint) {
+    if (!focusHint) return;
+    var sel = '[data-pid="' + CSS.escape(focusHint.productId) + '"] [data-role="' + focusHint.kind + '"]';
+    var target =
+      mount.querySelector(sel) ||
+      mount.querySelector('.cart-row [data-role="remove"]') ||
+      document.querySelector("h1");
+    if (!target) return;
+    // Natively-focusable fallback (a "remove" <button>) needs nothing extra. The <h1> fallback is not
+    // natively focusable — give it a programmatic-only tabindex so .focus() actually lands there, without
+    // adding it to the normal Tab order.
+    var NATIVELY_FOCUSABLE = { BUTTON: 1, A: 1, INPUT: 1, SELECT: 1, TEXTAREA: 1 };
+    if (!NATIVELY_FOCUSABLE[target.tagName] && !target.hasAttribute("tabindex")) {
+      target.setAttribute("tabindex", "-1");
+    }
+    if (target.focus) target.focus();
+  }
+  function renderCart(focusHint) {
     var mount = document.getElementById("cart");
     if (!mount) return;
     mount.textContent = "";
@@ -406,12 +428,14 @@
       mount.appendChild(browse);
       mount.setAttribute("data-ready", "empty");
       mount.setAttribute("aria-busy", "false");
+      restoreCartFocus(mount, focusHint);
       return;
     }
     var list = el("ul", "cart-list");
     list.setAttribute("data-testid", "cart-list");
     items.forEach(function (i) {
       var li = el("li", "cart-row");
+      li.setAttribute("data-pid", i.productId);
       li.appendChild(thumb(i.imageUrl, i.title));
       var mid = el("div");
       mid.appendChild(el("div", "title", i.title));
@@ -420,17 +444,19 @@
       var dec = el("button", null, "−");
       dec.type = "button";
       dec.setAttribute("aria-label", "Decrease quantity of " + i.title);
+      dec.setAttribute("data-role", "dec");
       dec.addEventListener("click", function () {
         setQty(i.productId, -1);
-        renderCart();
+        renderCart({ productId: i.productId, kind: "dec" });
       });
       var count = el("span", null, String(i.quantity));
       var inc = el("button", null, "+");
       inc.type = "button";
       inc.setAttribute("aria-label", "Increase quantity of " + i.title);
+      inc.setAttribute("data-role", "inc");
       inc.addEventListener("click", function () {
         setQty(i.productId, 1);
-        renderCart();
+        renderCart({ productId: i.productId, kind: "inc" });
       });
       qty.appendChild(dec);
       qty.appendChild(count);
@@ -440,9 +466,10 @@
       var rm = el("button", "remove", "Remove");
       rm.type = "button";
       rm.setAttribute("aria-label", "Remove " + i.title);
+      rm.setAttribute("data-role", "remove");
       rm.addEventListener("click", function () {
         removeItem(i.productId);
-        renderCart();
+        renderCart({ productId: i.productId, kind: "remove" });
       });
       li.appendChild(rm);
       list.appendChild(li);
@@ -479,6 +506,7 @@
     mount.appendChild(foot);
     mount.setAttribute("data-ready", "1");
     mount.setAttribute("aria-busy", "false");
+    restoreCartFocus(mount, focusHint);
   }
 
   function renderCartCount() {

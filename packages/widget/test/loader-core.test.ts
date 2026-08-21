@@ -97,6 +97,57 @@ describe("initWidgetLoader", () => {
     expect(launcher.getAttribute("aria-expanded")).toBe("false");
   });
 
+  // a11y hardening — closing the panel (minimize, Escape via palup:close, or the loader's own
+  // close path) must return keyboard/AT focus to the control that opened it, so focus never
+  // drops onto <body> and gets lost.
+  it("returns focus to the launcher when the panel closes", () => {
+    const c = cfg();
+    const api = initWidgetLoader(c);
+    const root = (c.host as any).__palupRoot as ShadowRoot;
+    const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
+    const focusSpy = vi.spyOn(launcher, "focus");
+    api!.open();
+    api!.close();
+    expect(focusSpy).toHaveBeenCalled();
+    expect(launcher.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  // a11y hardening — on a small viewport the panel goes full-screen (see the media-query test
+  // below), so it visually covers the host page; the host content behind it must be `inert`
+  // while open so a screen-reader/keyboard user can't tab into content hidden under the panel.
+  it("inerts host content while the mobile panel is open", () => {
+    (window as any).matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });
+    const sibling = document.createElement("div");
+    document.body.appendChild(sibling);
+    const c = cfg();
+    const api = initWidgetLoader(c)!;
+    api.open();
+    expect(sibling.hasAttribute("inert")).toBe(true);
+    api.close();
+    expect(sibling.hasAttribute("inert")).toBe(false);
+  });
+
+  // Regression: the viewport can cross the 480px boundary WHILE the panel is open (resize,
+  // orientation change). If close() re-checked matchMedia and it now reports desktop, the
+  // guard would short-circuit BEFORE clearing `inert` — stranding every body-level sibling
+  // `inert` (and therefore un-clickable) until a page reload. close() must always clear
+  // whatever open() actually set, regardless of the CURRENT media query.
+  it("clears inert on close even if the viewport crossed above 480px while the panel was open", () => {
+    (window as any).matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });
+    const sibling = document.createElement("div");
+    document.body.appendChild(sibling);
+    const c = cfg();
+    const api = initWidgetLoader(c)!;
+    api.open();
+    expect(sibling.hasAttribute("inert")).toBe(true);
+
+    // simulate a resize/orientation-change to desktop width while the panel stays open
+    (window as any).matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+    api.close();
+
+    expect(sibling.hasAttribute("inert")).toBe(false);
+  });
+
   it("mounts the panel iframe only on open, pointing at origin/embed/panel?shop=", () => {
     const c = cfg();
     const api = initWidgetLoader(c)!;
