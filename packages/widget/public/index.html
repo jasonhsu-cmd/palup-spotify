@@ -178,9 +178,10 @@
      helper are revealed only when the shopper opens it — so a first-turn shopper isn't met with the
      whole data-rights dashboard spread open above the chat. */
   .manage-memory{ width:100%; border-top:1px solid var(--line); margin-top:4px; padding-top:8px }
-  .manage-memory > summary{ list-style:none; cursor:pointer; font-size:12.5px; font-weight:600; color:var(--brand-text); display:flex; align-items:center; gap:7px; padding:2px 0; user-select:none }
+  .manage-memory > summary{ list-style:none; cursor:pointer; font-size:14px; font-weight:600; color:var(--brand-text); display:flex; align-items:center; gap:8px; padding:6px 0; user-select:none }
   .manage-memory > summary::-webkit-details-marker{ display:none }
-  .manage-memory > summary::before{ content:"\25B8"; font-size:10px; line-height:1; color:var(--muted); transition:transform .15s ease }
+  .manage-memory > summary:hover{ text-decoration:underline; text-underline-offset:2px }
+  .manage-memory > summary::before{ content:"\25B8"; font-size:12px; line-height:1; color:var(--brand-text); transition:transform .15s ease }
   .manage-memory[open] > summary::before{ transform:rotate(90deg) }
   .manage-memory > summary:focus-visible{ outline:2px solid var(--brand-text); outline-offset:2px; border-radius:6px }
   .manage-memory > :not(summary){ margin-top:7px }
