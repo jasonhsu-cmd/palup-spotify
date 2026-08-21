@@ -65,6 +65,7 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.02em; }
 
 .skip { position: absolute; left: -999px; top: 0; background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 0 0 10px 0; z-index: 100; }
 .skip:focus { left: 0; }
+.skip:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
 
 /* Header / nav */
 .site-header { border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: saturate(1.1) blur(8px); position: sticky; top: 0; z-index: 20; }
@@ -146,6 +147,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 32px 24px 96px; }
 /* Footer */
 .site-footer { border-top: 1px solid var(--line); background: var(--bg-soft); }
 .site-footer .inner { max-width: var(--maxw); margin: 0 auto; padding: 32px 24px 48px; color: var(--muted); font-size: 13px; display: grid; gap: 10px; }
+.site-footer .inner p { max-width: 70ch; }
 .site-footer h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0; }
 .assistant-note { color: var(--muted); font-size: 12.5px; line-height: 1.6; }
 

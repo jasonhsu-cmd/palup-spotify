@@ -86,4 +86,11 @@ test.describe("sample storefront — head hygiene", () => {
     await expect(page.locator('head link[rel="icon"]')).toHaveCount(1);
     await expect(page.locator('script[src="/storefront/app.js"]')).toHaveAttribute("defer", "");
   });
+
+  test("skip link has a themed focus ring", async ({ page }) => {
+    await page.goto("/");
+    await page.keyboard.press("Tab"); // focuses .skip
+    const outline = await page.locator(".skip").evaluate((el) => getComputedStyle(el).outlineStyle);
+    expect(outline).not.toBe("auto"); // was the browser default; now a solid themed ring
+  });
 });
