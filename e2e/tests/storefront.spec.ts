@@ -110,6 +110,28 @@ test.describe("sample storefront — product grid headings (Task 4, mocked catal
     const results = await new AxeBuilder({ page }).withTags(WCAG22AA).analyze();
     expect(results.violations).toEqual([]);
   });
+
+  test("heading order has no skipped level: h1 (brand) -> h2 (Products, sr-only) -> h3 (each card title)", async ({
+    page,
+  }) => {
+    // A grid of h3 titles with no h2 section heading above it skips a level for screen-reader heading
+    // navigation — this is the defect T4 introduced and this test guards against. The "Products" h2 is
+    // visually hidden (.sr-only) but still in the accessibility tree, still in the static (SSR'd) markup.
+    await page.route("**/storefront/catalog**", (route) => route.fulfill({ json: MOCK_CATALOG }));
+    await page.goto("/");
+    await expect(page.locator("#grid")).toHaveAttribute("data-ready", "1");
+    const productsHeading = page.getByRole("heading", { level: 2, name: "Products" });
+    await expect(productsHeading).toBeAttached();
+    // genuine DOM-order assertion (not just presence): the h2 must precede the first grid h3 in source order.
+    const h2PrecedesFirstCardHeading = await page.evaluate(() => {
+      const h2 = Array.from(document.querySelectorAll("h2")).find((h) => h.textContent === "Products");
+      const h3 = document.querySelector("#grid h3.title");
+      if (!h2 || !h3) return false;
+      // DOCUMENT_POSITION_FOLLOWING (4) set ⇒ h3 comes AFTER h2 in the document.
+      return Boolean(h2.compareDocumentPosition(h3) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    expect(h2PrecedesFirstCardHeading).toBe(true);
+  });
 });
 
 /**
