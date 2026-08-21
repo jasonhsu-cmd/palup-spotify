@@ -97,6 +97,21 @@ describe("initWidgetLoader", () => {
     expect(launcher.getAttribute("aria-expanded")).toBe("false");
   });
 
+  // a11y hardening — closing the panel (minimize, Escape via palup:close, or the loader's own
+  // close path) must return keyboard/AT focus to the control that opened it, so focus never
+  // drops onto <body> and gets lost.
+  it("returns focus to the launcher when the panel closes", () => {
+    const c = cfg();
+    const api = initWidgetLoader(c);
+    const root = (c.host as any).__palupRoot as ShadowRoot;
+    const launcher = root.querySelector('button[aria-label="Ask the expert"]') as HTMLButtonElement;
+    const focusSpy = vi.spyOn(launcher, "focus");
+    api!.open();
+    api!.close();
+    expect(focusSpy).toHaveBeenCalled();
+    expect(launcher.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("mounts the panel iframe only on open, pointing at origin/embed/panel?shop=", () => {
     const c = cfg();
     const api = initWidgetLoader(c)!;

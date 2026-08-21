@@ -208,6 +208,14 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
     function close(): void {
       if (iframe) iframe.style.display = "none";
       launcher.setAttribute("aria-expanded", "false");
+      // a11y: closing the panel (minimize, Escape, or palup:close) must not drop focus onto
+      // <body> — return it to the control that opened the panel. Best-effort: focus() can
+      // throw in exotic hosts (e.g. a detached launcher), never let that break close().
+      try {
+        launcher.focus();
+      } catch {
+        /* focus is best-effort */
+      }
     }
 
     function onMessage(e: MessageEvent): void {
