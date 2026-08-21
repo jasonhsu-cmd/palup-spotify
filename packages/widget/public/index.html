@@ -96,6 +96,13 @@
      backdrop of EVERY message bubble and of .handoff, so real contrast failures inside the log came
      back as "incomplete" instead of as violations. Declared as the flat colour it always was. */
   #messages{ flex:1; overflow-y:auto; padding:16px 14px; display:flex; flex-direction:column; gap:10px; background:var(--panel); }
+  /* Cold state: only the greeting (+ opener chips), no real shopper turn yet — center it instead of
+     leaving it stranded at the top with a large empty gap above the input. `flex:0 1 auto` + auto
+     top/bottom margins shrink the log to its own content and center that (now-small) box in the panel's
+     remaining vertical space — the standard flex auto-margin centering technique, so the log itself
+     never carries a large trailing gap. Removed the moment a real shopper turn lands (see add()); never
+     removed for the greeting or opener chips themselves. */
+  #messages.cold{ flex:0 1 auto; margin:auto 0; justify-content:center; }
   /* The log scrolls, so it must be reachable and scrollable by keyboard (SC 2.1.1) — hence the
      tabindex="0" + aria-label on the element. Inset outline: the panel clips overflow. */
   #messages:focus-visible{ outline:2px solid var(--brand-text); outline-offset:-2px }
@@ -850,6 +857,9 @@
   }
 
   function add(text, who, decision){
+    // A real shopper turn ends the cold state (see #messages.cold) — but never for the greeting or
+    // opener chips, which also route through here as "agent" turns.
+    if (who === "user") msgs.classList.remove("cold");
     const el = document.createElement("div");
     el.className = "msg " + who + (decision && decision.mode === "safety" ? " safety" : "");
     if (who === "agent") el.setAttribute("data-testid", "agent-msg");
@@ -1350,6 +1360,7 @@
     for (const t of transcript){ add(t.content, t.role === "agent" ? "agent" : "user"); }
   } else {
     staticGreetingEl = add(BRAND_NAME ? ("Hi! I'm " + BRAND_NAME + "'s assistant — ask me about a product or your order.") : "Hi! I'm your shopping assistant — ask me about a product or your order.", "agent");
+    msgs.classList.add("cold"); // fresh session: only the greeting so far — center it (see #messages.cold)
   }
   // Stamp the sessionId now, so a reload OR a closed tab before the first turn still continues this
   // conversation rather than opening a second one the server can't connect to the first.

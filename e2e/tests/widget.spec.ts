@@ -163,6 +163,20 @@ test("the surface carries its AI + PalUp disclosure on load", async ({ page }) =
   await expect(powered).toContainText("Powered by PalUp");
 });
 
+// Workstream C1 task 1 — cold-state panel: a fresh session (only the static greeting, no shopper turn
+// yet) should center the greeting rather than leave a large empty gap between it and the input.
+test("cold panel centers the greeting instead of leaving a large empty gap", async ({ page }) => {
+  await page.goto("/embed/panel?shop=palup-skincare-jason.myshopify.com");
+  const messages = page.locator("#messages");
+  await expect(messages).toHaveClass(/cold/);
+  // the last child's bottom is not stranded far above the input: gap under content < 40% of the log height
+  const gapRatio = await messages.evaluate((m) => {
+    const last = m.lastElementChild as HTMLElement; if (!last) return 1;
+    return (m.clientHeight - (last.offsetTop - m.offsetTop + last.offsetHeight)) / m.clientHeight;
+  });
+  expect(gapRatio).toBeLessThan(0.4);
+});
+
 // ADR-0018 task 10 — the shopper sign-in control is GESTURE-triggered: a click synchronously opens the
 // OAuth login. (CAA is off in mock mode, so the popup lands on a 404 — we assert the URL, not the page.)
 // AC3: this used to require a `#gear` click first, because the shopper's own sign-in control lived inside
