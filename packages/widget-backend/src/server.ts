@@ -1813,21 +1813,25 @@ export async function buildServer(opts?: {
     return { ok: r.kind === "ok", tenantId: r.kind === "ok" ? r.tenantId : undefined };
   };
   const storefrontShopDomainFor = (tenantId: string) => merchants.shopDomainFor(tenantId);
+  // Dedicated counter key ("storefront-catalog") so it never shares the /chat per-tenant bucket.
+  // Fail-CLOSED: a store error denies rather than silently disabling the cost ceiling. Pulled out to a
+  // named const (like `storefrontResolveTenant`/`storefrontShopDomainFor` above) so `GET /`'s SSR path
+  // reuses the IDENTICAL per-tenant denial-of-wallet backstop `/storefront/catalog` uses — never a second,
+  // divergent limiter, and never an unthrottled live-Shopify-fetch path on the highest-traffic route.
+  const storefrontAllowTenant = async (tenantId: string) => {
+    try {
+      return await underLimit(store, { tenantId }, "storefront-catalog", RL_TENANT, RL_WINDOW);
+    } catch {
+      return false;
+    }
+  };
   registerStorefrontCatalogRoutes(app, {
     resolveTenant: storefrontResolveTenant,
     getCatalogPage,
     getProductByHandle,
     shopDomainFor: storefrontShopDomainFor,
     allowIp: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
-    allowTenant: async (tenantId) => {
-      // Dedicated counter key ("storefront-catalog") so it never shares the /chat per-tenant bucket.
-      // Fail-CLOSED: a store error denies rather than silently disabling the cost ceiling.
-      try {
-        return await underLimit(store, { tenantId }, "storefront-catalog", RL_TENANT, RL_WINDOW);
-      } catch {
-        return false;
-      }
-    },
+    allowTenant: storefrontAllowTenant,
     ipKeyFor: (req) => {
       const xff = req.headers["x-forwarded-for"];
       return clientIpKey(Array.isArray(xff) ? xff[0] : xff, req.ip);
@@ -1840,6 +1844,8 @@ export async function buildServer(opts?: {
   // always sets `data-shop`, so this is the same store in practice). No live store configured → this
   // falls back to the same fixture-store domain `app.js` hardcodes, and `storefrontResolveTenant` above
   // then just as honestly fails to resolve it (dev/local/test posture — never a hard dependency).
+  // TODO: assumes a single configured store — `Object.values(...)[0]` is order-ambiguous (object key
+  // iteration order, not a declared "primary" store) the moment a second entry is added to `SHOPIFY_STORES`.
   const DEFAULT_STOREFRONT_SHOP = Object.values(parseStoreDomains())[0] ?? "palup-skincare-jason.myshopify.com";
 
   // WS3 — the sample storefront replaces the old inlined widget demo at the root. The widget is now embedded
@@ -1850,13 +1856,20 @@ export async function buildServer(opts?: {
   // Workstream B (SSR first page) — server-render the first catalog page into the static shell so the
   // grid + footer are at final height on first paint (kills the CLS/LCP/`{brand}` FOUC the UX review
   // flagged). Reuses the SAME `StorefrontCatalogDeps` functions `/storefront/catalog` uses — no second
-  // catalog-fetch path. GRACEFUL DEGRADATION IS MANDATORY: any failure (default tenant unresolved, the
-  // catalog fetch throwing) falls through to serving the raw, unmodified `storefrontHome` string, still
-  // a 200 — SSR is an enhancement here, never a hard dependency for the storefront to render at all.
+  // catalog-fetch path, AND the SAME per-tenant `storefrontAllowTenant` denial-of-wallet backstop, since
+  // `/` is the highest-traffic UNAUTHENTICATED route (bots/crawlers/refreshes) and would otherwise be an
+  // uncached, unthrottled way to trigger a live Shopify GraphQL call at each cache-TTL boundary. Cached
+  // response either way (`cache-control`, same as `/storefront/catalog`) so a CDN/browser absorbs most of
+  // that traffic before it ever reaches this handler. GRACEFUL DEGRADATION IS MANDATORY: any failure
+  // (default tenant unresolved, the per-tenant limiter denying/throwing, the catalog fetch throwing)
+  // falls through to serving the raw, unmodified `storefrontHome` string, still a 200 — SSR is an
+  // enhancement here, never a hard dependency for the storefront to render at all, and `/` must never 429
+  // (the client-side fetch fallback + its own `/storefront/catalog` limiter handle that case).
   app.get("/", async (_req, reply) => {
+    reply.header("cache-control", "public, max-age=300, stale-while-revalidate=600");
     try {
       const resolved = await storefrontResolveTenant(DEFAULT_STOREFRONT_SHOP);
-      if (resolved.ok && resolved.tenantId) {
+      if (resolved.ok && resolved.tenantId && (await storefrontAllowTenant(resolved.tenantId))) {
         const page = await getCatalogPage(resolved.tenantId, STOREFRONT_PAGE_LIMIT);
         const shopDomain = await storefrontShopDomainFor(resolved.tenantId).catch(() => undefined);
         const wire = projectStorefrontCatalog(page.context, shopDomain, page.nextCursor);
