@@ -749,6 +749,17 @@ export async function buildServer(opts?: {
   // on in a real environment is a human promotion (HITL-POLICY §5) — it changes what the shopper agent
   // detects. OFF ⇒ the classifier never runs (zero spend) and the guardrail ladder is byte-identical.
   const SERVER_GUARD_SIGNALS = process.env.SERVER_GUARD_SIGNALS === "true";
+  // WS-A (2026-08-21, owner-authorized staging enablement) — ADR-0018 disposition axes (createBrain
+  // positions 8-10). Consumers already exist in widget-brain/brain.ts (persona-style directive/B2B
+  // escalation, behavioral quieting, and the classifyPersonaStyle model call respectively); this is the
+  // env-read half that was previously entirely missing (the three were hardcoded `false` literals below
+  // with no `process.env` read anywhere in the repo). Same governed posture-flag discipline as every flag
+  // above: default OFF here, announced at boot via `wave4On`, and it is a human promotion to enable in a
+  // real environment (HITL-POLICY §5) — for staging, that human promotion is this owner-authorized change
+  // (see the deploy-staging.yml default and the updated comment at the createBrain call site below).
+  const DISPOSITION_STYLE = process.env.DISPOSITION_STYLE === "true";
+  const DISPOSITION_BEHAVIORAL = process.env.DISPOSITION_BEHAVIORAL === "true";
+  const DISPOSITION_CLASSIFIER = process.env.DISPOSITION_CLASSIFIER === "true";
   // A1b — PRODUCT_FACTS_HYDRATION: overlay the Tier-2 store's fresh price/availability onto the retrieved
   // subset before it renders. Same governed posture-flag discipline: env-read here, default OFF, turning it
   // on is a human promotion (HITL-POLICY §5) — it changes which PRICE the agent quotes (money/NN#1). OFF ⇒
@@ -887,7 +898,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER, PRODUCT_FACTS_READ_THROUGH })
+  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER, PRODUCT_FACTS_READ_THROUGH, DISPOSITION_STYLE, DISPOSITION_BEHAVIORAL, DISPOSITION_CLASSIFIER })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -912,12 +923,15 @@ export async function buildServer(opts?: {
     if (!b) {
       b = createBrain(
         meteredModel, grounding, policy, commerce, "shopper-demo", memoryPort, SUBSCRIPTION_SELFSERVE,
-        // Positions 8–10 — the disposition flags (ADR-0018). These have NO env read anywhere in the repo
-        // and stay off. Passed EXPLICITLY at their defaults rather than left implicit: reaching Wave 4's
-        // positions requires naming them, and a bare `undefined` here would be indistinguishable from a
-        // wiring bug of the exact kind this call site just had. Wiring them is a separate decision under
-        // their own ADR — not this change's to make.
-        /* dispositionStyle */ false, /* dispositionBehavioral */ false, /* dispositionClassifier */ false,
+        // Positions 8–10 — the disposition flags (ADR-0018). WS-A (2026-08-21, owner-authorized staging
+        // enablement) wires them to their env reads above, superseding the prior "these have NO env read
+        // and stay off" posture: DISPOSITION_STYLE gates the persona-style directive + B2B-role escalation,
+        // DISPOSITION_BEHAVIORAL gates rage/pitch-declined quieting, and DISPOSITION_CLASSIFIER gates the
+        // classifyPersonaStyle model call (only reachable when DISPOSITION_STYLE is also on — see brain.ts).
+        // Same governed posture-flag discipline as every other Wave 4 flag: default OFF, announced at boot
+        // via `wave4On` above, and turning any of these on in a real environment outside this owner-
+        // authorized staging default is still a human promotion (HITL-POLICY §5).
+        /* dispositionStyle */ DISPOSITION_STYLE, /* dispositionBehavioral */ DISPOSITION_BEHAVIORAL, /* dispositionClassifier */ DISPOSITION_CLASSIFIER,
         // Positions 11–16 — Wave 4. `catalogRetriever` is now built unconditionally (S4 §B); position 12
         // (`catalogRetrievalEnabled`) is the constructor DEFAULT only — it is always `false` here because
         // enablement is now a PER-TURN, per-tenant signal (`signals.catalogRetrievalEnabled`, resolved

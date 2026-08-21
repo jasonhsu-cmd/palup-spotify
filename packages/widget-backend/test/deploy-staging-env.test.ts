@@ -85,6 +85,15 @@ const REQUIRED_ENV: Array<[name: string, why: string]> = [
   // Threaded here (default 'false') so that, once that human flip lands, memory is a one-var deploy flip and an
   // operator's Cloud Run setting is not silently reverted by the next merge-deploy. Default-false enables NOTHING.
   ["MEMORY_ENABLED", "operator half of memory's double gate; INERT until the MEMORY_ADR_ACCEPTED const is also true (widget-memory/flag.ts)"],
+  // WS-A (2026-08-21, owner-authorized staging enablement) — the ADR-0018 disposition axes. Consumers
+  // already exist in widget-brain/brain.ts (positions 8-10 of createBrain); until this change server.ts
+  // hardcoded all three `false` with no env read at all, so there was nothing to thread here. Threaded
+  // the same governed way as every posture flag above: env-read in server.ts, announced at boot in
+  // `wave4On`, and default 'true' in deploy-staging.yml (the owner decision that supersedes the old
+  // "stays off" comment — see server.ts ~:915-920).
+  ["DISPOSITION_STYLE", "WS-A — ADR-0018 persona-style directive (B2B escalation, personaStyle) (server.ts / brain.ts)"],
+  ["DISPOSITION_BEHAVIORAL", "WS-A — ADR-0018 behavioral disposition (rage/pitch-declined quieting) (server.ts / brain.ts)"],
+  ["DISPOSITION_CLASSIFIER", "WS-A — ADR-0018 classifyPersonaStyle model call, gated on DISPOSITION_STYLE also being on (server.ts / brain.ts)"],
 ];
 
 /** Cloud Run secret mounts. Each must resolve to a Secret Manager secret that already exists — a
@@ -201,6 +210,29 @@ describe("#126 — the async memory-write Pub/Sub push env is opt-in and ships d
     expect(block).not.toMatch(/\|\|\s*true/);
     expect(block).not.toMatch(/continue-on-error/);
     expect(block).not.toMatch(/if:\s*false/);
+  });
+});
+
+describe("WS-A — the disposition axes + SERVER_GUARD_SIGNALS default ON for staging (2026-08-21)", () => {
+  // Owner-authorized enablement: staging is a solo, no-customers environment (see the repo's own
+  // "still no customers" note elsewhere), so these four already-built signal axes default to 'true'
+  // instead of the usual dark 'false' every other posture flag in this file ships with. Asserted as
+  // its own describe block (not folded into REQUIRED_ENV's plain "%s=" check) because presence alone
+  // would pass even if a well-meaning edit silently reverted the default back to 'false'.
+  const ON_BY_DEFAULT = ["SERVER_GUARD_SIGNALS", "DISPOSITION_STYLE", "DISPOSITION_BEHAVIORAL", "DISPOSITION_CLASSIFIER"];
+
+  it.each(ON_BY_DEFAULT)("%s falls back to 'true' (not 'false') when the repo variable is unset", (name) => {
+    expect(yml).toContain(`${name}: \${{ vars.${name} || 'true' }}`);
+    // The old dark default must be GONE for this name, not merely superseded — guards against a stray
+    // second `|| 'false'` occurrence for the same var surviving elsewhere in the env: block.
+    expect(yml).not.toContain(`${name}: \${{ vars.${name} || 'false' }}`);
+  });
+
+  it("the three DISPOSITION_* flags are also threaded through the echo/verify loop and the ENVS append, like SERVER_GUARD_SIGNALS", () => {
+    for (const name of ["DISPOSITION_STYLE", "DISPOSITION_BEHAVIORAL", "DISPOSITION_CLASSIFIER"]) {
+      expect(yml).toContain(`"${name}=\${${name}}"`);
+      expect(yml).toContain(`ENVS="\${ENVS}@${name}=\${${name}}"`);
+    }
   });
 });
 

@@ -136,9 +136,24 @@ jobs:
           # Pillar 2 (in-chat checkout) — the shopper assembles cited products and one-taps a Shopify checkout
           # PERMALINK (POST /cart/checkout-url). A link, never an add-to-cart or purchase; no new Shopify scope.
           IN_CHAT_CHECKOUT: ${{ vars.IN_CHAT_CHECKOUT || 'false' }}
-          SERVER_GUARD_SIGNALS: ${{ vars.SERVER_GUARD_SIGNALS || 'false' }}
+          # WS-A (2026-08-21, owner-authorized staging enablement): SERVER_GUARD_SIGNALS and the three
+          # DISPOSITION_* flags default to 'true' here — unlike every OTHER posture flag in this block,
+          # which ships dark via `|| 'false'`. Their brain-side consumers already exist and are already
+          # exercised by widget-brain's own test suite; staging is a solo, no-customers environment, so
+          # the owner has authorized these four already-built signal axes ON by default rather than
+          # requiring a manual repo-variable flip. This supersedes server.ts's prior "stays off, separate
+          # ADR decision" comment for the disposition flags (server.ts ~:915-935).
+          SERVER_GUARD_SIGNALS: ${{ vars.SERVER_GUARD_SIGNALS || 'true' }}
           OUTGOING_OFFER_CHECK: ${{ vars.OUTGOING_OFFER_CHECK || 'false' }}
           GREETING_PROACTIVE: ${{ vars.GREETING_PROACTIVE || 'false' }}
+          # WS-A — ADR-0018 disposition axes (createBrain positions 8-10, widget-brain/brain.ts). Default
+          # 'true' per the owner-authorized staging enablement above. DISPOSITION_CLASSIFIER only ever
+          # runs when DISPOSITION_STYLE is ALSO on (brain.ts), and adds one per-turn classifyPersonaStyle
+          # call through the model port on the staging default model (gemini-3.5-flash, cheap tier) — no
+          # tier change; see the WS-A cost/margin note.
+          DISPOSITION_STYLE: ${{ vars.DISPOSITION_STYLE || 'true' }}
+          DISPOSITION_BEHAVIORAL: ${{ vars.DISPOSITION_BEHAVIORAL || 'true' }}
+          DISPOSITION_CLASSIFIER: ${{ vars.DISPOSITION_CLASSIFIER || 'true' }}
           # SHOPPER_AUTH has a hard coupling: server.ts REFUSES TO BOOT if this is true while
           # WIDGET_AUTH_REQUIRED is not (F4 startup precondition). An operator enabling it must set
           # WIDGET_AUTH_REQUIRED=true in the SAME deploy. SUBSCRIPTION_SELFSERVE degrades to human-routed
@@ -230,6 +245,8 @@ jobs:
                       "PROACTIVE_OPENER=${PROACTIVE_OPENER}" \
                       "IN_CHAT_CHECKOUT=${IN_CHAT_CHECKOUT}" \
                       "SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}" "OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}" \
+                      "DISPOSITION_STYLE=${DISPOSITION_STYLE}" "DISPOSITION_BEHAVIORAL=${DISPOSITION_BEHAVIORAL}" \
+                      "DISPOSITION_CLASSIFIER=${DISPOSITION_CLASSIFIER}" \
                       "SHOPPER_AUTH=${SHOPPER_AUTH}" "SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}" \
                       "GREETING_PROACTIVE=${GREETING_PROACTIVE}" \
                       "CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}" "ORDER_ATTRIBUTION_WEBHOOKS=${ORDER_ATTRIBUTION_WEBHOOKS}" "VECTOR_ANN=${VECTOR_ANN}" \
@@ -314,6 +331,9 @@ jobs:
           ENVS="${ENVS}@IN_CHAT_CHECKOUT=${IN_CHAT_CHECKOUT}"
           ENVS="${ENVS}@SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}"
           ENVS="${ENVS}@OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}"
+          ENVS="${ENVS}@DISPOSITION_STYLE=${DISPOSITION_STYLE}"
+          ENVS="${ENVS}@DISPOSITION_BEHAVIORAL=${DISPOSITION_BEHAVIORAL}"
+          ENVS="${ENVS}@DISPOSITION_CLASSIFIER=${DISPOSITION_CLASSIFIER}"
           ENVS="${ENVS}@SHOPPER_AUTH=${SHOPPER_AUTH}"
           ENVS="${ENVS}@SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}"
           ENVS="${ENVS}@GREETING_PROACTIVE=${GREETING_PROACTIVE}"
