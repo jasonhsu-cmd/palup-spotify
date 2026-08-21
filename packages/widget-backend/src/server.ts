@@ -292,6 +292,7 @@ const storefrontProduct = readFileSync(join(STOREFRONT_DIR, "product.html"), "ut
 const storefrontCart = readFileSync(join(STOREFRONT_DIR, "cart.html"), "utf8");
 const storefrontCss = readFileSync(join(STOREFRONT_DIR, "app.css"), "utf8");
 const storefrontJs = readFileSync(join(STOREFRONT_DIR, "app.js"), "utf8");
+const storefrontFavicon = readFileSync(join(STOREFRONT_DIR, "favicon.svg"), "utf8");
 
 const { port: modelPort, name: modelName } = createModelPort();
 // ADR-0017 T7 / Wave-1 E — every commerce call goes through the ADR-0016 fail-closed guard.
@@ -1774,6 +1775,12 @@ export async function buildServer(opts?: {
       .header("content-type", "application/javascript; charset=utf-8")
       .header("cache-control", "public, max-age=300")
       .send(storefrontJs);
+  });
+  app.get("/storefront/favicon.svg", async (_req, reply) => {
+    reply
+      .header("content-type", "image/svg+xml; charset=utf-8")
+      .header("cache-control", "public, max-age=300")
+      .send(storefrontFavicon);
   });
   app.get("/widget", async (_req, reply) => {
     reply.type("text/html").send(widgetHtml);

@@ -1235,6 +1235,17 @@ test.describe("E3 — product cards (mocked /chat seam)", () => {
     await expect(page.getByTestId("product-cards")).not.toContainText("stock");
   });
 
+  test("an unconfirmed price is styled distinctly from a real price", async ({ page }) => {
+    await chatWith(page, {
+      recommendedProducts: ["x"],
+      recommendedProductCards: [{ productId: "x", title: "Serum", price: "current price needs confirming", priceConfirmed: false }],
+    });
+    await send(page);
+    const p = page.getByTestId("product-card").first().locator(".rec-p");
+    await expect(p).toHaveClass(/rec-p--unconfirmed/);
+    await expect(p).toHaveCSS("font-style", "italic");
+  });
+
   test("no cards, no card UI: the block is absent (not an empty container) when the server sends nothing", async ({ page }) => {
     await chatWith(page, {});
     await send(page);

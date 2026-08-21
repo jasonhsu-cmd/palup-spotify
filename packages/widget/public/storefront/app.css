@@ -65,6 +65,7 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.02em; }
 
 .skip { position: absolute; left: -999px; top: 0; background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 0 0 10px 0; z-index: 100; }
 .skip:focus { left: 0; }
+.skip:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
 
 /* Header / nav */
 .site-header { border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: saturate(1.1) blur(8px); position: sticky; top: 0; z-index: 20; }
@@ -124,6 +125,10 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 32px 24px 96px; }
 .btn-outline { background: transparent; color: var(--accent); border-color: var(--line-strong); }
 .btn-outline:hover { background: var(--accent-soft); border-color: var(--accent); }
 
+/* The "Ask the expert" affordance is PalUp's, not the merchant's terracotta accent — match the launcher. */
+.btn[data-testid="hero-ask"] { background: #0c4a3c; border-color: #0c4a3c; color: #ffffff; }
+.btn[data-testid="hero-ask"]:hover { background: #0a3d32; border-color: #0a3d32; }
+
 /* Cart page */
 .cart-list { list-style: none; margin: 28px 0 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
 .cart-row { display: grid; grid-template-columns: 80px 1fr auto; gap: 16px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow-sm); }
@@ -146,6 +151,7 @@ main { max-width: var(--maxw); margin: 0 auto; padding: 32px 24px 96px; }
 /* Footer */
 .site-footer { border-top: 1px solid var(--line); background: var(--bg-soft); }
 .site-footer .inner { max-width: var(--maxw); margin: 0 auto; padding: 32px 24px 48px; color: var(--muted); font-size: 13px; display: grid; gap: 10px; }
+.site-footer .inner p { max-width: 70ch; }
 .site-footer h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0; }
 .assistant-note { color: var(--muted); font-size: 12.5px; line-height: 1.6; }
 

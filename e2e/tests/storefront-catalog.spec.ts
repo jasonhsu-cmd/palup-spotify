@@ -35,3 +35,71 @@ test.describe("sample storefront — populated catalog (demo-tenant fixtures)", 
     expect(results.violations).toEqual([]);
   });
 });
+
+// The demo-tenant AURIA fixture (static-grounding.ts) carries no `imageUrl` on any product, so image
+// behavior can't be exercised against the live route. These tests mock `/storefront/catalog` directly
+// (page.route) with a synthetic product that DOES carry a `cdn.shopify.com` image, giving deterministic,
+// real (non-vacuous) coverage of the `thumb()` onerror fallback and display-sized CDN request.
+test.describe("sample storefront — image robustness (mocked catalog)", () => {
+  const withImage = {
+    brandName: "Auria",
+    policy: {},
+    products: [
+      {
+        id: "gid://p1",
+        title: "Mock Serum",
+        price: "$20.00",
+        imageUrl: "https://cdn.shopify.com/s/files/1/0000/0001/products/mock-serum.jpg",
+        handle: "mock-serum",
+      },
+    ],
+    nextCursor: null,
+  };
+
+  test("the product grid requests CDN images at display size (?width=)", async ({ page }) => {
+    await page.route("**/storefront/catalog**", (route) => route.fulfill({ json: withImage }));
+    await page.goto("/");
+    await expect(page.locator("#grid")).toHaveAttribute("data-ready", "1");
+    await expect(page.locator("#grid .card .thumb img").first()).toHaveAttribute("src", /[?&]width=\d+/);
+  });
+
+  test("a product image that fails to load falls back to the No-image placeholder", async ({ page }) => {
+    await page.route("**/storefront/catalog**", (route) => route.fulfill({ json: withImage }));
+    await page.route("**cdn.shopify.com/**", (route) => route.abort()); // force the thumb's <img> to fail
+    await page.goto("/");
+    await expect(page.locator("#grid")).toHaveAttribute("data-ready", "1");
+    // the card that would have had an image now shows the placeholder, never a broken <img>
+    await expect(page.locator("#grid .card .thumb .ph")).not.toHaveCount(0);
+    await expect(page.locator("#grid .card .thumb img")).toHaveCount(0);
+  });
+});
+
+test.describe("sample storefront — head hygiene", () => {
+  test("no favicon 404 and app.js is deferred", async ({ page }) => {
+    const resp404: string[] = [];
+    page.on("response", (r) => {
+      if (r.url().includes("favicon") && r.status() === 404) resp404.push(r.url());
+    });
+    await page.goto("/");
+    await page.locator("#grid .card").first().waitFor();
+    expect(resp404).toHaveLength(0);
+    await expect(page.locator('head link[rel="icon"]')).toHaveCount(1);
+    await expect(page.locator('script[src="/storefront/app.js"]')).toHaveAttribute("defer", "");
+  });
+
+  test("skip link has a themed focus ring", async ({ page }) => {
+    await page.goto("/");
+    await page.keyboard.press("Tab"); // focuses .skip
+    const outline = await page.locator(".skip").evaluate((el) => getComputedStyle(el).outlineStyle);
+    expect(outline).not.toBe("auto"); // was the browser default; now a solid themed ring
+  });
+
+  test("the hero 'Ask the expert' CTA is evergreen, matching the launcher", async ({ page }) => {
+    await page.goto("/");
+    const bg = await page.getByTestId("hero-ask").evaluate((el) => getComputedStyle(el).backgroundColor);
+    expect(bg).toBe("rgb(12, 74, 60)"); // #0c4a3c
+    // Browse-all stays the storefront accent (terracotta), not evergreen
+    const browse = await page.locator(".hero-cta a.btn-outline").evaluate((el) => getComputedStyle(el).color);
+    expect(browse).not.toBe("rgb(12, 74, 60)");
+  });
+});
