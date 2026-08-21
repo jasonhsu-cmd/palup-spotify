@@ -780,6 +780,15 @@ export async function buildServer(opts?: {
   // withholding is still a shopper-visible behaviour change (money/NN#1). OFF ⇒ channelHealthFor is never
   // read by createBrain and the CATALOG block is byte-identical.
   const PRICE_REQUIRES_LIVE_CHANNEL = process.env.PRICE_REQUIRES_LIVE_CHANNEL === "true";
+  // WS-C (2026-08-21, owner-authorized staging enablement) — AUTONOMOUS_MONEY_PITCHES: widen two of
+  // `selectPitch`'s existing confident-path branches to the money-gated `upsell`/`subscription` pitch
+  // kinds (brain.ts). `promo` is NEVER reachable, in any flag state — no branch anywhere returns it. Same
+  // governed posture-flag discipline as every flag above: env-read here, default OFF, announced at boot
+  // via `wave4On`, and this is a `createBrain` GUARDRAIL argument (never a `Policy` field — see brain.ts's
+  // param comment) so a self-improvement candidate cannot flip the money boundary itself. Turning this on
+  // outside this owner-authorized staging default is a human promotion (HITL-POLICY §5, NN#1 money
+  // boundary) — the deploy-staging.yml default is the staging-only enablement; production stays OFF.
+  const AUTONOMOUS_MONEY_PITCHES = process.env.AUTONOMOUS_MONEY_PITCHES === "true";
   // Pillar 1 (serve-time read-through) — PRODUCT_FACTS_READ_THROUGH: when the serve path is about to quote a
   // SKU whose Tier-2 fact is stale or missing, trigger a TARGETED on-demand refresh of just those ids BEFORE
   // quoting — instead of only hedging (priceConfirmed:false) — so the price can be CONFIRMED this turn.
@@ -900,7 +909,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER, PRODUCT_FACTS_READ_THROUGH, DISPOSITION_STYLE, DISPOSITION_BEHAVIORAL, DISPOSITION_CLASSIFIER })
+  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER, PRODUCT_FACTS_READ_THROUGH, DISPOSITION_STYLE, DISPOSITION_BEHAVIORAL, DISPOSITION_CLASSIFIER, AUTONOMOUS_MONEY_PITCHES })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -974,6 +983,10 @@ export async function buildServer(opts?: {
         // PRODUCT_FACTS_READ_THROUGH is set, so the hydration step's stale/missing-id refresh never fires and
         // the CATALOG block's hedge (priceConfirmed:false) is byte-identical to today.
         refreshFacts,
+        // Position 29 — WS-C AUTONOMOUS_MONEY_PITCHES. Default OFF ⇒ selectPitch is byte-identical to
+        // today (money-boundary test pins this exhaustively); ON ⇒ two existing confident-path branches
+        // widen to upsell/subscription, and `promo` still has no reachable branch either way (brain.ts).
+        AUTONOMOUS_MONEY_PITCHES,
       );
       brains.set(key, b);
     }

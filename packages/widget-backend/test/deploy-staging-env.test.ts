@@ -94,6 +94,12 @@ const REQUIRED_ENV: Array<[name: string, why: string]> = [
   ["DISPOSITION_STYLE", "WS-A — ADR-0018 persona-style directive (B2B escalation, personaStyle) (server.ts / brain.ts)"],
   ["DISPOSITION_BEHAVIORAL", "WS-A — ADR-0018 behavioral disposition (rage/pitch-declined quieting) (server.ts / brain.ts)"],
   ["DISPOSITION_CLASSIFIER", "WS-A — ADR-0018 classifyPersonaStyle model call, gated on DISPOSITION_STYLE also being on (server.ts / brain.ts)"],
+  // WS-C (2026-08-21, owner-authorized staging enablement) — money/NN#1: widens two of selectPitch's
+  // existing confident-path branches to upsell/subscription (widget-brain/brain.ts); `promo` stays
+  // unreachable by any branch, in any flag state. Threaded as a createBrain GUARDRAIL argument (never a
+  // Policy field), so a self-improvement candidate cannot flip it. Absent here would silently revert an
+  // operator's Cloud Run flip on the next merge-deploy, same trap as every flag above.
+  ["AUTONOMOUS_MONEY_PITCHES", "WS-C — money/NN#1: gates selectPitch's upsell/subscription branches; promo stays unreachable (server.ts / brain.ts)"],
 ];
 
 /** Cloud Run secret mounts. Each must resolve to a Secret Manager secret that already exists — a
@@ -233,6 +239,22 @@ describe("WS-A — the disposition axes + SERVER_GUARD_SIGNALS default ON for st
       expect(yml).toContain(`"${name}=\${${name}}"`);
       expect(yml).toContain(`ENVS="\${ENVS}@${name}=\${${name}}"`);
     }
+  });
+});
+
+describe("WS-C — AUTONOMOUS_MONEY_PITCHES default ON for staging (2026-08-21)", () => {
+  // Same owner-authorized staging posture as WS-A above, and the same reason this is its own describe
+  // block rather than folded into REQUIRED_ENV's plain presence check: presence alone would pass even if
+  // a well-meaning edit silently reverted the default back to 'false' — a money-boundary-sensitive
+  // regression that must fail loudly, not quietly.
+  it("falls back to 'true' (not 'false') when the repo variable is unset", () => {
+    expect(yml).toContain("AUTONOMOUS_MONEY_PITCHES: ${{ vars.AUTONOMOUS_MONEY_PITCHES || 'true' }}");
+    expect(yml).not.toContain("AUTONOMOUS_MONEY_PITCHES: ${{ vars.AUTONOMOUS_MONEY_PITCHES || 'false' }}");
+  });
+
+  it("is also threaded through the echo/verify loop and the ENVS append, like the DISPOSITION_* flags", () => {
+    expect(yml).toContain('"AUTONOMOUS_MONEY_PITCHES=${AUTONOMOUS_MONEY_PITCHES}"');
+    expect(yml).toContain("ENVS=\"${ENVS}@AUTONOMOUS_MONEY_PITCHES=${AUTONOMOUS_MONEY_PITCHES}\"");
   });
 });
 

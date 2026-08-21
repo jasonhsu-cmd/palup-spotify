@@ -154,6 +154,12 @@ jobs:
           DISPOSITION_STYLE: ${{ vars.DISPOSITION_STYLE || 'true' }}
           DISPOSITION_BEHAVIORAL: ${{ vars.DISPOSITION_BEHAVIORAL || 'true' }}
           DISPOSITION_CLASSIFIER: ${{ vars.DISPOSITION_CLASSIFIER || 'true' }}
+          # WS-C (2026-08-21, owner-authorized staging enablement) — widens two of selectPitch's existing
+          # confident-path branches to upsell/subscription (widget-brain/brain.ts); `promo` stays reachable
+          # by NO branch, in any flag state. GUARDRAIL createBrain argument, never a Policy field, so a
+          # self-improvement candidate cannot flip this itself (HITL-POLICY §3/§5, NN#1 money boundary).
+          # Default 'true' here mirrors the WS-A staging posture above; production stays OFF (unset).
+          AUTONOMOUS_MONEY_PITCHES: ${{ vars.AUTONOMOUS_MONEY_PITCHES || 'true' }}
           # SHOPPER_AUTH has a hard coupling: server.ts REFUSES TO BOOT if this is true while
           # WIDGET_AUTH_REQUIRED is not (F4 startup precondition). An operator enabling it must set
           # WIDGET_AUTH_REQUIRED=true in the SAME deploy. SUBSCRIPTION_SELFSERVE degrades to human-routed
@@ -247,6 +253,7 @@ jobs:
                       "SERVER_GUARD_SIGNALS=${SERVER_GUARD_SIGNALS}" "OUTGOING_OFFER_CHECK=${OUTGOING_OFFER_CHECK}" \
                       "DISPOSITION_STYLE=${DISPOSITION_STYLE}" "DISPOSITION_BEHAVIORAL=${DISPOSITION_BEHAVIORAL}" \
                       "DISPOSITION_CLASSIFIER=${DISPOSITION_CLASSIFIER}" \
+                      "AUTONOMOUS_MONEY_PITCHES=${AUTONOMOUS_MONEY_PITCHES}" \
                       "SHOPPER_AUTH=${SHOPPER_AUTH}" "SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}" \
                       "GREETING_PROACTIVE=${GREETING_PROACTIVE}" \
                       "CATALOG_WEBHOOKS=${CATALOG_WEBHOOKS}" "ORDER_ATTRIBUTION_WEBHOOKS=${ORDER_ATTRIBUTION_WEBHOOKS}" "VECTOR_ANN=${VECTOR_ANN}" \
@@ -334,6 +341,7 @@ jobs:
           ENVS="${ENVS}@DISPOSITION_STYLE=${DISPOSITION_STYLE}"
           ENVS="${ENVS}@DISPOSITION_BEHAVIORAL=${DISPOSITION_BEHAVIORAL}"
           ENVS="${ENVS}@DISPOSITION_CLASSIFIER=${DISPOSITION_CLASSIFIER}"
+          ENVS="${ENVS}@AUTONOMOUS_MONEY_PITCHES=${AUTONOMOUS_MONEY_PITCHES}"
           ENVS="${ENVS}@SHOPPER_AUTH=${SHOPPER_AUTH}"
           ENVS="${ENVS}@SUBSCRIPTION_SELFSERVE=${SUBSCRIPTION_SELFSERVE}"
           ENVS="${ENVS}@GREETING_PROACTIVE=${GREETING_PROACTIVE}"
