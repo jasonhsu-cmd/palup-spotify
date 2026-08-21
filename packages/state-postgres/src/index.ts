@@ -90,6 +90,7 @@ export {
   type RecordConsentInput,
   type LookupConsentInput,
 } from "./runtime-consent-store.js";
+export { recordHealthDisclosure, lookupHealthDisclosure, type DisclosureInput } from "./runtime-disclosure-store.js";
 export {
   revokeGuest,
   isGuestRevoked,
