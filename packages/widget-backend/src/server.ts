@@ -48,7 +48,7 @@ import {
   tombstoneKey,
   mergeGuestIntoAccount,
 } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
@@ -2685,7 +2685,6 @@ export async function buildServer(opts?: {
     }
     const body = (req.body ?? {}) as {
       anonId?: unknown; // NEVER trusted as the guest subject — see the route's own doc comment above.
-      healthDisclosed?: unknown;
       widgetToken?: string;
       /** Mirrors /chat's/consent's dual-transport fallback for the x-shopper-token header. */
       shopperToken?: string;
@@ -2737,16 +2736,12 @@ export async function buildServer(opts?: {
       lookupConsent(store, { tenantId, anonId: accountSubject! }),
       lookupConsent(store, { tenantId, anonId: guestAnonId }),
     ]);
-    // MED-1 (security review) — INTERIM: `healthDisclosed` is a CLIENT-ASSERTED Q19(c) gate leg. The other
-    // two legs (both consent tiers) are server-recorded; this one is not. A tampered client already holding
-    // valid shopper+guest tokens with Consent 2 "in" on BOTH subjects could assert `true` and carry Art-9
-    // facts even if the disclosure UI never showed (bounded: self-data, own account, both consents still
-    // required — not a cross-subject/exfil path). Before the memory feature is ENABLED, this must become a
-    // SERVER-RECORDED disclosure event (recorded when the widget carry-over prompt actually names health
-    // data), read here instead of trusting a body boolean — a named-owner/counsel go-live residual, landing
-    // with the R2-1 carry-over prompt (CARRY_OVER_PROMPT_ENABLED, still legal-gated off). Safe as-is only
-    // because the route 404s while memory is dark and no widget caller sets this true yet.
-    const healthDisclosed = body.healthDisclosed === true;
+    // WS-D — Q19(c) is now SERVER-RECORDED, not client-asserted. `healthDisclosed` reads a disclosure event
+    // written (by the future R2-1 carry-over prompt, still legal-gated CARRY_OVER_PROMPT_ENABLED) via
+    // recordHealthDisclosure, keyed by (tenant, accountSubject, guestAnonId) — like the two consent legs.
+    // Until a production writer exists, this is fail-closed false, so special-category rows do not carry.
+    // A forged body.healthDisclosed can no longer promote Art-9 facts (MED-1 remediated).
+    const healthDisclosed = await lookupHealthDisclosure(store, { tenantId, accountSubject: accountSubject!, guestAnonId });
 
     const result = await mergeGuestIntoAccount(
       { vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET },

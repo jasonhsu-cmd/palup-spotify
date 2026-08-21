@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { InMemoryRuntimeStore, createInMemoryVectorStore, mintWidgetToken, mintShopperToken } from "@palup/platform-ports";
-import { recordConsent, armKill } from "@palup/state-postgres";
+import { recordConsent, armKill, recordHealthDisclosure } from "@palup/state-postgres";
 import { subjectNamespace, accountSubjectId } from "@palup/widget-memory";
 
 // `floorNamespace` (widget-memory/src/identity.ts) isn't part of widget-memory's public surface (see
@@ -140,16 +140,17 @@ describe("POST /memory/merge — guest→account memory carry-over (task 10, R2-
       await app.close();
     });
 
-    it("NOT copied when healthDisclosed is explicitly false, even if both consents are 'in'", async () => {
+    it("SECURITY: a forged body.healthDisclosed:true does NOT carry special rows without a server-recorded disclosure", async () => {
       armAuth();
       const store = new InMemoryRuntimeStore();
       const vector = createInMemoryVectorStore();
       await seedSpecialGuestFact(vector);
       await recordConsent(store, { tenantId: "demo", anonId: accountSubjectId(SHOPPER_ID), memoryOrdinary: "in", memorySpecial: "in", source: "shopper" });
       await recordConsent(store, { tenantId: "demo", anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "in", source: "shopper" });
+      // NO recordHealthDisclosure — the client forges the flag in the body instead.
       const app = await buildServer({ store, vectorPort: vector, memoryEnabled: true });
 
-      const res = await postMerge(app, { "x-shopper-token": shopperToken(), ...guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON_ID) }, { healthDisclosed: false });
+      const res = await postMerge(app, { "x-shopper-token": shopperToken(), ...guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON_ID) }, { healthDisclosed: true });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ merged: 0 });
       const acctFloor = await vector.query(floorNamespace("demo", accountSubjectId(SHOPPER_ID)), { text: "", k: 10 });
@@ -174,16 +175,17 @@ describe("POST /memory/merge — guest→account memory carry-over (task 10, R2-
       await app.close();
     });
 
-    it("COPIED to the account FLOOR namespace only when account+guest are both 'in' AND healthDisclosed is true", async () => {
+    it("COPIED to the account FLOOR namespace only when both consents are 'in' AND a disclosure is server-recorded", async () => {
       armAuth();
       const store = new InMemoryRuntimeStore();
       const vector = createInMemoryVectorStore();
       await seedSpecialGuestFact(vector);
       await recordConsent(store, { tenantId: "demo", anonId: accountSubjectId(SHOPPER_ID), memoryOrdinary: "in", memorySpecial: "in", source: "shopper" });
       await recordConsent(store, { tenantId: "demo", anonId: GUEST_ANON_ID, memoryOrdinary: "in", memorySpecial: "in", source: "shopper" });
+      await recordHealthDisclosure(store, { tenantId: "demo", accountSubject: accountSubjectId(SHOPPER_ID), guestAnonId: GUEST_ANON_ID });
       const app = await buildServer({ store, vectorPort: vector, memoryEnabled: true });
 
-      const res = await postMerge(app, { "x-shopper-token": shopperToken(), ...guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON_ID) }, { healthDisclosed: true });
+      const res = await postMerge(app, { "x-shopper-token": shopperToken(), ...guestTokenHeader(GUEST_SECRET, "demo", GUEST_ANON_ID) });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ merged: 1 });
       const acctFloor = await vector.query(floorNamespace("demo", accountSubjectId(SHOPPER_ID)), { text: "", k: 10 });
