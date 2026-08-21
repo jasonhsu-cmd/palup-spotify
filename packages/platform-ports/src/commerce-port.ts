@@ -20,6 +20,16 @@ export interface Order {
   fulfilled: boolean;
 }
 
+/** Order-history summary for lifecycle classification (ADR-0015 Tier 2). */
+export interface OrderHistorySummary {
+  /** Total number of orders this shopper has placed (0 for a known account with no orders). */
+  orderCount: number;
+  /** Whole days since the MOST RECENT order, or null if there are no orders. */
+  lastOrderDaysAgo: number | null;
+  /** Whole days since the FIRST order, or null if there are no orders. */
+  firstOrderDaysAgo: number | null;
+}
+
 export interface Subscription {
   id: string;
   shopperId: string;
@@ -95,6 +105,9 @@ export interface CommercePort {
   getOrder(orderId: string): Promise<Order | null>;
   /** The shopper's most recent order — used when they ask "where's my order?" with no number. */
   getRecentOrder(shopperId: string): Promise<Order | null>;
+  /** Order-history summary for lifecycle classification (ADR-0015 Tier 2). Returns null when history is
+   * genuinely unavailable (⇒ callers fall back to the base new/anonymous relationship — fail-open). */
+  getOrderHistory(shopperId: string): Promise<OrderHistorySummary | null>;
   getPolicy(): Promise<CommercePolicy>;
   getSubscription(shopperId: string): Promise<Subscription | null>;
   /**

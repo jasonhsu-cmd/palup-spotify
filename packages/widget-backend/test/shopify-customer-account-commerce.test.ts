@@ -17,6 +17,23 @@ const ORDER_DATA = {
   data: { customer: { orders: { nodes: [{ id: "gid://shopify/Order/9", name: "#1009", financialStatus: "PAID", fulfillmentStatus: "FULFILLED", processedAt: "2023-11-10T00:00:00Z", totalPrice: { amount: "42.50", currencyCode: "USD" }, lineItems: { nodes: [{ title: "Barrier Serum", quantity: 1 }] } }] } } },
 };
 const SUB_DATA = { data: { customer: { subscriptionContracts: { nodes: [{ id: "gid://shopify/SubscriptionContract/7", status: "ACTIVE" }] } } } };
+// WS-B2a — a multi-order fixture (unordered processedAt on purpose) to prove getOrderHistory computes
+// count + first/last daysAgo from max/min processedAt, not from array order. See node calc: with
+// NOW=1_700_000_000, "2023-11-10" -> 4 days ago, "2023-11-01" -> 13 days ago (oldest/first), "2023-11-13"
+// -> 1 day ago (newest/last).
+const MULTI_ORDER_DATA = {
+  data: {
+    customer: {
+      orders: {
+        nodes: [
+          { id: "gid://shopify/Order/9", name: "#1009", processedAt: "2023-11-10T00:00:00Z" },
+          { id: "gid://shopify/Order/3", name: "#1003", processedAt: "2023-11-01T00:00:00Z" },
+          { id: "gid://shopify/Order/13", name: "#1013", processedAt: "2023-11-13T00:00:00Z" },
+        ],
+      },
+    },
+  },
+};
 
 type FetchFn = typeof globalThis.fetch;
 function makeFetch(opts: { graphql?: unknown; status?: number; onAuth?: (auth: unknown) => void } = {}): FetchFn {
@@ -36,6 +53,7 @@ const fallbackPolicy = { returnWindowDays: 30, refundCeiling: 50, returns: "R", 
 const fallback: CommercePort = {
   getOrder: async () => null,
   getRecentOrder: async () => null,
+  getOrderHistory: async () => null,
   getPolicy: async () => fallbackPolicy,
   getSubscription: async () => null,
   skipNextDelivery: async () => ({ ok: false, detail: "no", reversalPath: "n/a" }),
@@ -88,6 +106,18 @@ describe("createCustomerAccountCommerceAdapter — reads", () => {
     const { adapter } = await harness(makeFetch({ graphql: { data: { customer: { orders: { nodes: [] } } } } }));
     expect(await withRequestPrincipal(shopper("shopify:acme:1"), () => adapter.getRecentOrder("shopify:acme:1"))).toBeNull();
   });
+
+  it("getOrderHistory maps a multi-order fixture to count + max/min-processedAt daysAgo (WS-B2a)", async () => {
+    const { adapter } = await harness(makeFetch({ graphql: MULTI_ORDER_DATA }));
+    const history = await withRequestPrincipal(shopper("shopify:acme:1"), () => adapter.getOrderHistory("shopify:acme:1"));
+    expect(history).toEqual({ orderCount: 3, lastOrderDaysAgo: 1, firstOrderDaysAgo: 13 });
+  });
+
+  it("getOrderHistory: empty orders ⇒ a well-formed zero summary (known account, no orders — NOT null)", async () => {
+    const { adapter } = await harness(makeFetch({ graphql: { data: { customer: { orders: { nodes: [] } } } } }));
+    const history = await withRequestPrincipal(shopper("shopify:acme:1"), () => adapter.getOrderHistory("shopify:acme:1"));
+    expect(history).toEqual({ orderCount: 0, lastOrderDaysAgo: null, firstOrderDaysAgo: null });
+  });
 });
 
 describe("createCustomerAccountCommerceAdapter — reauth paths", () => {
@@ -124,6 +154,16 @@ describe("createCustomerAccountCommerceAdapter — reauth paths", () => {
   it("a 5xx / throttle ⇒ null, NOT reauth (transient) — reviewer concern D", async () => {
     const { adapter } = await harness(makeFetch({ graphql: {}, status: 503 }));
     expect(await withRequestPrincipal(shopper("shopify:acme:1"), () => adapter.getSubscription("shopify:acme:1"))).toBeNull();
+  });
+
+  it("getOrderHistory: no grant ⇒ reauth, same as the other reads (WS-B2a)", async () => {
+    const { adapter } = await harness(makeFetch({ graphql: MULTI_ORDER_DATA }), {}); // no grants
+    await expect(withRequestPrincipal(shopper("shopify:acme:1"), () => adapter.getOrderHistory("shopify:acme:1"))).rejects.toBeInstanceOf(CommerceReauthRequiredError);
+  });
+
+  it("getOrderHistory: a 5xx / throttle ⇒ null, NOT reauth (transient degrade path, WS-B2a)", async () => {
+    const { adapter } = await harness(makeFetch({ graphql: {}, status: 503 }));
+    expect(await withRequestPrincipal(shopper("shopify:acme:1"), () => adapter.getOrderHistory("shopify:acme:1"))).toBeNull();
   });
 });
 

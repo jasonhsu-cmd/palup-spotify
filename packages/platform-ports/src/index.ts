@@ -29,6 +29,7 @@ export type {
   CommercePort,
   Order,
   OrderItem,
+  OrderHistorySummary,
   Subscription,
   CommercePolicy,
   SubscriptionActionResult,

@@ -55,7 +55,13 @@ export type ProactivityLevel = "cautious" | "balanced" | "confident";
 export type PersonaStyle = "ready" | "researcher" | "deal_seeker" | "needs_guidance";
 /** Who the shopper is buying for. `b2b` still routes to escalate; `gift` is style-only. */
 export type PersonaRole = "for_self" | "gift" | "b2b";
-/** Concrete in-session behavioral events (server-derived; never trusted raw). */
+/** Concrete in-session behavioral events. WS-B3a: only the three TIMING events (dwell/hesitation/
+ *  idle_then_return) are accepted from the client, enum-validated at the trust boundary (widget-
+ *  backend's deriveServingSignals, CLIENT_BEHAVIORAL_EVENTS) — safe because a client can legitimately
+ *  observe its own session timing. `repeat_question`/`pitch_declined`/`rage` are CONVERSATION-derived
+ *  and stay SERVER-owned (never trusted from the client): DISPOSITION_BEHAVIORAL is default-on on
+ *  staging and a client-supplied `rage` would set brain.ts's escalateToHuman unconditionally, letting a
+ *  shopper flood the escalation queue with no server corroboration. */
 export type BehavioralEvent = "dwell" | "hesitation" | "repeat_question" | "pitch_declined" | "idle_then_return" | "rage";
 export type Device = "mobile" | "desktop" | "tablet";
 export type Entry = "ad" | "organic" | "direct" | "email" | "social";
@@ -470,12 +476,17 @@ export interface Signals {
   // ── Persona / shopper-disposition layer (PR-0, INERT) ──────────────────────────────────────────
   // All optional; the wire-key NAMES match full-corpus.json so the eval corpus feeds the brain with zero
   // corpus edits. `personaStyle`/`personaRole` are per-turn classified + TRANSIENT (never persisted;
-  // mirror `mood`). The rest are SERVER-derived + validated in deriveServingSignals, never trusted raw.
+  // mirror `mood`). The rest are validated in deriveServingSignals — most are SERVER-derived and never
+  // trusted raw; `behavioral` (WS-B3a) is PARTLY a CLIENT-supplied exception: only the three TIMING
+  // events are accepted from the client (enum-validated), because the three CONVERSATION-derived events
+  // (rage/pitch_declined/repeat_question) are not client-corroborable and stay server-owned — see
+  // BehavioralEvent's own doc comment for why.
   /** The classified service/guidance posture for this turn (transient). */
   personaStyle?: PersonaStyle;
   /** Who the shopper is buying for (b2b → escalate; gift → style only). */
   personaRole?: PersonaRole;
-  /** Concrete in-session behavioral events (server-derived). */
+  /** Concrete in-session behavioral events (timing events client-supplied + enum-validated; the three
+   *  conversation-derived events stay server-owned — WS-B3a). */
   behavioral?: BehavioralEvent[];
   device?: Device;
   entry?: Entry;

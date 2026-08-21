@@ -38,6 +38,13 @@ export interface CreateVertexOptions {
   embedDimension?: number;
   /** Injected embedding transport — TESTS ONLY. Production leaves it unset and gets the real SDK call. */
   embedContent?: EmbedContentFn;
+  /**
+   * WS-E1 — hard ceiling on ONE `complete()` call (a single reactive /chat turn). Defaults to
+   * PALUP_MODEL_TIMEOUT_MS, else 30000ms — chat needs more headroom than the embed path's default
+   * (20000ms, index-only) so a normal slow response is not false-timed-out, while still bounding a
+   * genuinely hung call instead of letting it hang the whole request.
+   */
+  completeTimeoutMs?: number;
 }
 
 export function isVertexConfigured(): boolean {
@@ -80,6 +87,11 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
       "createVertexAdapter: set GOOGLE_CLOUD_PROJECT (and GOOGLE_CLOUD_LOCATION) or pass opts.project",
     );
   }
+  // WS-E1: config-driven, defaulted — a deployment that has never set PALUP_MODEL_TIMEOUT_MS still gets a
+  // bound (30s) rather than silently staying unbounded, unlike the embed knobs above (which default to
+  // pre-existing unbounded/no-retry behaviour because THEY are new resilience knobs on an existing method
+  // signature). complete()'s previous total absence of a bound is exactly the gap this closes.
+  const completeTimeoutMs = opts.completeTimeoutMs ?? positiveIntEnv(process.env.PALUP_MODEL_TIMEOUT_MS) ?? 30000;
 
   // Lazy dynamic import: importing this package (e.g. in the backend's mock mode) never loads the
   // Google SDK. It resolves+initializes only on the FIRST real Vertex call — and ONE client serves both
@@ -157,7 +169,7 @@ export function createVertexAdapter(opts: CreateVertexOptions = {}): VertexModel
   // not "this operator would rather not".
   return new VertexModelAdapter(
     generate,
-    { model, ...(thinkingLevel ? { thinkingLevel } : {}) },
+    { model, ...(thinkingLevel ? { thinkingLevel } : {}), completeTimeoutMs },
     {
       call: embedContent,
       cfg: {

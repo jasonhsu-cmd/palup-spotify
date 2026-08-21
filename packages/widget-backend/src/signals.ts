@@ -1,4 +1,4 @@
-import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent } from "@palup/widget-brain";
+import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Mood, BehavioralEvent, Relationship } from "@palup/widget-brain";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -8,6 +8,35 @@ import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent } fr
 
 const MOODS = new Set<string>(["frustrated", "upset", "anxious", "confused", "skeptical", "neutral", "satisfied"]);
 const CARTS = new Set<string>(["empty", "has_items", "high_value"]);
+// WS-B3a — the full BehavioralEvent enum, kept for the TYPE (not the client-accept filter below — see
+// CLIENT_BEHAVIORAL_EVENTS). Every event here is restrain-only in the BRAIN (suppresses a pitch,
+// triggers a conservative cart_recovery, or is pure observability) — but "restrain-only in the brain"
+// is not the same as "safe to accept unverified from the client": DISPOSITION_BEHAVIORAL is default-on
+// on staging, and `rageDetected` (brain.ts ~1641/1847/2100) sets `escalateToHuman: true` UNCONDITIONALLY
+// from `signals.behavioral.includes("rage")`, with no server corroboration. A client that could set
+// `rage` every turn could flood the escalation/support queue — a real cost/ops-load lever, not merely a
+// restrained one. So this set stays for typing/reference; CLIENT_BEHAVIORAL_EVENTS below is the actual
+// allow-list `deriveServingSignals` filters against.
+const BEHAVIORAL_EVENTS = new Set<string>(["dwell", "hesitation", "repeat_question", "pitch_declined", "idle_then_return", "rage"]);
+// WS-B3a fix round 1 — only the THREE TIMING events a client can legitimately observe about its own
+// session (how long the shopper dwelled, whether they hesitated, whether they left and came back) are
+// client-accepted. The three CONVERSATION-derived events — `rage`, `pitch_declined`, `repeat_question`
+// — stay SERVER-OWNED, never trusted from the client, matching this file's original "server-derived;
+// never trusted raw" intent for BehavioralEvent (widget-brain/src/types.ts): `pitch_declined` is armed
+// by session.ts's own SessionState (session.ts ~250-252), not by echoing a client value, and
+// `repeat_question`/`rage` have no legitimate client-observable signal backing them (a client claiming
+// "the shopper is enraged" cannot be corroborated the way "the shopper dwelled 40s" can). NOTE: none of
+// the three timing events below has a brain.ts consumer yet (grepped; only rage/pitch_declined/
+// repeat_question are read) — accepting them here is presently a DEAD capability, not a vetted one; a
+// future PR wiring a brain consumer to dwell/hesitation/idle_then_return must re-run this trust
+// analysis rather than assume this task already vetted that consumption.
+const CLIENT_BEHAVIORAL_EVENTS = new Set<string>(["dwell", "hesitation", "idle_then_return"]);
+// Load-time guard so BEHAVIORAL_EVENTS stays a real invariant on CLIENT_BEHAVIORAL_EVENTS rather than
+// two lists that can silently drift: a typo'd/renamed event in the client allow-list fails at import
+// time instead of shipping as a silently-dropped (or silently-wrong) filter.
+for (const e of CLIENT_BEHAVIORAL_EVENTS) {
+  if (!BEHAVIORAL_EVENTS.has(e)) throw new Error(`signals.ts: CLIENT_BEHAVIORAL_EVENTS has unknown event "${e}"`);
+}
 
 // ── E4: cart line items ──────────────────────────────────────────────────────────────────────────
 //
@@ -155,6 +184,23 @@ export interface ServingSignalContext {
    *  output, so no server safety/injection/support signal exists this turn. Passed through so the SERVER
    *  is the sole origin of `Signals.serverGuardDegraded`; the client's own value is never read. */
   serverGuardDegraded?: boolean;
+  /**
+   * WS-B1 — the guard classifier's whitelisted mood for THIS turn (same source + call as the safety/
+   * support fields above — folded into the SAME classifyGuardSignals model call, no second round-trip).
+   * Unlike safetyClass/supportIntent, mood is NON-trust-bearing (it can only make the brain MORE
+   * restrained via the mood brake — never grant treatment), so when this is absent (flag off, classifier
+   * degraded, or the model omitted/mis-emitted mood) `deriveServingSignals` falls back to the client's own
+   * `signals.mood` echo rather than dropping mood entirely — safe because mood only ever restrains.
+   */
+  serverMood?: Mood;
+  /**
+   * WS-B2b — the server-computed lifecycle stage for a verified shopper (deriveLifecycle, lifecycle.ts —
+   * derived from order history + subscription, itself fetched from the guarded commerce port, never the
+   * client). Absent when no lifecycle was computed this turn (anonymous shopper, or the commerce lookup
+   * failed — server.ts fails OPEN on any error) ⇒ the old verified/anonymous-only default below still
+   * applies, byte-identical to before this field existed.
+   */
+  relationship?: Relationship;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -163,9 +209,23 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
   // did. The distinction matters: `undefined` leaves the pre-existing enum path alone, while `[]` is a
   // POSITIVE statement that the cart is empty.
   const cartItems = ctx.cartLineItemsEnabled ? sanitizeCartItems((r as { cartItems?: unknown }).cartItems) : undefined;
+  // WS-B3a — `undefined` when the client sent no array at all (⇒ the key is omitted below, mirroring
+  // `cartItems`'s discipline), an array (possibly EMPTY after filtering — same "sent but nothing
+  // accepted" discipline as cartItems/`cart:"empty"`) when it did, filtered to the CLIENT-accepted
+  // timing subset (CLIENT_BEHAVIORAL_EVENTS, not the full BehavioralEvent enum) so an unrecognized value
+  // OR a server-owned conversation event (rage/pitch_declined/repeat_question) is dropped rather than
+  // coerced, kept, or trusted from the client.
+  const behavioral = Array.isArray((r as { behavioral?: unknown }).behavioral)
+    ? (r as { behavioral?: unknown[] }).behavioral!.filter(
+        (e): e is BehavioralEvent => typeof e === "string" && CLIENT_BEHAVIORAL_EVENTS.has(e),
+      )
+    : undefined;
   return {
-    // Accepted shopper/UI context — only when a valid enum value.
-    mood: typeof r.mood === "string" && MOODS.has(r.mood) ? r.mood : undefined,
+    // WS-B1 — mood is now SERVER-derived when the guard classifier ran cleanly for this turn
+    // (ctx.serverMood, folded into the same classifyGuardSignals call): the server-classified mood wins.
+    // The client's own enum-checked echo remains only as the flag-off/degraded fallback — safe because
+    // mood is non-trust-bearing (it only ever restrains the brain, never grants treatment).
+    mood: ctx.serverMood ?? (typeof r.mood === "string" && MOODS.has(r.mood) ? r.mood : undefined),
     // E4 — a supplied line-item list RE-DERIVES this and overrides whatever the client claimed. Only two
     // outputs are reachable from it, so a shopper cannot manufacture `high_value` out of a cart payload;
     // see the trust note above `sanitizeCartItems`, including what this deliberately does NOT close.
@@ -180,6 +240,11 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // discipline `Decision.recommendedProducts` uses, and what keeps an `Object.keys` consumer and a
     // strict-equal fixture unchanged while E4 is unwired.
     ...(cartItems ? { cartItems } : {}),
+    // WS-B3a — SPREAD, so the key is ABSENT (not present-and-undefined) whenever the client sent no
+    // array, same discipline as `cartItems` above — keeps an `Object.keys`/strict-equal fixture and
+    // session.ts's existing `signals.behavioral` carry logic (which reads `signals.behavioral ?? []`)
+    // unaffected when nothing was supplied.
+    ...(behavioral ? { behavioral } : {}),
     // Agent-initiated proactive UI trigger (§4 Behavioral: exit-intent) — non-trust-bearing UI context
     // like mood/cart, accepted ONLY as the known enum. It can only route to a MORE restrained proactive
     // cart_recovery on the clean sales path; every server cap still holds (precedence ladder, mood brake,
@@ -198,7 +263,10 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // Gate the id on the VERIFIED flag too (not just relationship) — an (id-set, unverified) ctx (e.g. a
     // future OTP adapter mid-verify) must never key the ownership check on an unverified id.
     shopperId: ctx.shopperVerified && ctx.shopperId ? ctx.shopperId : undefined,
-    relationship: ctx.shopperVerified && ctx.shopperId ? "new" : "anonymous",
+    // WS-B2b — ctx.relationship (server-computed lifecycle, deriveLifecycle) wins when present; absent
+    // (no lifecycle computed this turn) falls back to the old verified/anonymous-only default exactly as
+    // before, so the inert path (lifecycle fetch never happens) stays byte-identical.
+    relationship: ctx.relationship ?? (ctx.shopperVerified && ctx.shopperId ? "new" : "anonymous"),
     consent: {
       email: "unknown",
       sms: "unknown",

@@ -51,4 +51,59 @@ describe("signals trust — the client cannot set the server-derived guardrail s
     expect("serverGuardDegraded" in deriveServingSignals(undefined, ctx)).toBe(false);
     expect("serverGuardDegraded" in deriveServingSignals(undefined, { ...ctx, serverGuardDegraded: false })).toBe(false);
   });
+
+  // WS-B1 — mood becomes server-derived via the SAME guard-classifier call. It is NON-trust-bearing (it
+  // can only make the brain MORE restrained, never grant treatment), so unlike safetyClass/supportIntent
+  // the client's own mood echo remains as the flag-off/degraded FALLBACK — but whenever the server has a
+  // mood for this turn (ctx.serverMood), it wins over whatever the client claimed.
+  it("ctx.serverMood overrides a client-supplied mood", () => {
+    const hostile = { mood: "satisfied" } as Signals;
+    const out = deriveServingSignals(hostile, { ...ctx, serverMood: "frustrated" });
+    expect(out.mood).toBe("frustrated");
+  });
+
+  it("falls back to the client mood when ctx.serverMood is absent (flag-off/degraded turn)", () => {
+    const clientOnly = { mood: "anxious" } as Signals;
+    expect(deriveServingSignals(clientOnly, ctx).mood).toBe("anxious");
+  });
+});
+
+// WS-B3a — `behavioral` joins the ALLOW-list of non-trust-bearing client fields (mood/cart/
+// proactiveTrigger), but ONLY the three TIMING events (dwell/hesitation/idle_then_return) a client can
+// legitimately observe about its own session. Fix round 1: the three CONVERSATION-derived events
+// (rage/pitch_declined/repeat_question) stay SERVER-owned — DISPOSITION_BEHAVIORAL is default-on on
+// staging and brain.ts sets escalateToHuman UNCONDITIONALLY off a client-supplied `rage`
+// (signals.behavioral.includes("rage"), no server corroboration), so trusting it from the client would
+// let a shopper flood the escalation/support queue at will. Unknown AND conversation-derived values are
+// both dropped, never coerced or kept.
+describe("WS-B3a — the client's behavioral array is accepted only after enum validation, timing events only", () => {
+  it("filters an array to known TIMING BehavioralEvent values, dropping unknowns", () => {
+    const hostile = { behavioral: ["dwell", "bogus", "rage"] } as unknown as Signals;
+    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual(["dwell"]);
+  });
+
+  it("drops rage/pitch_declined/repeat_question from the client — they stay server-owned (key present, filtered to empty, matching cartItems's 'sent but nothing accepted' discipline)", () => {
+    const hostile = { behavioral: ["rage", "pitch_declined", "repeat_question"] } as unknown as Signals;
+    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual([]);
+  });
+
+  it("accepts all three timing events together", () => {
+    const client = { behavioral: ["dwell", "hesitation", "idle_then_return"] } as unknown as Signals;
+    expect(deriveServingSignals(client, ctx).behavioral).toEqual(["dwell", "hesitation", "idle_then_return"]);
+  });
+
+  it("omits the key entirely when the client sent no behavioral field (key absent, not undefined-valued)", () => {
+    const out = deriveServingSignals({ mood: "neutral" } as Signals, ctx);
+    expect("behavioral" in out).toBe(false);
+  });
+
+  it("omits the key when the client sends a non-array behavioral value", () => {
+    const hostile = { behavioral: "rage" } as unknown as Signals;
+    expect("behavioral" in deriveServingSignals(hostile, ctx)).toBe(false);
+  });
+
+  it("drops non-string entries inside the array without throwing", () => {
+    const hostile = { behavioral: ["dwell", 123, null, { foo: "bar" }, "hesitation"] } as unknown as Signals;
+    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual(["dwell", "hesitation"]);
+  });
 });

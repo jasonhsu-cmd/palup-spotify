@@ -79,3 +79,54 @@ describe("VertexModelAdapter mapping", () => {
     );
   });
 });
+
+// WS-E1 — complete() had NO bound on the reactive model call: a slow/hung Gemini call hung the whole
+// /chat request instead of degrading gracefully (server.ts's catch already returns a graceful 200, but
+// only once complete() actually rejects). Mirrors the embed path's existing withTimeout/cfg.timeoutMs
+// (embedBatch, ~:392-435) for the completion path.
+describe("VertexModelAdapter complete() timeout (WS-E1)", () => {
+  it("rejects with a clear timeout error when generate() never resolves, bounded by completeTimeoutMs", async () => {
+    const hungGenerate: GenerateFn = () => new Promise(() => {}); // never settles — simulates a hung model call
+    const adapter = new VertexModelAdapter(hungGenerate, { model: "gemini-test", completeTimeoutMs: 20 });
+    await expect(adapter.complete({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(
+      /vertex: completion timed out after 20ms/,
+    );
+  });
+
+  it("does not time out a completion that resolves within completeTimeoutMs", async () => {
+    const adapter = new VertexModelAdapter(fakeGenerate, { model: "gemini-test", completeTimeoutMs: 5000 });
+    const res = await adapter.complete({ messages: [{ role: "user", content: "hi" }] });
+    expect(res.text).toContain("vitamin-C serum");
+  });
+
+  it("never leaks a pending timer past a successful completion (no dangling setTimeout)", async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = new VertexModelAdapter(fakeGenerate, { model: "gemini-test", completeTimeoutMs: 5000 });
+      const p = adapter.complete({ messages: [{ role: "user", content: "hi" }] });
+      await p;
+      // If the timeout timer were never cleared, this would still be pending after the completion
+      // resolved — asserting the count is a proxy for "cleared", since vitest fake timers expose it.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("is unbounded (no timeout) when completeTimeoutMs is unset — pre-existing behaviour preserved", async () => {
+    const adapter = new VertexModelAdapter(fakeGenerate, { model: "gemini-test" });
+    const res = await adapter.complete({ messages: [{ role: "user", content: "hi" }] });
+    expect(res.text).toContain("vitamin-C serum");
+  });
+
+  it("does NOT retry on timeout — generate() is called exactly once", async () => {
+    let calls = 0;
+    const hungGenerate: GenerateFn = () => {
+      calls++;
+      return new Promise(() => {});
+    };
+    const adapter = new VertexModelAdapter(hungGenerate, { model: "gemini-test", completeTimeoutMs: 15 });
+    await expect(adapter.complete({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+});

@@ -10,6 +10,7 @@ import {
   type Policy,
   type Signals,
   type Consent,
+  type Relationship,
 } from "@palup/widget-brain";
 import { DEFAULT_POLICY, normalizeHistory, OFFER_CHECK_AGENT_TYPE } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
@@ -48,10 +49,11 @@ import {
   tombstoneKey,
   mergeGuestIntoAccount,
 } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals } from "./signals.js";
+import { deriveLifecycle } from "./lifecycle.js";
 import { registerEmbedRoutes, bundleLoader } from "./routes/embed.js";
 import { resolveTheme } from "./widget-theme.js";
 import { registerStorefrontCatalogRoutes, projectStorefrontCatalog, STOREFRONT_PAGE_LIMIT } from "./routes/storefront-catalog.js";
@@ -749,6 +751,17 @@ export async function buildServer(opts?: {
   // on in a real environment is a human promotion (HITL-POLICY §5) — it changes what the shopper agent
   // detects. OFF ⇒ the classifier never runs (zero spend) and the guardrail ladder is byte-identical.
   const SERVER_GUARD_SIGNALS = process.env.SERVER_GUARD_SIGNALS === "true";
+  // WS-A (2026-08-21, owner-authorized staging enablement) — ADR-0018 disposition axes (createBrain
+  // positions 8-10). Consumers already exist in widget-brain/brain.ts (persona-style directive/B2B
+  // escalation, behavioral quieting, and the classifyPersonaStyle model call respectively); this is the
+  // env-read half that was previously entirely missing (the three were hardcoded `false` literals below
+  // with no `process.env` read anywhere in the repo). Same governed posture-flag discipline as every flag
+  // above: default OFF here, announced at boot via `wave4On`, and it is a human promotion to enable in a
+  // real environment (HITL-POLICY §5) — for staging, that human promotion is this owner-authorized change
+  // (see the deploy-staging.yml default and the updated comment at the createBrain call site below).
+  const DISPOSITION_STYLE = process.env.DISPOSITION_STYLE === "true";
+  const DISPOSITION_BEHAVIORAL = process.env.DISPOSITION_BEHAVIORAL === "true";
+  const DISPOSITION_CLASSIFIER = process.env.DISPOSITION_CLASSIFIER === "true";
   // A1b — PRODUCT_FACTS_HYDRATION: overlay the Tier-2 store's fresh price/availability onto the retrieved
   // subset before it renders. Same governed posture-flag discipline: env-read here, default OFF, turning it
   // on is a human promotion (HITL-POLICY §5) — it changes which PRICE the agent quotes (money/NN#1). OFF ⇒
@@ -887,7 +900,7 @@ export async function buildServer(opts?: {
   // because a posture nobody could see was wrong for weeks). §5 still requires a recorded eval gate,
   // shadow, canary and a named human's approval before any of these is set in a real environment — this
   // line does not authorize it, it makes skipping it visible.
-  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER, PRODUCT_FACTS_READ_THROUGH })
+  const wave4On = Object.entries({ PRODUCT_CITATIONS, PRODUCT_CARDS, CART_LINE_ITEMS, SERVER_GUARD_SIGNALS, PRODUCT_FACTS_HYDRATION, OUTGOING_OFFER_CHECK, GREETING_PROACTIVE, PRICE_REQUIRES_LIVE_CHANNEL, PROACTIVE_OPENER, PRODUCT_FACTS_READ_THROUGH, DISPOSITION_STYLE, DISPOSITION_BEHAVIORAL, DISPOSITION_CLASSIFIER })
     .filter(([, v]) => v)
     .map(([k]) => k);
   if (wave4On.length > 0) {
@@ -912,12 +925,15 @@ export async function buildServer(opts?: {
     if (!b) {
       b = createBrain(
         meteredModel, grounding, policy, commerce, "shopper-demo", memoryPort, SUBSCRIPTION_SELFSERVE,
-        // Positions 8–10 — the disposition flags (ADR-0018). These have NO env read anywhere in the repo
-        // and stay off. Passed EXPLICITLY at their defaults rather than left implicit: reaching Wave 4's
-        // positions requires naming them, and a bare `undefined` here would be indistinguishable from a
-        // wiring bug of the exact kind this call site just had. Wiring them is a separate decision under
-        // their own ADR — not this change's to make.
-        /* dispositionStyle */ false, /* dispositionBehavioral */ false, /* dispositionClassifier */ false,
+        // Positions 8–10 — the disposition flags (ADR-0018). WS-A (2026-08-21, owner-authorized staging
+        // enablement) wires them to their env reads above, superseding the prior "these have NO env read
+        // and stay off" posture: DISPOSITION_STYLE gates the persona-style directive + B2B-role escalation,
+        // DISPOSITION_BEHAVIORAL gates rage/pitch-declined quieting, and DISPOSITION_CLASSIFIER gates the
+        // classifyPersonaStyle model call (only reachable when DISPOSITION_STYLE is also on — see brain.ts).
+        // Same governed posture-flag discipline as every other Wave 4 flag: default OFF, announced at boot
+        // via `wave4On` above, and turning any of these on in a real environment outside this owner-
+        // authorized staging default is still a human promotion (HITL-POLICY §5).
+        /* dispositionStyle */ DISPOSITION_STYLE, /* dispositionBehavioral */ DISPOSITION_BEHAVIORAL, /* dispositionClassifier */ DISPOSITION_CLASSIFIER,
         // Positions 11–16 — Wave 4. `catalogRetriever` is now built unconditionally (S4 §B); position 12
         // (`catalogRetrievalEnabled`) is the constructor DEFAULT only — it is always `false` here because
         // enablement is now a PER-TURN, per-tenant signal (`signals.catalogRetrievalEnabled`, resolved
@@ -2685,7 +2701,6 @@ export async function buildServer(opts?: {
     }
     const body = (req.body ?? {}) as {
       anonId?: unknown; // NEVER trusted as the guest subject — see the route's own doc comment above.
-      healthDisclosed?: unknown;
       widgetToken?: string;
       /** Mirrors /chat's/consent's dual-transport fallback for the x-shopper-token header. */
       shopperToken?: string;
@@ -2737,16 +2752,12 @@ export async function buildServer(opts?: {
       lookupConsent(store, { tenantId, anonId: accountSubject! }),
       lookupConsent(store, { tenantId, anonId: guestAnonId }),
     ]);
-    // MED-1 (security review) — INTERIM: `healthDisclosed` is a CLIENT-ASSERTED Q19(c) gate leg. The other
-    // two legs (both consent tiers) are server-recorded; this one is not. A tampered client already holding
-    // valid shopper+guest tokens with Consent 2 "in" on BOTH subjects could assert `true` and carry Art-9
-    // facts even if the disclosure UI never showed (bounded: self-data, own account, both consents still
-    // required — not a cross-subject/exfil path). Before the memory feature is ENABLED, this must become a
-    // SERVER-RECORDED disclosure event (recorded when the widget carry-over prompt actually names health
-    // data), read here instead of trusting a body boolean — a named-owner/counsel go-live residual, landing
-    // with the R2-1 carry-over prompt (CARRY_OVER_PROMPT_ENABLED, still legal-gated off). Safe as-is only
-    // because the route 404s while memory is dark and no widget caller sets this true yet.
-    const healthDisclosed = body.healthDisclosed === true;
+    // WS-D — Q19(c) is now SERVER-RECORDED, not client-asserted. `healthDisclosed` reads a disclosure event
+    // written (by the future R2-1 carry-over prompt, still legal-gated CARRY_OVER_PROMPT_ENABLED) via
+    // recordHealthDisclosure, keyed by (tenant, accountSubject, guestAnonId) — like the two consent legs.
+    // Until a production writer exists, this is fail-closed false, so special-category rows do not carry.
+    // A forged body.healthDisclosed can no longer promote Art-9 facts (MED-1 remediated).
+    const healthDisclosed = await lookupHealthDisclosure(store, { tenantId, accountSubject: accountSubject!, guestAnonId });
 
     const result = await mergeGuestIntoAccount(
       { vector: vectorPort, audit: store, hmacKey: AUDIT_HMAC_SECRET },
@@ -2973,6 +2984,12 @@ export async function buildServer(opts?: {
       // input and delete known-bad fields, we RECONSTRUCT signals from trusted sources — the safe default
       // is that a field the shopper sends is ignored unless it is explicitly non-trust-bearing context.
       //   • mood / cart  — shopper/UI context; accepted only if a valid enum value (from the storefront in prod).
+      //   • behavioral   — WS-B3a: client-accepted, but only the enum-validated TIMING subset
+      //     (dwell/hesitation/idle_then_return) a client can legitimately observe about its own session.
+      //     `rage`/`pitch_declined`/`repeat_question` stay SERVER-owned — DISPOSITION_BEHAVIORAL is
+      //     default-on on staging and a client-supplied `rage` would set brain.ts's escalateToHuman
+      //     unconditionally, so those three are never trusted from the client (signals.ts's
+      //     CLIENT_BEHAVIORAL_EVENTS, not the full BehavioralEvent enum).
       //   • relationship — grants VIP/subscriber treatment ⇒ SERVER-derived. Anonymous until an identified
       //     customer + history exist (M2 customer identity), never client-claimed.
       //   • consent      — legally load-bearing (TCPA/CAN-SPAM, gates outbound) ⇒ conservative default
@@ -3187,6 +3204,26 @@ export async function buildServer(opts?: {
           consentPrompt: consentPrompt ?? "none",
         }),
       );
+      // WS-B2b — lifecycle derivation (ADR-0015 Tier 2): VERIFIED-ONLY (never called for an anonymous
+      // shopper) and FAIL-OPEN (any throw — including CommerceGuardRefusalError on a live adapter, or a
+      // real adapter error/timeout — leaves `relationship` undefined, so deriveServingSignals below falls
+      // back to its old new/anonymous-only default; the chat turn never breaks on this). Bound via
+      // `withRequestPrincipal` (same mechanism `session.send` uses further down) so a LIVE commerce
+      // adapter's guard — which requires the ALS-bound principal to be this verified shopper — actually
+      // passes, rather than always refusing because no principal was bound yet at this point in the
+      // handler. Adds 2 commerce calls per verified-shopper turn — acceptable for staging; a per-session
+      // cache is a future optimization, not built here.
+      let relationship: Relationship | undefined;
+      if (verifiedShopperId) {
+        try {
+          const [hist, sub] = await withRequestPrincipal(shopperPrincipal, () =>
+            Promise.all([commerce.getOrderHistory(verifiedShopperId), commerce.getSubscription(verifiedShopperId)]),
+          );
+          relationship = deriveLifecycle(hist, sub, true);
+        } catch {
+          relationship = undefined; // FAIL-OPEN: any commerce error ⇒ fall back to the old default
+        }
+      }
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
         kill: Boolean(kill),
@@ -3205,6 +3242,10 @@ export async function buildServer(opts?: {
         // any error/timeout/unparseable/out-of-enum). deriveServingSignals only ever sets the key when
         // truthy, so the flag-off / clean-classification path stays byte-identical.
         serverGuardDegraded: guardSignals?.degraded,
+        // WS-B1 — mood, folded into the SAME classifyGuardSignals call above (no second model.complete).
+        // Undefined when the classifier didn't run / omitted mood / emitted out-of-enum ⇒
+        // deriveServingSignals falls back to the client's own mood echo (safe: mood only restrains).
+        serverMood: guardSignals?.mood,
         // E4 — THE SECOND GATE. `cartLineItemsEnabled` appears twice by design: here it decides whether a
         // client's `cartItems` is PARSED AT ALL (parsing untrusted input is its own attack surface), and in
         // `createBrain` above it decides whether the parsed value is CONSUMED. One env var must open both,
@@ -3221,6 +3262,8 @@ export async function buildServer(opts?: {
         // token, or the F1 re-binding check above failed).
         shopperId: shopperPrincipal.kind === "shopper" ? shopperPrincipal.shopperId : undefined,
         shopperVerified: shopperPrincipal.kind === "shopper" ? shopperPrincipal.verified : undefined,
+        // WS-B2b — server-computed lifecycle stage (undefined ⇒ deriveServingSignals's old default).
+        relationship,
         consent: consentRecord,
         // The SAME subject the consent lookup above used — so recall, remember(), the sweep and the
         // consent gate all key off one namespace (security review F1/F2).

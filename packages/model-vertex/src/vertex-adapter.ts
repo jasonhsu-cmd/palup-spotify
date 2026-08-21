@@ -48,6 +48,16 @@ export interface VertexConfig {
   /** Optional Gemini thinking level (MINIMAL | LOW | MEDIUM | HIGH). Latency/quality lever; unset ⇒ the
    * model default. Set from PALUP_THINKING_LEVEL in create.ts. */
   thinkingLevel?: string;
+  /**
+   * WS-E1 — hard ceiling on ONE `complete()` call (the reactive per-turn model request), distinct from
+   * the embed path's `VertexEmbedConfig.timeoutMs` (a different config object, batch-index-only). Unset ⇒
+   * unbounded, matching pre-WS-E1 behaviour exactly (no deployment's timing changes just by upgrading).
+   * Set from PALUP_MODEL_TIMEOUT_MS in create.ts, default ~30000ms — chat needs more headroom than embed
+   * (30s bounds a hung call without false-timing-out a normal slow response). On timeout this THROWS; the
+   * caller (`/chat`'s route catch, server.ts) already turns that into a graceful reply — no retry here (a
+   * hard ceiling, not a retry: retrying a slow model worsens latency/COGS, not fixes it).
+   */
+  completeTimeoutMs?: number;
 }
 
 // ── embeddings (B3) ───────────────────────────────────────────────────────────────────────────────
@@ -303,7 +313,7 @@ export class VertexModelAdapter implements ModelPort {
         parts: [{ text: m.content }],
       }));
 
-    const res = await this.generate({
+    const genPromise = this.generate({
       model: this.cfg.model,
       contents,
       config: {
@@ -314,6 +324,29 @@ export class VertexModelAdapter implements ModelPort {
         ...(this.cfg.thinkingLevel ? { thinkingConfig: { thinkingLevel: this.cfg.thinkingLevel } } : {}),
       },
     });
+
+    // WS-E1: bound the reactive call so a SLOW (not just failing) model degrades gracefully instead of
+    // hanging the request. Mirrors embedBatch's withTimeout (~:392-435): Promise.race against a rejecting
+    // setTimeout, timer ALWAYS cleared on either outcome (finally) so a fast completion never leaves a
+    // dangling timer alive for its full duration. Unset completeTimeoutMs ⇒ unbounded (pre-existing
+    // behaviour, unchanged). NO retry — one attempt, bounded, then throw to the caller's graceful catch.
+    const timeoutMs = this.cfg.completeTimeoutMs;
+    let res: GenResponse;
+    if (timeoutMs === undefined) {
+      res = await genPromise;
+    } else {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        res = await Promise.race([
+          genPromise,
+          new Promise<GenResponse>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error(`vertex: completion timed out after ${timeoutMs}ms`)), timeoutMs);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
 
     const text = (res.text ?? "").trim();
     if (!text)

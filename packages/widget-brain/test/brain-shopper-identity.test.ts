@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createBrain, DEFAULT_POLICY, MockModelAdapter, StaticGroundingAdapter } from "../src/index.js";
-import type { CommercePort, CommercePolicy, Order, Subscription, SubscriptionActionResult } from "@palup/platform-ports";
+import type { CommercePort, CommercePolicy, Order, OrderHistorySummary, Subscription, SubscriptionActionResult } from "@palup/platform-ports";
 
 // ADR-0017 T6: the brain must use the PER-REQUEST `signals.shopperId` (server-derived), not the
 // constructor default, for the support/commerce ownership check — otherwise a stale/constant
@@ -24,6 +24,11 @@ class StubCommerce implements CommercePort {
     return orderId.replace(/[^0-9]/g, "") === "5000" ? ORDER_OWNED_BY_B : null;
   }
   async getRecentOrder(): Promise<Order | null> {
+    return null;
+  }
+  // Not exercised by this suite (ADR-0017 T6 IDOR focus) — stub so the class still satisfies
+  // CommercePort after WS-B2a's new getOrderHistory method.
+  async getOrderHistory(): Promise<OrderHistorySummary | null> {
     return null;
   }
   async getPolicy(): Promise<CommercePolicy> {
