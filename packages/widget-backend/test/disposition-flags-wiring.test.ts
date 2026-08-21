@@ -23,12 +23,17 @@ import { buildServer } from "../src/server.js";
 // array (brain.ts:1977, server.ts's `response.flags = d.flags`) — this is the assertion below.
 //
 // STALE as of WS-B3a (2026-08-21): `behavioral` no longer belongs in the "nothing behind the flag" list
-// above — deriveServingSignals now accepts + enum-validates a client-supplied `behavioral` array
-// (signals.ts's BEHAVIORAL_EVENTS set) and server.ts passes `body.signals` straight into it, so
-// DISPOSITION_BEHAVIORAL now HAS a real client→signals→brain seam (pinned by
-// signals-safety-trust.test.ts's WS-B3a block, unit-level only). End-to-end /chat coverage for that seam
-// is not added here — out of this test's and WS-B3a's scope — so the deploy-guard test
-// (deploy-staging-env.test.ts) remains the only coverage of the flag itself at this wire.
+// above — deriveServingSignals now accepts + enum-validates a client-supplied `behavioral` array, but
+// ONLY the three TIMING events (signals.ts's CLIENT_BEHAVIORAL_EVENTS: dwell/hesitation/
+// idle_then_return, fix round 1) — `rage`/`pitch_declined`/`repeat_question` stay server-owned because
+// DISPOSITION_BEHAVIORAL is default-on on staging and a client-supplied `rage` would set brain.ts's
+// escalateToHuman unconditionally with no server corroboration. server.ts passes `body.signals` straight
+// into deriveServingSignals, so DISPOSITION_BEHAVIORAL now HAS a real client→signals→brain seam for the
+// three timing events (pinned by signals-safety-trust.test.ts's WS-B3a block, unit-level only — and
+// those three currently have no brain.ts consumer either, so the seam is presently a dead capability).
+// End-to-end /chat coverage for that seam is not added here — out of this test's and WS-B3a's scope —
+// so the deploy-guard test (deploy-staging-env.test.ts) remains the only coverage of the flag itself at
+// this wire.
 
 const ENV_KEYS = ["DISPOSITION_STYLE", "DISPOSITION_CLASSIFIER"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));

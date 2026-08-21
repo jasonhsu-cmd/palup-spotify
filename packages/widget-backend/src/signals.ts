@@ -8,12 +8,35 @@ import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Moo
 
 const MOODS = new Set<string>(["frustrated", "upset", "anxious", "confused", "skeptical", "neutral", "satisfied"]);
 const CARTS = new Set<string>(["empty", "has_items", "high_value"]);
-// WS-B3a — every BehavioralEvent is restrain-only (suppresses a pitch, triggers a conservative
-// cart_recovery on the exit-intent path, or is pure observability); none unlock money/autonomy. So, like
-// MOODS/CARTS above, a client-supplied array validated against this enum is safe to pass through as
-// non-trust-bearing context — no new flag gate needed here (the brain's own dispositionBehavioral flag
-// governs whether anything CONSUMES it).
+// WS-B3a — the full BehavioralEvent enum, kept for the TYPE (not the client-accept filter below — see
+// CLIENT_BEHAVIORAL_EVENTS). Every event here is restrain-only in the BRAIN (suppresses a pitch,
+// triggers a conservative cart_recovery, or is pure observability) — but "restrain-only in the brain"
+// is not the same as "safe to accept unverified from the client": DISPOSITION_BEHAVIORAL is default-on
+// on staging, and `rageDetected` (brain.ts ~1641/1847/2100) sets `escalateToHuman: true` UNCONDITIONALLY
+// from `signals.behavioral.includes("rage")`, with no server corroboration. A client that could set
+// `rage` every turn could flood the escalation/support queue — a real cost/ops-load lever, not merely a
+// restrained one. So this set stays for typing/reference; CLIENT_BEHAVIORAL_EVENTS below is the actual
+// allow-list `deriveServingSignals` filters against.
 const BEHAVIORAL_EVENTS = new Set<string>(["dwell", "hesitation", "repeat_question", "pitch_declined", "idle_then_return", "rage"]);
+// WS-B3a fix round 1 — only the THREE TIMING events a client can legitimately observe about its own
+// session (how long the shopper dwelled, whether they hesitated, whether they left and came back) are
+// client-accepted. The three CONVERSATION-derived events — `rage`, `pitch_declined`, `repeat_question`
+// — stay SERVER-OWNED, never trusted from the client, matching this file's original "server-derived;
+// never trusted raw" intent for BehavioralEvent (widget-brain/src/types.ts): `pitch_declined` is armed
+// by session.ts's own SessionState (session.ts ~250-252), not by echoing a client value, and
+// `repeat_question`/`rage` have no legitimate client-observable signal backing them (a client claiming
+// "the shopper is enraged" cannot be corroborated the way "the shopper dwelled 40s" can). NOTE: none of
+// the three timing events below has a brain.ts consumer yet (grepped; only rage/pitch_declined/
+// repeat_question are read) — accepting them here is presently a DEAD capability, not a vetted one; a
+// future PR wiring a brain consumer to dwell/hesitation/idle_then_return must re-run this trust
+// analysis rather than assume this task already vetted that consumption.
+const CLIENT_BEHAVIORAL_EVENTS = new Set<string>(["dwell", "hesitation", "idle_then_return"]);
+// Load-time guard so BEHAVIORAL_EVENTS stays a real invariant on CLIENT_BEHAVIORAL_EVENTS rather than
+// two lists that can silently drift: a typo'd/renamed event in the client allow-list fails at import
+// time instead of shipping as a silently-dropped (or silently-wrong) filter.
+for (const e of CLIENT_BEHAVIORAL_EVENTS) {
+  if (!BEHAVIORAL_EVENTS.has(e)) throw new Error(`signals.ts: CLIENT_BEHAVIORAL_EVENTS has unknown event "${e}"`);
+}
 
 // ── E4: cart line items ──────────────────────────────────────────────────────────────────────────
 //
@@ -179,11 +202,14 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
   // POSITIVE statement that the cart is empty.
   const cartItems = ctx.cartLineItemsEnabled ? sanitizeCartItems((r as { cartItems?: unknown }).cartItems) : undefined;
   // WS-B3a — `undefined` when the client sent no array at all (⇒ the key is omitted below, mirroring
-  // `cartItems`'s discipline), an array (possibly empty) when it did, filtered to known enum members so
-  // an unrecognized value is dropped rather than coerced or kept.
+  // `cartItems`'s discipline), an array (possibly EMPTY after filtering — same "sent but nothing
+  // accepted" discipline as cartItems/`cart:"empty"`) when it did, filtered to the CLIENT-accepted
+  // timing subset (CLIENT_BEHAVIORAL_EVENTS, not the full BehavioralEvent enum) so an unrecognized value
+  // OR a server-owned conversation event (rage/pitch_declined/repeat_question) is dropped rather than
+  // coerced, kept, or trusted from the client.
   const behavioral = Array.isArray((r as { behavioral?: unknown }).behavioral)
     ? (r as { behavioral?: unknown[] }).behavioral!.filter(
-        (e): e is BehavioralEvent => typeof e === "string" && BEHAVIORAL_EVENTS.has(e),
+        (e): e is BehavioralEvent => typeof e === "string" && CLIENT_BEHAVIORAL_EVENTS.has(e),
       )
     : undefined;
   return {

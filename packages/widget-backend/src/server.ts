@@ -2982,6 +2982,12 @@ export async function buildServer(opts?: {
       // input and delete known-bad fields, we RECONSTRUCT signals from trusted sources — the safe default
       // is that a field the shopper sends is ignored unless it is explicitly non-trust-bearing context.
       //   • mood / cart  — shopper/UI context; accepted only if a valid enum value (from the storefront in prod).
+      //   • behavioral   — WS-B3a: client-accepted, but only the enum-validated TIMING subset
+      //     (dwell/hesitation/idle_then_return) a client can legitimately observe about its own session.
+      //     `rage`/`pitch_declined`/`repeat_question` stay SERVER-owned — DISPOSITION_BEHAVIORAL is
+      //     default-on on staging and a client-supplied `rage` would set brain.ts's escalateToHuman
+      //     unconditionally, so those three are never trusted from the client (signals.ts's
+      //     CLIENT_BEHAVIORAL_EVENTS, not the full BehavioralEvent enum).
       //   • relationship — grants VIP/subscriber treatment ⇒ SERVER-derived. Anonymous until an identified
       //     customer + history exist (M2 customer identity), never client-claimed.
       //   • consent      — legally load-bearing (TCPA/CAN-SPAM, gates outbound) ⇒ conservative default

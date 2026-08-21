@@ -69,14 +69,27 @@ describe("signals trust — the client cannot set the server-derived guardrail s
 });
 
 // WS-B3a — `behavioral` joins the ALLOW-list of non-trust-bearing client fields (mood/cart/
-// proactiveTrigger), validated against the same BehavioralEvent enum the brain consumes. Every event in
-// that enum is restrain-only (suppresses a pitch, or triggers a conservative cart_recovery, or is pure
-// observability) — none unlock money/autonomy — so a validated client array is safe to pass through
-// exactly like mood/cart are today. Unknown values are dropped, never coerced or kept.
-describe("WS-B3a — the client's behavioral array is accepted only after enum validation", () => {
-  it("filters an array to known BehavioralEvent values, dropping unknowns", () => {
+// proactiveTrigger), but ONLY the three TIMING events (dwell/hesitation/idle_then_return) a client can
+// legitimately observe about its own session. Fix round 1: the three CONVERSATION-derived events
+// (rage/pitch_declined/repeat_question) stay SERVER-owned — DISPOSITION_BEHAVIORAL is default-on on
+// staging and brain.ts sets escalateToHuman UNCONDITIONALLY off a client-supplied `rage`
+// (signals.behavioral.includes("rage"), no server corroboration), so trusting it from the client would
+// let a shopper flood the escalation/support queue at will. Unknown AND conversation-derived values are
+// both dropped, never coerced or kept.
+describe("WS-B3a — the client's behavioral array is accepted only after enum validation, timing events only", () => {
+  it("filters an array to known TIMING BehavioralEvent values, dropping unknowns", () => {
     const hostile = { behavioral: ["dwell", "bogus", "rage"] } as unknown as Signals;
-    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual(["dwell", "rage"]);
+    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual(["dwell"]);
+  });
+
+  it("drops rage/pitch_declined/repeat_question from the client — they stay server-owned (key present, filtered to empty, matching cartItems's 'sent but nothing accepted' discipline)", () => {
+    const hostile = { behavioral: ["rage", "pitch_declined", "repeat_question"] } as unknown as Signals;
+    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual([]);
+  });
+
+  it("accepts all three timing events together", () => {
+    const client = { behavioral: ["dwell", "hesitation", "idle_then_return"] } as unknown as Signals;
+    expect(deriveServingSignals(client, ctx).behavioral).toEqual(["dwell", "hesitation", "idle_then_return"]);
   });
 
   it("omits the key entirely when the client sent no behavioral field (key absent, not undefined-valued)", () => {
@@ -90,7 +103,7 @@ describe("WS-B3a — the client's behavioral array is accepted only after enum v
   });
 
   it("drops non-string entries inside the array without throwing", () => {
-    const hostile = { behavioral: ["dwell", 123, null, { foo: "bar" }, "rage"] } as unknown as Signals;
-    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual(["dwell", "rage"]);
+    const hostile = { behavioral: ["dwell", 123, null, { foo: "bar" }, "hesitation"] } as unknown as Signals;
+    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual(["dwell", "hesitation"]);
   });
 });
