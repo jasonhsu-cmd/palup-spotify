@@ -55,7 +55,8 @@ export type ProactivityLevel = "cautious" | "balanced" | "confident";
 export type PersonaStyle = "ready" | "researcher" | "deal_seeker" | "needs_guidance";
 /** Who the shopper is buying for. `b2b` still routes to escalate; `gift` is style-only. */
 export type PersonaRole = "for_self" | "gift" | "b2b";
-/** Concrete in-session behavioral events (server-derived; never trusted raw). */
+/** Concrete in-session behavioral events. WS-B3a: accepted from the client, enum-validated at the trust
+ *  boundary (widget-backend's deriveServingSignals) — safe because every value here is restrain-only. */
 export type BehavioralEvent = "dwell" | "hesitation" | "repeat_question" | "pitch_declined" | "idle_then_return" | "rage";
 export type Device = "mobile" | "desktop" | "tablet";
 export type Entry = "ad" | "organic" | "direct" | "email" | "social";
@@ -470,12 +471,14 @@ export interface Signals {
   // ── Persona / shopper-disposition layer (PR-0, INERT) ──────────────────────────────────────────
   // All optional; the wire-key NAMES match full-corpus.json so the eval corpus feeds the brain with zero
   // corpus edits. `personaStyle`/`personaRole` are per-turn classified + TRANSIENT (never persisted;
-  // mirror `mood`). The rest are SERVER-derived + validated in deriveServingSignals, never trusted raw.
+  // mirror `mood`). The rest are validated in deriveServingSignals — most are SERVER-derived and never
+  // trusted raw; `behavioral` (WS-B3a) is the one CLIENT-supplied exception, accepted only after enum
+  // validation because every event in it is restrain-only (see BehavioralEvent's own doc comment).
   /** The classified service/guidance posture for this turn (transient). */
   personaStyle?: PersonaStyle;
   /** Who the shopper is buying for (b2b → escalate; gift → style only). */
   personaRole?: PersonaRole;
-  /** Concrete in-session behavioral events (server-derived). */
+  /** Concrete in-session behavioral events (client-supplied, enum-validated — WS-B3a). */
   behavioral?: BehavioralEvent[];
   device?: Device;
   entry?: Entry;

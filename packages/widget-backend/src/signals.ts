@@ -1,4 +1,4 @@
-import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Mood } from "@palup/widget-brain";
+import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Mood, BehavioralEvent } from "@palup/widget-brain";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -8,6 +8,12 @@ import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Moo
 
 const MOODS = new Set<string>(["frustrated", "upset", "anxious", "confused", "skeptical", "neutral", "satisfied"]);
 const CARTS = new Set<string>(["empty", "has_items", "high_value"]);
+// WS-B3a — every BehavioralEvent is restrain-only (suppresses a pitch, triggers a conservative
+// cart_recovery on the exit-intent path, or is pure observability); none unlock money/autonomy. So, like
+// MOODS/CARTS above, a client-supplied array validated against this enum is safe to pass through as
+// non-trust-bearing context — no new flag gate needed here (the brain's own dispositionBehavioral flag
+// governs whether anything CONSUMES it).
+const BEHAVIORAL_EVENTS = new Set<string>(["dwell", "hesitation", "repeat_question", "pitch_declined", "idle_then_return", "rage"]);
 
 // ── E4: cart line items ──────────────────────────────────────────────────────────────────────────
 //
@@ -172,6 +178,14 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
   // did. The distinction matters: `undefined` leaves the pre-existing enum path alone, while `[]` is a
   // POSITIVE statement that the cart is empty.
   const cartItems = ctx.cartLineItemsEnabled ? sanitizeCartItems((r as { cartItems?: unknown }).cartItems) : undefined;
+  // WS-B3a — `undefined` when the client sent no array at all (⇒ the key is omitted below, mirroring
+  // `cartItems`'s discipline), an array (possibly empty) when it did, filtered to known enum members so
+  // an unrecognized value is dropped rather than coerced or kept.
+  const behavioral = Array.isArray((r as { behavioral?: unknown }).behavioral)
+    ? (r as { behavioral?: unknown[] }).behavioral!.filter(
+        (e): e is BehavioralEvent => typeof e === "string" && BEHAVIORAL_EVENTS.has(e),
+      )
+    : undefined;
   return {
     // WS-B1 — mood is now SERVER-derived when the guard classifier ran cleanly for this turn
     // (ctx.serverMood, folded into the same classifyGuardSignals call): the server-classified mood wins.
@@ -192,6 +206,11 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // discipline `Decision.recommendedProducts` uses, and what keeps an `Object.keys` consumer and a
     // strict-equal fixture unchanged while E4 is unwired.
     ...(cartItems ? { cartItems } : {}),
+    // WS-B3a — SPREAD, so the key is ABSENT (not present-and-undefined) whenever the client sent no
+    // array, same discipline as `cartItems` above — keeps an `Object.keys`/strict-equal fixture and
+    // session.ts's existing `signals.behavioral` carry logic (which reads `signals.behavioral ?? []`)
+    // unaffected when nothing was supplied.
+    ...(behavioral ? { behavioral } : {}),
     // Agent-initiated proactive UI trigger (§4 Behavioral: exit-intent) — non-trust-bearing UI context
     // like mood/cart, accepted ONLY as the known enum. It can only route to a MORE restrained proactive
     // cart_recovery on the clean sales path; every server cap still holds (precedence ladder, mood brake,

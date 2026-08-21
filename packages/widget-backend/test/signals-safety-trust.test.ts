@@ -67,3 +67,30 @@ describe("signals trust — the client cannot set the server-derived guardrail s
     expect(deriveServingSignals(clientOnly, ctx).mood).toBe("anxious");
   });
 });
+
+// WS-B3a — `behavioral` joins the ALLOW-list of non-trust-bearing client fields (mood/cart/
+// proactiveTrigger), validated against the same BehavioralEvent enum the brain consumes. Every event in
+// that enum is restrain-only (suppresses a pitch, or triggers a conservative cart_recovery, or is pure
+// observability) — none unlock money/autonomy — so a validated client array is safe to pass through
+// exactly like mood/cart are today. Unknown values are dropped, never coerced or kept.
+describe("WS-B3a — the client's behavioral array is accepted only after enum validation", () => {
+  it("filters an array to known BehavioralEvent values, dropping unknowns", () => {
+    const hostile = { behavioral: ["dwell", "bogus", "rage"] } as unknown as Signals;
+    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual(["dwell", "rage"]);
+  });
+
+  it("omits the key entirely when the client sent no behavioral field (key absent, not undefined-valued)", () => {
+    const out = deriveServingSignals({ mood: "neutral" } as Signals, ctx);
+    expect("behavioral" in out).toBe(false);
+  });
+
+  it("omits the key when the client sends a non-array behavioral value", () => {
+    const hostile = { behavioral: "rage" } as unknown as Signals;
+    expect("behavioral" in deriveServingSignals(hostile, ctx)).toBe(false);
+  });
+
+  it("drops non-string entries inside the array without throwing", () => {
+    const hostile = { behavioral: ["dwell", 123, null, { foo: "bar" }, "rage"] } as unknown as Signals;
+    expect(deriveServingSignals(hostile, ctx).behavioral).toEqual(["dwell", "rage"]);
+  });
+});

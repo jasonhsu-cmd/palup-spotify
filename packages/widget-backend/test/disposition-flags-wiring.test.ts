@@ -12,21 +12,23 @@ import { buildServer } from "../src/server.js";
 //
 // SEAM CHOSEN, and why an earlier draft of this test (passing `signals.personaRole: "b2b"` in the /chat
 // body) was WRONG and replaced: `deriveServingSignals` (signals.ts) is an explicit ALLOW-list of
-// non-trust-bearing client fields (mood/cart/proactiveTrigger/pageContext) — `personaRole`,
-// `personaStyle` and `behavioral` are not on it, so a client-supplied value is silently dropped before
-// ever reaching `decide()`. Verified by grep: none of the three appears anywhere in signals.ts. So the
-// ONLY flag-gated disposition path server.ts can currently exercise end-to-end through the real /chat
-// wire is DISPOSITION_STYLE + DISPOSITION_CLASSIFIER together, via `classifyPersonaStyle`
+// non-trust-bearing client fields (mood/cart/proactiveTrigger/pageContext) — `personaRole` and
+// `personaStyle` are not on it, so a client-supplied value is silently dropped before ever reaching
+// `decide()`. Verified by grep: neither appears anywhere in signals.ts. So the ONLY flag-gated
+// disposition path server.ts can currently exercise end-to-end through the real /chat wire via THIS
+// test is DISPOSITION_STYLE + DISPOSITION_CLASSIFIER together, via `classifyPersonaStyle`
 // (brain.ts:1956-1959) — it classifies from the MESSAGE TEXT itself using the model port `buildServer`
 // already exposes as an injectable test seam (`opts.modelPort`), not from any client-supplied signal.
 // A classification of "ready" pushes the flag `persona:ready` onto the wire response's own `flags`
 // array (brain.ts:1977, server.ts's `response.flags = d.flags`) — this is the assertion below.
 //
-// DISPOSITION_BEHAVIORAL has NO analogous seam: it only ever consumes `signals.behavioral`, which — like
-// `personaRole`/`personaStyle` — server.ts never populates from any trusted source today (grepped
-// signals.ts and server.ts; no match). There is genuinely nothing behind that flag for a request to
-// exercise through the real wire yet, so its coverage here is the deploy-guard test
-// (deploy-staging-env.test.ts) only, exactly as the brief's fallback anticipates.
+// STALE as of WS-B3a (2026-08-21): `behavioral` no longer belongs in the "nothing behind the flag" list
+// above — deriveServingSignals now accepts + enum-validates a client-supplied `behavioral` array
+// (signals.ts's BEHAVIORAL_EVENTS set) and server.ts passes `body.signals` straight into it, so
+// DISPOSITION_BEHAVIORAL now HAS a real client→signals→brain seam (pinned by
+// signals-safety-trust.test.ts's WS-B3a block, unit-level only). End-to-end /chat coverage for that seam
+// is not added here — out of this test's and WS-B3a's scope — so the deploy-guard test
+// (deploy-staging-env.test.ts) remains the only coverage of the flag itself at this wire.
 
 const ENV_KEYS = ["DISPOSITION_STYLE", "DISPOSITION_CLASSIFIER"];
 afterEach(() => ENV_KEYS.forEach((k) => delete process.env[k]));
