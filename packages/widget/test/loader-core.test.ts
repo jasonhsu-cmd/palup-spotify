@@ -127,6 +127,27 @@ describe("initWidgetLoader", () => {
     expect(sibling.hasAttribute("inert")).toBe(false);
   });
 
+  // Regression: the viewport can cross the 480px boundary WHILE the panel is open (resize,
+  // orientation change). If close() re-checked matchMedia and it now reports desktop, the
+  // guard would short-circuit BEFORE clearing `inert` — stranding every body-level sibling
+  // `inert` (and therefore un-clickable) until a page reload. close() must always clear
+  // whatever open() actually set, regardless of the CURRENT media query.
+  it("clears inert on close even if the viewport crossed above 480px while the panel was open", () => {
+    (window as any).matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });
+    const sibling = document.createElement("div");
+    document.body.appendChild(sibling);
+    const c = cfg();
+    const api = initWidgetLoader(c)!;
+    api.open();
+    expect(sibling.hasAttribute("inert")).toBe(true);
+
+    // simulate a resize/orientation-change to desktop width while the panel stays open
+    (window as any).matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+    api.close();
+
+    expect(sibling.hasAttribute("inert")).toBe(false);
+  });
+
   it("mounts the panel iframe only on open, pointing at origin/embed/panel?shop=", () => {
     const c = cfg();
     const api = initWidgetLoader(c)!;

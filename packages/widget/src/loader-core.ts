@@ -208,14 +208,33 @@ export function initWidgetLoader(cfg: LoaderConfig): LoaderApi | null {
       }
       return el;
     }
+    // Tracks whether setHostInert(true) actually inerted the siblings, so the CLEAR path can
+    // always undo it — regardless of what matchMedia reports at close() time. Without this, a
+    // viewport change WHILE the panel is open (resize / orientation change) would make close()
+    // re-check matchMedia, see "not mobile" now, and skip clearing `inert` — stranding every
+    // body-level sibling `inert` (and therefore unclickable) until a page reload.
+    let hostInerted = false;
     function setHostInert(on: boolean): void {
       try {
-        if (!window.matchMedia || !window.matchMedia("(max-width:480px)").matches) return;
-        const mount = findBodyLevelMount();
-        for (const child of Array.from(document.body.children)) {
-          if (child === mount) continue;
-          if (on) child.setAttribute("inert", "");
-          else child.removeAttribute("inert");
+        if (on) {
+          // Mobile-only to inert: on desktop/tablet the panel is a floating card, so the host
+          // page stays fully usable and must NOT be touched.
+          if (!window.matchMedia || !window.matchMedia("(max-width:480px)").matches) return;
+          const mount = findBodyLevelMount();
+          for (const child of Array.from(document.body.children)) {
+            if (child === mount) continue;
+            child.setAttribute("inert", "");
+          }
+          hostInerted = true;
+        } else if (hostInerted) {
+          // Unconditional clear: undo exactly what the matching setHostInert(true) set, even if
+          // the CURRENT media query no longer matches mobile.
+          const mount = findBodyLevelMount();
+          for (const child of Array.from(document.body.children)) {
+            if (child === mount) continue;
+            child.removeAttribute("inert");
+          }
+          hostInerted = false;
         }
       } catch {
         /* best-effort */
