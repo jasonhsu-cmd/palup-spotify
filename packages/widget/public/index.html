@@ -193,7 +193,7 @@
   .recs{ align-self:stretch; max-width:100%; margin:2px 0 }
   .recs-h{ display:block; font-size:11.5px; color:var(--muted); margin:0 0 6px 2px }
   .rec-list{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px }
-  .rec{ display:flex; align-items:flex-start; gap:11px; padding:9px 11px; border:1px solid var(--line); border-radius:12px; background:var(--panel) }
+  .rec{ display:flex; align-items:center; gap:11px; padding:9px 11px; border:1px solid var(--line); border-radius:12px; background:var(--panel) }
   /* Product thumbnail (optional): a fixed 52px square that never squeezes the text. object-fit:cover keeps
      any aspect ratio tidy; the --agent tint + --line border give an empty/slow-loading image a calm frame. */
   .rec-img{ flex:0 0 auto; width:52px; height:52px; border-radius:8px; object-fit:cover; background:var(--agent); border:1px solid var(--line) }
@@ -202,6 +202,7 @@
   .rec-body{ flex:1 1 auto; min-width:0; display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 8px }
   .rec-t{ font-size:13px; color:var(--fg); font-weight:600; flex:1 1 auto; min-width:0; overflow-wrap:anywhere }
   .rec-p{ font-size:13px; color:var(--fg); flex:0 0 auto }
+  .rec-p--unconfirmed{ color:var(--muted); font-style:italic }
   .rec-a{ flex-basis:100%; font-size:11.5px; color:var(--muted) }
   /* C1 — the low-key cart link: its own row, small, a quiet brand-coloured text link (theme-safe via
      --brand-text), never a filled "Buy now" button. */
@@ -947,7 +948,7 @@
       const t = document.createElement("span"); t.className = "rec-t"; t.textContent = c.title;
       body.appendChild(t);
       if (typeof c.price === "string" && c.price){
-        const p = document.createElement("span"); p.className = "rec-p"; p.textContent = c.price;
+        const p = document.createElement("span"); p.className = "rec-p" + (c.priceConfirmed === false ? " rec-p--unconfirmed" : ""); p.textContent = c.price;
         body.appendChild(p);
       }
       // Three-state, exactly as the server sends it: true / false / key absent. Only an explicit boolean
