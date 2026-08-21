@@ -22,7 +22,9 @@ const esc = (s: string): string => s.replace(/[&<>"]/g, (c) => ESCAPE_MAP[c]!);
 /** Render one policy string as one or more `<p>` elements, split on blank lines (`\n\n`) so a
  *  multi-paragraph merchant policy renders as real paragraphs instead of one run-on block. A policy
  *  with no blank line stays a single `<p>` — byte-compatible with the single-paragraph case. Each
- *  paragraph is HTML-escaped independently (never innerHTML). */
+ *  paragraph is HTML-escaped independently (never innerHTML). NOTE: when a policy has >=2 paragraphs
+ *  this emits multiple `<p>` elements sharing the SAME `[attr]` — a consumer must use
+ *  `querySelectorAll`, not `querySelector`, to read all of them. */
 function renderPolicyParagraphs(attr: string, text: string): string {
   const paragraphs = (text || "")
     .split(/\n\n+/)
@@ -40,10 +42,16 @@ function renderPolicyParagraphs(attr: string, text: string): string {
 export function injectStorefrontFirstPage(html: string, data: StorefrontCatalogWire): string {
   const brand = data.brandName || "this store";
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
+  // Every `.replace` below uses a REPLACER FUNCTION, never a plain replacement string. A plain string
+  // is special-cased by JS: `$&`, `` $` ``, `$'`, `$$`, `$n` are reinterpreted inside it, so
+  // merchant-controlled text (brand names, policy copy, product titles routinely containing `$`) could
+  // silently corrupt the output (e.g. a brand of "$&" would re-insert the whole match, or "$$" in a
+  // product description would collapse to a single "$" inside the JSON island). A function return
+  // value is always inserted literally, with no `$`-pattern reinterpretation.
   return html
-    .replace(/\{brand\}/g, esc(brand))
-    .replace(/<span data-brand>[^<]*<\/span>/g, `<span data-brand>${esc(brand)}</span>`)
-    .replace(/<p data-policy-shipping>[^<]*<\/p>/, renderPolicyParagraphs("data-policy-shipping", data.policy.shipping))
-    .replace(/<p data-policy-returns>[^<]*<\/p>/, renderPolicyParagraphs("data-policy-returns", data.policy.returns))
-    .replace("<!--PALUP_SSR-->", `<script id="palup-ssr" type="application/json">${json}</script>`);
+    .replace(/\{brand\}/g, () => esc(brand))
+    .replace(/<span data-brand>[^<]*<\/span>/g, () => `<span data-brand>${esc(brand)}</span>`)
+    .replace(/<p data-policy-shipping>[^<]*<\/p>/, () => renderPolicyParagraphs("data-policy-shipping", data.policy.shipping))
+    .replace(/<p data-policy-returns>[^<]*<\/p>/, () => renderPolicyParagraphs("data-policy-returns", data.policy.returns))
+    .replace("<!--PALUP_SSR-->", () => `<script id="palup-ssr" type="application/json">${json}</script>`);
 }

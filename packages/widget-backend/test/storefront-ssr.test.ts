@@ -54,6 +54,26 @@ describe("injectStorefrontFirstPage", () => {
     expect(returnsMatches[0]).toBe("<p data-policy-returns>30 days, no questions asked.</p>");
   });
 
+  it("does not reinterpret $-patterns from merchant text as regex replacement tokens", () => {
+    // A brand of "$&" would, under a plain-string .replace, re-insert the whole match (defeating
+    // escaping); "$$" in a product description would collapse to "$" under a plain-string .replace.
+    // A correct implementation uses a replacer FUNCTION everywhere, so these pass through literally.
+    const out = injectStorefrontFirstPage(HTML, {
+      brandName: "$&",
+      policy: { shipping: "free ship", returns: "30 days" },
+      products: [{ id: "p1", title: "Save $$$ now", price: "$1.00", description: "Buy $$ get $$ free" }],
+    });
+    expect(out).toContain("<title>$&amp; — x</title>");
+    expect(out).toContain(">$&amp;<");
+    expect(out).not.toContain("{brand}amp;");
+
+    const scriptMatch = out.match(/<script id="palup-ssr" type="application\/json">([^]*?)<\/script>/);
+    expect(scriptMatch).not.toBeNull();
+    const parsed = JSON.parse(scriptMatch![1]);
+    expect(parsed.products[0].title).toBe("Save $$$ now");
+    expect(parsed.products[0].description).toBe("Buy $$ get $$ free");
+  });
+
   it("keeps a single <p> when the policy has no blank-line paragraph break", () => {
     const out = injectStorefrontFirstPage(HTML, {
       brandName: "Acme",
