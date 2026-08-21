@@ -68,6 +68,14 @@ const MAX_TAGS = 20;
 const MAX_HANDLE = 200;
 const MAX_IMAGE_URL = 2048;
 const bound = (s: string | undefined, max: number): string => (s ?? "").slice(0, max);
+const MAX_POLICY = 2000; // policy bodies deserve a larger budget than the 600-char prompt cap
+export const boundWords = (s: string | undefined, max: number): string => {
+  const str = s ?? "";
+  if (str.length <= max) return str;
+  const cut = str.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd() + "…";
+};
 
 // Storefront render fields — display-only, host/charset-validated at the adapter (defense in depth: the
 // `featuredImage.url` reaches a shopper's browser as `<img src>`, so a compromised/injected Storefront
@@ -158,8 +166,8 @@ export function mapStorefrontToContext(tenantId: string, data: StorefrontData): 
       handle: safeHandle(n.handle),
     }));
   const policy: StorePolicy = {
-    returns: bound(data.shop?.refundPolicy?.body, MAX_DESC),
-    shipping: bound(data.shop?.shippingPolicy?.body, MAX_DESC),
+    returns: boundWords(data.shop?.refundPolicy?.body, MAX_POLICY),
+    shipping: boundWords(data.shop?.shippingPolicy?.body, MAX_POLICY),
   };
   return { tenantId, brandName: bound(data.shop?.name, MAX_TITLE) || "this store", products, policy };
 }
@@ -177,8 +185,8 @@ export type StorefrontShellFetch = (creds: ShopifyStoreCreds) => Promise<Storefr
 /** Pure mapping: shell response → GroundingShell. Stamps the REQUESTED tenantId, bounds merchant text. */
 export function mapStorefrontToShell(tenantId: string, data: StorefrontData): GroundingShell {
   const policy: StorePolicy = {
-    returns: bound(data.shop?.refundPolicy?.body, MAX_DESC),
-    shipping: bound(data.shop?.shippingPolicy?.body, MAX_DESC),
+    returns: boundWords(data.shop?.refundPolicy?.body, MAX_POLICY),
+    shipping: boundWords(data.shop?.shippingPolicy?.body, MAX_POLICY),
   };
   return { tenantId, brandName: bound(data.shop?.name, MAX_TITLE) || "this store", policy };
 }
