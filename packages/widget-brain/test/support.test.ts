@@ -188,3 +188,22 @@ describe("support authorization (never act on an order we can't verify)", () => 
     expect(r.reply).toMatch(/in transit/);
   });
 });
+
+// WS-B2a — MockCommerceAdapter.getOrderHistory: order-count/recency summary for the relationship-lifecycle
+// derivation (B2b). Exercised directly against the port (not through handleSupport), mirroring how this
+// file already calls `c.getRecentOrder`/`c.getSubscription`-shaped fixtures elsewhere via handleSupport.
+describe("CommercePort contract — getOrderHistory (WS-B2a)", () => {
+  it("a well-formed summary for a shopper with multiple fixture orders (count + min/max placedDaysAgo)", async () => {
+    // shopper-demo owns #1042 (3d), #1050 (9d), #2000 (5d), #3100 (0d) — see mock-commerce.ts's ORDERS.
+    const history = await c.getOrderHistory(shopper);
+    expect(history).toEqual({ orderCount: 4, lastOrderDaysAgo: 0, firstOrderDaysAgo: 9 });
+  });
+  it("a single-order shopper ⇒ first and last daysAgo are the same order's age", async () => {
+    const history = await c.getOrderHistory("someone-else"); // owns only #9999 (2d)
+    expect(history).toEqual({ orderCount: 1, lastOrderDaysAgo: 2, firstOrderDaysAgo: 2 });
+  });
+  it("a known account with NO orders ⇒ a well-formed zero summary, not null (fail-open still means a real shape)", async () => {
+    const history = await c.getOrderHistory("shopper-with-no-orders");
+    expect(history).toEqual({ orderCount: 0, lastOrderDaysAgo: null, firstOrderDaysAgo: null });
+  });
+});

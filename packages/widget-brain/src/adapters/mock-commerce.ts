@@ -1,4 +1,4 @@
-import { SUBSCRIPTION_SKIP_CAP, type CommercePolicy, type CommercePort, type Order, type Subscription, type SubscriptionActionResult } from "@palup/platform-ports";
+import { SUBSCRIPTION_SKIP_CAP, type CommercePolicy, type CommercePort, type Order, type OrderHistorySummary, type Subscription, type SubscriptionActionResult } from "@palup/platform-ports";
 
 // Demo commerce data (stands in for the Shopify adapter). Shopper "shopper-demo" owns #1042/#1050/#2000
 // and a subscription; #9999 belongs to someone else (used to test ownership verification).
@@ -54,6 +54,15 @@ export class MockCommerceAdapter implements CommercePort {
     const owned = Object.values(ORDERS).filter((o) => o.shopperId === shopperId);
     // "most relevant recent" for a where-is-it question = the one still in transit, else newest.
     return owned.find((o) => o.status.includes("transit")) ?? owned[0] ?? null;
+  }
+  /** WS-B2a — order-history summary for lifecycle classification. Always a well-formed summary (never
+   * null): the mock is a known/fixture account, so an empty order list is a real "0 orders", not
+   * genuine unavailability (that null path is reserved for adapters that can actually fail to reach data). */
+  async getOrderHistory(shopperId: string): Promise<OrderHistorySummary | null> {
+    const owned = Object.values(ORDERS).filter((o) => o.shopperId === shopperId);
+    if (owned.length === 0) return { orderCount: 0, lastOrderDaysAgo: null, firstOrderDaysAgo: null };
+    const daysAgo = owned.map((o) => o.placedDaysAgo);
+    return { orderCount: owned.length, lastOrderDaysAgo: Math.min(...daysAgo), firstOrderDaysAgo: Math.max(...daysAgo) };
   }
   async getPolicy(): Promise<CommercePolicy> {
     return POLICY;

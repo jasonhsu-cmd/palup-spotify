@@ -1,4 +1,4 @@
-import type { CommercePort, Order, Subscription, Principal } from "@palup/platform-ports";
+import type { CommercePort, Order, OrderHistorySummary, Subscription, Principal } from "@palup/platform-ports";
 import { shopperIdTenant } from "@palup/platform-ports";
 import { currentPrincipal, isVerifiedShopper } from "./commerce-guard.js";
 import type { CustomerGrantStore } from "./customer-grant-store.js";
@@ -63,6 +63,14 @@ const ORDERS_QUERY = `query PalUpOrders($first: Int!) {
 }`;
 const SUBS_QUERY = `query PalUpSubs($first: Int!) { customer { subscriptionContracts(first: $first) { nodes { id status } } } }`;
 
+// WS-B2a — getOrderHistory pages the SAME orders connection as getOrder (`first:10`) but wider, since it
+// needs the full set to compute count + oldest/newest, not just a lookup match. 100 is a page cap, NOT a
+// true lifetime order count: a shopper with more than 100 orders gets orderCount/firstOrderDaysAgo
+// truncated to this page. Acceptable for Tier 2 lifecycle classification (which only needs to distinguish
+// "new" from "a handful" from "many" orders, not an exact count) — paging past this cap is out of scope
+// for this task; a future increment should add pagination if precise counts beyond 100 are ever needed.
+const ORDER_HISTORY_PAGE_CAP = 100;
+
 interface RawOrder {
   id: string;
   name?: string;
@@ -93,11 +101,19 @@ function mapStatus(fulfillment?: string, financial?: string): string {
   }
 }
 
+/** Whole days between `processedAt` (an ISO timestamp, possibly missing/unparseable) and `now()`
+ * (unix seconds), floored, never negative. Shared by `mapOrder`'s `placedDaysAgo` and
+ * `getOrderHistory`'s first/last-order recency (WS-B2a) — one clock/rounding rule for every
+ * order-age computation this adapter makes. Returns null when `processedAt` can't be parsed. */
+function daysAgoFrom(processedAt: string | undefined, now: () => number): number | null {
+  const processedSec = processedAt ? Math.floor(Date.parse(processedAt) / 1000) : NaN;
+  return Number.isFinite(processedSec) ? Math.max(0, Math.floor((now() - processedSec) / 86_400)) : null;
+}
+
 function mapOrder(o: RawOrder, shopperId: string, now: () => number): Order {
   const items = (o.lineItems?.nodes ?? []).map((li) => ({ title: li.title ?? "item", price: "" })); // never fabricate a per-line price
   const total = o.totalPrice?.amount ? Number(o.totalPrice.amount) : 0;
-  const processedSec = o.processedAt ? Math.floor(Date.parse(o.processedAt) / 1000) : NaN;
-  const placedDaysAgo = Number.isFinite(processedSec) ? Math.max(0, Math.floor((now() - processedSec) / 86_400)) : 0;
+  const placedDaysAgo = daysAgoFrom(o.processedAt, now) ?? 0; // unparseable ⇒ 0 (never fabricate a fake age; existing behavior preserved)
   return {
     id: o.name || o.id,
     shopperId,
@@ -196,6 +212,19 @@ export function createCustomerAccountCommerceAdapter(deps: CaaCommerceDeps): Com
       if (r.kind === "unavailable") return null;
       const node = (r.data.customer?.orders?.nodes ?? []).find((n) => n.id === orderId || n.name === orderId);
       return node ? mapOrder(node, c.shopperId, now) : null;
+    },
+    async getOrderHistory(_shopperId: string): Promise<OrderHistorySummary | null> {
+      const c = await resolve("getOrderHistory"); // NB: ignores the arg — binds to the ALS principal
+      const r = await gql<{ customer?: { orders?: { nodes?: RawOrder[] } } }>(c.endpoint, c.accessToken, ORDERS_QUERY, { first: ORDER_HISTORY_PAGE_CAP });
+      if (r.kind === "reauth") throw new CommerceReauthRequiredError("getOrderHistory");
+      if (r.kind === "unavailable") return null; // transient/schema — genuinely unavailable, not "zero orders"
+      const nodes = r.data.customer?.orders?.nodes ?? [];
+      if (nodes.length === 0) return { orderCount: 0, lastOrderDaysAgo: null, firstOrderDaysAgo: null };
+      const daysAgo = nodes.map((n) => daysAgoFrom(n.processedAt, now)).filter((d): d is number => d !== null);
+      if (daysAgo.length === 0) return { orderCount: nodes.length, lastOrderDaysAgo: null, firstOrderDaysAgo: null };
+      // Page-capped at ORDER_HISTORY_PAGE_CAP (see comment above the constant) — beyond that many orders,
+      // this undercounts orderCount and understates firstOrderDaysAgo (the true oldest order is older).
+      return { orderCount: nodes.length, lastOrderDaysAgo: Math.min(...daysAgo), firstOrderDaysAgo: Math.max(...daysAgo) };
     },
     async getSubscription(_shopperId: string): Promise<Subscription | null> {
       const c = await resolve("getSubscription");

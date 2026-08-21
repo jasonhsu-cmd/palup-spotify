@@ -77,6 +77,10 @@ export function guardCommercePort(port: CommercePort, isLive: boolean, getPrinci
       check("getRecentOrder", shopperId);
       return port.getRecentOrder(shopperId);
     },
+    async getOrderHistory(shopperId) {
+      check("getOrderHistory", shopperId);
+      return port.getOrderHistory(shopperId);
+    },
     async getPolicy() {
       check("getPolicy");
       return port.getPolicy();

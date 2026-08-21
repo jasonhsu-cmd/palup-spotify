@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { CommercePort, CommercePolicy, Order, Subscription, SubscriptionActionResult, Principal } from "@palup/platform-ports";
+import type { CommercePort, CommercePolicy, Order, OrderHistorySummary, Subscription, SubscriptionActionResult, Principal } from "@palup/platform-ports";
 import { guardCommercePort, withRequestPrincipal, CommerceGuardRefusalError } from "../src/commerce-guard.js";
 
 // ADR-0017 T7 (ADR-0016 fail-closed guard). F2: ANY live commerce/subscription adapter must refuse
@@ -12,12 +12,16 @@ import { guardCommercePort, withRequestPrincipal, CommerceGuardRefusalError } fr
 const ORDER: Order = { id: "1", shopperId: "shopper-demo", status: "delivered", placedDaysAgo: 1, total: 20, items: [], fulfilled: true };
 const POLICY: CommercePolicy = { returnWindowDays: 30, refundCeiling: 75, returns: "r", shipping: "s" };
 const SUB: Subscription = { id: "sub-1", shopperId: "shopper-demo", active: true };
+const ORDER_HISTORY: OrderHistorySummary = { orderCount: 1, lastOrderDaysAgo: 1, firstOrderDaysAgo: 1 };
 
 const ACTION_RESULT: SubscriptionActionResult = { ok: true, detail: "done", reversalPath: "n/a" };
 
 class FakeLiveCommerce implements CommercePort {
   async getOrder(): Promise<Order | null> { return ORDER; }
   async getRecentOrder(): Promise<Order | null> { return ORDER; }
+  // WS-B2a — not exercised by this suite's guard-coverage assertions; stub so the class still satisfies
+  // CommercePort. Not null, so a future "guard covers getOrderHistory too" test can assert real data flows.
+  async getOrderHistory(): Promise<OrderHistorySummary | null> { return ORDER_HISTORY; }
   async getPolicy(): Promise<CommercePolicy> { return POLICY; }
   async getSubscription(): Promise<Subscription | null> { return SUB; }
   // ADR-0016 #3/#4 — the new subscription-action WRITES; guarded identically to the reads above.
@@ -58,10 +62,23 @@ describe("guardCommercePort (T7, ADR-0016 fail-closed)", () => {
     await expect(withRequestPrincipal(anon, () => guarded.getPolicy())).rejects.toThrow(CommerceGuardRefusalError);
   });
 
+  // WS-B2a — getOrderHistory is a shopper-scoped READ exactly like getRecentOrder/getSubscription, so it
+  // must inherit the identical fail-closed + ownership check by construction.
+  it("live + anonymous ⇒ fails closed on getOrderHistory too (WS-B2a)", async () => {
+    const guarded = guardCommercePort(new FakeLiveCommerce(), true);
+    await expect(withRequestPrincipal(anon, () => guarded.getOrderHistory("shopper-demo"))).rejects.toThrow(CommerceGuardRefusalError);
+  });
+
+  it("live + VERIFIED shopper but a MISMATCHED shopperId arg ⇒ fails closed on getOrderHistory (WS-B2a)", async () => {
+    const guarded = guardCommercePort(new FakeLiveCommerce(), true);
+    await expect(withRequestPrincipal(verifiedShopper, () => guarded.getOrderHistory("shopify:acme:999"))).rejects.toBeInstanceOf(CommerceGuardRefusalError);
+  });
+
   it("live + VERIFIED shopper ⇒ ok (the real call goes through)", async () => {
     const guarded = guardCommercePort(new FakeLiveCommerce(), true);
     await expect(withRequestPrincipal(verifiedShopper, () => guarded.getRecentOrder("shopify:acme:1"))).resolves.toEqual(ORDER);
     await expect(withRequestPrincipal(verifiedShopper, () => guarded.getOrder("1"))).resolves.toEqual(ORDER);
+    await expect(withRequestPrincipal(verifiedShopper, () => guarded.getOrderHistory("shopify:acme:1"))).resolves.toEqual(ORDER_HISTORY);
     await expect(withRequestPrincipal(verifiedShopper, () => guarded.getSubscription("shopify:acme:1"))).resolves.toEqual(SUB);
     await expect(withRequestPrincipal(verifiedShopper, () => guarded.getPolicy())).resolves.toEqual(POLICY);
   });
@@ -79,6 +96,7 @@ describe("guardCommercePort (T7, ADR-0016 fail-closed)", () => {
     const guarded = guardCommercePort(new FakeLiveCommerce(), false);
     await expect(withRequestPrincipal(anon, () => guarded.getRecentOrder("shopper-demo"))).resolves.toEqual(ORDER);
     await expect(guarded.getOrder("1")).resolves.toEqual(ORDER); // even with no bound principal at all
+    await expect(guarded.getOrderHistory("shopper-demo")).resolves.toEqual(ORDER_HISTORY); // WS-B2a
   });
 
   // ADR-0016 #3/#4 — the new subscription-action methods are WRITES on a live adapter and MUST inherit

@@ -4,6 +4,7 @@ import {
   type CommercePort,
   type CommercePolicy,
   type Order,
+  type OrderHistorySummary,
   type StorePolicy,
   type Subscription,
   type SubscriptionActionResult,
@@ -28,6 +29,11 @@ class AnonymousGuardedCommerce implements CommercePort {
   }
   async getRecentOrder(): Promise<Order | null> {
     throw new CommerceGuardRefusalError("getRecentOrder");
+  }
+  // WS-B2a — getOrderHistory is a shopper-scoped READ like getRecentOrder, so a live guard refusal
+  // reproduces here too.
+  async getOrderHistory(): Promise<OrderHistorySummary | null> {
+    throw new CommerceGuardRefusalError("getOrderHistory");
   }
   async getPolicy(): Promise<CommercePolicy> {
     throw new CommerceGuardRefusalError("getPolicy");
@@ -116,6 +122,7 @@ describe("F13 — a live commerce-guard refusal for an anonymous shopper must no
       isFixtureData: base.isFixtureData,
       getOrder: (id) => base.getOrder(id),
       getRecentOrder: (id) => base.getRecentOrder(id),
+      getOrderHistory: (id) => base.getOrderHistory(id),
       getSubscription: (id) => base.getSubscription(id),
       skipNextDelivery: (id) => base.skipNextDelivery(id),
       pauseSubscription: (id) => base.pauseSubscription(id),
