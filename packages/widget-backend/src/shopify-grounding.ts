@@ -69,6 +69,9 @@ const MAX_HANDLE = 200;
 const MAX_IMAGE_URL = 2048;
 const bound = (s: string | undefined, max: number): string => (s ?? "").slice(0, max);
 const MAX_POLICY = 2000; // policy bodies deserve a larger budget than the 600-char prompt cap
+// If the first `max` chars contain no space (a single leading token longer than `max`), this still
+// cuts at `max` with no word boundary to back off to — acceptable for prose policy bodies, where a
+// single "word" longer than the cap essentially never occurs.
 export const boundWords = (s: string | undefined, max: number): string => {
   const str = s ?? "";
   if (str.length <= max) return str;

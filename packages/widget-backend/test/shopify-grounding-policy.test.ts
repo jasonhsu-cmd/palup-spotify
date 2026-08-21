@@ -6,10 +6,11 @@ describe("boundWords", () => {
     expect(boundWords("short policy", 100)).toBe("short policy");
   });
   it("truncates on a word boundary with an ellipsis, never mid-word", () => {
-    const out = boundWords("free shipping over fifty dollars treat yourself basically", 30);
-    expect(out.endsWith("…")).toBe(true);
-    expect(out).not.toMatch(/basical…$/); // no mid-word cut
-    expect(out.length).toBeLessThanOrEqual(31);
-    expect(out.slice(0, -1).trim().split(" ").pop()).not.toBe("basical");
+    // Exact expected string, not just shape assertions — a naive `slice(0, max) + "…"` with no
+    // word-boundary logic (e.g. "free shipping over fifty dolla…") would also satisfy
+    // endsWith("…") and length<=31, so this must pin the precise word-bounded cut.
+    expect(boundWords("free shipping over fifty dollars treat yourself basically", 30)).toBe(
+      "free shipping over fifty…"
+    );
   });
 });

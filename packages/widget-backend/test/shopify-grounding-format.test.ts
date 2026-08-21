@@ -14,4 +14,7 @@ describe("formatPrice", () => {
     expect(formatPrice({})).toBe("");
     expect(formatPrice(undefined)).toBe("");
   });
+  it("returns empty string for a NaN/garbage amount", () => {
+    expect(formatPrice({ amount: "not-a-number", currencyCode: "USD" })).toBe("");
+  });
 });
