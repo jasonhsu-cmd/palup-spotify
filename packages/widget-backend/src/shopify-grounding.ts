@@ -104,10 +104,15 @@ function safeHandle(handle: string | undefined): string | undefined {
   return h.length > 0 && h.length <= MAX_HANDLE && HANDLE_SHAPE.test(h) ? h : undefined;
 }
 
-function formatPrice(p?: { amount?: string; currencyCode?: string }): string {
+export function formatPrice(p?: { amount?: string; currencyCode?: string }): string {
   if (!p?.amount) return "";
-  return p.currencyCode && p.currencyCode !== "USD" ? `${p.amount} ${p.currencyCode}` : `$${p.amount}`;
+  const n = Number(p.amount);
+  if (!Number.isFinite(n)) return ""; // never surface a raw/garbage amount
+  const code = p.currencyCode && p.currencyCode !== "USD" ? p.currencyCode : "USD";
+  const num = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+  return code === "USD" ? `$${num}` : `${num} ${code}`;
 }
+export { formatPrice as formatPriceForTest };
 
 /**
  * Pure mapping: Storefront response → GroundingContext. Stamps the REQUESTED tenantId (never a value
