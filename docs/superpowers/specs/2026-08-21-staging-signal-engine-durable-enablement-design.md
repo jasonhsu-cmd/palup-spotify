@@ -20,10 +20,22 @@ exactly the ones not producing signal.
 by default on staging.** Defer legal / human-only gates to prod. **Live chat must be durable.** Target: a
 top-tier US sales agent with very high stickiness and the strongest defensible moat available (per
 `docs/MOAT.md`, a *compounding* moat — accumulated per-merchant results + trust + cross-visit memory —
-not a "perfect" one, which the doc says does not exist).
+not a "perfect" one, which the doc says does not exist; see §8 for the doc-vs-directive note).
+
+**The objective has two co-equal sides.** (1) Help each Shopify merchant *maximize revenue* — acquire,
+close, nurture, upsell 24/7. (2) Maximize *PalUp's own profit margin and revenue* — the business must
+scale to a $30B US public company serving millions of merchants and hundreds of millions of shoppers. At
+that scale **per-turn inference COGS is the P&L**: "enable all axes" adds three model-port classifier
+calls per turn (guard + mood + persona) on top of the reactive call and memory retrieval, so a
+revenue-only plan that ignores margin would erode the very unit economics that make the $30B outcome
+possible. PalUp already runs on **Google Vertex AI / Gemini** — currently `gemini-3.5-flash`,
+`thinking:MINIMAL` (`create.ts:67-69`), a cheap tier — and all model access goes through the **model port**
+(ADR-0001), so model-tiering and provider-negotiation stay available as margin levers without a rewrite.
+Margin is therefore a first-class design axis here, not an afterthought.
 
 This spec turns "enable all axes durably on staging" into eight workstreams, each test-first (ATDD), each
-shipping as its own gate-passed PR, all governed by a **durability invariant (§3)**.
+shipping as its own gate-passed PR, all governed by **two co-equal invariants — durability (§3) and
+cost/margin (§3b)**.
 
 ## 2. Governance boundary (non-negotiable — CLAUDE.md §3)
 
@@ -74,6 +86,32 @@ client timing events). None may be able to break the chat. Every workstream's ac
 6. **Durability is tested, not asserted.** Each producer gets a fault-injection test (timeout / error /
    malformed → chat still answers) plus a Layer-2 live-staging degradation check.
 
+## 3b. Cost/margin invariant (#0b — co-equal with durability)
+
+Every added producer costs inference. At millions of merchants × hundreds of millions of shoppers, an
+unpriced classifier per turn compounds into the dominant COGS line (`docs/design/cost-margin-telemetry.md`,
+`docs/design/model-gateway.md`). Every workstream that adds a model call must satisfy:
+
+1. **Cheapest tier that meets quality.** New classifiers pin to the cheapest model config that passes their
+   eval, never the flagship. The model port takes a per-call `model` string (`model-port.ts:28`) and a
+   `thinking` lever (`create.ts:68`), so a classifier can run on `gemini-3.5-flash` / `thinking:MINIMAL` (or
+   cheaper) independent of the reply model. Provider stays swappable via the port (ADR-0001).
+2. **Consolidate calls — one round-trip, many signals.** `classifyGuardSignals` already returns
+   safety + injection + support in a *single* call (`guard-classifier.ts:94-147`). **Mood folds into that
+   same call's response schema** (WS-B1), and persona is a candidate to fold too — turning three classifier
+   round-trips into **one**, which cuts added COGS *and* latency *and* failure surface by ~⅔. This is the
+   headline margin lever and it reinforces the durability invariant.
+3. **Spend only when it can matter.** Reuse the existing gates: the guard classifier already skips empty
+   messages (`message.trim() !== ""`, `server.ts:3151-3154`); BASIC mode / `atCap` already suppress
+   proactive spend; a classifier need not run when its signal cannot change the outcome (e.g. after a kill
+   or on a pure smalltalk turn). No unconditional per-turn spend that a cheaper gate can avoid.
+4. **Per-axis cost telemetry, measured before prod.** Each new classifier is metered under its own agent
+   type (usage is already on every model response) so staging produces a **per-axis cost-per-turn** number.
+   The margin impact of "all axes on" is a **measured** figure feeding the pre-prod gate (§6), not a guess.
+5. **Margin protects, never overrides, safety.** Cost gates may skip a *sales/style* classifier but never a
+   *safety* rung — kill, injection, and the safety latch always run. Cheapening never loosens a guardrail
+   (mirrors the durability invariant's kill/BASIC rule).
+
 ## 4. Workstreams
 
 Each is an independent, test-first PR. "Consumer already built" means the brain reads the signal today; we
@@ -110,20 +148,24 @@ So each needs a small code change, not just a repo var.
 ### WS-B1 — Mood detector (new server-side producer)
 
 Today `mood` is **client-supplied only** (`signals.ts:168`, echoed if a valid enum); no server detector.
-Build `classifyMood(model, message, tenantId)` mirroring `classifyGuardSignals`:
 
-- Model **port** call, `temperature:0`, `responseSchema` enum = the 7 `Mood` values (`types.ts:7-14`);
-  nested try/catch, **never throws**, returns `{ mood?, degraded }`.
-- Own metering agent type (mirror `GUARD_CLASSIFIER_AGENT_TYPE`); metered model port constructed only when
-  on (mirror `server.ts:825-827`).
-- New env flag `SERVER_MOOD_SIGNALS` read in `server.ts` (mirror `SERVER_GUARD_SIGNALS:751`), default
-  `true` for staging; invoked per-turn alongside the guard classifier (`server.ts:3151-3154`), merged into
-  **server-authored** `signals.mood` via `deriveServingSignals` (so it becomes unspoofable like
-  `serverSafetyClass`, replacing the client echo).
+**Preferred design (per §3b consolidation): fold mood into the existing `classifyGuardSignals` call**
+rather than adding a separate `classifyMood` round-trip. Extend that call's `responseSchema` to also emit a
+`mood` enum (the 7 `Mood` values, `types.ts:7-14`) alongside safety/injection/support — **one model call,
+one billing, one failure point**. The guard classifier already runs server-side per-turn, temp 0, skips
+empty messages, and **never throws** (`guard-classifier.ts:94-147`), so mood inherits fail-open + the empty
+gate for free. It stays gated by `SERVER_GUARD_SIGNALS` (so no *new* env flag and no *new* model port).
+Merge the result into **server-authored** `signals.mood` via `deriveServingSignals` (unspoofable like
+`serverSafetyClass`, replacing the client echo). Pin to the cheapest passing tier (§3b).
+
+(Fallback only if an eval shows one prompt can't do both well: a separate `classifyMood` mirroring the
+guard classifier, gated `SERVER_MOOD_SIGNALS` — accepted *only* with a measured cost/quality justification,
+since it doubles the classifier COGS the consolidation exists to avoid.)
 
 **Acceptance:** frustrated/anxious/skeptical messages drive the existing mood brakes (`brain.ts:2031-2106`)
-with a *server-derived* mood; client-supplied mood no longer trusted when the detector is on; timeout →
-`degraded`, chat answers; runs within the latency budget.
+with a *server-derived* mood; client-supplied mood no longer trusted when detection is on; timeout →
+`degraded`, chat answers; **added cost-per-turn vs guard-only is ~0** (same call) and is reported in
+telemetry; runs within the latency budget.
 
 ### WS-B3 — Behavioral timing events (client producer + server pass-through)
 
@@ -245,6 +287,9 @@ corpus `packages/eval/cases/widget-behavioral.json`) is the bed:
   model-call timeout → graceful reply; grounding cold-failure → last-known-good.
 - **Governance:** promo-never-returned; environment tailoring is FAIR-1 style-only; forged
   `healthDisclosed` rejected; staging-env guard test.
+- **Cost/margin (§3b):** each new classifier reports per-turn token usage under its own agent type; a test
+  asserts consolidation holds (mood adds ~0 calls over guard-only) and that classifiers pin to the cheap
+  tier; the aggregate "all-axes-on" cost-per-turn is captured on staging for the §6 pre-prod gate.
 - **Layer-2 live staging:** the two-layer harness (`e2e/tests/widget-behavioral-live.spec.ts`) verifies
   each axis end-to-end against `palup-widget-staging`, including degradation.
 
@@ -270,6 +315,12 @@ lifecycle; durability hardening; lowest-ROI environment last).
 - **No request-schema validation** (`server.ts:2766-2777` is a raw `as` cast): out of scope; the trust
   boundary is `deriveServingSignals`, which rebuilds/validates. Noted for a future hardening pass.
 
+**Pre-prod gate (staging → prod, human-owned — NOT part of this spec's merges).** Before any of this is
+promoted, staging must produce evidence on **both** objectives: (a) *revenue/quality* — the behavioral eval
+suite green with the newly-live axes, and (b) *margin* — a measured all-axes-on **cost-per-turn** within
+the target unit-economics envelope (`docs/design/cost-margin-telemetry.md`). If margin regresses beyond
+target, the fix is tiering/consolidation/gating (§3b), not shipping. Promotion stays a human §3/§5 step.
+
 ## 7. What this spec deliberately does NOT do
 
 - Does not promote anything to production or change any prod flag.
@@ -277,3 +328,14 @@ lifecycle; durability hardening; lowest-ROI environment last).
 - Does not change any legal gate, the memory go-live checklist, or `CARRY_OVER_PROMPT_ENABLED`.
 - Does not fix the `classifyFact` language gap (deferred, Art-9-sensitive).
 - Does not weaken any eval/HITL gate or grant an agent self-promotion.
+
+## 8. Note: "perfect moat" (doc vs directive)
+
+The owner directive states the goal as a **"perfect moat."** `docs/MOAT.md` explicitly holds the opposite —
+"there is no such thing as a perfect moat" (`MOAT.md:6`, :75-79) — and defines PalUp's moat as a
+*compounding* one: accumulated per-merchant outcomes + earned trust + cross-visit memory, raising switching
+cost over time, not a static lock-in. This spec builds toward exactly that compounding moat (memory,
+lifecycle, personalization), which is the strongest *achievable* defensibility. Flagging the wording
+mismatch rather than silently overriding either side: if the owner wants the stated position changed, that
+is a governance edit to `MOAT.md` with a named human owner — not something this build spec does. The
+engineering plan is identical either way.
