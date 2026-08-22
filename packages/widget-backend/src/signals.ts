@@ -1,4 +1,4 @@
-import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Mood, BehavioralEvent, Relationship } from "@palup/widget-brain";
+import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Mood, BehavioralEvent, Relationship, Device, Entry } from "@palup/widget-brain";
 
 // T7 — derive the trusted `signals` the brain runs on from UNTRUSTED client input. The default is that
 // a client-supplied field is IGNORED; only explicitly non-trust-bearing context (mood/cart, and only
@@ -8,6 +8,26 @@ import type { Signals, CartLineItemRef, Consent, SafetyClass, SupportIntent, Moo
 
 const MOODS = new Set<string>(["frustrated", "upset", "anxious", "confused", "skeptical", "neutral", "satisfied"]);
 const CARTS = new Set<string>(["empty", "has_items", "high_value"]);
+// WS-B4' — environment signals (device + entry), STYLE/FORMAT-ONLY (FAIR-1). Both are non-trust-bearing
+// UI/environment context, exactly like MOODS/CARTS above: neither can grant treatment, only steer voice.
+// `device` is SERVER-derived (classifyDevice below, from the request's own user-agent header) — DEVICES
+// is a defense-in-depth guard against a malformed/out-of-enum ctx.device, not a client-input filter.
+// `entry` IS accepted from the client (like mood): a spoofed entry can only change tone, never pitch/
+// price/offer/outbound, so trusting the client's own referrer/UTM-derived claim carries no real risk.
+const DEVICES = new Set<string>(["mobile", "desktop", "tablet"]);
+const ENTRIES = new Set<string>(["ad", "organic", "direct", "email", "social"]);
+
+/**
+ * WS-B4' — tiny, deterministic user-agent classifier. Never trusted-input-shaped: it only ever narrows an
+ * arbitrary string down to one of the three closed `Device` values, never echoes anything back verbatim.
+ * No user-agent header (or an empty one) falls through to "desktop", same as any other empty match.
+ */
+export function classifyDevice(userAgent: string | undefined): Device {
+  const ua = userAgent ?? "";
+  if (/ipad|tablet/i.test(ua)) return "tablet";
+  if (/mobi/i.test(ua)) return "mobile";
+  return "desktop";
+}
 // WS-B3a — the full BehavioralEvent enum, kept for the TYPE (not the client-accept filter below — see
 // CLIENT_BEHAVIORAL_EVENTS). Every event here is restrain-only in the BRAIN (suppresses a pitch,
 // triggers a conservative cart_recovery, or is pure observability) — but "restrain-only in the brain"
@@ -201,6 +221,13 @@ export interface ServingSignalContext {
    * applies, byte-identical to before this field existed.
    */
   relationship?: Relationship;
+  /**
+   * WS-B4' — the SERVER-classified device (classifyDevice, from the request's own `user-agent` header,
+   * never the client's `signals` body). Optional/absent when the caller didn't classify one (mirrors
+   * localHour above) ⇒ `signals.device` is simply omitted, byte-identical to before this field existed.
+   * STYLE/FORMAT-ONLY (FAIR-1): consumed only by brain.ts's DEVICE_DIRECTIVE, never selectPitch/price.
+   */
+  device?: Device;
 }
 
 export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSignalContext): Signals {
@@ -245,12 +272,25 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // session.ts's existing `signals.behavioral` carry logic (which reads `signals.behavioral ?? []`)
     // unaffected when nothing was supplied.
     ...(behavioral ? { behavioral } : {}),
-    // Agent-initiated proactive UI trigger (§4 Behavioral: exit-intent) — non-trust-bearing UI context
-    // like mood/cart, accepted ONLY as the known enum. It can only route to a MORE restrained proactive
-    // cart_recovery on the clean sales path; every server cap still holds (precedence ladder, mood brake,
-    // support/safety suppression, and the ONE INV-E budget), so passing it through grants no autonomy.
+    // WS-B4' — device: SERVER-classified only (ctx.device, from classifyDevice above the call site), never
+    // read from the client body. DEVICES re-validates it (defense in depth against a malformed/future ctx
+    // value) rather than trusting the caller's TypeScript type alone. Key-omission discipline: absent
+    // (not present-and-undefined) whenever no device was classified this turn.
+    ...(ctx.device && DEVICES.has(ctx.device) ? { device: ctx.device } : {}),
+    // WS-B4' — entry: accepted from the CLIENT (like mood/cart above), validated against the closed Entry
+    // enum. Non-trust-bearing: a spoofed entry can only change VOICE (brain.ts's ENTRY_DIRECTIVE), never
+    // pitch/price/offer/outbound (FAIR-1). Unknown/missing ⇒ omitted, never coerced.
+    ...(typeof r.entry === "string" && ENTRIES.has(r.entry) ? { entry: r.entry as Entry } : {}),
+    // Agent-initiated proactive UI trigger (§4 Behavioral: exit-intent; WS-B3b: reengage) —
+    // non-trust-bearing UI context like mood/cart, accepted ONLY as the known enum. It can only route to
+    // a MORE restrained proactive cart_recovery on the clean sales path; every server cap still holds
+    // (precedence ladder, mood brake, support/safety suppression, and the ONE INV-E budget), so passing
+    // it through grants no autonomy. "reengage" reuses the exact same brain.ts rung as "exit_intent" —
+    // no new pitch/money logic — so accepting it here is exactly as safe as exit_intent already was.
     proactiveTrigger:
-      r.proactiveTrigger === "exit_intent" || r.proactiveTrigger === "greeting" ? r.proactiveTrigger : undefined,
+      r.proactiveTrigger === "exit_intent" || r.proactiveTrigger === "greeting" || r.proactiveTrigger === "reengage"
+        ? r.proactiveTrigger
+        : undefined,
     // Page context (§4): the product/page the shopper is viewing — UNTRUSTED merchant-page content,
     // bounded here (defense-in-depth) and sanitized again in the brain before it reaches the model.
     pageContext: typeof r.pageContext === "string" && r.pageContext ? r.pageContext.slice(0, 400) : undefined,

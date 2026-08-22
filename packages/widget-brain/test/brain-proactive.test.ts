@@ -138,3 +138,103 @@ describe("proactive exit-intent consumes the ONE budget — it cannot nag (INV-E
     expect(d3.flags).toContain("budget_capped");
   });
 });
+
+// WS-B3b — "reengage" (client-detected dwell / idle_then_return) EXTENDS the exact same exit-intent rung
+// rather than adding a new one: same conservative cart_recovery pitch, same INV-E budget, same
+// atCap/kill/mood/no_cart suppression, NO money logic added. Only the flag differs (proactive:reengage vs
+// proactive:exit_intent) so the two are distinguishable in the audit log/eval corpus.
+const REENGAGE = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({ proactiveTrigger: "reengage", mood: "neutral", ...extra });
+
+describe("proactive reengage (WS-B3b) — reuses the exit-intent rung verbatim", () => {
+  it("reengage + an unrecovered cart + budget available → the SAME single cart_recovery pitch, labeled proactive:reengage", async () => {
+    const d = await decide("", REENGAGE({ cart: "has_items", proactivityLevel: "balanced" }));
+    expect(d.mode).toBe("sales");
+    expect(d.pitch).toBe("cart_recovery");
+    expect(d.flags).toContain("proactive:reengage");
+    expect(d.flags).not.toContain("proactive:exit_intent"); // distinguishable from the exit-intent moment
+    expect(d.flags).toContain("pitch:cart_recovery");
+    expect(d.outbound).toBe(false);
+    expect(d.reply.length).toBeGreaterThan(0);
+  });
+
+  it("NO cart / 'just browsing' → quiet: pitch none, EMPTY reply (never nag)", async () => {
+    for (const cart of ["empty", undefined]) {
+      const d = await decide("", REENGAGE({ cart }));
+      expect(d.pitch, String(cart)).toBe("none");
+      expect(d.reply, String(cart)).toBe("");
+      expect(d.flags, String(cart)).toContain("no_cart");
+      expect(d.flags, String(cart)).toContain("proactive:reengage");
+      expect(d.flags, String(cart)).not.toContain("pitch:cart_recovery");
+    }
+  });
+
+  it("negative mood suppresses reengage exactly like exit-intent (mood brake reused, not re-implemented)", async () => {
+    const d = await decide("", REENGAGE({ cart: "has_items", mood: "frustrated" }));
+    expect(d.pitch).toBe("none");
+    expect(d.reply).toBe("");
+    expect(d.flags).toContain("mood_brake");
+    expect(d.flags).not.toContain("pitch:cart_recovery");
+  });
+
+  it("operator kill still halts a reengage trigger — no autonomous action survives the kill switch", async () => {
+    const d = await decide("", REENGAGE({ cart: "has_items", kill: true }));
+    expect(d.flags).toContain("kill_switch");
+    expect(d.pitch).toBe("none");
+    expect(d.escalateToHuman).toBe(true);
+    expect(d.model).toBe("guardrail"); // short-circuits before the proactive branch ever runs
+  });
+
+  it("§8a invariant 14 basic-mode-at-cap suppresses reengage exactly like exit-intent", async () => {
+    const d = await decide(
+      "",
+      REENGAGE({ cart: "high_value", mood: "satisfied", atCap: true }),
+    );
+    expect(d.pitch).toBe("none");
+    expect(d.flags).toContain("at_cap");
+    expect(d.flags).toContain("no_pitch");
+  });
+
+  it("reengage consumes the SAME ONE INV-E budget as exit-intent — the two triggers cannot double-spend it", async () => {
+    const s = await createSession(createBrain(new MockModelAdapter()), { level: "cautious" }); // budget = 1
+    const d1 = await s.send("", REENGAGE({ cart: "has_items" }) as never);
+    expect(d1.pitch).toBe("cart_recovery");
+    const d2 = await s.send("", EXIT({ cart: "has_items" }) as never); // same session, same shared budget
+    expect(d2.pitch).toBe("none");
+    expect(d2.flags).toContain("budget_capped");
+    expect(d2.reply).toBe("");
+  });
+
+  // Fix round 1 — session.ts:341's reply-blanking guard string-matched ONLY "proactive:exit_intent", so a
+  // budget-capped REENGAGE turn (flags carrying "proactive:reengage" instead) fell through UNBLANKED: the
+  // generated pitch text leaked into the /chat HTTP response and the persisted traffic log on a turn that
+  // reported pitch:"none". The reverse ordering (exit_intent spends, reengage is the one that goes over
+  // budget) is the case the ORIGINAL "reengage consumes..." test above did NOT cover — it only ever put
+  // exit_intent on the over-budget side, which the old string-match already happened to blank correctly.
+  it("a budget-capped REENGAGE turn is blanked exactly like exit-intent (session.ts:341 must match ANY proactive:* flag)", async () => {
+    const s = await createSession(createBrain(new MockModelAdapter()), { level: "cautious" }); // budget = 1
+    const d1 = await s.send("", EXIT({ cart: "has_items" }) as never); // spend the one budget unit via exit_intent
+    expect(d1.pitch).toBe("cart_recovery");
+    const d2 = await s.send("", REENGAGE({ cart: "has_items" }) as never); // reengage is now the one over budget
+    expect(d2.pitch).toBe("none");
+    expect(d2.flags).toContain("budget_capped");
+    expect(d2.flags).toContain("proactive:reengage"); // still correctly labeled...
+    expect(d2.reply).toBe(""); // ...and the generated pitch text must NOT leak through unblanked
+  });
+
+  it("a budget-capped SECOND reengage (same trigger twice) is blanked — the same-trigger ordering", async () => {
+    const s = await createSession(createBrain(new MockModelAdapter()), { level: "cautious" }); // budget = 1
+    const d1 = await s.send("", REENGAGE({ cart: "has_items" }) as never);
+    expect(d1.pitch).toBe("cart_recovery");
+    const d2 = await s.send("", REENGAGE({ cart: "has_items" }) as never); // second reengage, over budget
+    expect(d2.pitch).toBe("none");
+    expect(d2.flags).toContain("budget_capped");
+    expect(d2.reply).toBe("");
+  });
+
+  it("a REAL shopper message riding with a reengage flag is handled reactively, never hijacked", async () => {
+    const d = await decide("my face is burning after the serum", REENGAGE({ cart: "has_items" }));
+    expect(d.mode).toBe("safety");
+    expect(d.pitch).toBe("none");
+    expect(d.flags).not.toContain("pitch:cart_recovery");
+  });
+});

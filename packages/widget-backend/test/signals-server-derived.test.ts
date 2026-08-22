@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveServingSignals } from "../src/signals.js";
+import { deriveServingSignals, classifyDevice } from "../src/signals.js";
 import type { Signals } from "@palup/widget-brain";
 import { generateGuestId } from "@palup/widget-memory";
 
@@ -34,9 +34,12 @@ describe("deriveServingSignals — client signals are untrusted", () => {
 
   // WS6: proactiveTrigger is a non-trust-bearing UI enum — accepted for the two known values, anything
   // else (a made-up trigger trying to reach a different rung) is dropped to undefined.
-  it("WS6: accepts proactiveTrigger 'greeting'/'exit_intent', drops any other value", () => {
+  // WS-B3b adds "reengage" (dwell / idle_then_return) to the same whitelist — it reuses the exit-intent
+  // rung's guardrails, so it is exactly as safe to accept from the client as "exit_intent" was.
+  it("WS6/WS-B3b: accepts proactiveTrigger 'greeting'/'exit_intent'/'reengage', drops any other value", () => {
     expect(deriveServingSignals({ proactiveTrigger: "greeting" } as Signals, ctx).proactiveTrigger).toBe("greeting");
     expect(deriveServingSignals({ proactiveTrigger: "exit_intent" } as Signals, ctx).proactiveTrigger).toBe("exit_intent");
+    expect(deriveServingSignals({ proactiveTrigger: "reengage" } as Signals, ctx).proactiveTrigger).toBe("reengage");
     expect(deriveServingSignals({ proactiveTrigger: "buy_now" } as unknown as Signals, ctx).proactiveTrigger).toBeUndefined();
   });
 
@@ -163,6 +166,56 @@ describe("deriveServingSignals — client signals are untrusted", () => {
       );
       // The server's ctx.consent ("out"/"unknown") wins — NOT the client's claimed "in"/"in".
       expect(out.consent).toEqual({ email: "unknown", sms: "unknown", memoryOrdinary: "out", memorySpecial: "unknown" });
+    });
+  });
+
+  // WS-B4' — environment signals (device + entry), STYLE/FORMAT-ONLY (FAIR-1). device is SERVER-derived
+  // (classifyDevice, from THIS request's own user-agent, via ctx — never the client body); entry is
+  // accepted from the client, exactly like mood, validated against the closed Entry enum.
+  describe("WS-B4': device (server-derived) + entry (client, enum-validated)", () => {
+    it("classifyDevice: /ipad|tablet/i wins over mobile-like tokens, /mobi/i is mobile, else desktop", () => {
+      expect(classifyDevice("Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)")).toBe("tablet");
+      expect(classifyDevice("Mozilla/5.0 (Linux; Android 13; SM-X200) Tablet")).toBe("tablet");
+      expect(classifyDevice("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile/15E148")).toBe("mobile");
+      expect(classifyDevice("Mozilla/5.0 (Linux; Android 13; Pixel 7) Mobile")).toBe("mobile");
+      expect(classifyDevice("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")).toBe("desktop");
+      expect(classifyDevice(undefined)).toBe("desktop");
+      expect(classifyDevice("")).toBe("desktop");
+    });
+
+    it("ctx.device (server-classified) is threaded straight into signals.device", () => {
+      expect(deriveServingSignals(undefined, { ...ctx, device: "mobile" }).device).toBe("mobile");
+      expect(deriveServingSignals(undefined, { ...ctx, device: "tablet" }).device).toBe("tablet");
+      expect(deriveServingSignals(undefined, { ...ctx, device: "desktop" }).device).toBe("desktop");
+    });
+
+    it("no ctx.device ⇒ signals.device is omitted (key-omission discipline, byte-identical to before this field existed)", () => {
+      const out = deriveServingSignals(undefined, ctx);
+      expect(out.device).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(out, "device")).toBe(false);
+    });
+
+    it("a client-sent signals.device is IGNORED — only ctx.device (server-classified) is ever consulted", () => {
+      const out = deriveServingSignals({ device: "mobile" } as Signals, { ...ctx, device: "desktop" });
+      expect(out.device).toBe("desktop"); // ctx wins, not the client's claimed "mobile"
+    });
+
+    it("accepts a client-supplied entry only when it's a valid Entry enum value", () => {
+      expect(deriveServingSignals({ entry: "ad" } as Signals, ctx).entry).toBe("ad");
+      expect(deriveServingSignals({ entry: "organic" } as Signals, ctx).entry).toBe("organic");
+      expect(deriveServingSignals({ entry: "direct" } as Signals, ctx).entry).toBe("direct");
+      expect(deriveServingSignals({ entry: "email" } as Signals, ctx).entry).toBe("email");
+      expect(deriveServingSignals({ entry: "social" } as Signals, ctx).entry).toBe("social");
+    });
+
+    it("drops an unknown/bogus entry rather than coercing or trusting it", () => {
+      const out = deriveServingSignals({ entry: "referral-spam" as never } as Signals, ctx);
+      expect(out.entry).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(out, "entry")).toBe(false);
+    });
+
+    it("no signals.entry sent at all ⇒ omitted", () => {
+      expect(deriveServingSignals(undefined, ctx).entry).toBeUndefined();
     });
   });
 });

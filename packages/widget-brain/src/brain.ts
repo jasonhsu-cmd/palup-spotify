@@ -26,6 +26,8 @@ import type {
   CartLineItemRef,
   CatalogRetrieverPort,
   Decision,
+  Device,
+  Entry,
   HistoryTurn,
   MemoryRecallPort,
   PersonaRole,
@@ -492,6 +494,32 @@ const REL_VOICE: Record<string, string> = {
 const PERSONA_ROLE_FLAG: Record<Exclude<PersonaRole, "b2b">, string> = {
   for_self: "persona:role_self",
   gift: "persona:role_gift",
+};
+
+// ── Environment directives (WS-B4', SAME flag DISPOSITION_STYLE) ─────────────────────────────────
+// device (from the request's own user-agent, server-derived — widget-backend/src/signals.ts's
+// classifyDevice) and entry (from the client's referrer/UTM, non-trust-bearing like mood — a spoofed
+// entry can only change tone) each add ONE benign, code-owned, closed-enum-keyed VOICE/FORMAT directive
+// to systemExtra, gated on the SAME DISPOSITION_STYLE flag as every other directive table above. FAIR-1 /
+// Inv 10 is absolute here too: neither is ever threaded into selectPitch/pitch/outbound/price below — a
+// shopper on mobile, or one who arrived from an ad, gets the EXACT same pitch surface as anyone else. No
+// price/offer/tier language in any entry. `desktop`/`direct` are the unmarked defaults — no special
+// framing needed — so their entries are empty, mirroring REL_VOICE's `anonymous` having no stage voice.
+const DEVICE_DIRECTIVE: Record<Device, string> = {
+  mobile:
+    "\nDEVICE - mobile: The shopper is on a small screen. Keep replies short and skimmable - short sentences, minimal formatting, no long lists.",
+  tablet: "\nDEVICE - tablet: The shopper is on a tablet. Keep replies reasonably concise and easy to scan.",
+  desktop: "",
+};
+
+const ENTRY_DIRECTIVE: Record<Entry, string> = {
+  ad: "\nENTRY - ad: The shopper arrived from an ad. Be welcoming and get to the point quickly.",
+  organic:
+    "\nENTRY - organic: The shopper found this through a search. They likely already have some context - answer directly.",
+  direct: "",
+  email:
+    "\nENTRY - email: The shopper arrived from an email. Acknowledge that context efficiently and help them pick up where it left off.",
+  social: "\nENTRY - social: The shopper arrived from social media. Keep the tone light and conversational.",
 };
 
 // ── Persona-style MODEL CLASSIFIER (PR-5, flag DISPOSITION_CLASSIFIER) ────────────────────────────
@@ -1821,18 +1849,22 @@ export function createBrain(
         return { mode: "smalltalk", reply: greet.text, pitch: "none", escalateToHuman: false, outbound: false, safetyClass: "none", flags, model: greet.model };
       }
 
-      // 4a. PROACTIVE trigger (§4 Behavioral: exit-intent; §5 Timing). AGENT-INITIATED, not a shopper
-      // message: it is never run through the intent classifiers (they key off the shopper's text, which
-      // is empty on a proactive turn). We only reach this rung on the CLEAN sales path — every higher rung
-      // already won if it applied, and the signal-based brakes (kill / safety latch / open issues) each
-      // short-circuited above — so a proactive trigger CANNOT override a brake. On this clean path it may
-      // surface AT MOST a single cart_recovery pitch (the value-aligned exit-intent moment, allowed at
-      // every proactivity level per §5), and ONLY with an unrecovered cart and no negative mood. Anything
-      // else is QUIET: no proactive message at all. The ONE INV-E budget (session.ts) still caps it — a
-      // spent budget converts it to none AND suppresses the message — so it can never nag. Gate on an
-      // EMPTY shopper turn so a real message can never be hijacked by a stray proactive flag.
-      if (signals.proactiveTrigger === "exit_intent" && text.trim() === "") {
-        flags.push("proactive:exit_intent");
+      // 4a. PROACTIVE trigger (§4 Behavioral: exit-intent; §5 Timing; WS-B3b: reengage). AGENT-INITIATED,
+      // not a shopper message: it is never run through the intent classifiers (they key off the shopper's
+      // text, which is empty on a proactive turn). We only reach this rung on the CLEAN sales path — every
+      // higher rung already won if it applied, and the signal-based brakes (kill / safety latch / open
+      // issues) each short-circuited above — so a proactive trigger CANNOT override a brake. On this clean
+      // path it may surface AT MOST a single cart_recovery pitch (the value-aligned exit-intent moment,
+      // allowed at every proactivity level per §5), and ONLY with an unrecovered cart and no negative
+      // mood. Anything else is QUIET: no proactive message at all. The ONE INV-E budget (session.ts) still
+      // caps it — a spent budget converts it to none AND suppresses the message — so it can never nag.
+      // Gate on an EMPTY shopper turn so a real message can never be hijacked by a stray proactive flag.
+      //
+      // "reengage" (client-detected dwell / idle_then_return, WS-B3b) fires this SAME rung verbatim — no
+      // new pitch/money logic, no separate budget, no separate suppression path. Only the flag pushed
+      // below distinguishes it from exit_intent in the audit log/eval corpus.
+      if ((signals.proactiveTrigger === "exit_intent" || signals.proactiveTrigger === "reengage") && text.trim() === "") {
+        flags.push(signals.proactiveTrigger === "reengage" ? "proactive:reengage" : "proactive:exit_intent");
         const proactiveNegativeMood =
           signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
         const hasCart = signals.cart === "has_items" || signals.cart === "high_value";
@@ -1998,6 +2030,20 @@ export function createBrain(
           flags.push(PERSONA_ROLE_FLAG[role]);
           systemExtra += PERSONA_ROLE_DIRECTIVE[role];
         }
+      }
+      // WS-B4' — environment signals (device + entry), SAME flag DISPOSITION_STYLE, SAME guarded-lookup
+      // shape as the persona tables above. STYLE/FORMAT-ONLY (FAIR-1, Inv 10): never touches pitch/
+      // selectPitch/outbound/price below. `signals.device` is server-derived (widget-backend); `entry` is
+      // the client's own non-trust-bearing referrer/UTM claim (like mood) — either way, only a real Device/
+      // Entry enum member is ever trusted, so an out-of-enum/prototype-chain value is skipped, never
+      // resolving to an inherited Function or the literal "undefined".
+      if (dispositionStyleEnabled && signals.device && Object.prototype.hasOwnProperty.call(DEVICE_DIRECTIVE, signals.device)) {
+        flags.push(`device:${signals.device}`);
+        systemExtra += DEVICE_DIRECTIVE[signals.device];
+      }
+      if (dispositionStyleEnabled && signals.entry && Object.prototype.hasOwnProperty.call(ENTRY_DIRECTIVE, signals.entry)) {
+        flags.push(`entry:${signals.entry}`);
+        systemExtra += ENTRY_DIRECTIVE[signals.entry];
       }
       // Shopper-disposition program PR-4 (flag DISPOSITION_BEHAVIORAL) — a shopper who has asked a
       // similar question again this session gets a benign "recall, don't re-ask" voice directive appended

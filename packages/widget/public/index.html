@@ -317,6 +317,34 @@
     // (widget-backend/src/signals.ts — the shopper never sets an autonomy lever).
     return { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
   }
+
+  // WS-B4' — entry (STYLE/FORMAT-ONLY; FAIR-1): unlike demoSignals() above, this is a REAL signal every
+  // shopper sends, not a debug dial — it is derived from the browser's own referrer/UTM params, which the
+  // server can't see directly. It is non-trust-bearing like mood: the server (widget-backend/src/
+  // signals.ts) only accepts a value in the closed Entry enum, and a spoofed value can only steer VOICE
+  // (brain.ts's ENTRY_DIRECTIVE), never pitch/price/offer/outbound. `device` needs no client code at all —
+  // the server classifies it from the request's own user-agent header.
+  function computeEntry(){
+    try {
+      const params = new URLSearchParams(location.search);
+      const medium = (params.get("utm_medium") || "").toLowerCase();
+      if (medium === "cpc" || medium === "ppc" || medium === "paid" || params.get("gclid") || params.get("fbclid")) {
+        return { entry: "ad" };
+      }
+      if (medium === "email") return { entry: "email" };
+      const ref = document.referrer || "";
+      let refHost = "";
+      try { refHost = ref ? new URL(ref).hostname.toLowerCase() : ""; } catch { refHost = ""; }
+      const SOCIAL_HOSTS = /(^|\.)(facebook|instagram|twitter|x|tiktok|linkedin|pinterest|reddit)\.com$/i;
+      if (medium === "social" || SOCIAL_HOSTS.test(refHost)) return { entry: "social" };
+      const SEARCH_HOSTS = /(^|\.)(google|bing|yahoo|duckduckgo|baidu)\.[a-z.]+$/i;
+      if (SEARCH_HOSTS.test(refHost)) return { entry: "organic" };
+      return { entry: "direct" };
+    } catch { return {}; } // never let a hostile/unsupported URL API break the panel
+  }
+  // Computed once per page load — the referrer/UTM params for THIS visit never change mid-session.
+  const entrySignal = computeEntry();
+
   let handedOff = false, lastSend = null;
 
   // PANEL MODE (Task 5) — this same file is served at /embed/panel?shop=… inside the loader's iframe
@@ -1217,7 +1245,13 @@
     // live and consented) their anonId.
     // ADR-0019 task 8 / invariant 4 — the widget NEVER sends a client anonId in signals; the guest subject
     // is derived server-side from the verified `x-guest-token` header (added in doFetch below).
-    const signals = { ...demoSignals(), pageContext: currentPageContext(), ...cartSignal() };
+    // WS-B3b — the accumulated TIMING behavioral events (dwell/hesitation/idle_then_return) ride along on
+    // the shopper's own next turn, then are cleared so they are never resent stale on a later turn.
+    const signals = {
+      ...demoSignals(), ...entrySignal, pageContext: currentPageContext(), ...cartSignal(),
+      ...(behavioralEvents.length ? { behavioral: behavioralEvents.slice() } : {}),
+    };
+    behavioralEvents = [];
     // Stable idempotency key per turn, REUSED on retry, so a replayed request the server already
     // processed is de-duplicated (never double-counts the pitch budget or double-audits).
     const idempotencyKey = (isRetry && lastSend && lastSend.idempotencyKey)
@@ -1286,7 +1320,7 @@
     if (exitIntentFired()) return;                        // at most once per session; never re-fires
     markExitIntentFired();                                // mark BEFORE the request so it can never double-fire
     // ADR-0019 task 8 / invariant 4 — no client anonId in signals; identity comes from the x-guest-token header.
-    const signals = { ...demoSignals(), proactiveTrigger: trigger, pageContext: currentPageContext(), ...cartSignal() };
+    const signals = { ...demoSignals(), ...entrySignal, proactiveTrigger: trigger, pageContext: currentPageContext(), ...cartSignal() };
     const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
     try {
       await ensureToken(false);
@@ -1314,6 +1348,69 @@
     sendProactive("exit_intent");
   });
 
+  // WS-B3b — dwell / hesitation / idle_then_return: the client half of WS-B3a's server-side acceptance
+  // (deriveServingSignals's CLIENT_BEHAVIORAL_EVENTS whitelist already accepted these three TIMING events;
+  // nothing emitted them until now). dwell and idle_then_return additionally fire a "reengage" proactive
+  // nudge that REUSES the exact same conservative exit-intent rung in brain.ts — same cart_recovery-only
+  // pitch, same INV-E budget, same atCap/kill/mood/no_cart suppression, NO new pitch/money logic; only the
+  // originating client signal differs. hesitation NEVER triggers a proactive turn — a shopper mid-typing
+  // must not be interrupted — it only ever rides along on the shopper's own next send().
+  let behavioralEvents = [];
+  function pushBehavioral(evt){ if (behavioralEvents.indexOf(evt) === -1) behavioralEvents.push(evt); }
+  // reengage's OWN once-per-session cap, SEPARATE from EXIT_KEY, so a reengage nudge can never cannibalize
+  // (or be cannibalized by) a real exit-intent nudge — each fires at most once, independently.
+  const REENGAGE_KEY = "palup.widget.reengage.v1";
+  function reengageFired(){ try { return sessionStorage.getItem(REENGAGE_KEY) === "1"; } catch { return false; } }
+  function markReengageFired(){ try { sessionStorage.setItem(REENGAGE_KEY, "1"); } catch {} }
+  function fireReengage(evt){
+    pushBehavioral(evt);
+    if (reengageFired()) return;        // at most once per session; never re-fires
+    markReengageFired();                // mark BEFORE the request so it can never double-fire
+    sendProactive("reengage");
+  }
+
+  const DWELL_MS = 8000, IDLE_MS = 30000, HESITATE_PAUSE_MS = 5000;
+
+  // dwell: the shopper lingers ~8s with the panel OPEN and no interaction. Any interaction (click,
+  // keypress, scroll, pointer move) resets the clock — dwell means lingering, not "8s since page load".
+  let dwellTimer = null;
+  function scheduleDwell(){
+    clearTimeout(dwellTimer);
+    if (reengageFired() || widget.hidden) return; // budget already spent, or nothing to linger IN
+    dwellTimer = setTimeout(() => { if (!widget.hidden) fireReengage("dwell"); }, DWELL_MS);
+  }
+  ["click", "keydown", "scroll", "mousemove"].forEach((evt) => widget.addEventListener(evt, scheduleDwell, { passive: true }));
+  // setOpen is the single entry point for opening/closing the panel; re-arm the dwell clock on open (and
+  // stop it on close, so a minimized panel can never silently accrue dwell time).
+  const _b3bSetOpen = setOpen;
+  setOpen = function(open){ _b3bSetOpen(open); if (open) scheduleDwell(); else clearTimeout(dwellTimer); };
+  scheduleDwell(); // covers standalone /widget, where the panel starts already open
+
+  // idle_then_return: no activity for ~30s, then the tab/window comes back into focus.
+  let idleTimer = null, wentIdle = false;
+  function scheduleIdle(){ clearTimeout(idleTimer); wentIdle = false; idleTimer = setTimeout(() => { wentIdle = true; }, IDLE_MS); }
+  ["click", "keydown", "scroll", "mousemove"].forEach((evt) => document.addEventListener(evt, scheduleIdle, { passive: true }));
+  function onReturn(){ if (wentIdle) fireReengage("idle_then_return"); scheduleIdle(); }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") onReturn(); });
+  window.addEventListener("focus", onReturn);
+  scheduleIdle();
+
+  // hesitation: typing-then-deleting (the compose box grew then shrank) OR a ~5s pause mid-compose.
+  // Behavioral-array-only — see the block comment above: this never calls sendProactive.
+  (function(){
+    const composeEl = $("#in");
+    if (!composeEl) return;
+    let lastLen = composeEl.value.length, pauseTimer = null, grew = false;
+    composeEl.addEventListener("input", () => {
+      const len = composeEl.value.length;
+      if (len > lastLen) grew = true;
+      else if (len < lastLen && grew){ pushBehavioral("hesitation"); grew = false; }
+      lastLen = len;
+      clearTimeout(pauseTimer);
+      if (len > 0) pauseTimer = setTimeout(() => pushBehavioral("hesitation"), HESITATE_PAUSE_MS);
+    });
+  })();
+
   // WS6 — first-touch greeting. Fires AT MOST once per session, when the embedded panel is first opened.
   // AGENT-INITIATED (empty message + proactiveTrigger:"greeting"); the SERVER decides whether any greeting
   // is emitted (GREETING_PROACTIVE flag). Flag OFF (production default) or any failure ⇒ empty reply ⇒ the
@@ -1328,7 +1425,7 @@
   async function sendGreeting(){
     if (greetedThisSession()) return;                     // once per session; never re-fires
     try { sessionStorage.setItem(GREET_KEY, "1"); } catch {}   // mark BEFORE the request so it can never double-fire
-    const signals = { ...demoSignals(), proactiveTrigger: "greeting", pageContext: currentPageContext(), ...cartSignal() };
+    const signals = { ...demoSignals(), ...entrySignal, proactiveTrigger: "greeting", pageContext: currentPageContext(), ...cartSignal() };
     const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
     try {
       await ensureToken(false);
