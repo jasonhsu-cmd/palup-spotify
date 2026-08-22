@@ -317,6 +317,34 @@
     // (widget-backend/src/signals.ts — the shopper never sets an autonomy lever).
     return { mood: $("#mood").value, cart: $("#cart").value, proactivityLevel: $("#proactivityLevel").value };
   }
+
+  // WS-B4' — entry (STYLE/FORMAT-ONLY; FAIR-1): unlike demoSignals() above, this is a REAL signal every
+  // shopper sends, not a debug dial — it is derived from the browser's own referrer/UTM params, which the
+  // server can't see directly. It is non-trust-bearing like mood: the server (widget-backend/src/
+  // signals.ts) only accepts a value in the closed Entry enum, and a spoofed value can only steer VOICE
+  // (brain.ts's ENTRY_DIRECTIVE), never pitch/price/offer/outbound. `device` needs no client code at all —
+  // the server classifies it from the request's own user-agent header.
+  function computeEntry(){
+    try {
+      const params = new URLSearchParams(location.search);
+      const medium = (params.get("utm_medium") || "").toLowerCase();
+      if (medium === "cpc" || medium === "ppc" || medium === "paid" || params.get("gclid") || params.get("fbclid")) {
+        return { entry: "ad" };
+      }
+      if (medium === "email") return { entry: "email" };
+      const ref = document.referrer || "";
+      let refHost = "";
+      try { refHost = ref ? new URL(ref).hostname.toLowerCase() : ""; } catch { refHost = ""; }
+      const SOCIAL_HOSTS = /(^|\.)(facebook|instagram|twitter|x|tiktok|linkedin|pinterest|reddit)\.com$/i;
+      if (medium === "social" || SOCIAL_HOSTS.test(refHost)) return { entry: "social" };
+      const SEARCH_HOSTS = /(^|\.)(google|bing|yahoo|duckduckgo|baidu)\.[a-z.]+$/i;
+      if (SEARCH_HOSTS.test(refHost)) return { entry: "organic" };
+      return { entry: "direct" };
+    } catch { return {}; } // never let a hostile/unsupported URL API break the panel
+  }
+  // Computed once per page load — the referrer/UTM params for THIS visit never change mid-session.
+  const entrySignal = computeEntry();
+
   let handedOff = false, lastSend = null;
 
   // PANEL MODE (Task 5) — this same file is served at /embed/panel?shop=… inside the loader's iframe
@@ -1220,7 +1248,7 @@
     // WS-B3b — the accumulated TIMING behavioral events (dwell/hesitation/idle_then_return) ride along on
     // the shopper's own next turn, then are cleared so they are never resent stale on a later turn.
     const signals = {
-      ...demoSignals(), pageContext: currentPageContext(), ...cartSignal(),
+      ...demoSignals(), ...entrySignal, pageContext: currentPageContext(), ...cartSignal(),
       ...(behavioralEvents.length ? { behavioral: behavioralEvents.slice() } : {}),
     };
     behavioralEvents = [];
@@ -1292,7 +1320,7 @@
     if (exitIntentFired()) return;                        // at most once per session; never re-fires
     markExitIntentFired();                                // mark BEFORE the request so it can never double-fire
     // ADR-0019 task 8 / invariant 4 — no client anonId in signals; identity comes from the x-guest-token header.
-    const signals = { ...demoSignals(), proactiveTrigger: trigger, pageContext: currentPageContext(), ...cartSignal() };
+    const signals = { ...demoSignals(), ...entrySignal, proactiveTrigger: trigger, pageContext: currentPageContext(), ...cartSignal() };
     const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
     try {
       await ensureToken(false);
@@ -1397,7 +1425,7 @@
   async function sendGreeting(){
     if (greetedThisSession()) return;                     // once per session; never re-fires
     try { sessionStorage.setItem(GREET_KEY, "1"); } catch {}   // mark BEFORE the request so it can never double-fire
-    const signals = { ...demoSignals(), proactiveTrigger: "greeting", pageContext: currentPageContext(), ...cartSignal() };
+    const signals = { ...demoSignals(), ...entrySignal, proactiveTrigger: "greeting", pageContext: currentPageContext(), ...cartSignal() };
     const idempotencyKey = (crypto.randomUUID && crypto.randomUUID()) || (String(Date.now()) + "-" + String(Math.random()).slice(2));
     try {
       await ensureToken(false);

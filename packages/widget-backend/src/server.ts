@@ -52,7 +52,7 @@ import {
 import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
-import { deriveServingSignals } from "./signals.js";
+import { deriveServingSignals, classifyDevice } from "./signals.js";
 import { deriveLifecycle } from "./lifecycle.js";
 import { registerEmbedRoutes, bundleLoader } from "./routes/embed.js";
 import { resolveTheme } from "./widget-theme.js";
@@ -3224,10 +3224,16 @@ export async function buildServer(opts?: {
           relationship = undefined; // FAIL-OPEN: any commerce error ⇒ fall back to the old default
         }
       }
+      // WS-B4' — device is SERVER-derived from THIS request's own `user-agent` header, never the client's
+      // `signals` body (STYLE/FORMAT-ONLY; FAIR-1). Same array-vs-string header normalization as the
+      // `x-forwarded-for` reads elsewhere in this file — a proxy/multi-value header takes the first value.
+      const uaHeader = req.headers["user-agent"];
+      const device = classifyDevice(Array.isArray(uaHeader) ? uaHeader[0] : uaHeader);
       const signals: Signals = deriveServingSignals(body.signals, {
         tenantId,
         kill: Boolean(kill),
         atCap: Boolean(costCap),
+        device,
         catalogRetrievalEnabled,
         catalogRetrievalKilled: Boolean(retrievalKill),
         // T1 — server-authored guard signals (undefined ⇒ deriveServingSignals omits the keys, so the
