@@ -34,9 +34,12 @@ describe("deriveServingSignals — client signals are untrusted", () => {
 
   // WS6: proactiveTrigger is a non-trust-bearing UI enum — accepted for the two known values, anything
   // else (a made-up trigger trying to reach a different rung) is dropped to undefined.
-  it("WS6: accepts proactiveTrigger 'greeting'/'exit_intent', drops any other value", () => {
+  // WS-B3b adds "reengage" (dwell / idle_then_return) to the same whitelist — it reuses the exit-intent
+  // rung's guardrails, so it is exactly as safe to accept from the client as "exit_intent" was.
+  it("WS6/WS-B3b: accepts proactiveTrigger 'greeting'/'exit_intent'/'reengage', drops any other value", () => {
     expect(deriveServingSignals({ proactiveTrigger: "greeting" } as Signals, ctx).proactiveTrigger).toBe("greeting");
     expect(deriveServingSignals({ proactiveTrigger: "exit_intent" } as Signals, ctx).proactiveTrigger).toBe("exit_intent");
+    expect(deriveServingSignals({ proactiveTrigger: "reengage" } as Signals, ctx).proactiveTrigger).toBe("reengage");
     expect(deriveServingSignals({ proactiveTrigger: "buy_now" } as unknown as Signals, ctx).proactiveTrigger).toBeUndefined();
   });
 

@@ -245,12 +245,16 @@ export function deriveServingSignals(raw: Signals | undefined, ctx: ServingSigna
     // session.ts's existing `signals.behavioral` carry logic (which reads `signals.behavioral ?? []`)
     // unaffected when nothing was supplied.
     ...(behavioral ? { behavioral } : {}),
-    // Agent-initiated proactive UI trigger (§4 Behavioral: exit-intent) — non-trust-bearing UI context
-    // like mood/cart, accepted ONLY as the known enum. It can only route to a MORE restrained proactive
-    // cart_recovery on the clean sales path; every server cap still holds (precedence ladder, mood brake,
-    // support/safety suppression, and the ONE INV-E budget), so passing it through grants no autonomy.
+    // Agent-initiated proactive UI trigger (§4 Behavioral: exit-intent; WS-B3b: reengage) —
+    // non-trust-bearing UI context like mood/cart, accepted ONLY as the known enum. It can only route to
+    // a MORE restrained proactive cart_recovery on the clean sales path; every server cap still holds
+    // (precedence ladder, mood brake, support/safety suppression, and the ONE INV-E budget), so passing
+    // it through grants no autonomy. "reengage" reuses the exact same brain.ts rung as "exit_intent" —
+    // no new pitch/money logic — so accepting it here is exactly as safe as exit_intent already was.
     proactiveTrigger:
-      r.proactiveTrigger === "exit_intent" || r.proactiveTrigger === "greeting" ? r.proactiveTrigger : undefined,
+      r.proactiveTrigger === "exit_intent" || r.proactiveTrigger === "greeting" || r.proactiveTrigger === "reengage"
+        ? r.proactiveTrigger
+        : undefined,
     // Page context (§4): the product/page the shopper is viewing — UNTRUSTED merchant-page content,
     // bounded here (defense-in-depth) and sanitized again in the brain before it reaches the model.
     pageContext: typeof r.pageContext === "string" && r.pageContext ? r.pageContext.slice(0, 400) : undefined,

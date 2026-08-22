@@ -1821,18 +1821,22 @@ export function createBrain(
         return { mode: "smalltalk", reply: greet.text, pitch: "none", escalateToHuman: false, outbound: false, safetyClass: "none", flags, model: greet.model };
       }
 
-      // 4a. PROACTIVE trigger (§4 Behavioral: exit-intent; §5 Timing). AGENT-INITIATED, not a shopper
-      // message: it is never run through the intent classifiers (they key off the shopper's text, which
-      // is empty on a proactive turn). We only reach this rung on the CLEAN sales path — every higher rung
-      // already won if it applied, and the signal-based brakes (kill / safety latch / open issues) each
-      // short-circuited above — so a proactive trigger CANNOT override a brake. On this clean path it may
-      // surface AT MOST a single cart_recovery pitch (the value-aligned exit-intent moment, allowed at
-      // every proactivity level per §5), and ONLY with an unrecovered cart and no negative mood. Anything
-      // else is QUIET: no proactive message at all. The ONE INV-E budget (session.ts) still caps it — a
-      // spent budget converts it to none AND suppresses the message — so it can never nag. Gate on an
-      // EMPTY shopper turn so a real message can never be hijacked by a stray proactive flag.
-      if (signals.proactiveTrigger === "exit_intent" && text.trim() === "") {
-        flags.push("proactive:exit_intent");
+      // 4a. PROACTIVE trigger (§4 Behavioral: exit-intent; §5 Timing; WS-B3b: reengage). AGENT-INITIATED,
+      // not a shopper message: it is never run through the intent classifiers (they key off the shopper's
+      // text, which is empty on a proactive turn). We only reach this rung on the CLEAN sales path — every
+      // higher rung already won if it applied, and the signal-based brakes (kill / safety latch / open
+      // issues) each short-circuited above — so a proactive trigger CANNOT override a brake. On this clean
+      // path it may surface AT MOST a single cart_recovery pitch (the value-aligned exit-intent moment,
+      // allowed at every proactivity level per §5), and ONLY with an unrecovered cart and no negative
+      // mood. Anything else is QUIET: no proactive message at all. The ONE INV-E budget (session.ts) still
+      // caps it — a spent budget converts it to none AND suppresses the message — so it can never nag.
+      // Gate on an EMPTY shopper turn so a real message can never be hijacked by a stray proactive flag.
+      //
+      // "reengage" (client-detected dwell / idle_then_return, WS-B3b) fires this SAME rung verbatim — no
+      // new pitch/money logic, no separate budget, no separate suppression path. Only the flag pushed
+      // below distinguishes it from exit_intent in the audit log/eval corpus.
+      if ((signals.proactiveTrigger === "exit_intent" || signals.proactiveTrigger === "reengage") && text.trim() === "") {
+        flags.push(signals.proactiveTrigger === "reengage" ? "proactive:reengage" : "proactive:exit_intent");
         const proactiveNegativeMood =
           signals.mood === "frustrated" || signals.mood === "upset" || signals.mood === "anxious";
         const hasCart = signals.cart === "has_items" || signals.cart === "high_value";

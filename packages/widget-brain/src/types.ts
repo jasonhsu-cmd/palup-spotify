@@ -414,13 +414,17 @@ export interface Signals {
   /**
    * An AGENT-INITIATED proactive trigger (§4 Behavioral: exit-intent; §5 Timing) — NOT a shopper
    * message. "exit_intent" = the shopper's pointer left toward the top of the viewport with an
-   * unrecovered cart. It is evaluated ONLY on the clean sales path (every higher precedence rung wins
-   * first) and NEVER overrides a brake: it may surface AT MOST a single, value-aligned cart_recovery
-   * pitch, still gated by the mood brake, support/safety suppression, and the ONE INV-E budget. It is
-   * never run through the shopper-message intent classifiers; the shopper turn on a proactive trigger
-   * is empty. Sentinel-valued.
+   * unrecovered cart. "reengage" (WS-B3b) = the client detected dwell (lingering ~8s, panel open) or
+   * idle_then_return (idle ~30s then tab/window refocus) — it shares the EXACT SAME rung as exit_intent
+   * (brain.ts), just a different originating client signal; no separate pitch/money logic exists for it.
+   * It is evaluated ONLY on the clean sales path (every higher precedence rung wins first) and NEVER
+   * overrides a brake: it may surface AT MOST a single, value-aligned cart_recovery pitch, still gated by
+   * the mood brake, support/safety suppression, and the ONE INV-E budget (shared across both trigger
+   * kinds — a session cannot double-spend it by mixing exit_intent and reengage). It is never run
+   * through the shopper-message intent classifiers; the shopper turn on a proactive trigger is empty.
+   * Sentinel-valued.
    */
-  proactiveTrigger?: "exit_intent" | "greeting";
+  proactiveTrigger?: "exit_intent" | "greeting" | "reengage";
   /**
    * §8a invariant 14 — the merchant (or the platform) has reached its cost/billing cap, so the agent runs
    * in BASIC MODE: no proactive/outbound initiation, while live chat continues to be answered normally.
