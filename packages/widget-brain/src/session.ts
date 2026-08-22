@@ -335,10 +335,12 @@ export async function createSession(brain: Brain, opts: SessionOptions = {}): Pr
             ...d,
             pitch: "none",
             outbound: false,
-            // A PROACTIVE nudge (§5) has no shopper turn to answer, so an over-budget one must surface
-            // NOTHING (INV-E one-strike: it can never nag). Blank its reply; a reactive answer is
-            // untouched — only its pitch flag is dropped.
-            reply: d.flags.includes("proactive:exit_intent") ? "" : d.reply,
+            // A PROACTIVE nudge (§5 exit_intent; WS-B3b reengage) has no shopper turn to answer, so an
+            // over-budget one must surface NOTHING (INV-E one-strike: it can never nag). Blank its reply;
+            // a reactive answer is untouched — only its pitch flag is dropped. Matches ANY "proactive:*"
+            // flag (not just "proactive:exit_intent") so a future proactive trigger is blanked correctly
+            // by construction, without this guard needing a re-edit every time one is added.
+            reply: d.flags.some((f) => f.startsWith("proactive:")) ? "" : d.reply,
             flags: [
               ...d.flags.filter((f) => !f.startsWith("pitch:") && f !== "outbound"),
               "budget_capped",

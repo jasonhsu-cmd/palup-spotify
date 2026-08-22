@@ -204,6 +204,33 @@ describe("proactive reengage (WS-B3b) — reuses the exit-intent rung verbatim",
     expect(d2.reply).toBe("");
   });
 
+  // Fix round 1 — session.ts:341's reply-blanking guard string-matched ONLY "proactive:exit_intent", so a
+  // budget-capped REENGAGE turn (flags carrying "proactive:reengage" instead) fell through UNBLANKED: the
+  // generated pitch text leaked into the /chat HTTP response and the persisted traffic log on a turn that
+  // reported pitch:"none". The reverse ordering (exit_intent spends, reengage is the one that goes over
+  // budget) is the case the ORIGINAL "reengage consumes..." test above did NOT cover — it only ever put
+  // exit_intent on the over-budget side, which the old string-match already happened to blank correctly.
+  it("a budget-capped REENGAGE turn is blanked exactly like exit-intent (session.ts:341 must match ANY proactive:* flag)", async () => {
+    const s = await createSession(createBrain(new MockModelAdapter()), { level: "cautious" }); // budget = 1
+    const d1 = await s.send("", EXIT({ cart: "has_items" }) as never); // spend the one budget unit via exit_intent
+    expect(d1.pitch).toBe("cart_recovery");
+    const d2 = await s.send("", REENGAGE({ cart: "has_items" }) as never); // reengage is now the one over budget
+    expect(d2.pitch).toBe("none");
+    expect(d2.flags).toContain("budget_capped");
+    expect(d2.flags).toContain("proactive:reengage"); // still correctly labeled...
+    expect(d2.reply).toBe(""); // ...and the generated pitch text must NOT leak through unblanked
+  });
+
+  it("a budget-capped SECOND reengage (same trigger twice) is blanked — the same-trigger ordering", async () => {
+    const s = await createSession(createBrain(new MockModelAdapter()), { level: "cautious" }); // budget = 1
+    const d1 = await s.send("", REENGAGE({ cart: "has_items" }) as never);
+    expect(d1.pitch).toBe("cart_recovery");
+    const d2 = await s.send("", REENGAGE({ cart: "has_items" }) as never); // second reengage, over budget
+    expect(d2.pitch).toBe("none");
+    expect(d2.flags).toContain("budget_capped");
+    expect(d2.reply).toBe("");
+  });
+
   it("a REAL shopper message riding with a reengage flag is handled reactively, never hijacked", async () => {
     const d = await decide("my face is burning after the serum", REENGAGE({ cart: "has_items" }));
     expect(d.mode).toBe("safety");
