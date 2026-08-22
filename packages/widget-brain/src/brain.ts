@@ -372,15 +372,34 @@ function productQueryFromPageContext(pageContext: string | undefined): string {
 }
 
 
-function selectPitch(signals: Signals, policy: Policy, isObjection = false): PitchKind {
+// WS-C — `moneyPitchesEnabled` is the same GUARDRAIL flag `createBrain` receives as
+// `autonomousMoneyPitchesEnabled` (never a `Policy` field — see createBrain's param comment). Default
+// OFF ⇒ this function is byte-identical to its pre-WS-C behavior. When ON, it ONLY narrows two of the
+// EXISTING confident-path branches below to a money-gated kind — it never adds a new branch and never
+// returns "promo" in any state (Owner authorized upsell + subscription only; a real merchant promo is
+// surfaced by the grounding layer, never manufactured here). These exact triggers are a conservative
+// starting point; the model's PITCH_PLAYBOOK ("only if genuinely a better fit") + discountGuardrail still
+// gate the actual reply, and the owner/security-reviewer validate the triggers before any further rollout.
+function selectPitch(
+  signals: Signals,
+  policy: Policy,
+  isObjection = false,
+  moneyPitchesEnabled = false,
+): PitchKind {
   const level = signals.proactivityLevel ?? policy.proactivityDefault;
   const rel = signals.relationship;
   const cart = signals.cart;
   let pitch: PitchKind;
   if (cart === "has_items" || cart === "high_value") {
-    pitch = level === "cautious" ? "cart_recovery" : "cross_sell";
+    if (level === "cautious") {
+      pitch = "cart_recovery";
+    } else if (moneyPitchesEnabled && level === "confident") {
+      pitch = "upsell"; // WS-C: trade-up, confident shopper only; cautious/balanced unchanged above/below
+    } else {
+      pitch = "cross_sell";
+    }
   } else if ((rel === "replenishment_due" || rel === "lapsed") && level !== "cautious") {
-    pitch = "replenishment";
+    pitch = moneyPitchesEnabled && rel === "replenishment_due" ? "subscription" : "replenishment"; // WS-C: lapsed always stays "replenishment"
   } else if (level === "cautious") {
     pitch = "none";
   } else {
@@ -411,13 +430,19 @@ const PITCH_PLAYBOOK: Record<PitchKind, string> = {
 };
 
 // NN#1 money boundary, made STRUCTURAL. These three pitch kinds move plan/price/promotion
-// (docs/HITL-POLICY.md Q1), so a run-time agent may NEVER emit them autonomously — they are
-// reachable ONLY through a human-approved enablement path (Approval Center; SUBSCRIPTION_SELFSERVE
-// ADR-0016; grounded merchant promos surfaced by the grounding layer, not manufactured here).
-// `selectPitch` — the autonomous reactive selector — has no branch that returns any of them, and
-// `select-pitch-money-boundary.test.ts` pins that exhaustively so a future branch cannot cross the
-// money boundary unnoticed (§3 — the OpenClaw failure mode PalUp exists to prevent). This is a
-// guard on the AUTONOMOUS path only; it does not remove the governed enablement path.
+// (docs/HITL-POLICY.md Q1). `promo` may NEVER be emitted autonomously by `selectPitch` — no branch
+// anywhere returns it, in any flag state; a real merchant promo is surfaced by the grounding layer,
+// never manufactured here. `upsell`/`subscription` are reachable ONLY behind the `createBrain`
+// GUARDRAIL argument `autonomousMoneyPitchesEnabled` (WS-C; NOT a `Policy` field, so a self-improvement
+// candidate cannot flip this itself) — default OFF everywhere, and ON only where a human has set
+// `AUTONOMOUS_MONEY_PITCHES=true` at deploy time (staging today; production requires a separate §5
+// promotion). Flag OFF ⇒ `selectPitch` is byte-identical to its pre-WS-C behavior and none of the three
+// kinds are reachable, exactly as before (Approval Center; SUBSCRIPTION_SELFSERVE ADR-0016 remain the
+// other governed paths to these same pitch kinds).
+// `select-pitch-money-boundary.test.ts` pins BOTH: the flag-OFF brain never emits any of the three
+// (exhaustive, unchanged), and the flag-ON brain still never emits `promo` while `upsell`/`subscription`
+// are reachable only via the two specific triggers above (§3 — the OpenClaw failure mode PalUp exists to
+// prevent). This is a guard on the AUTONOMOUS path only; it does not remove the governed enablement path.
 export const MONEY_GATED_PITCHES = ["upsell", "subscription", "promo"] as const satisfies readonly PitchKind[];
 
 // ── Persona-style directives (PR-3, flag DISPOSITION_STYLE) ──────────────────────────────────────
@@ -1099,6 +1124,18 @@ export function createBrain(
   // WHETHER/WHEN a price gets confirmed is a money/NN#1 run-time behaviour change ⇒ eval gate → shadow →
   // canary → named-human promotion (HITL §5) before this is ever supplied in a real environment.
   refreshFacts?: (tenantId: string, productIds: string[]) => Promise<void>,
+  // WS-C — the AUTONOMOUS_MONEY_PITCHES posture flag (operator/deploy-time GUARDRAIL, threaded exactly
+  // like every posture flag above; never hardcoded on, never read from process.env inside this package,
+  // and — deliberately — NOT a field on `Policy`: a self-improvement candidate must never be able to flip
+  // the money boundary itself, so this can only ever arrive as a `createBrain` argument the composition
+  // root (server.ts) supplies from its own env read. Default OFF ⇒ `selectPitch` is byte-identical to
+  // today and the exhaustive `select-pitch-money-boundary.test.ts` guard holds unchanged. Even when ON,
+  // it only ever widens two of `selectPitch`'s EXISTING confident-path branches to `upsell`/`subscription`
+  // (never adds a new branch, never touches `promo` — no branch anywhere returns "promo", flag state
+  // notwithstanding) — the model's PITCH_PLAYBOOK ("only if genuinely a better fit") and discountGuardrail
+  // still gate the actual reply, and enabling this beyond staging is a §5 human promotion, not a build-time
+  // default.
+  autonomousMoneyPitchesEnabled = false,
 ): Brain {
   // Grounding + model tenancy are PER-REQUEST: this brain instance is cached per policy and shared
   // across every tenant (server.ts brainFor), so the tenant must arrive on each call (via signals),
@@ -2181,7 +2218,7 @@ export function createBrain(
         // the detection either way, even when a later cap (budget, session.ts) drops the pitch to none.
         const isObjection = OBJECTION.test(text);
         if (isObjection) flags.push("objection_detected");
-        const rawPitch = selectPitch(signals, policy, isObjection);
+        const rawPitch = selectPitch(signals, policy, isObjection, autonomousMoneyPitchesEnabled);
         // F4 — the anxious SOFT brake caps selectPitch's own result: only a gentle guided_rec is
         // allowed through for an anxious shopper (ordinary/empty cart only — anxiousSoftBrake is
         // false whenever cart is high_value, which stays on the hard-brake branch above). Every
