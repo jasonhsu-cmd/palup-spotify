@@ -108,7 +108,7 @@ export async function buildServer(opts?: {
     merchantPlane.addHook("preHandler", requireMerchant(identity));
     registerMeRoutes(merchantPlane);
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
-    registerApprovalsRoutes(merchantPlane, { proposalStore });
+    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms });
   });
 
   return app;
