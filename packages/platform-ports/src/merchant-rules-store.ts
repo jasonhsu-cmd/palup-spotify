@@ -126,6 +126,41 @@ export const PALUP_FLOORS: Readonly<Record<ProposalCategory, PalupFloor>> = {
   autonomy_scope: { maxAutoPct: 0, maxAutoUsd: 0, massSendRecipientFloor: 500 },
 };
 
+/** The action-param dimensions (`pct`, `usd`) a category's `AutoActLimit` numeric caps actually mean
+ * something for — see `AUTO_ELIGIBLE_DIMENSIONS` below for why this exists. */
+export type AutoEligibleDimension = "pct" | "usd";
+
+// §3-CRITICAL FOLLOW-UP FIX. `PALUP_FLOORS` gives every category BOTH a `maxAutoPct` and a
+// `maxAutoUsd` (F1, above) purely so `withinFloor`'s "does this floor leave any room at all" gate
+// has a real number on both sides to check — most categories' `maxAutoPct` (100 for
+// ad_spend/refund/campaign/subscription) is a structural NO-OP ceiling, never a real percentage
+// auto-eligibility. But `classifyAction` only treated an action as "unmeasured" (invariant 4) when
+// BOTH `pct` AND `usd` were absent from `action.params` — so a `refund` action carrying ONLY a
+// `pct` param (no `usd`) was checked against that no-op 100% cap, passed it, and auto-approved a
+// "100%-of-order-value" refund of ARBITRARY dollar size — the real $200 USD floor was never even
+// evaluated. This map closes that hole: it is the authoritative list of which dimensions a category
+// is ACTUALLY auto-eligible on, independent of which numeric floors happen to be defined for
+// `withinFloor`'s sake. `classifyAction` consults this FIRST for each dimension PRESENT on the
+// action — a dimension present but not in this category's list is `requires_approval` with an
+// `unexpected_dimension` reason, never checked against that category's (possibly no-op) cap.
+//
+//   - `discount` → both: a discount is legitimately expressed as either a percentage OR a flat
+//     dollar amount, and both have a real, non-no-op floor (30% / $50).
+//   - `refund` / `ad_spend` → usd only: these are inherently dollar-denominated actions; their
+//     `maxAutoPct:100` exists ONLY for `withinFloor`, never as a real percentage ceiling.
+//   - `campaign` / `subscription` / `autonomy_scope` → neither: none of these are ever auto-eligible
+//     on a raw pct/usd amount at all today — campaign's real risk is reach (the mass-send floor, a
+//     separate, unconditional check), subscription changes have no percentage/dollar meaning yet,
+//     and autonomy_scope (the unmapped-action fallback) must never be auto-eligible on anything.
+export const AUTO_ELIGIBLE_DIMENSIONS: Readonly<Record<ProposalCategory, ReadonlyArray<AutoEligibleDimension>>> = {
+  discount: ["pct", "usd"],
+  ad_spend: ["usd"],
+  refund: ["usd"],
+  campaign: [],
+  subscription: [],
+  autonomy_scope: [],
+};
+
 /**
  * A brand-new tenant's automation envelope BEFORE any merchant has touched the settings —
  * `MerchantRulesStore.get` merges the stored envelope over this. Every category with a real money

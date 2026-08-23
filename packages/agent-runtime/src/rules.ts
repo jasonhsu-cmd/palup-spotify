@@ -24,12 +24,14 @@ import type { AgentAction, ProposalCategory } from "@palup/platform-ports";
 import {
   CONSERVATIVE_DEFAULTS,
   PALUP_FLOORS,
+  AUTO_ELIGIBLE_DIMENSIONS,
   clampToFloor,
   InMemoryMerchantRulesStore,
   effectiveCategory,
   mergeOverDefaults,
   isBigJump,
   type AutoActLimit,
+  type AutoEligibleDimension,
   type CategoryRuleEnvelope,
   type MerchantRuleSet,
   type MerchantRulesStore,
@@ -42,6 +44,7 @@ import type { RulesProvider } from "./classify.js";
 export {
   CONSERVATIVE_DEFAULTS,
   PALUP_FLOORS,
+  AUTO_ELIGIBLE_DIMENSIONS,
   clampToFloor,
   InMemoryMerchantRulesStore,
   effectiveCategory,
@@ -50,6 +53,7 @@ export {
 };
 export type {
   AutoActLimit,
+  AutoEligibleDimension,
   CategoryRuleEnvelope,
   MerchantRuleSet,
   MerchantRulesStore,

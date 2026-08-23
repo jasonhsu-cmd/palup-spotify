@@ -79,4 +79,37 @@ describe("classifyAction", () => {
     expect(c.decision).toBe("requires_approval");
     expect(c.boundaryReasons.some(b=>b.rule.includes("usd_over_cap"))).toBe(true);
   });
+
+  // FOLLOW-UP §3 FIX — coordinator repro: `refund` was given a no-op `maxAutoPct:100` floor just to
+  // satisfy `withinFloor`'s pct-AND-usd gate, but `classifyAction` only treated an action as
+  // "unmeasured" when BOTH pct and usd were absent — so a refund carrying ONLY a `pct` param (no
+  // `usd`) was checked against that 100% no-op cap and could auto-approve, never evaluating the
+  // real $200 USD ceiling at all. `refund` is usd-only auto-eligible; a `pct` on it must now be an
+  // "unexpected dimension", never a measured-and-passing one.
+  it("a pct param on a USD-only category (refund) never bypasses the USD floor — requires approval", async () => {
+    const c = await classifyAction(
+      { type:"issue_refund", params:{ pct: 100 } },
+      ctx,
+      usdRules({ maxUsd: 200 }, { maxAutoUsd: 200 }),
+    );
+    expect(c.decision).toBe("requires_approval");
+    expect(c.boundaryReasons.some(b=>b.rule === "refund.unexpected_dimension")).toBe(true);
+  });
+
+  // Same fix, opposite direction: `discount` IS pct-AND-usd auto-eligible, so a plain pct discount
+  // within cap must keep auto-approving exactly as before — the dimension gate must not regress the
+  // already-working case.
+  it("a discount within its pct cap still auto-approves after the dimension-gate fix", async () => {
+    const c = await classifyAction({ type: "issue_discount", params: { pct: 10 } }, ctx, rules());
+    expect(c.decision).toBe("auto");
+  });
+
+  // MINOR — the "unmeasured action" invariant (4), previously only exercised via an UNMAPPED action
+  // type (which hits invariant 2 first, not 4). This covers a MAPPED category, auto-eligible, with
+  // no measurable params at all.
+  it("requires approval on a mapped, auto-eligible category with no measurable params at all (invariant 4)", async () => {
+    const c = await classifyAction({ type: "issue_discount", params: {} }, ctx, rules({ allowedAuto: true }));
+    expect(c.decision).toBe("requires_approval");
+    expect(c.boundaryReasons.some(b=>b.rule.includes("unmeasured_action"))).toBe(true);
+  });
 });

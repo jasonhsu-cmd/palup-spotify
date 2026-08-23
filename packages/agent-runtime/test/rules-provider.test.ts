@@ -54,6 +54,20 @@ describe("createRulesProvider", () => {
     }
   });
 
+  // FOLLOW-UP §3 FIX — coordinator repro, through the REAL provider + PALUP_FLOORS (not a test
+  // fake): `refund`'s `maxAutoPct:100` exists only to satisfy `withinFloor`'s gate, never as a real
+  // pct-based auto-eligibility for refunds. A refund action carrying a `pct` (not `usd`) param used
+  // to be checked against that no-op 100% cap and auto-approve, bypassing the real $200 USD floor
+  // entirely — an "100%-of-order-value" refund of arbitrary dollar size.
+  it("a refund carrying only `pct` (no `usd`) never auto-approves via the no-op maxAutoPct floor", async () => {
+    const store = new InMemoryMerchantRulesStore(new InMemoryRuntimeStore());
+    await store.set(ctx, { refund: { allowedAuto: true } }, "owner", "merchant_set");
+    const rules = createRulesProvider(store);
+    const c = await classifyAction({ type: "issue_refund", params: { pct: 100 } }, ctx, rules);
+    expect(c.decision).toBe("requires_approval");
+    expect(c.boundaryReasons.some((b) => b.rule === "refund.unexpected_dimension")).toBe(true);
+  });
+
   // F3 — mass-send floor through the real provider + classifier (not just the E1 fake).
   it("routes a mass send through createRulesProvider to requires_approval via the mass_send_floor rule", async () => {
     const store = new InMemoryMerchantRulesStore(new InMemoryRuntimeStore());

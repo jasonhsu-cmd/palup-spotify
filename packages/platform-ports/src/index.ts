@@ -107,10 +107,12 @@ export type {
   PalupFloor,
   RuleSetChangeResult,
   MerchantRulesStore,
+  AutoEligibleDimension,
 } from "./merchant-rules-store.js";
 export {
   PALUP_FLOORS,
   CONSERVATIVE_DEFAULTS,
+  AUTO_ELIGIBLE_DIMENSIONS,
   effectiveCategory,
   mergeOverDefaults,
   isBigJump,
