@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { Proposal } from "@palup/platform-ports";
 import { ProposalDetail } from "./ProposalDetail";
 import { formatImpact } from "./format";
@@ -58,5 +59,16 @@ describe("ProposalDetail", () => {
   it("renders nothing extra for the actions slot when omitted", () => {
     render(<ProposalDetail proposal={irreversibleCampaign()} />);
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("wires the real ApproveDialog when `api` is provided — confirm calls approve(id, version)", async () => {
+    const p = irreversibleCampaign();
+    const approve = vi.fn(async () => ({ ...p, version: p.version + 1, status: "approved" as const }));
+    render(<ProposalDetail proposal={p} api={{ approve }} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await userEvent.click(screen.getByRole("button", { name: "Confirm approve" }));
+
+    expect(approve).toHaveBeenCalledWith(p.id, p.version);
   });
 });

@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import type { Proposal } from "@palup/platform-ports";
 import { Badge, Card, CardBody, CardHeader, CardHint, CardTitle, Note } from "@palup/design-system";
+import type { ApiClient } from "../../app/api";
+import { ApproveDialog } from "./ApproveDialog";
 import { CATEGORY_LABEL, formatImpact, isIrreversible } from "./format";
 
 // T3 (Proposal detail): the full decision surface for ONE pending proposal — rationale, every
@@ -13,13 +15,21 @@ import { CATEGORY_LABEL, formatImpact, isIrreversible } from "./format";
 
 export interface ProposalDetailProps {
   proposal: Proposal;
-  /** Rendered below the reversal-plan callout — Task 4 wires `<ApproveDialog/>` here. Left
-   *  optional so this view also renders standalone (e.g. a read-only history entry) without an
-   *  action, and so it never needs to know how approving actually works. */
+  /** When provided, renders the real, focus-trapped `<ApproveDialog/>` (T4) wired to this
+   *  proposal's CURRENT id/version. Optional — a screen with no approve authority (or a
+   *  standalone/read-only render, e.g. a history entry) can omit it and get no action at all,
+   *  never a fake or disabled-looking approve button that implies capability it doesn't have. */
+  api?: Pick<ApiClient, "approve">;
+  onApproved?: (updated: Proposal) => void;
+  onConflict?: () => void;
+  notify?: (message: string) => void;
+  /** An additional/alternate action area, rendered after the wired `ApproveDialog` (if any) —
+   *  e.g. a future Reject button. Left generic so this view never needs to know every possible
+   *  action's own wiring. */
   actions?: ReactNode;
 }
 
-export function ProposalDetail({ proposal, actions }: ProposalDetailProps) {
+export function ProposalDetail({ proposal, api, onApproved, onConflict, notify, actions }: ProposalDetailProps) {
   const irreversible = isIrreversible(proposal);
 
   return (
@@ -52,7 +62,20 @@ export function ProposalDetail({ proposal, actions }: ProposalDetailProps) {
           </div>
         )}
 
-        {actions && <div className="pt-2">{actions}</div>}
+        {(api || actions) && (
+          <div className="flex flex-wrap items-center gap-2 pt-2">
+            {api && (
+              <ApproveDialog
+                api={api}
+                proposal={proposal}
+                onApproved={onApproved}
+                onConflict={onConflict}
+                notify={notify}
+              />
+            )}
+            {actions}
+          </div>
+        )}
       </CardBody>
     </Card>
   );
