@@ -444,6 +444,13 @@ async function completeInstallInner(
   // `adminTokens` ⇒ zero behaviour change from before this task (the surrounding `try` for the delegate
   // token above deliberately does NOT also cover this — an Admin-token custody failure must not undo a
   // delegate token that is already safely stored, so it maps to its own outcome instead of `custody_failed`).
+  // Task 12 (ADR-0022 F3) — this call custodies whatever Admin scopes the SAME OAuth grant above already
+  // obtained (a delegate-token exchange); it does not itself request Admin scopes, so there is nothing here
+  // yet to pin against `ADMIN_SYNC_SCOPES` (shopify-webhook-identity.ts) — the least-privilege
+  // (`read_products`,`read_inventory`) scope set a PRODUCTION catalog-sync admin-token request should use.
+  // Noted here as the landing spot: whichever task wires a real production Admin-token scope request
+  // (Task 13) requests exactly `ADMIN_SYNC_SCOPES`, never a write scope (F3's own pin,
+  // order-attribution-scope-pinning.test.ts).
   if (deps.adminTokens) {
     try {
       await deps.adminTokens.put(tenantId, grant.accessToken, { actor: "system:shopify-install", expiresAt: grant.expiresAt });

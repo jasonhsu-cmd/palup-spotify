@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { INSTALL_SCOPES_DEFAULT } from "../src/routes/shopify-install.js";
-import { ORDER_ATTRIBUTION_ADMIN_SCOPE } from "../src/shopify-webhook-identity.js";
+import { ORDER_ATTRIBUTION_ADMIN_SCOPE, ADMIN_SYNC_SCOPES } from "../src/shopify-webhook-identity.js";
 
 // W2-C — CRITICAL CONSTRAINTS, pinned so a later change cannot silently cross either boundary this
 // work item was explicitly told never to touch:
@@ -73,5 +73,30 @@ describe("W3-3 — read_orders is requested only via the per-deployment SHOPIFY_
     const scopesLine = toml.split("\n").find((l) => l.trim().startsWith("scopes ="));
     expect(scopesLine, "shopify.app.toml must declare an [access_scopes] scopes line").toBeDefined();
     expect(scopesLine).not.toContain(ORDER_ATTRIBUTION_ADMIN_SCOPE);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Task 12 (ADR-0022 F3) — hardening the least-privilege scope pin. The describes above pin `read_orders`
+// specifically (W2-C/W3-3's own decision); this section pins the BROADER anti-creep property F3 requires:
+// no WRITE scope (`write_products`/`write_customers`/`write_orders`/`write_inventory`) may ever become a
+// CODE-LEVEL default — write_customers/write_orders are authorized ONLY as a staging-DEV-app-only grant in
+// shopify.app.toml (see the allowlist describe above), never as something `INSTALL_SCOPES_DEFAULT` (or any
+// future admin-sync default) requests for a production install. `ADMIN_SYNC_SCOPES` names the exact
+// least-privilege scope set a production catalog-sync admin token needs — read_products/read_inventory,
+// the same pair [S7] (shopify-install-identity.ts) documents as what `PRODUCTS_*`/`INVENTORY_LEVELS_UPDATE`
+// webhook subscriptions require — and nothing more.
+describe("Task 12 (F3) — no write scope is a code-level default; admin sync scopes are least-privilege", () => {
+  it("no write scope is a code-level install default (write_* is staging-dev-app-only) [F3]", () => {
+    const scopes = INSTALL_SCOPES_DEFAULT.split(",").map((s) => s.trim());
+    for (const w of ["write_products", "write_customers", "write_orders", "write_inventory"]) {
+      expect(scopes).not.toContain(w);
+    }
+  });
+
+  it("the admin sync scopes are exactly read_products,read_inventory (least privilege) [F3]", () => {
+    // The constant a future production install/admin-sync wiring uses for the admin OAuth scope request
+    // (Task 13 is its first real consumer) is read-only and nothing broader.
+    expect(ADMIN_SYNC_SCOPES).toEqual(["read_products", "read_inventory"]);
   });
 });
