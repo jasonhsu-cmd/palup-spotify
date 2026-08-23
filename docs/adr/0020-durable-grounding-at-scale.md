@@ -19,6 +19,12 @@
 ## Decisions
 
 ### D1 — Shopify API scope + webhook custody
+> **Proposed supersession (2026-08-23):** the token-custody clause below ("no persisted offline Admin
+> token") is proposed to be reversed for the public-app end-state by **ADR-0022** (per-shop offline
+> Admin token for catalog sync) — pending a `security-reviewer` pass + owner sign-off. Until ADR-0022
+> is Accepted, D1 as written stands. The read-only scope set, declarative-webhook mechanism, and
+> `availableForSale` contract are **retained** by ADR-0022, not superseded.
+
 Keep catalog/policy **reads on the Storefront delegate token** (`unauthenticated_read_product_listings`,
 unchanged). Add **only** the minimal Admin **read** scopes the ingestion webhooks require — `read_products`
 (`products/create|update|delete`) and `read_inventory` (`inventory_levels/update`) — and no write, order,
