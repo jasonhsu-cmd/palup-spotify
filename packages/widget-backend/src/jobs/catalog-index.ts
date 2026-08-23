@@ -260,6 +260,19 @@ export type CatalogSource = (tenantId: string) => Promise<GroundingContext | und
  *  delisted ids simply do not appear in the returned array (the caller treats those as deletions). */
 export type CatalogByIdSource = (tenantId: string, ids: string[]) => Promise<Product[] | undefined>;
 
+/**
+ * Task 7 (durable-catalog-sync) — the CLOBBER RESOLUTION carried in from the Task 6 review. Resolve the
+ * named products (by corpus GID) in the FULL Admin GraphQL shape (multi-variant, description, tags,
+ * productType, vendor, options, onlineStoreUrl) rather than the thin Storefront-shaped `Product`
+ * `CatalogByIdSource` returns. `undefined` (as a whole, or per-call) means "no rich source configured /
+ * nothing rich known for these ids" — `reconcileProducts` then falls back to the thin projection exactly
+ * as Task 6 built it, so this seam is additive and opt-in. A real implementation (a live Admin
+ * `nodes(ids:)` GraphQL call via the Task 3 client) lives in `catalog-backfill.ts`
+ * (`makeCatalogProductByIdSource`) — NOT wired into any real composition here; server.ts composition is
+ * Task 13's job. This type/field exist purely as the TEST SEAM the brief calls for.
+ */
+export type CatalogProductByIdSource = (tenantId: string, ids: string[]) => Promise<CatalogProductRecord[] | undefined>;
+
 export interface CatalogIndexDeps {
   store: RuntimeStatePort;
   vector: VectorPort;
@@ -288,6 +301,17 @@ export interface CatalogIndexDeps {
    * completes.
    */
   catalogProduct?: CatalogProductPort;
+  /**
+   * Task 7 (durable-catalog-sync) — OPTIONAL rich-shape by-id source for the `reconcileProducts` delta
+   * path (see `CatalogProductByIdSource`'s doc comment for the full rationale). When present AND it
+   * returns rich records for the ids being reconciled, `reconcileProducts` writes THOSE to
+   * `catalogProduct` instead of the thin `catalogProductRecordsFrom(fetched, …)` projection — resolving
+   * the clobber where a Bulk-Ops backfill's rich row would otherwise be nulled by the very next product
+   * webhook. Absent (the default — no composition wires it yet) ⇒ byte-identical to Task 6. Ignored by
+   * `runCatalogIndex`'s full-crawl path (`indexOneTenant`): a Storefront-driven full crawl has no by-id
+   * rich source to call per product, so that path is unaffected by this field.
+   */
+  catalogProductAdminSource?: CatalogProductByIdSource;
   /**
    * Pillar 1b — invoked after a SUCCESSFUL money-fact upsert so channel-health records a live producer run.
    * Optional; absent ⇒ no health signal (byte-identical). Never throws by contract.
@@ -341,8 +365,12 @@ export function productFactsFrom(ctx: GroundingContext, now: Date): ProductFact[
   }));
 }
 
-/** sha256 of the embedded text — the change detector that makes a re-run free (see `indexOneTenant`). */
-function contentHash(text: string): string {
+/** sha256 of the embedded text — the change detector that makes a re-run free (see `indexOneTenant`).
+ *  Exported (Task 7) so `catalog-backfill.ts` can reuse the SAME hash primitive for its own change
+ *  detector rather than re-implementing sha256 hashing — the two jobs hash different INPUTS (this job
+ *  hashes embed text only; the backfill hashes a canonical projection of the full rich record), but the
+ *  primitive itself should not drift. */
+export function contentHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
@@ -1226,10 +1254,29 @@ export async function reconcileProducts(
   // Task 6 — durable catalog_product store for the refreshed subset, on every successful targeted fetch,
   // independent of the embed short-circuit above (mirrors the full path's block). `fetched` is exactly the
   // set `deps.catalogById` returned for the requested ids — the same set `productFactsFrom` uses just above.
+  //
+  // Task 7 (clobber resolution, carried in from the Task 6 review — LOAD-BEARING) — when
+  // `deps.catalogProductAdminSource` is wired AND it reports rich records for these ids, write THOSE
+  // instead of the thin `catalogProductRecordsFrom(fetched, …)` projection. Without this, a rich
+  // Bulk-Ops backfill row (multi-variant, description, tags, productType, vendor, options,
+  // onlineStoreUrl) would be permanently nulled by the very next product webhook, because both
+  // `CatalogProductPort` adapters do an unconditional full-column upsert. Absent (the default — no
+  // composition wires it yet; that is Task 13's job) this is BYTE-IDENTICAL to Task 6.
   if (deps.catalogProduct && fetched.length > 0) {
-    const catalogRecords = catalogProductRecordsFrom(fetched, now());
     let catalogUpserted = false;
+    let catalogCount = 0;
     try {
+      let catalogRecords: CatalogProductRecord[] | undefined;
+      if (deps.catalogProductAdminSource) {
+        catalogRecords = await deps.catalogProductAdminSource(tenantId, validProductIds);
+      }
+      // Falls back to the thin projection when no rich source is wired, OR the rich source itself
+      // reports nothing for these ids (e.g. a tenant never backfilled) — never silently write zero rows
+      // for a product `fetched` just confirmed still exists.
+      if (!catalogRecords || catalogRecords.length === 0) {
+        catalogRecords = catalogProductRecordsFrom(fetched, now());
+      }
+      catalogCount = catalogRecords.length;
       await deps.catalogProduct.upsertMany(tenantId, catalogRecords);
       catalogUpserted = true;
       await deps.store.audit(
@@ -1237,7 +1284,12 @@ export async function reconcileProducts(
         {
           actor: CATALOG_INDEX_ACTOR,
           action: "catalog_product.write",
-          input: { tenantId, count: catalogRecords.length, source: `reconcile:${opts.reason ?? "product"}` },
+          input: {
+            tenantId,
+            count: catalogCount,
+            source: `reconcile:${opts.reason ?? "product"}`,
+            shape: deps.catalogProductAdminSource ? "admin-rich" : "storefront-thin",
+          },
           decision: "upserted",
           reversalPath: `the next \`pnpm catalog:index --tenant ${tenantId}\` run overwrites them; CatalogProductPort.deleteTenant erases them`,
         },
