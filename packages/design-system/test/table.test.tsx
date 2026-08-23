@@ -34,4 +34,30 @@ describe("Table", () => {
     expect(bodyCell.tagName).toBe("TD");
     expect(document.querySelectorAll("td").length).toBe(2);
   });
+
+  it("defaults TableHeaderCell to scope=col (governance data tables need this for screen readers)", () => {
+    render(
+      <Table>
+        <TableHead>
+          <TableRow>
+            <TableHeaderCell>Insight</TableHeaderCell>
+          </TableRow>
+        </TableHead>
+      </Table>
+    );
+    expect(screen.getByText("Insight").getAttribute("scope")).toBe("col");
+  });
+
+  it("lets an explicit scope override the scope=col default (e.g. a row-header cell)", () => {
+    render(
+      <Table>
+        <TableBody>
+          <TableRow>
+            <TableHeaderCell scope="row">Merchant</TableHeaderCell>
+          </TableRow>
+        </TableBody>
+      </Table>
+    );
+    expect(screen.getByText("Merchant").getAttribute("scope")).toBe("row");
+  });
 });

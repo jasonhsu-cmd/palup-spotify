@@ -22,9 +22,17 @@ export function TableRow({ className, ...props }: React.HTMLAttributes<HTMLTable
   );
 }
 
-export function TableHeaderCell({ className, ...props }: React.ThHTMLAttributes<HTMLTableCellElement>) {
+export function TableHeaderCell({
+  className,
+  scope = "col",
+  ...props
+}: React.ThHTMLAttributes<HTMLTableCellElement>) {
+  // Governance data tables (Approval Center, Audit Log, Eval Dashboard) need every header cell
+  // programmatically associated with its column for screen readers; scope="col" is the common
+  // case, so it's the default here, still overridable (e.g. scope="row" on a row-header cell).
   return (
     <th
+      scope={scope}
       className={cn(
         "border-b border-line px-[14px] py-[11px] text-left text-[11px] font-bold uppercase tracking-[.06em] text-ink-4",
         className
