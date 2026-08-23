@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Toaster, useToast } from "../src/components/toast";
 
@@ -32,6 +32,23 @@ describe("Toaster / useToast", () => {
     await userEvent.click(buttons[1]!);
     expect(screen.getByText("First")).toBeTruthy();
     expect(screen.getByText("Second")).toBeTruthy();
+  });
+
+  it("announces the toast via a role=status live region (Radix's announcer, not just visible text)", async () => {
+    render(
+      <Toaster>
+        <Trigger message="Settings saved" />
+      </Toaster>
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Trigger" }));
+    // Radix Toast renders an off-screen aria-live announcer (role="status") in addition to the
+    // visible toast; its text is filled in a frame after the element mounts, so wait for the
+    // content rather than just the element. Guards against a refactor (e.g. dropping
+    // ToastPrimitive.Description) silently killing the live-region announcement a screen
+    // reader relies on.
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toContain("Settings saved");
+    });
   });
 
   it("throws when useToast is called outside a Toaster", () => {
