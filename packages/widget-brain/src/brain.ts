@@ -1197,20 +1197,37 @@ export function createBrain(
     const seen = new Set<string>();
     for (const hit of result.hits) {
       if (seen.has(hit.productId)) continue;
-      const md = (hit.metadata ?? {}) as { title?: unknown; variantId?: unknown; imageUrl?: unknown };
+      const md = (hit.metadata ?? {}) as {
+        title?: unknown;
+        variantId?: unknown;
+        imageUrl?: unknown;
+        // Task 8b (durable-catalog-sync, spec §4.1) — DESCRIPTIVE fields only. For a BACKFILLED tenant,
+        // the retriever seam (catalog-retriever.ts's `localHydration` dep) enriches a hit's metadata with
+        // these two fields, read from the tenant's own local `catalog_product` corpus. For a non-backfilled
+        // tenant (or the flag off), a hit never carries them and this branch is byte-identical to before.
+        description?: unknown;
+        tags?: unknown;
+      };
       const title = typeof md.title === "string" ? md.title : "";
       if (!title) continue; // a row with no render title is unusable — drop it rather than render blank
       seen.add(hit.productId);
       rendered.push({
         id: hit.productId,
         title,
-        description: "", // corpus carries no description for render; price filled by hydrate below
+        // Task 8b — locally-hydrated description when present, else "" exactly as before. NEVER a price:
+        // price/availability remain EXCLUSIVELY the A1b `ProductFactsPort` overlay's job, below — this
+        // field is deliberately not read from `md` (money surface unchanged, NN#1).
+        description: typeof md.description === "string" ? md.description : "",
         price: "",
         ...(typeof md.variantId === "string" && md.variantId ? { variantId: md.variantId } : {}),
         // The corpus carries the product image as a STABLE render field (like title/variantId — never
         // price), so a retrieval-path card can show a thumbnail without a second catalog fetch. Already
         // https/Shopify-CDN-validated at index time; the widget re-validates the host before rendering.
         ...(typeof md.imageUrl === "string" && md.imageUrl ? { imageUrl: md.imageUrl } : {}),
+        // Task 8b — locally-hydrated tags, same provenance/gating as description above.
+        ...(Array.isArray(md.tags) && md.tags.length > 0 && md.tags.every((t) => typeof t === "string")
+          ? { tags: md.tags as string[] }
+          : {}),
       });
       if (rendered.length >= k) break; // the port's k is a request, not a promise — enforce it here too
     }

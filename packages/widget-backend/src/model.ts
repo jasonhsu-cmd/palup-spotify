@@ -20,6 +20,31 @@ export class GroundingCredentialUnreadableError extends Error {
   }
 }
 
+/**
+ * Task 8 (durable-catalog-sync) — the per-tenant "is this tenant backfilled / locally served" decision,
+ * MEMOIZED with a short TTL (coordinator review fix #2's own reasoning: `listByTenant(limit:1)` is a real
+ * DB round-trip and a tenant is never un-backfilled, so a brief staleness window costs nothing but a short
+ * delay before a newly-backfilled tenant benefits). Extracted to a standalone factory (Task 8b) so this
+ * ONE decision instance can be shared between `createGroundingPort`'s own routing below AND the catalog
+ * retriever's local-hydration seam (`catalog-retriever.ts`'s `localHydration.hasLocalCatalog`) — reusing
+ * the memoization, not re-deriving "is this tenant backfilled" a second way that could drift from it.
+ */
+export function createLocalCatalogDecision(
+  catalogProduct: CatalogProductPort,
+  opts: { ttlMs?: number; now?: () => number } = {},
+): (tenantId: string) => Promise<boolean> {
+  const now = opts.now ?? (() => Date.now());
+  const ttlMs = opts.ttlMs ?? 60_000;
+  const cache = new Map<string, { isLocal: boolean; atMs: number }>();
+  return async (tenantId: string): Promise<boolean> => {
+    const cached = cache.get(tenantId);
+    if (cached && now() - cached.atMs < ttlMs) return cached.isLocal;
+    const isLocal = (await catalogProduct.listByTenant(tenantId, { limit: 1 })).length > 0;
+    cache.set(tenantId, { isLocal, atMs: now() });
+    return isLocal;
+  };
+}
+
 // Composition root: pick the real Vertex adapter when GOOGLE_CLOUD_PROJECT is set, else the
 // deterministic mock. Feature code only ever sees a ModelPort — it never knows which (ADR-0001).
 // T8 (security-data-path §3): wrap whichever adapter in the PII-redaction guardrail so a payment
@@ -75,6 +100,14 @@ export function createGroundingPort(
     localServingCacheTtlMs?: number;
     /** Injectable clock (ms) for deterministic tests of the memoization above. Default `Date.now`. */
     now?: () => number;
+    /**
+     * Task 8b — an already-built `createLocalCatalogDecision` instance, reused instead of building a new
+     * one here. The composition root (server.ts) supplies this so the SAME memoized decision drives both
+     * this router AND the catalog retriever's local-hydration seam. Absent ⇒ this function builds its own
+     * internally (byte-identical to before this task) — every pre-existing caller that does not pass this
+     * is unaffected.
+     */
+    hasLocalCatalog?: (tenantId: string) => Promise<boolean>;
   } = {},
 ): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
@@ -138,16 +171,8 @@ export function createGroundingPort(
     // — an unnecessary DB round-trip on a hot path, for every tenant, backfilled or not. A tenant is never
     // un-backfilled, so a short, process-local TTL cache is safe: the only observable effect of staleness is
     // a newly-backfilled tenant keeping the storefront path for up to `ttlMs` longer than strictly necessary.
-    const now = opts.now ?? (() => Date.now());
-    const ttlMs = opts.localServingCacheTtlMs ?? 60_000;
-    const localCatalogCache = new Map<string, { isLocal: boolean; atMs: number }>();
-    const hasLocalCatalog = async (tenantId: string): Promise<boolean> => {
-      const cached = localCatalogCache.get(tenantId);
-      if (cached && now() - cached.atMs < ttlMs) return cached.isLocal;
-      const isLocal = (await catalogProduct.listByTenant(tenantId, { limit: 1 })).length > 0;
-      localCatalogCache.set(tenantId, { isLocal, atMs: now() });
-      return isLocal;
-    };
+    const hasLocalCatalog =
+      opts.hasLocalCatalog ?? createLocalCatalogDecision(catalogProduct, { ttlMs: opts.localServingCacheTtlMs, now: opts.now });
     router = {
       async getContext(tenantId) {
         return (await hasLocalCatalog(tenantId)) ? local.getContext(tenantId) : shopifyOrFixtures.getContext(tenantId);

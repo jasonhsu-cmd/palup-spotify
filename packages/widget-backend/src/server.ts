@@ -51,7 +51,8 @@ import {
   mergeGuestIntoAccount,
 } from "@palup/widget-memory";
 import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, PostgresCatalogProductStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
-import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
+import { createModelPort, createGroundingPort, createCommercePort, createLocalCatalogDecision } from "./model.js";
+import { createLocalCatalogGroundingPort } from "./local-catalog-grounding.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals, classifyDevice } from "./signals.js";
 import { deriveLifecycle } from "./lifecycle.js";
@@ -531,6 +532,11 @@ export async function buildServer(opts?: {
   if (localCatalogProduct instanceof PostgresCatalogProductStore) await localCatalogProduct.migrate();
   const localProductFacts = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
   if (localProductFacts instanceof PostgresProductFactsStore) await localProductFacts.migrate();
+  // Task 8b (durable-catalog-sync, spec §4.1) — the SAME memoized per-tenant "is this tenant backfilled"
+  // decision Task 8 already built, constructed ONCE here so it can be shared between the grounding router
+  // below and the catalog retriever's local-hydration seam further down — never a second, independently
+  // memoized (and potentially drifting) backfilled-tenant check.
+  const hasLocalCatalog = CATALOG_LOCAL_SERVING ? createLocalCatalogDecision(localCatalogProduct) : undefined;
   const grounding = createGroundingPort(store, secrets, {
     shopDomainFor: (t) => merchants.shopDomainFor(t),
     readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
@@ -539,6 +545,7 @@ export async function buildServer(opts?: {
     localServingEnabled: CATALOG_LOCAL_SERVING,
     catalogProduct: localCatalogProduct,
     productFacts: localProductFacts,
+    hasLocalCatalog,
   });
   // Pillar 5 (auto-brand) — resolve the merchant's real Shopify shop NAME (via the light `getShell`), cached
   // on the RuntimeStatePort: at most ONE bounded fetch per tenant per TTL, fail-closed to the neutral default,
@@ -839,10 +846,29 @@ export async function buildServer(opts?: {
   // RUNTIME_AGENT_TYPE: this is per-shopper-turn EMBEDDING spend while the turn itself is generation, and
   // a cost review must be able to tell them apart (ADR-0013, and the explicit requirement in
   // catalog-retriever.ts's COST + AUDIT note that the composition root must do this).
+  // Task 8b — the local-hydration dep for a backfilled tenant: the SAME `hasLocalCatalog` decision the
+  // grounding router above shares, plus a DEDICATED local `GroundingPort.getProductsByIds` (never the
+  // Shopify-or-fixtures router) so this hot path can never make a Shopify call. Built from the same
+  // `localCatalogProduct`/`localProductFacts` instances the router already uses; `shellSource` is required
+  // by `createLocalCatalogGroundingPort`'s own interface but is never invoked on the `getProductsByIds`
+  // path this dep calls, so reusing `grounding` here (rather than constructing a second shell source) is
+  // safe. Absent (flag off) ⇒ `createCatalogRetriever` gets no `localHydration` dep at all — byte-identical
+  // to before this task.
+  const localCatalogHydration = CATALOG_LOCAL_SERVING && hasLocalCatalog
+    ? {
+        hasLocalCatalog,
+        getProductsByIds: createLocalCatalogGroundingPort({
+          catalogProduct: localCatalogProduct,
+          productFacts: localProductFacts,
+          shellSource: grounding,
+        }).getProductsByIds,
+      }
+    : undefined;
   const catalogRetriever = createCatalogRetriever({
     store,
     vector: vectorPort,
     model: createMeteringModelPort(activeModelPort, telemetry, { agentType: CATALOG_RETRIEVAL_AGENT_TYPE }),
+    localHydration: localCatalogHydration,
   });
   // semantic-memory-v1, PR3, T8 — the brain's SHARED turn-embedder, constructed UNCONDITIONALLY (mirrors
   // `catalogRetriever`'s own model wrapper immediately above) and metered under its OWN agentType

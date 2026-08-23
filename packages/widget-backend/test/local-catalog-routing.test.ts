@@ -128,4 +128,43 @@ describe("createGroundingPort — per-tenant local-serving routing", () => {
     await g.getShell("backfilled-tenant");
     expect(listByTenantCalls).toBe(2); // cache expired -> re-checked exactly once more
   });
+
+  // Task 8b — the retrieval-render hydration seam (catalog-retriever.ts) must consult the SAME per-tenant
+  // backfilled decision Task 8 already built, not a second one. `createGroundingPort` accepts an injected
+  // `hasLocalCatalog` for exactly this reuse: when supplied, it is honoured INSTEAD of building its own
+  // internal memoized decision, so the composition root (server.ts) can share one instance between the
+  // grounding router and the catalog retriever's hydration dep.
+  it("honours an injected hasLocalCatalog decision instead of building its own", async () => {
+    const catalogProduct = createInMemoryCatalogProductStore();
+    // The REAL check (a non-empty listByTenant) would say this tenant IS backfilled.
+    await catalogProduct.upsertMany("backfilled-tenant", [
+      {
+        productId: "gid://shopify/Product/1",
+        handle: "widget",
+        title: "Widget",
+        status: "active",
+        variants: [{ variantId: "v1", price: "$9" }],
+        contentHash: "h1",
+        syncedAt: "2026-08-01T00:00:00.000Z",
+      },
+    ]);
+    const productFacts = createInMemoryProductFactsStore();
+    // An injected decision that DISAGREES with the real check on purpose, to prove it — not the internal
+    // memoized listByTenant check — is what actually routes when supplied.
+    const alwaysNotLocal = async () => false;
+
+    const g = createGroundingPort(store(), secrets, {
+      localServingEnabled: true,
+      catalogProduct,
+      productFacts,
+      hasLocalCatalog: alwaysNotLocal,
+      shopDomainFor: async () => undefined, // no live creds -> falls to StaticGroundingAdapter fixtures
+    });
+
+    // "backfilled-tenant" is not a known fixture id, so the fixtures adapter returns EMPTY products. Had
+    // the real (ignored) check been consulted instead, this tenant IS backfilled and would have returned
+    // the one local catalog_product record — so an empty result here proves the injected decision won.
+    const ctx = await g.getContext("backfilled-tenant");
+    expect(ctx.products).toEqual([]);
+  });
 });

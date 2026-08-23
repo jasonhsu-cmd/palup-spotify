@@ -2,6 +2,7 @@ import {
   canEmbed,
   requireEmbedAlignment,
   type ModelPort,
+  type Product,
   type RuntimeStatePort,
   type VectorPort,
 } from "@palup/platform-ports";
@@ -67,6 +68,38 @@ export interface CatalogRetrieverDeps {
   vector: VectorPort;
   /** Whatever adapter this deployment composed. MUST already be metered (see the note above). */
   model: ModelPort;
+  /**
+   * Task 8b (durable-catalog-sync, spec §4.1) — LOCAL DESCRIPTIVE HYDRATION for a backfilled tenant. The
+   * corpus row (`RetrievedProduct.metadata`) carries only the S2 render fields (title/variantId/imageUrl);
+   * for a tenant Task 7 has backfilled, the render path can additionally show description/tags straight
+   * from that tenant's own durable `catalog_product` corpus — the WHOLE catalog record, not a second copy
+   * of it inside the vector store. When present AND `hasLocalCatalog(tenantId)` resolves true, each hit's
+   * `metadata` is enriched with exactly two DESCRIPTIVE fields — `description`, `tags` — read via
+   * `getProductsByIds` (e.g. `createLocalCatalogGroundingPort(...).getProductsByIds`, Task 8's own
+   * no-Shopify local `GroundingPort`).
+   *
+   * MONEY SURFACE UNCHANGED (NN#1) — load-bearing. `price`/`availableForSale`/`priceConfirmed` are NEVER
+   * copied into `metadata` here, even though the `Product`s `getProductsByIds` returns carry a (locally
+   * computed) price: the ONE money-truth channel for the retrieval render path remains the A1b
+   * `ProductFactsPort` overlay applied later in `brain.ts` (`hydrateProductFacts`), and this task adds no
+   * second one. Deliberately excluding those keys here — rather than trusting the render path to ignore
+   * them — means a future brain change that widens which metadata keys it reads can never accidentally
+   * start quoting a price from this seam.
+   *
+   * FAIL-OPEN, gated, additive:
+   *  - `hasLocalCatalog` reuses Task 8's own memoized per-tenant decision (model.ts's
+   *    `createLocalCatalogDecision`) — this file does NOT invent a second backfilled-tenant check.
+   *  - Absent dep, `hasLocalCatalog` resolving false, or either call throwing ⇒ hits are returned exactly
+   *    as before this task (metadata-only) — a hydration failure can only fail to enrich, never break or
+   *    change the underlying retrieval result.
+   *  - No Shopify call on this path: `getProductsByIds` here is always the LOCAL (`catalog_product` +
+   *    `product_facts`) implementation, never the Shopify-or-fixtures router — the composition root
+   *    (server.ts) is responsible for supplying the local one, not the general `GroundingPort`.
+   */
+  localHydration?: {
+    hasLocalCatalog: (tenantId: string) => Promise<boolean>;
+    getProductsByIds: (tenantId: string, ids: string[]) => Promise<Product[]>;
+  };
 }
 
 /** A refusal this module authored: a static, PII-free sentence. Never carries the shopper's own text. */
@@ -172,6 +205,31 @@ export function createCatalogRetriever(deps: CatalogRetrieverDeps): CatalogRetri
         if (!(m.score > 0)) continue;
         hits.push({ productId, score: m.score, ...(m.metadata ? { metadata: m.metadata } : {}) });
       }
+
+      // Task 8b — local DESCRIPTIVE hydration for a backfilled tenant (see `localHydration`'s own doc
+      // comment for the full contract). Purely additive and fail-open: any failure here is swallowed and
+      // the hits already built above are returned unchanged, exactly as they were before this task.
+      if (deps.localHydration && hits.length > 0) {
+        try {
+          const isLocal = await deps.localHydration.hasLocalCatalog(tenantId);
+          if (isLocal) {
+            const rich = await deps.localHydration.getProductsByIds(tenantId, hits.map((h) => h.productId));
+            const byId = new Map(rich.map((p) => [p.id, p]));
+            for (const hit of hits) {
+              const p = byId.get(hit.productId);
+              if (!p) continue;
+              const extra: Record<string, unknown> = {};
+              if (p.description) extra.description = p.description;
+              if (p.tags && p.tags.length > 0) extra.tags = p.tags;
+              // NEVER merge price/availableForSale/priceConfirmed here — see the doc comment above.
+              if (Object.keys(extra).length > 0) hit.metadata = { ...hit.metadata, ...extra };
+            }
+          }
+        } catch {
+          /* fail-open: hydration can only enrich a hit, never withhold or break the retrieval result */
+        }
+      }
+
       return { hits, corpusProductCount };
     },
   };
