@@ -90,9 +90,10 @@ async function hydrate(deps: LocalCatalogGroundingDeps, tenantId: string, record
 
 /**
  * The LOCAL `GroundingPort` — no Shopify dependency for catalog PRODUCTS. `getContext`/`getProductsByIds`
- * read ONLY `CatalogProductPort` + `ProductFactsPort`. `getContext`'s brand+policy fall back to
- * `shellSource` (see file banner), but a shell-source failure degrades to a neutral default rather than
- * losing the products — the durability invariant this whole file exists for.
+ * read ONLY `CatalogProductPort` + `ProductFactsPort`. Brand+policy (both `getContext` and `getShell`)
+ * fall back to `shellSource` (see file banner), and a shell-source failure degrades EITHER method to the
+ * SAME neutral default (never a throw) — `getContext`'s degrade additionally protects the already-resolved
+ * products, which is the durability invariant this whole file exists for.
  */
 export function createLocalCatalogGroundingPort(deps: LocalCatalogGroundingDeps): GroundingPort {
   return {
@@ -118,7 +119,15 @@ export function createLocalCatalogGroundingPort(deps: LocalCatalogGroundingDeps)
       return { tenantId, brandName, products, policy };
     },
     async getShell(tenantId: string): Promise<GroundingShell> {
-      return deps.shellSource.getShell(tenantId);
+      // Symmetric with getContext's own degrade: a shell-source failure (Shopify down, credential
+      // revoked, …) fails CLOSED to the same neutral default rather than throwing. `getShell` has no
+      // products to protect, but this port should never surface a raw upstream failure any differently
+      // than `getContext` does for the identical dependency (coordinator review fix #1).
+      try {
+        return await deps.shellSource.getShell(tenantId);
+      } catch {
+        return { tenantId, brandName: FALLBACK_BRAND, policy: FALLBACK_POLICY };
+      }
     },
     async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
       if (ids.length === 0) return [];

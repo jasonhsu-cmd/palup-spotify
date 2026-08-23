@@ -63,6 +63,18 @@ export function createGroundingPort(
     localServingEnabled?: boolean;
     catalogProduct?: CatalogProductPort;
     productFacts?: ProductFactsPort;
+    /**
+     * Coordinator review fix #2 — TTL (ms) for memoizing the per-tenant `hasLocalCatalog` decision below.
+     * `createCachingGroundingPort` only caches `getContext`, so without this a `listByTenant(limit:1)` read
+     * would run on EVERY `getShell`/`getProductsByIds` call for EVERY tenant (a hot-path DB round-trip that
+     * serves no purpose once a tenant's backfill status is known). Default 60s. A tenant that becomes
+     * backfilled mid-session may keep the storefront path for up to this long — acceptable: a tenant is
+     * never un-backfilled, so the only cost is a brief delay before it starts benefiting from local serving,
+     * never a correctness/isolation issue.
+     */
+    localServingCacheTtlMs?: number;
+    /** Injectable clock (ms) for deterministic tests of the memoization above. Default `Date.now`. */
+    now?: () => number;
   } = {},
 ): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
@@ -120,8 +132,22 @@ export function createGroundingPort(
     // HAS a `catalog_product` corpus (backfilled), detected via a non-empty `listByTenant`. A tenant with
     // none (not yet backfilled) keeps `shopifyOrFixtures` UNCHANGED, so flipping `CATALOG_LOCAL_SERVING` on
     // globally never blanks a currently-working ≤1000-SKU tenant that has not gone through Task 7's backfill.
-    const hasLocalCatalog = async (tenantId: string): Promise<boolean> =>
-      (await catalogProduct.listByTenant(tenantId, { limit: 1 })).length > 0;
+    //
+    // MEMOIZED (coordinator review fix #2): `createCachingGroundingPort` below only caches `getContext`,
+    // so `getShell`/`getProductsByIds` would otherwise re-run this `listByTenant` read on every single call
+    // — an unnecessary DB round-trip on a hot path, for every tenant, backfilled or not. A tenant is never
+    // un-backfilled, so a short, process-local TTL cache is safe: the only observable effect of staleness is
+    // a newly-backfilled tenant keeping the storefront path for up to `ttlMs` longer than strictly necessary.
+    const now = opts.now ?? (() => Date.now());
+    const ttlMs = opts.localServingCacheTtlMs ?? 60_000;
+    const localCatalogCache = new Map<string, { isLocal: boolean; atMs: number }>();
+    const hasLocalCatalog = async (tenantId: string): Promise<boolean> => {
+      const cached = localCatalogCache.get(tenantId);
+      if (cached && now() - cached.atMs < ttlMs) return cached.isLocal;
+      const isLocal = (await catalogProduct.listByTenant(tenantId, { limit: 1 })).length > 0;
+      localCatalogCache.set(tenantId, { isLocal, atMs: now() });
+      return isLocal;
+    };
     router = {
       async getContext(tenantId) {
         return (await hasLocalCatalog(tenantId)) ? local.getContext(tenantId) : shopifyOrFixtures.getContext(tenantId);

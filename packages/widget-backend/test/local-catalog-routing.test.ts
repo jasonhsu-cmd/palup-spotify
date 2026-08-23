@@ -83,4 +83,49 @@ describe("createGroundingPort — per-tenant local-serving routing", () => {
     const ctx = await g.getContext("demo");
     expect(ctx.brandName).toBe("Auria");
   });
+
+  // Coordinator review fix #2: hasLocalCatalog's listByTenant(limit:1) read must be memoized per tenant
+  // with a short TTL — createCachingGroundingPort only caches getContext, so getShell/getProductsByIds
+  // would otherwise re-read the backfill check on EVERY call.
+  it("memoizes the per-tenant local-serving decision with a short TTL — repeated calls do NOT re-read listByTenant", async () => {
+    const realCatalogProduct = createInMemoryCatalogProductStore();
+    await realCatalogProduct.upsertMany("backfilled-tenant", [
+      {
+        productId: "gid://shopify/Product/1",
+        handle: "widget",
+        title: "Widget",
+        status: "active",
+        variants: [{ variantId: "v1", price: "$9" }],
+        contentHash: "h1",
+        syncedAt: "2026-08-01T00:00:00.000Z",
+      },
+    ]);
+    let listByTenantCalls = 0;
+    const countingCatalogProduct = {
+      ...realCatalogProduct,
+      listByTenant: async (tenantId: string, opts?: { limit?: number; includeDeleted?: boolean }) => {
+        listByTenantCalls++;
+        return realCatalogProduct.listByTenant(tenantId, opts);
+      },
+    };
+    const productFacts = createInMemoryProductFactsStore();
+
+    let clock = 1_000_000;
+    const g = createGroundingPort(store(), secrets, {
+      localServingEnabled: true,
+      catalogProduct: countingCatalogProduct,
+      productFacts,
+      now: () => clock,
+      shopDomainFor: async () => "backfilled.myshopify.com",
+    });
+
+    await g.getShell("backfilled-tenant");
+    await g.getShell("backfilled-tenant");
+    await g.getShell("backfilled-tenant");
+    expect(listByTenantCalls).toBe(1); // memoized within the TTL window — not one read per call
+
+    clock += 61_000; // advance past the (default 60s) TTL
+    await g.getShell("backfilled-tenant");
+    expect(listByTenantCalls).toBe(2); // cache expired -> re-checked exactly once more
+  });
 });

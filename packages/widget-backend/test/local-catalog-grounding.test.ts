@@ -67,6 +67,22 @@ describe("createLocalCatalogGroundingPort — durability invariant (§3)", () =>
     expect(shell).toEqual({ tenantId: "t1", brandName: "Acme", policy: { returns: "30d", shipping: "free" } });
   });
 
+  // Coordinator review fix #1: getShell must degrade symmetrically with getContext, not throw. Called
+  // DIRECTLY on the local port here (not through createCachingGroundingPort's own getShell try/catch), so
+  // this proves the local port itself is fail-closed, independent of any caller-side safety net.
+  it("getShell degrades to the SAME neutral default as getContext when the shellSource throws (called directly)", async () => {
+    const catalogProduct = createInMemoryCatalogProductStore();
+    const productFacts = createInMemoryProductFactsStore();
+    const shellSource = {
+      getShell: async () => {
+        throw new Error("Shopify is down");
+      },
+    };
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource });
+    const shell = await grounding.getShell("t1");
+    expect(shell).toEqual({ tenantId: "t1", brandName: "this store", policy: { returns: "", shipping: "" } });
+  });
+
   it("getContext THROWS past the MAX_CATALOG_PRODUCTS ceiling (no silent truncation, NN#5)", async () => {
     const catalogProduct = createInMemoryCatalogProductStore();
     const many: CatalogProductRecord[] = [];
