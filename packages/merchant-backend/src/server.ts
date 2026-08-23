@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
 import {
   type RuntimeStatePort,
@@ -79,15 +79,22 @@ export async function buildServer(opts?: {
   // `deps.state.audit()` throwing after a transition already committed) once approve/reject stop
   // catching every `Error` into a 409. Every typed §3 error (`VersionConflictError`/`KillSwitchError`/
   // `ProposalNotFoundError`/`TerminalStateError`) is already mapped to a specific status code INSIDE
-  // the route before it would ever reach here — this handler is the redacted fallback for everything
-  // else: log the real message server-side, return a fixed, message-free 500 to the client.
-  app.setErrorHandler((err, req, reply) => {
+  // the route via an explicit `reply.code(...).send(...)` before it would ever reach here — this
+  // handler is the redacted fallback for everything else.
+  //
+  // FIX (coordinator re-review, 2nd pass): an EARLIER version of this handler redacted
+  // UNCONDITIONALLY to 500, which also clobbered legitimate Fastify-NATIVE 4xx errors (e.g. a
+  // malformed/empty JSON body -> `FST_ERR_CTP_INVALID_JSON_BODY`, a real 400) into a misleading 500 —
+  // breaking client retry logic (5xx retryable, 4xx not) and misdirecting on-call triage on every POST
+  // route. Pass through a well-formed 4xx `statusCode` (still WITHOUT ever echoing `err.message` —
+  // `err.name`/a fixed code is the most detail sent), and redact to a generic message-free 500 ONLY
+  // when the status is absent or >= 500 (a genuine bug/infra failure).
+  app.setErrorHandler((err: FastifyError, req, reply) => {
     req.log.error({ err }, "unhandled error");
-    // No route in this package throws a Fastify SCHEMA-validation error with a legitimate,
-    // non-sensitive 4xx message (no `schema` option is used anywhere yet) — so redacting
-    // unconditionally to a fixed 500 is safe today; every intentional non-500 response (400/401/403/
-    //404/409/423) is sent explicitly by the route itself via `reply.code(...).send(...)` and never
-    // reaches this handler at all.
+    const sc = err.statusCode;
+    if (typeof sc === "number" && sc >= 400 && sc < 500) {
+      return reply.code(sc).send({ statusCode: sc, error: err.name ?? "Bad Request" }); // never err.message
+    }
     reply.code(500).send({ statusCode: 500, error: "Internal Server Error" });
   });
 

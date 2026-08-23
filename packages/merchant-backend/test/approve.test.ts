@@ -7,6 +7,7 @@ import {
   SandboxCustomerDirectory,
   type MerchantIdentityPort,
   type MerchantPrincipal,
+  type ProposalStore,
 } from "@palup/platform-ports";
 import { killMerchant, findLapsedSegment, draftWinBack, proposeWinBack, createRulesProvider, campaignExecutor } from "@palup/agent-runtime";
 import { buildServer } from "../src/server.js";
@@ -255,6 +256,61 @@ describe("POST /approvals/:id/approve", () => {
     const app = await buildServer({ store: state, identity: { authenticate: async () => ({ kind: "anonymous" }), authorize: () => false } });
     const res = await app.inject({ method: "POST", url: "/approvals/x/approve", payload: { version: 0 } });
     expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+
+  // Regression test (coordinator's 2nd-pass review): the FIRST version of `server.ts`'s
+  // `setErrorHandler` redacted UNCONDITIONALLY to 500 — which also clobbered a legitimate
+  // Fastify-native 4xx (malformed JSON body -> `FST_ERR_CTP_INVALID_JSON_BODY`, a real 400) into a
+  // misleading 500. A malformed body must still 400, not 500 — and must never leak `err.message`.
+  it("a malformed JSON body -> 400 (not 500), no message leaked", async () => {
+    const state = new InMemoryRuntimeStore();
+    const app = await buildServer({ store: state, identity: identityFor(owner) });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/approvals/any-id/approve",
+      headers: { authorization: "Bearer good", "content-type": "application/json" },
+      payload: "{not valid json",
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.message).toBeUndefined();
+    expect(typeof body.error).toBe("string");
+    await app.close();
+  });
+
+  // Companion case: a GENUINE unclassified failure (not one of the typed §3 errors) must still
+  // redact to a message-free 500 — the setErrorHandler fix for the 4xx case above must not have
+  // reopened the original C1 info leak for the 5xx case.
+  it("a genuine unclassified store failure -> 500, no message leaked", async () => {
+    const state = new InMemoryRuntimeStore();
+    const throwingStore: ProposalStore = {
+      async create() {
+        throw new Error("should not be called");
+      },
+      async get() {
+        throw new Error("db connection lost: internal detail that must never reach the client");
+      },
+      async list() {
+        return { items: [] };
+      },
+      async transition() {
+        throw new Error("should not be called");
+      },
+    };
+    const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore: throwingStore });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/approvals/any-id/approve",
+      headers: { authorization: "Bearer good" },
+      payload: { version: 0 },
+    });
+    expect(res.statusCode).toBe(500);
+    const body = res.json();
+    expect(body.message).toBeUndefined();
+    expect(JSON.stringify(body)).not.toMatch(/db connection lost/);
     await app.close();
   });
 });
