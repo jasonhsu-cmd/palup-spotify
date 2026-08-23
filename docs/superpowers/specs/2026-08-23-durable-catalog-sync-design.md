@@ -117,7 +117,8 @@ tenant_id, product_id (Shopify product GID, stable key)   -- PK (tenant_id, prod
 handle, title, description_html, description_text
 product_type, vendor, tags text[], status                 -- active | archived | draft
 options jsonb                                              -- [{name, values[]}]
-variants jsonb  -- [{variantId,title,sku,price,currency,availableForSale,inventoryQty,imageUrl,options{}}]
+variants jsonb  -- [{variantId,title,sku,price,currency,availableForSale,imageUrl,options{}}]
+                -- NOTE (security F8): persist the availableForSale BOOLEAN, not raw inventoryQty.
 featured_image_url, image_urls text[], online_store_url
 content_hash        -- delta short-circuit (mirrors the pgvector delta key)
 synced_at timestamptz not null   -- staleness signal
@@ -147,6 +148,13 @@ grounding port. Owns (all fields VERIFIED, Appendix A):
 
 Injectable `fetchFn` (mirrors `storefrontFetch`'s injection ~:357) so unit tests drive throttle
 branches with a fake. Knows nothing about `catalog_product`.
+
+**SSRF/egress discipline (ADR-0022 F4).** The client host-allowlists the Admin GraphQL endpoint
+(byte-identical to the Storefront `SHOP_HOST` allowlist in `shopify-grounding.ts:204`) before
+attaching the Admin token, https-+host-allowlists the Bulk-Operation result `url` (Shopify serves it
+pre-signed from a CDN/GCS host — pin those), and **never attaches the Admin token to the result
+download** (pre-signed; sending the token to a non-shop host would leak it). Token-free egress logs,
+as today.
 
 ### 4.4 Backfill — Shopify Bulk Operations (extend `catalog-index.ts`)
 
@@ -186,14 +194,21 @@ HMAC verification reuses the existing verified adapter (`shopify-webhook-identit
 A public app receives a **per-shop offline Admin access token** at OAuth install (VERIFIED: default
 token, persists across sessions, for background/scheduled jobs). Under **managed install / token
 exchange** it is a **refreshable expiring** offline token. Custody design:
-- Stored **encrypted, per tenant, via the secrets port** (never in code/logs — CLAUDE.md §5).
+- Stored **encrypted, per tenant, via the `CryptoPort`-backed `MerchantCredentialStore`** (the
+  existing hardened pattern — AES-256-GCM envelope, per-tenant HKDF key, GCM AAD, atomic audited
+  write), under a **distinct record key + key scope** from the storefront delegate token; **not** the
+  read-only `SecretsPort` (it has no `put`). **Prod requires a KMS-backed `CryptoPort`.** Never in
+  code/logs (CLAUDE.md §5). See ADR-0022 conditions F2.
 - **Least privilege:** read-only Admin scopes `read_products`, `read_inventory` only — no write,
   order, or customer scope. Holding `read_inventory` does **not** authorize surfacing stock counts;
-  the boolean `availableForSale` contract stays (ADR-0020 §8a).
-- **Refresh** handled by the client (token-exchange refresh) so background sync keeps working.
-- **Revoke on uninstall:** subscribe `app/uninstalled` (VERIFIED: fires on uninstall; token access
-  ends) → delete the stored token + halt the tenant's sync + tombstone/retire its catalog per the
-  data-retention policy. Custody ends cleanly at uninstall.
+  the boolean `availableForSale` contract stays (ADR-0020 §8a). Staging's `write_*` scopes are
+  dev-app-only and must be hard-excluded from prod (ADR-0022 F3).
+- **Refresh** handled by the custody module (token-exchange refresh): persist non-secret `expiresAt`,
+  single-flight per tenant, audited `token.refresh` (ADR-0022 F6).
+- **Revoke — two-step by signal trust (ADR-0022 F1):** `app/uninstalled` (unsigned shop header) →
+  **reversible** halt sync + `setStatus(uninstalled)` + tombstone only. **`shop/redact`** (HMAC-covered
+  `shop_domain`, ~48h post-uninstall) → **irreversible** token hard-delete + catalog retire. A replayed
+  `app/uninstalled` with a spoofed header thus cannot destroy an arbitrary tenant's token/catalog.
 
 ### 5.2 Compliance webhooks (App Store requirement)
 Public-app listing requires subscribing `customers/data_request`, `customers/redact`, `shop/redact`
@@ -209,6 +224,9 @@ Backfilling millions of shops is orchestrated, not on-demand:
 - A scheduler bounds **how many shops** backfill concurrently (protects PalUp's own compute + the
   embedding pipeline), independent of Shopify's per-shop 5-op allowance.
 - Each backfill is idempotent/resumable (§4.4) so a crash resumes without duplication.
+- **In-flight halt (ADR-0022 F5):** backfill/reconcile re-check the kill switch + enablement **and**
+  token presence between steps (per page/poll) and abort promptly; a **sync-plane-scoped** kill exists
+  (distinct from the serving-plane kill), and no job continues on a cached token after delete.
 
 ### 5.4 Serving stays local (scale payoff)
 With the local store, the **Storefront delegate token's hot-path role disappears** — shopper serving
@@ -322,8 +340,13 @@ Each acceptance criterion → a test that fails before implementation:
   hashes does zero rewrites; exceeding the ceiling logs the truncation.
 - **Delta:** a product-update webhook updates all three stores in one transaction; a delete
   tombstones; an `inventory_levels/update` webhook updates stock without a full refetch.
-- **Token custody:** token stored via a fake secrets port is encrypted-at-rest (never plaintext in
-  logs); `app/uninstalled` deletes it + halts sync; a refresh path renews an expiring token.
+- **Token custody:** token stored via the `CryptoPort`-backed store is encrypted-at-rest (never
+  plaintext in logs) under a distinct key scope; `app/uninstalled` performs **reversible** halt only
+  (a replayed spoofed-header uninstall does **not** delete a victim's token), while `shop/redact`
+  performs the irreversible delete + retire; a refresh path renews an expiring token, single-flight
+  and audited.
+- **SSRF/egress (F4):** the Admin client rejects a non-allowlisted host; the Bulk result-`url`
+  download rejects a non-allowlisted host and carries no Admin token.
 - **Serving durability (encodes §3):** with the Shopify client stubbed to **throw on every call**, a
   shopper turn still returns the full catalog from the local store.
 - **Portability:** no feature/serving module imports a Shopify symbol directly (grep-guard, mirroring
