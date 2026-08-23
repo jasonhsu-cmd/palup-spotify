@@ -14,5 +14,12 @@ export default defineConfig({
       ["packages/widget/**", "jsdom"],
       ["packages/design-system/**", "jsdom"],
     ],
+    // React Testing Library's auto-cleanup (packages/design-system) only registers itself
+    // when a global `afterEach` exists (it does `typeof afterEach === "function"`, checked
+    // directly against this repo's installed @testing-library/react this session) — without
+    // this, render() output from one `it` leaks into the next in the same file. `globals: true`
+    // is the standard fix; every existing test file still explicitly imports describe/it/expect
+    // from "vitest", so this is additive and does not change their behavior.
+    globals: true,
   },
 });
