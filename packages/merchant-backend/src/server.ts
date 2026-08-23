@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
 import { type RuntimeStatePort, type MerchantIdentityPort, InMemoryRuntimeStore } from "@palup/platform-ports";
+import { requireMerchant, shopifyEmbedFrameAncestors } from "@palup/identity-shopify";
 import "./types.js";
 
 // F3 skeleton (F4 real composition): `store`/`identity` are injectable so tests can supply fakes
@@ -8,13 +9,47 @@ import "./types.js";
 // `createRuntimeStore` (@palup/state-postgres) + `createShopifyAppBridgeIdentity`
 // (@palup/identity-shopify) — lands in Task 4; until then these defaults are deliberately minimal and
 // fail-closed (an unauthenticated caller is always denied), never a silent bypass.
+const NOOP_IDENTITY: MerchantIdentityPort = {
+  authenticate: async () => ({ kind: "anonymous" }),
+  authorize: () => false,
+};
+
 export async function buildServer(opts?: { store?: RuntimeStatePort; identity?: MerchantIdentityPort }): Promise<FastifyInstance> {
   const store: RuntimeStatePort = opts?.store ?? new InMemoryRuntimeStore();
   void store; // wired into routes as W1-W7 land; unused for now beyond proving the injectable seam.
+  const identity: MerchantIdentityPort = opts?.identity ?? NOOP_IDENTITY;
 
   const app = Fastify({ logger: false });
 
+  // /health is the ONLY unauthenticated route — registered directly on `app`, outside the encapsulated
+  // merchant-plane context below, so it can never accidentally pick up the auth preHandler that context
+  // scopes to everything registered inside it.
   app.get("/health", async () => ({ ok: true }));
+
+  // CSP `frame-ancestors` pin (F2, anti-clickjacking): the embedded merchant console may only be framed
+  // by Shopify admin. Per-shop widening needs the authenticated merchant's shop domain, which the
+  // identity port doesn't surface yet (Task 4 composition) — until then every response gets the safe
+  // admin-only default rather than staying unset.
+  app.addHook("onSend", async (_req, reply, payload) => {
+    reply.header("content-security-policy", shopifyEmbedFrameAncestors(""));
+    return payload;
+  });
+
+  // Every merchant-plane route (everything except /health) lives inside this encapsulated context so
+  // Fastify's own scoping — not string-matching request URLs — is what keeps /health open: the
+  // fail-closed session-token preHandler (F2's `requireMerchant`) applies to every route registered
+  // inside here and nowhere else. An absent/invalid bearer -> 401 from the preHandler itself; a valid
+  // one attaches `req.principal` for the handler + any `requirePermission` preHandler mounted per-route.
+  await app.register(async (merchantPlane) => {
+    merchantPlane.addHook("preHandler", requireMerchant(identity));
+
+    // Temporary stub proving the auth chain end-to-end; Task 3 replaces this with the real
+    // routes/me.ts (same response shape) and adds the RBAC-gated probe.
+    merchantPlane.get("/me", async (req) => {
+      const p = req.principal!;
+      return { merchantId: p.merchantId, userId: p.userId, role: p.role, authLevel: p.authLevel };
+    });
+  });
 
   return app;
 }
