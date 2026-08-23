@@ -3,11 +3,12 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import { Shell } from "./app/shell";
 import { makeApiClient } from "./app/api";
 import { useSessionToken } from "./app/session";
+import { ApprovalCenter } from "./screens/approvals/ApprovalCenter";
 
 // W1-UI Task 1: wires the shell + routing + a REAL (API-backed) pending-approval count. The
-// Approval Center screen itself (queue/detail/approve/reject/kill/audit/live-reconcile) is built
-// incrementally in Tasks 2-7 on top of this scaffold; every nav link below is a stub route until
-// its own task lands (plan Task 1, Step 3: "other items are visible-but-stub").
+// Approval Center screen itself (queue/detail/approve/reject/kill/audit/live-reconcile,
+// `ApprovalCenter` — Tasks 2-7) is wired below at `/approvals`; every OTHER nav link remains a
+// stub route until its own task lands (plan Task 1, Step 3: "other items are visible-but-stub").
 
 function StubScreen({ title, note }: { title: string; note?: string }) {
   return (
@@ -71,10 +72,7 @@ export function App() {
     <Shell pendingCount={pendingCount} activePath={location.pathname} onNavigate={navigate}>
       <Routes>
         <Route path="/" element={<Navigate to="/approvals" replace />} />
-        <Route
-          path="/approvals"
-          element={<StubScreen title="Approval Center" note="The approvals queue lands in the next task." />}
-        />
+        <Route path="/approvals" element={<ApprovalCenter api={api} />} />
         {STUB_ROUTES.map((r) => (
           <Route key={r.path} path={r.path} element={<StubScreen title={r.title} />} />
         ))}
