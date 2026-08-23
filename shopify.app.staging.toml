@@ -1,68 +1,28 @@
-# Shopify app configuration — STAGING app (the single old app was deleted 2026-08-23; staging + prod are
-# now SEPARATE apps, each its own client_id). Deploy this one with: `shopify app deploy --config staging`.
-#
-# STAGING carries the BROAD scope set autonomous testing needs (see [access_scopes]); PRODUCTION is a
-# SEPARATE, DEFERRED app (`shopify.app.production.toml`, not yet created) that will declare ONLY the minimal
-# scopes real product features require — never the write/test scopes below. The scope-pinning guard
-# (packages/widget-backend/test/order-attribution-scope-pinning.test.ts) enforces that split.
-#
-# Runtime install is env-driven (SHOPIFY_APP_CLIENT_ID / SHOPIFY_INSTALL_REDIRECT_URI / SHOPIFY_INSTALL_*,
-# docs/DEPLOY.md) — this file is only the Shopify CLI's declarative config for `shopify app deploy`.
-#
-# TO SET after creating the staging app in the Dev Dashboard: `shopify app config link --config staging`
-# fills `client_id` below. `application_url` is the live staging Cloud Run host (already provisioned).
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "REPLACE_WITH_STAGING_APP_CLIENT_ID"
-name = "PalUp (staging)"
+client_id = "9164450357d4a26ee3883546db766c5c"
 application_url = "https://palup-widget-staging-t7xp5lndiq-uc.a.run.app"
-embedded = false
+embedded = true
+name = "PalUp staging"
 
 [access_scopes]
-# STAGING = all Admin scopes autonomous testing uses:
-#   read_products,read_inventory — catalog grounding + the ingestion webhooks below (base, also in prod).
-#   write_customers,write_orders — seed test-shopper fixtures (customers + backdated orders) for the
-#     relationship-lifecycle test (WS-B2). write_* include their read.
-#   read_all_orders — read seeded orders OLDER than the Admin API's 60-day default back (verifying the
-#     "lapsed" >180-day fixture via the Admin API). The agent itself reads a shopper's history via the
-#     Customer-Account API, not these — these exist ONLY for the seeding/verification harness.
-# Dev/development-store apps need no Shopify Protected-Customer-Data review (shopify.dev, 2026-08-23).
-scopes = "read_products,read_inventory,write_customers,write_orders,read_all_orders"
+# STAGING autonomous-testing scope set (seed test-shopper fixtures). `config link` blanked this from the
+# fresh app; restored 2026-08-23. write_* include their read. (read_all_orders is NOT declarable here —
+# Shopify rejects it in app_access; it's a request-gated scope. Not needed: write_orders creates the
+# backdated orders, and the agent reads order history via the Customer-Account API, not the Admin API.)
+#
+# SELF-IMPROVING FLYWHEEL note: the revenue-outcome/incrementality signal (order-attribution webhooks
+# orders/create, orders/updated, refunds/create — ADR-0007, server.ts W3-3) needs `read_orders`. On
+# STAGING that is ALREADY covered — `write_orders` includes read access to orders — so the flywheel's
+# attribution can be exercised here (flip `ORDER_ATTRIBUTION_WEBHOOKS=true` to activate the subscriptions).
+# In PRODUCTION `read_orders` is NOT declared in the app config — it's requested per-deployment via
+# SHOPIFY_INSTALL_SCOPES + Shopify PCD approval (see shopify.app.production.toml when created / the guard test).
+scopes = "read_products,read_inventory,write_customers,write_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ "https://palup-widget-staging-t7xp5lndiq-uc.a.run.app/shopify/callback" ]
 
 [webhooks]
 api_version = "2026-07"
-
-# ── Catalog/inventory ingestion (ADR-0020 D4). Each topic → its own route (verify → enqueue → 200). ──
-[[webhooks.subscriptions]]
-topics = [ "products/create" ]
-uri = "/shopify/webhooks/products/create"
-
-[[webhooks.subscriptions]]
-topics = [ "products/update" ]
-uri = "/shopify/webhooks/products/update"
-
-[[webhooks.subscriptions]]
-topics = [ "products/delete" ]
-uri = "/shopify/webhooks/products/delete"
-
-[[webhooks.subscriptions]]
-topics = [ "inventory_levels/update" ]
-uri = "/shopify/webhooks/inventory_levels/update"
-
-# ── Lifecycle — makes an uninstall real (C2). ──
-[[webhooks.subscriptions]]
-topics = [ "app/uninstalled" ]
-uri = "/shopify/webhooks/app/uninstalled"
-
-# ── Mandatory privacy/compliance webhooks (C2). Own uris to match the separate-path design; confirm the
-#    compliance_topics-vs-topics form against `shopify app deploy` before first use. ──
-[[webhooks.subscriptions]]
-compliance_topics = [ "customers/data_request" ]
-uri = "/shopify/webhooks/customers/data_request"
-
-[[webhooks.subscriptions]]
-compliance_topics = [ "customers/redact" ]
-uri = "/shopify/webhooks/customers/redact"
-
-[[webhooks.subscriptions]]
-compliance_topics = [ "shop/redact" ]
-uri = "/shopify/webhooks/shop/redact"

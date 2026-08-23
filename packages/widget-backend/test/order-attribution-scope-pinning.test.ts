@@ -27,12 +27,19 @@ function scopesOf(tomlPath: string): string[] {
 describe("shopify STAGING app declares only the allowed autonomous-testing scope set (anti-creep)", () => {
   it("staging scopes are all within the fixed testing allowlist", () => {
     const scopes = scopesOf(join(repoRoot, "shopify.app.staging.toml"));
-    const ALLOWED = new Set(["read_products", "read_inventory", "write_customers", "write_orders", "read_all_orders"]);
+    // NB: `write_orders` includes read access to orders, so staging ALSO covers the self-improving
+    // flywheel's read_orders order-attribution signal (ADR-0007) — no separate scope needed here.
+    // (`read_all_orders` is NOT allowed: Shopify rejects it in app_access; it's request-gated.)
+    const ALLOWED = new Set(["read_products", "read_inventory", "write_customers", "write_orders"]);
     const unexpected = scopes.filter((s) => !ALLOWED.has(s));
     expect(unexpected, `un-allowlisted scope(s) in shopify.app.staging.toml: ${unexpected.join(", ")}`).toEqual([]);
   });
 });
 
+// PROD least-privilege pin. NOTE for when the self-improving flywheel goes live in prod: its revenue
+// incrementality signal needs `read_orders` (order-attribution webhooks, ADR-0007) — but that is requested
+// PER-DEPLOYMENT via `SHOPIFY_INSTALL_SCOPES` + Shopify PCD approval (W3-3 below), NEVER added to the static
+// prod app config. So `read_orders` must stay OUT of shopify.app.production.toml even after the flywheel ships.
 describe("shopify PRODUCTION app (deferred) stays least-privilege — no write/order/customer scope", () => {
   it("prod toml, once it exists, declares only read_products/read_inventory", () => {
     const prodToml = join(repoRoot, "shopify.app.production.toml");
