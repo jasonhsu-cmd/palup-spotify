@@ -24,7 +24,7 @@
 // Determinism: no `Date.now()`/`Math.random()` here — classification is a pure function of
 // (action, ctx, rules-at-call-time).
 
-import type { AgentAction, BoundaryReason, ProposalCategory } from "./types.js";
+import type { AgentAction, BoundaryReason, ProposalCategory } from "@palup/platform-ports";
 
 /** The merchant-configured ceiling for auto-acting in one category, as W4-min (Rules) resolves it
  * for this tenant/category/action. Either field may be absent when not applicable to the category

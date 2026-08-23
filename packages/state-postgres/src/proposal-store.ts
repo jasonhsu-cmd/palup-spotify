@@ -6,15 +6,18 @@ import {
   type ProposalListResult,
   type ProposalStore,
   type ProposalTransitionPatch,
-} from "@palup/agent-runtime";
-import type { RuntimeStateCtx } from "@palup/platform-ports";
+  type RuntimeStateCtx,
+} from "@palup/platform-ports";
 import type { Sql } from "./sql.js";
 
 // Postgres adapter for `ProposalStore` (E1 Task 8; docs/superpowers/plans/2026-08-23-E1-engine-core.md).
-// The durable, staging-real twin of `InMemoryProposalStore` (`@palup/agent-runtime/proposal-store.js`,
-// Task 2), which is the behavioral ORACLE: both run `proposalStoreContract`
-// (`@palup/agent-runtime/contract/proposal-store`), so the engine loop (loop.ts) stays swappable and
-// never learns which adapter it got.
+// `ProposalStore`/`Proposal`/etc. live in `@palup/platform-ports` (not `@palup/agent-runtime`, which
+// re-exports them) — `state-postgres` importing from `agent-runtime` directly would form a package
+// cycle, since `agent-runtime` already depends on `state-postgres` for the shared kill registry
+// (`kill.ts`). The durable, staging-real twin of `InMemoryProposalStore`
+// (`@palup/platform-ports/proposal-store.js`, Task 2), which is the behavioral ORACLE: both run
+// `proposalStoreContract` (`@palup/platform-ports/contract/proposal-store`), so the engine loop
+// (`agent-runtime/loop.ts`) stays swappable and never learns which adapter it got.
 //
 // PATTERN: mirrors `PostgresMerchantRegistry` — a DEDICATED table (not a KV row over
 // `RuntimeStatePort`), because this adapter needs a real SQL-engine-enforced optimistic lock: the

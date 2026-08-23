@@ -8,7 +8,6 @@
     "./test/helpers/*": "./test/helpers/*"
   },
   "dependencies": {
-    "@palup/agent-runtime": "workspace:*",
     "@palup/platform-ports": "workspace:*",
     "@palup/widget-brain": "workspace:*",
     "pg": "^8.13.0"

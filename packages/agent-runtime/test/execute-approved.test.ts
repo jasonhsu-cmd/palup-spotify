@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { InMemoryRuntimeStore } from "@palup/platform-ports";
-import { InMemoryProposalStore } from "../src/proposal-store.js";
+import { InMemoryProposalStore, InMemoryRuntimeStore } from "@palup/platform-ports";
 import { proposeOrExecute, executeApproved } from "../src/loop.js";
 import { killMerchant, KillSwitchError } from "../src/kill.js";
 

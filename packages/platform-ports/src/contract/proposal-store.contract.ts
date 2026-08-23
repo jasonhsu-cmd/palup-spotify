@@ -1,13 +1,12 @@
 import { describe, it, expect } from "vitest";
-import type { RuntimeStateCtx } from "@palup/platform-ports";
-import { ProposalNotFoundError, VersionConflictError, type ProposalStore } from "../proposal-store.js";
-import type { Proposal } from "../types.js";
+import type { RuntimeStateCtx } from "../runtime-state-port.js";
+import { ProposalNotFoundError, VersionConflictError, type Proposal, type ProposalStore } from "../proposal-store.js";
 
-// ProposalStore contract (Task 8; parity with ADR-0001's port-contract convention — see
-// `runMerchantRegistryPortContract`): EVERY adapter (the in-memory one from Task 2, the Postgres one
-// from Task 8) MUST pass this suite, so the engine (loop.ts) stays swappable and never learns which
-// adapter it got. Extracted verbatim from Task 2's `proposal-store.test.ts` so behavior didn't drift
-// while lifting it into a shared helper.
+// ProposalStore contract (E1 Task 8; parity with the `runMerchantRegistryPortContract` convention):
+// EVERY adapter (the in-memory one that ships with the port, the Postgres one in
+// `@palup/state-postgres`) MUST pass this, so `agent-runtime/loop.ts` stays swappable and never
+// learns which adapter it got. Import into an adapter's test and call
+// `proposalStoreContract(() => makeMyAdapter())`.
 //
 // `makeStore` must return a FRESH, EMPTY store each call. Async so a Postgres adapter can
 // migrate/truncate a scratch schema per test.

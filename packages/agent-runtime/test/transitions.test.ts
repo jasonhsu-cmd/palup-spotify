@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { InMemoryRuntimeStore } from "@palup/platform-ports";
-import { InMemoryProposalStore } from "../src/proposal-store.js";
+import { InMemoryProposalStore, InMemoryRuntimeStore } from "@palup/platform-ports";
 import { proposeOrExecute, executeApproved, rejectProposal, expireStale, withdrawProposal } from "../src/loop.js";
 
 const ctx = { tenantId: "t1" };

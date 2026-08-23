@@ -143,9 +143,6 @@ importers:
 
   packages/state-postgres:
     dependencies:
-      '@palup/agent-runtime':
-        specifier: workspace:*
-        version: link:../agent-runtime
       '@palup/platform-ports':
         specifier: workspace:*
         version: link:../platform-ports

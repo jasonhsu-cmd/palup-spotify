@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { proposalStoreContract } from "@palup/agent-runtime/contract/proposal-store";
-import { VersionConflictError, ProposalNotFoundError, type Proposal } from "@palup/agent-runtime";
+import { proposalStoreContract } from "@palup/platform-ports/contract/proposal-store";
+import { VersionConflictError, ProposalNotFoundError, type Proposal } from "@palup/platform-ports";
 import { PGVECTOR_AVAILABLE, startPgvectorContainer } from "./helpers/pgvector-container.js";
 import type { Sql } from "../src/sql.js";
 import { PostgresProposalStore } from "../src/proposal-store.js";

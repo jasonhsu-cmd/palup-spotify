@@ -10,18 +10,20 @@
 // of its inputs given a fixed `now` — replayable in tests and evals.
 
 import { createHash, randomUUID } from "node:crypto";
-import type { RuntimeStateCtx, RuntimeStatePort } from "@palup/platform-ports";
-import { classifyAction, type RulesProvider } from "./classify.js";
-import { assertNotKilled } from "./kill.js";
-import { ProposalNotFoundError, type ProposalStore } from "./proposal-store.js";
 import {
+  ProposalNotFoundError,
   ttlForCategory,
   type AgentAction,
   type Proposal,
   type ProposalCategory,
   type ProposalStatus,
+  type ProposalStore,
   type ReversalPlan,
-} from "./types.js";
+  type RuntimeStateCtx,
+  type RuntimeStatePort,
+} from "@palup/platform-ports";
+import { classifyAction, type RulesProvider } from "./classify.js";
+import { assertNotKilled } from "./kill.js";
 
 /** Statuses `executeApproved` refuses to move past — a human (or the TTL) has already settled this
  * proposal's fate; re-approving it would silently overturn that decision. */

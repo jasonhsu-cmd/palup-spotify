@@ -86,6 +86,19 @@ export type {
   InMemoryMerchantRegistryOpts,
 } from "./merchant-registry-port.js";
 export { createInMemoryMerchantRegistry, normalizePrimaryDomain } from "./merchant-registry-port.js";
+export type {
+  Proposal,
+  ProposalCategory,
+  ProposalStatus,
+  AgentAction,
+  BoundaryReason,
+  ReversalPlan,
+  ProposalStore,
+  ProposalListFilter,
+  ProposalListResult,
+  ProposalTransitionPatch,
+} from "./proposal-store.js";
+export { ttlForCategory, VersionConflictError, ProposalNotFoundError, InMemoryProposalStore } from "./proposal-store.js";
 export type { VectorPort, VectorRecord, VectorQuery, VectorMatch, VectorListItem, VectorListOpts } from "./vector-port.js";
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type { ProductFactsPort, ProductFact } from "./product-facts-port.js";
