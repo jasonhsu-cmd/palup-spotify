@@ -128,4 +128,46 @@ export interface CommercePort {
   /** ADR-0016 #3 — the EXECUTABLE reversal of `skipNextDelivery`. Idempotent: undoing when nothing is
    * skipped is a no-op. "You can undo this anytime" must be real. */
   unskipNextDelivery(shopperId: string): Promise<SubscriptionActionResult>;
+  /**
+   * WB win-back agent — enumerates THIS TENANT's customers with their most recent order timestamp.
+   * OPTIONAL, unlike every other method above: those are all per-shopper (a verified shopper reading
+   * their OWN account), but this one is tenant-wide enumeration, which only an Admin-API-scoped
+   * adapter can do — a per-shopper Customer Account API adapter (e.g.
+   * `widget-backend/src/shopify-customer-account-commerce.ts`) genuinely cannot implement it, so it
+   * is not required on every adapter. A real Shopify Admin-API adapter (broader `read_customers`
+   * scope) is a later, human-gated staging-enablement concern — see `SandboxCustomerDirectory` below
+   * for the dev/test/staging stand-in.
+   */
+  listCustomersWithLastOrder?(ctx: { tenantId: string }): Promise<CustomerLastOrder[]>;
+}
+
+/** One tenant customer + their most recent order timestamp — the minimal shape the win-back agent's
+ *  `findLapsedSegment` (`@palup/agent-runtime`) needs to pick a lapsed-customer segment. */
+export interface CustomerLastOrder {
+  customerId: string;
+  /** Recipient address for outbound comms (email today; extend as more channels are wired). */
+  contact: string;
+  /** ISO-8601 timestamp of the customer's most recent order. */
+  lastOrderAt: string;
+}
+
+/** The narrow capability `findLapsedSegment` actually depends on — deliberately NOT the full
+ *  `CommercePort` (most adapters can't enumerate all customers; see the optional method above). Any
+ *  adapter (or `CommercePort` that happens to implement the optional method) satisfies this. */
+export interface CustomerListingCommerce {
+  listCustomersWithLastOrder(ctx: { tenantId: string }): Promise<CustomerLastOrder[]>;
+}
+
+/**
+ * Minimal in-memory sandbox adapter for `listCustomersWithLastOrder` — seeded fixture data, never
+ * calls a real commerce system. The win-back agent's dev/test/staging seam until a real Shopify
+ * Admin-API adapter is wired (a later, human-gated staging-enablement step, same pattern as
+ * `SandboxCommsAdapter` in `comms-port.ts`).
+ */
+export class SandboxCustomerDirectory implements CustomerListingCommerce {
+  constructor(private readonly customers: CustomerLastOrder[] = []) {}
+
+  async listCustomersWithLastOrder(_ctx: { tenantId: string }): Promise<CustomerLastOrder[]> {
+    return this.customers.map((c) => ({ ...c }));
+  }
 }
