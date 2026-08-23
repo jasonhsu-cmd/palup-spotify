@@ -30,11 +30,10 @@ import type { Sql } from "./sql.js";
 // `loop.ts` (the only caller — `proposeOrExecute`/`executeApproved`/`rejectProposal`/
 // `withdrawProposal`/`expireStale`) already calls `deps.state.audit(...)` around every one of this
 // store's mutations, so an adapter-internal audit would be a silent duplicate of that trail, not a
-// second layer of defense. (`InMemoryProposalStore.create/transition` DO audit internally — that is a
-// registry-over-`RuntimeStatePort` convention (its own tx/audit are the same call); this adapter's
-// dedicated table has no such tx to piggyback on, so it follows `PostgresMerchantRegistry`'s
-// "adapter is silent, caller audits" convention instead. Neither leaves NN#5 unmet: `loop.ts` is the
-// caller for both.)
+// second layer of defense. (`InMemoryProposalStore.create`/`transition` do NOT audit internally
+// either — silenced by the audit-double-write fix so both adapters are pure state, matching this
+// adapter's "adapter is silent, caller audits" convention exactly, not just approximately. `loop.ts`
+// is the SOLE owner of this store's entire audit trail, on either adapter.)
 //
 // JSONB columns (`action`, `boundary_reasons`, `estimated_impact`, `reversal_plan`, `preconditions`,
 // `execution_result`) are written as `JSON.stringify(...)` parameters against a plain `$n` placeholder

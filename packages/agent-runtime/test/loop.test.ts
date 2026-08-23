@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryProposalStore, InMemoryRuntimeStore } from "@palup/platform-ports";
 import { proposeOrExecute } from "../src/loop.js";
+import { killMerchant, KillSwitchError } from "../src/kill.js";
 
 const ctx = { tenantId: "t1" };
 
@@ -76,5 +77,34 @@ describe("proposeOrExecute", () => {
     // executor call, not after (there is no "after" on this path: the function throws).
     expect(audit.some((r: any) => r.action === "agent.action.auto.intent")).toBe(true);
     expect(audit.some((r: any) => r.action === "agent.action.failed")).toBe(true);
+  });
+
+  // FIX 2 (spec §6.3 — "while killed, new proposals blocked"): a killed tenant must not accept new
+  // proposals either, not just be blocked from auto-executing. `assertNotKilled` must run before
+  // classification/proposal-creation, not only inside the auto branch.
+  it("blocks proposal creation (not just execution) while the merchant is killed", async () => {
+    const deps = mkDeps();
+    await killMerchant(deps.state, ctx, "operator halt");
+    const before = await deps.store.list(ctx, {});
+    expect(before.items).toHaveLength(0);
+    await expect(
+      proposeOrExecute(input({ action: { type: "send_campaign", params: {} } }), deps),
+    ).rejects.toBeInstanceOf(KillSwitchError);
+    const after = await deps.store.list(ctx, {});
+    expect(after.items).toHaveLength(0); // no proposal was created
+  });
+
+  // FIX 4 (§3 honesty floor): a `reversalPlan` that exists but says nothing (`plan: ""`) is not
+  // actually a way back — same non-empty floor already enforced on reject/withdraw `reason`.
+  it("rejects a reversalPlan with a blank plan string", async () => {
+    await expect(
+      proposeOrExecute(
+        input({
+          action: { type: "issue_discount", params: { pct: 25 } },
+          reversalPlan: { reversible: true, plan: "   " },
+        }),
+        mkDeps(),
+      ),
+    ).rejects.toThrow(/reversalPlan/);
   });
 });

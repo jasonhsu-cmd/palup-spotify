@@ -63,6 +63,31 @@ describe("rejectProposal", () => {
     const p = await seedPending(deps);
     await expect(rejectProposal(ctx, p.id, "owner", "", "2026-08-23T01:00:00Z", deps)).rejects.toThrow(/reason/);
   });
+
+  // FIX 1 (illogical state transition): the optimistic version lock only catches concurrent races,
+  // not an illogical transition from a settled TERMINAL status — a proposal already `executed`
+  // (money moved) must never be flipped to `rejected`, overwriting that terminal state. Only a
+  // `pending` proposal may be rejected.
+  it("throws (status unchanged) rejecting an already-EXECUTED proposal", async () => {
+    const deps = mkDeps();
+    const p = await seedPending(deps);
+    const executed = await executeApproved(ctx, p.id, "owner", "2026-08-23T01:00:00Z", deps);
+    expect(executed.status).toBe("executed");
+    await expect(
+      rejectProposal(ctx, p.id, "owner", "too late", "2026-08-23T02:00:00Z", deps),
+    ).rejects.toThrow(/executed/);
+    expect((await deps.store.get(ctx, p.id))?.status).toBe("executed");
+  });
+
+  it("throws (status unchanged) rejecting an already-REJECTED proposal", async () => {
+    const deps = mkDeps();
+    const p = await seedPending(deps);
+    await rejectProposal(ctx, p.id, "owner", "not on brand", "2026-08-23T01:00:00Z", deps);
+    await expect(
+      rejectProposal(ctx, p.id, "owner", "again", "2026-08-23T02:00:00Z", deps),
+    ).rejects.toThrow(/rejected/);
+    expect((await deps.store.get(ctx, p.id))?.status).toBe("rejected");
+  });
 });
 
 describe("expireStale", () => {
@@ -105,5 +130,29 @@ describe("withdrawProposal", () => {
     const deps = mkDeps();
     const p = await seedPending(deps);
     await expect(withdrawProposal(ctx, p.id, "", "2026-08-23T01:00:00Z", deps)).rejects.toThrow(/reason/);
+  });
+
+  // FIX 1 (illogical state transition) — same rule as rejectProposal: only a `pending` proposal can
+  // be withdrawn; an already-EXECUTED or already-REJECTED proposal's terminal status must not be
+  // silently overwritten.
+  it("throws (status unchanged) withdrawing an already-EXECUTED proposal", async () => {
+    const deps = mkDeps();
+    const p = await seedPending(deps);
+    const executed = await executeApproved(ctx, p.id, "owner", "2026-08-23T01:00:00Z", deps);
+    expect(executed.status).toBe("executed");
+    await expect(
+      withdrawProposal(ctx, p.id, "no longer relevant", "2026-08-23T02:00:00Z", deps),
+    ).rejects.toThrow(/executed/);
+    expect((await deps.store.get(ctx, p.id))?.status).toBe("executed");
+  });
+
+  it("throws (status unchanged) withdrawing an already-REJECTED proposal", async () => {
+    const deps = mkDeps();
+    const p = await seedPending(deps);
+    await rejectProposal(ctx, p.id, "owner", "not on brand", "2026-08-23T01:00:00Z", deps);
+    await expect(
+      withdrawProposal(ctx, p.id, "no longer relevant", "2026-08-23T02:00:00Z", deps),
+    ).rejects.toThrow(/rejected/);
+    expect((await deps.store.get(ctx, p.id))?.status).toBe("rejected");
   });
 });

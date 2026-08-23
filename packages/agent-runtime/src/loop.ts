@@ -111,17 +111,21 @@ export async function proposeOrExecute(input: ProposeInput, deps: EngineDeps): P
   if (!input.reversalPlan) {
     throw new Error("proposeOrExecute: reversalPlan is required — no action may proceed without a way back");
   }
+  // FIX 4 (§3 honesty floor): a `reversalPlan` that exists but says nothing is not a way back —
+  // same non-empty floor already enforced on reject/withdraw `reason`.
+  if (!input.reversalPlan.plan || !input.reversalPlan.plan.trim()) {
+    throw new Error("proposeOrExecute: reversalPlan.plan must not be blank — a reversal plan must actually say something");
+  }
+
+  // FIX 2 (spec §6.3 — "while killed, new proposals blocked"): checked BEFORE classification, so a
+  // killed merchant/agent-type/global halt blocks BOTH branches below — auto-execution AND new
+  // pending-proposal creation. `executeApproved` (Task 6) re-checks this same gate before it would
+  // ever execute an already-created proposal.
+  await assertNotKilled(deps.state, input.ctx, input.agentType);
 
   const classification = await classifyAction(input.action, input.ctx, deps.rules);
 
   if (classification.decision === "auto") {
-    // Kill-Switch gate (governance non-negotiable #4): checked immediately before the ONLY
-    // execution path in this function, so a killed merchant/agent-type/global halt can never reach
-    // the executor. A `requires_approval` classification still creates its proposal below —
-    // proposing is not autonomous execution; `executeApproved` (Task 6) re-checks this same gate
-    // before it would ever execute an approved proposal.
-    await assertNotKilled(deps.state, input.ctx, input.agentType);
-
     // F1 (NN#5 — no silent actions): write the INTENT record BEFORE calling the executor. If the
     // executor throws, or the process dies between the executor call and a result audit, this
     // record still exists — money never moves with zero audit trail. `deps.state.audit` commits
@@ -365,6 +369,13 @@ export async function rejectProposal(
   }
   const proposal = await deps.store.get(ctx, id);
   if (!proposal) throw new ProposalNotFoundError(id);
+  // FIX 1: the optimistic version lock only catches concurrent races, not an illogical transition
+  // from an already-settled TERMINAL status — a proposal that already reached `executed` (money
+  // moved) must never be flipped to `rejected`, overwriting that terminal state. Only `pending` may
+  // be rejected.
+  if (proposal.status !== "pending") {
+    throw new Error(`rejectProposal: proposal ${id} is ${proposal.status}, cannot reject (only a pending proposal can be rejected)`);
+  }
   const rejected = await deps.store.transition(ctx, id, proposal.version, {
     status: "rejected",
     decidedBy,
@@ -401,6 +412,11 @@ export async function withdrawProposal(
   }
   const proposal = await deps.store.get(ctx, id);
   if (!proposal) throw new ProposalNotFoundError(id);
+  // FIX 1: same rule as `rejectProposal` — only a `pending` proposal may be withdrawn; an
+  // already-settled terminal status (e.g. `executed`, money moved) must never be overwritten.
+  if (proposal.status !== "pending") {
+    throw new Error(`withdrawProposal: proposal ${id} is ${proposal.status}, cannot withdraw (only a pending proposal can be withdrawn)`);
+  }
   const withdrawn = await deps.store.transition(ctx, id, proposal.version, {
     status: "withdrawn",
     decidedAt: now,
