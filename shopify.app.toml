@@ -17,8 +17,19 @@
 #
 # The Storefront delegate scope (`unauthenticated_read_product_listings`) is NOT here: catalog/policy READS
 # stay on the Storefront delegate token (ADR-0020 D1, unchanged), issued on the code install path
-# (INSTALL_SCOPES_DEFAULT). This file carries only the minimal ADMIN READ scopes the ingestion webhooks
-# require — no write, order, or customer scopes.
+# (INSTALL_SCOPES_DEFAULT).
+#
+# DEV-APP-ONLY (owner-authorized, jason, 2026-08-23): `write_customers,write_orders` are added below so an
+# operator can SEED test customers/orders on the DEVELOPMENT store (the relationship-lifecycle test-shopper
+# fixture, WS-B2). This is the DEV Dashboard app on a dev store; PRODUCTION will be a SEPARATE app, so these
+# write scopes must NOT be carried into the prod app without a real product justification + security review.
+# Dev/development-store apps need NO Shopify Protected-Customer-Data review (shopify.dev "Work with protected
+# customer data": an app "installed only on a development store … You don't need to submit for review",
+# retrieved 2026-08-23). write_* each include their read; read_products (already present) covers order
+# line-item refs; read_all_orders is deliberately NOT added (the agent reads a shopper's history via the
+# Customer-Account API, not the Admin API's 60-day-capped read path). ADR-0020 D1 TENSION: that ADR keeps NO
+# persisted offline Admin token; these scopes mean the dev-store install grants one — acceptable for a dev
+# store, but capturing/using that Admin token for seeding is a deliberate operator step, not a code default.
 
 client_id = "REPLACE_WITH_APP_CLIENT_ID"
 name = "PalUp"
@@ -28,7 +39,7 @@ embedded = false
 [access_scopes]
 # D1: the minimal Admin READ scopes the ingestion webhooks require. read_inventory does NOT authorize
 # surfacing stock counts — the boolean-only availableForSale contract stays (§8a inv 11).
-scopes = "read_products,read_inventory"
+scopes = "read_products,read_inventory,write_customers,write_orders"
 
 [webhooks]
 api_version = "2026-07"
