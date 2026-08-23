@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { merchantRulesContract } from "@palup/platform-ports/contract/merchant-rules";
-import { CONSERVATIVE_DEFAULTS } from "@palup/platform-ports";
+import {
+  CONSERVATIVE_DEFAULTS,
+  type AuditInput,
+  type MerchantRuleSet,
+  type RuntimeStateCtx,
+  type RuntimeStatePort,
+} from "@palup/platform-ports";
 import { PGVECTOR_AVAILABLE, startPgvectorContainer } from "./helpers/pgvector-container.js";
 import type { Sql } from "../src/sql.js";
 import { PostgresRuntimeStore } from "../src/postgres-runtime-store.js";
@@ -111,6 +117,89 @@ describe.skipIf(!PGVECTOR_AVAILABLE)("PostgresMerchantRulesStore", () => {
       const got = await store.get(ctx);
       expect(got.discount?.maxPct).toBe(25); // untouched by the 2nd set — still there
       expect(got.refund?.maxUsd).toBe(20);
+    });
+
+    // Post-review FIX 1 coverage: mutate-then-audit, not audit-then-mutate.
+
+    it("a successful set()'s audited `after` matches the row ACTUALLY persisted (re-read to confirm)", async () => {
+      await sql.query("TRUNCATE pl_merchant_rules");
+      await sql.query("TRUNCATE rs_audit");
+      const store = new PostgresMerchantRulesStore(sql, runtimeStore);
+      const result = await store.set(ctx, { discount: { allowedAuto: true, maxPct: 25 } }, "owner", "merchant_set");
+      const persisted = await store.get(ctx); // independent re-read, not the value set() handed back
+      expect(result.envelope).toEqual(persisted);
+      const records = await runtimeStore.readAudit(ctx);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.decision).toEqual({
+        before: expect.objectContaining({ discount: expect.objectContaining({ allowedAuto: false }) }),
+        after: persisted,
+        bigJump: true,
+      });
+    });
+
+    it("chained set()s: each audit's before/after reflects the row that ACTUALLY existed at that point, never a stale pre-read", async () => {
+      await sql.query("TRUNCATE pl_merchant_rules");
+      await sql.query("TRUNCATE rs_audit");
+      const store = new PostgresMerchantRulesStore(sql, runtimeStore);
+      await store.set(ctx, { discount: { allowedAuto: true, maxPct: 25 } }, "owner", "merchant_set");
+      const afterFirst = await store.get(ctx);
+      const second = await store.set(ctx, { refund: { allowedAuto: true, maxUsd: 20 } }, "owner", "merchant_set");
+      const records = await runtimeStore.readAudit(ctx);
+      expect(records).toHaveLength(2);
+      expect(records[1]?.decision).toEqual({ before: afterFirst, after: second.envelope, bigJump: true });
+    });
+
+    it("the audit write happens AFTER the row already reflects the change, not before (mutate-then-audit)", async () => {
+      await sql.query("TRUNCATE pl_merchant_rules");
+      await sql.query("TRUNCATE rs_audit");
+      let rowSeenAtAuditTime: MerchantRuleSet | null | undefined;
+      // A thin spy over `RuntimeStatePort.audit`: at the moment `set()` calls it, read the row
+      // DIRECTLY (bypassing the store) to prove the persisted row already carries the new value —
+      // i.e. the table write's transaction has already committed by the time audit() runs.
+      const spyState: RuntimeStatePort = {
+        audit: async (c: RuntimeStateCtx, entry: AuditInput, at?: string) => {
+          const { rows } = await sql.query<{ envelope: MerchantRuleSet }>(
+            "SELECT envelope FROM pl_merchant_rules WHERE tenant_id = $1",
+            [c.tenantId],
+          );
+          rowSeenAtAuditTime = rows[0]?.envelope ?? null;
+          return runtimeStore.audit(c, entry, at);
+        },
+      } as unknown as RuntimeStatePort;
+      const store = new PostgresMerchantRulesStore(sql, spyState);
+      await store.set(ctx, { discount: { allowedAuto: true, maxPct: 25 } }, "owner", "merchant_set");
+      expect(rowSeenAtAuditTime?.discount?.maxPct).toBe(25); // already committed when audit() ran
+    });
+
+    it("a failed mutation writes NO row and audits `rules.change_failed`, not `rules.changed` (no silent failure)", async () => {
+      await sql.query("TRUNCATE pl_merchant_rules");
+      await sql.query("TRUNCATE rs_audit");
+      const store = new PostgresMerchantRulesStore(sql, runtimeStore);
+      // An out-of-union provenance is rejected by the DB CHECK (FIX 2) — a real, engine-level
+      // mutation failure, not a simulated one.
+      await expect(
+        store.set(
+          ctx,
+          { discount: { allowedAuto: true, maxPct: 25 } },
+          "owner",
+          "not_a_real_provenance" as unknown as "merchant_set",
+        ),
+      ).rejects.toThrow();
+      const { rows } = await sql.query<{ n: string }>("SELECT count(*)::text AS n FROM pl_merchant_rules");
+      expect(rows[0]?.n).toBe("0"); // the tx rolled back — no row was ever committed
+      const records = await runtimeStore.readAudit(ctx);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.action).toBe("rules.change_failed");
+    });
+
+    it("provenance is CHECK-constrained at the ENGINE level to the RuleProvenance union", async () => {
+      await sql.query("TRUNCATE pl_merchant_rules");
+      await expect(
+        sql.query(
+          "INSERT INTO pl_merchant_rules (tenant_id, envelope, provenance, updated_by, updated_at) VALUES ($1,$2,$3,$4,$5)",
+          ["t1", JSON.stringify({}), "not_a_real_provenance", "owner", "2026-08-23T00:00:00Z"],
+        ),
+      ).rejects.toThrow();
     });
   });
 });

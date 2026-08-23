@@ -42,22 +42,31 @@ import type { Sql } from "./sql.js";
 // instead of a second, adapter-private audit mechanism that could drift from the canonical hash-chain
 // implementation in `postgres-runtime-store.ts`.
 //
-// HONEST LIMIT ON ATOMICITY (documented rather than papered over — the style this codebase already
-// uses for `merchant-credential-store.ts`'s "HONEST LIMIT" notes): the dedicated-table write (this
-// file's own SQL transaction) and the `rs_audit` write (`state.audit()`, ITS OWN separate transaction,
-// since `RuntimeStatePort.audit` does not accept an externally-supplied transaction handle) are TWO
-// separate commits, not one atomic unit — true cross-mechanism atomicity would require either a
-// two-phase commit or reaching into `PostgresRuntimeStore`'s private hash-chain internals from here,
-// both worse than the gap. `set()` therefore audits FIRST, computed from a plain (non-locking) read of
-// the current row, and only then performs the actual mutation inside `sql.tx()` (SERIALIZABLE, so the
-// mutation itself is concurrency-safe — a losing concurrent writer gets a serialization failure to
-// retry, never a lost update). Ordering it this way means the failure mode of a crash between the two
-// steps is "an audit row describes a change that was never actually applied" rather than "a change took
-// effect with no audit trail at all" — the direction NN#5 (no SILENT autonomous action) actually cares
-// about. Under normal (non-crashing, non-concurrent) operation the two agree exactly, and the contract
-// suite (`merchantRulesContract`) does not exercise the crash/race window — it is called out here as a
-// known gap for a future op job (e.g. reconciling `rs_audit`'s last `rules.changed` entry per tenant
-// against `pl_merchant_rules`'s row) rather than silently assumed away.
+// HONEST LIMIT ON ATOMICITY, AND WHY `set()` MUTATES BEFORE IT AUDITS (fixed post-review — the
+// original revision audited FIRST from a non-locking pre-read, which could commit an audit record
+// describing a state the table never actually held, or one that raced ahead of what the SERIALIZABLE
+// tx below really applied; and a thrown mutation left no audit trail at all — the exact "silent
+// action" NN#5 forbids). This now follows the same MUTATE-THEN-AUDIT convention `loop.ts`'s
+// `executeApproved` uses for `ProposalStore` transitions: the table write happens FIRST, inside
+// `sql.tx()` (SERIALIZABLE — sql.ts:5-7 — so a racing writer gets a serialization failure to retry,
+// never a lost update), and the values captured are the ACTUAL before/after the tx really read and
+// wrote — never a value computed outside it. The audit record is written AFTER the tx commits, from
+// those actual values, so `rs_audit` can only ever describe a state that genuinely existed. On a
+// mutation error, the `catch` writes a `rules.change_failed` audit record (mirroring
+// `executeApproved`'s `proposal.execution_failed` pattern) before rethrowing — so even a FAILED
+// attempt leaves a trace, never a silent one.
+//
+// The dedicated-table write and the `rs_audit` write are still TWO separate commits, not one atomic
+// unit (`RuntimeStatePort.audit` does not accept an externally-supplied transaction handle, and true
+// cross-mechanism atomicity would need either a two-phase commit or reaching into
+// `PostgresRuntimeStore`'s private hash-chain internals from here — both worse than the gap). The
+// residual, honestly-stated gap: if the process crashes AFTER the tx commits but BEFORE the audit
+// write lands, the state changed with (temporarily) no audit record for it — the mirror image of the
+// old bug, but strictly smaller in blast radius (a missing audit for a real, correct change, never a
+// present audit for a change that never happened or that describes the wrong before/after). A future
+// op job (e.g. reconciling `pl_merchant_rules.updated_at` against `rs_audit`'s last `rules.changed`
+// entry per tenant) could close this; not built here because nothing calls this adapter yet (see
+// `state-postgres/src/index.ts`'s export comment).
 //
 // SQL INJECTION: every value is a bound `$n` parameter; the only template-substituted text is the
 // fixed `COLUMNS` constant defined in this file (never derived from input) — same discipline as
@@ -97,13 +106,18 @@ export class PostgresMerchantRulesStore implements MerchantRulesStore {
   }
 
   /** Create the table if absent. Idempotent; run at startup / in a migration step, like every other
-   *  `state-postgres` adapter's `migrate()`. */
+   *  `state-postgres` adapter's `migrate()`. `provenance`'s CHECK mirrors `pl_proposal`'s
+   *  `category`/`status` CHECK-guards (`proposal-store.ts`) — restated literally (never interpolated
+   *  from the `RuleProvenance` union, which is module-private to `@palup/platform-ports`) so a row
+   *  written by anything other than this adapter (a hand-edited row, a future stray writer) cannot
+   *  silently smuggle an un-vetted provenance value into an operator's "which merchants have an
+   *  `agent_proposed` change pending review" query. */
   async migrate(): Promise<void> {
     await this.sql.query(
       `CREATE TABLE IF NOT EXISTS pl_merchant_rules (
          tenant_id text PRIMARY KEY CHECK (btrim(tenant_id) <> ''),
          envelope jsonb NOT NULL,
-         provenance text NOT NULL,
+         provenance text NOT NULL CHECK (provenance IN ('merchant_set','agent_proposed')),
          updated_by text NOT NULL,
          updated_at text NOT NULL)`,
     );
@@ -124,45 +138,61 @@ export class PostgresMerchantRulesStore implements MerchantRulesStore {
     const tenantId = requireTenant(ctx.tenantId);
     const at = this.now();
 
-    // Best-effort read for the audit payload (see the file-header "HONEST LIMIT" note) — NOT inside
-    // the mutation's own transaction, so its before/after may in the rare concurrent-write race not be
-    // byte-identical to what the mutation below actually persists. The mutation's own correctness does
-    // not depend on this read.
-    const preRead = await this.selectStored(this.sql, tenantId);
-    const before = mergeOverDefaults(preRead);
-    const { storedAfter, bigJump } = applyPatch(preRead, before, patch);
-    const after = mergeOverDefaults(storedAfter);
+    // MUTATE FIRST (see the file-header note for why this order changed post-review): the ACTUAL
+    // before/after/bigJump come from what this transaction itself read and wrote — never from a
+    // separate, non-locking read that could disagree with what actually got committed. SERIALIZABLE
+    // (sql.tx's isolation — sql.ts:5-7) makes the mutation concurrency-safe: a racing writer gets a
+    // serialization failure to retry, never a lost update.
+    let applied: { before: MerchantRuleSet; after: MerchantRuleSet; bigJump: boolean };
+    try {
+      applied = await this.sql.tx(async (tx) => {
+        const current = await this.selectStored(tx, tenantId);
+        const before = mergeOverDefaults(current);
+        const { storedAfter, bigJump } = applyPatch(current, before, patch);
+        const after = mergeOverDefaults(storedAfter);
+        await tx.query(
+          `INSERT INTO pl_merchant_rules (${COLUMNS}) VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (tenant_id) DO UPDATE
+             SET envelope = EXCLUDED.envelope, provenance = EXCLUDED.provenance,
+                 updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at`,
+          [tenantId, JSON.stringify(storedAfter), provenance, by, at],
+        );
+        return { before, after, bigJump };
+      });
+    } catch (e) {
+      // No silent failure (NN#5): a rejected/failed mutation still leaves a trace, mirroring
+      // `executeApproved`'s `proposal.execution_failed` audit-on-catch pattern (`loop.ts`). Nothing is
+      // persisted to `pl_merchant_rules` on this path (the tx rolled back), so there is no "after" to
+      // report — only the attempt and why it did not apply.
+      await this.state.audit(
+        { tenantId },
+        {
+          actor: by,
+          action: "rules.change_failed",
+          input: { patch, provenance },
+          decision: { error: e instanceof Error ? e.message : String(e) },
+          reversalPath: "no state changed — the mutation was rolled back; retry set() with the same patch",
+        },
+        at,
+      );
+      throw e;
+    }
 
+    // Audited AFTER the tx commits, from the values the tx ACTUALLY applied — `rs_audit` can only ever
+    // describe a state that genuinely existed (or, on the catch path above, an attempt that did not).
     await this.state.audit(
       { tenantId },
       {
         actor: by,
         action: "rules.changed",
         input: { patch, provenance },
-        decision: { before, after, bigJump },
+        decision: { before: applied.before, after: applied.after, bigJump: applied.bigJump },
         reversalPath: `MerchantRulesStore.set(ctx, <before-envelope>, "${by}", "reversal") restores the prior envelope for tenant ${tenantId}`,
       },
       at,
     );
 
-    // The actual mutation: SERIALIZABLE (sql.tx's isolation — sql.ts:5-7) re-reads and re-applies the
-    // SAME patch against whatever is CURRENTLY stored, so a writer that raced the pre-read above still
-    // lands correctly (or gets a serialization failure to retry) — this is what makes the STATE change
-    // itself concurrency-safe, independent of the best-effort audit payload above.
-    return this.sql.tx(async (tx) => {
-      const current = await this.selectStored(tx, tenantId);
-      const currentBefore = mergeOverDefaults(current);
-      const { storedAfter: finalStoredAfter, bigJump: finalBigJump } = applyPatch(current, currentBefore, patch);
-      const finalAfter = mergeOverDefaults(finalStoredAfter);
-      await tx.query(
-        `INSERT INTO pl_merchant_rules (${COLUMNS}) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (tenant_id) DO UPDATE
-           SET envelope = EXCLUDED.envelope, provenance = EXCLUDED.provenance,
-               updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at`,
-        [tenantId, JSON.stringify(finalStoredAfter), provenance, by, at],
-      );
-      return { envelope: finalAfter, bigJump: finalBigJump };
-    });
+    return { envelope: applied.after, bigJump: applied.bigJump };
   }
 
   private async selectStored(sql: Sql, tenantId: string): Promise<MerchantRuleSet> {
