@@ -327,3 +327,72 @@ export function createInMemoryComms(opts: InMemoryCommsOpts = {}): InMemoryComms
 
   return port;
 }
+
+// --- SandboxCommsAdapter (WB win-back agent, 2026-08-23) ------------------------------------------
+//
+// A SEPARATE, additive capability from the `CommsPort` fail-closed gate above: a batch-send
+// recorder for run-time CAMPAIGN agents (e.g. the win-back agent's `campaignExecutor`,
+// `@palup/agent-runtime`). Deliberately NOT the same interface as `CommsPort` — that port's
+// `send(msg)` is a single-message, per-recipient call gated by consent/suppression/frequency/
+// quiet-hours/rate/DLP (comms-and-messaging.md §1); a campaign blast needs a BATCH call across a
+// whole lapsed-customer segment. Named/typed distinctly (`CampaignCommsPort`/`CampaignMessage`,
+// not `CommsPort`/`CommsMessage`) so this addition never collides with, weakens, or bypasses that
+// existing compliance gate.
+//
+// OPEN CONCERN (flag before any live enablement): `SandboxCommsAdapter` itself runs NO consent/
+// suppression/DLP check — it only records, deterministically, and never delivers, which is exactly
+// what makes it safe for dev/test/staging (a campaign agent wired to this adapter can send nothing
+// to a real shopper). A LIVE adapter for real campaign sends must still clear the same consent/
+// suppression/DLP guardrails `CommsPort` already enforces (CAN-SPAM/TCPA) before it ships — that
+// wiring is a later, human-gated task, not assumed here.
+
+/** The outbound channels a campaign send may use. Reuses `CommsPort`'s channel vocabulary so a
+ *  future live adapter can share it rather than defining a second, divergent union. */
+export type CampaignMessage = {
+  channel: CommsChannel;
+  /** Recipient address (email) or E.164 number (sms). */
+  to: string;
+  /** Email subject line; meaningless for `sms` (adapters ignore it there). */
+  subject?: string;
+  body: string;
+};
+
+/** A committed batch-send receipt: how many messages were recorded, and their minted ids
+ *  (index-order, same length as the input batch). */
+export interface CampaignSendResult {
+  sent: number;
+  ids: string[];
+}
+
+/** The batch-campaign-send port a run-time campaign agent's executor depends on (never a vendor
+ *  SDK directly — ADR-0001). */
+export interface CampaignCommsPort {
+  send(messages: CampaignMessage[], ctx: { tenantId: string }): Promise<CampaignSendResult>;
+}
+
+/** One recorded campaign message: the input message plus the tenant it was sent for and the
+ *  minted id. Deep-cloned on read so a caller can't mutate the adapter's internal record. */
+export interface RecordedCampaignMessage extends CampaignMessage {
+  tenantId: string;
+  id: string;
+}
+
+/**
+ * The sandbox/dev/test/staging implementation of `CampaignCommsPort`: RECORDS every message and
+ * NEVER delivers anything to a real provider. Ids are minted deterministically from the adapter's
+ * own running count (`sandbox:<index>`) — no `Math.random`, no `Date.now()` — so a staging deploy
+ * of a campaign agent behind this adapter is provably incapable of reaching a real shopper.
+ */
+export class SandboxCommsAdapter implements CampaignCommsPort {
+  readonly recorded: RecordedCampaignMessage[] = [];
+
+  async send(messages: CampaignMessage[], ctx: { tenantId: string }): Promise<CampaignSendResult> {
+    const ids: string[] = [];
+    for (const msg of messages) {
+      const id = `sandbox:${this.recorded.length}`;
+      this.recorded.push({ ...msg, tenantId: ctx.tenantId, id });
+      ids.push(id);
+    }
+    return { sent: messages.length, ids };
+  }
+}

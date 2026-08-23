@@ -137,8 +137,12 @@ export type {
   LiveChatHandle,
   InMemoryComms,
   InMemoryCommsOpts,
+  CampaignMessage,
+  CampaignSendResult,
+  CampaignCommsPort,
+  RecordedCampaignMessage,
 } from "./comms-port.js";
-export { createInMemoryComms, CommsRejection } from "./comms-port.js";
+export { createInMemoryComms, CommsRejection, SandboxCommsAdapter } from "./comms-port.js";
 export type {
   Play,
   Arm,
