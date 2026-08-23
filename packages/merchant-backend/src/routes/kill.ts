@@ -74,7 +74,14 @@ export function registerKillRoutes(app: FastifyInstance, deps: KillRoutesDeps): 
       return reply.code(400).send({ error: "reason is required" });
     }
     await killMerchant(deps.state, ctx, reason);
-    deps.bus.publish(ctx.tenantId, { type: "kill.changed", killed: true });
+    // T7 (coordinator review): the halt above has already taken effect — a `publish` failure must
+    // never turn an already-committed kill into an error response (worst case for the Kill Switch:
+    // the halt landed but the caller is told it failed and might retry/escalate believing it didn't).
+    try {
+      deps.bus.publish(ctx.tenantId, { type: "kill.changed", killed: true });
+    } catch (publishErr) {
+      req.log.error({ err: publishErr }, "event publish failed after a committed kill");
+    }
     return { killed: true };
   });
 
@@ -83,7 +90,12 @@ export function registerKillRoutes(app: FastifyInstance, deps: KillRoutesDeps): 
     const principal = req.principal!;
     const ctx = { tenantId: principal.merchantId };
     await unkillMerchant(deps.state, ctx);
-    deps.bus.publish(ctx.tenantId, { type: "kill.changed", killed: false });
+    // T7: same own-try/catch as kill above.
+    try {
+      deps.bus.publish(ctx.tenantId, { type: "kill.changed", killed: false });
+    } catch (publishErr) {
+      req.log.error({ err: publishErr }, "event publish failed after a committed unkill");
+    }
     return { killed: false };
   });
 }

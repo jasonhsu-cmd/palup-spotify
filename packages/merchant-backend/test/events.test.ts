@@ -11,7 +11,7 @@ import {
 } from "@palup/platform-ports";
 import { findLapsedSegment, draftWinBack, proposeWinBack, createRulesProvider, campaignExecutor } from "@palup/agent-runtime";
 import { buildServer } from "../src/server.js";
-import { InMemoryEventBus, type ConsoleEvent } from "../src/events.js";
+import { InMemoryEventBus, type ConsoleEvent, type EventBus } from "../src/events.js";
 
 // W1-API Task 7: `InMemoryEventBus` (pure unit tests) + the SSE `GET /events` wire + the mutating
 // routes (approve/reject/kill/unkill) publishing to it. Same fixtures/pattern as
@@ -314,6 +314,95 @@ describe("GET /events (SSE)", () => {
 
     expect(sawData).toBe(false);
     req.destroy();
+    await app.close();
+  });
+});
+
+// Coordinator review (post-approval fragility): a `publish` failure must never change the HTTP
+// result of a mutation that has ALREADY committed. `InMemoryEventBus.publish` happens to swallow
+// per-listener errors, but that guarantee lives on that concrete class, not the route call site — a
+// future bus (e.g. a real pub/sub adapter) could throw. This double proves the call sites (not the
+// bus) are what makes publish best-effort.
+const throwingBus: EventBus = {
+  publish: () => {
+    throw new Error("bus unavailable");
+  },
+  subscribe: () => () => {},
+};
+
+describe("a throwing EventBus never turns an already-committed mutation into a failure response", () => {
+  it("approve still returns 200/executed when bus.publish throws", async () => {
+    const state = new InMemoryRuntimeStore();
+    const proposalStore = new InMemoryProposalStore(state);
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const comms = new SandboxCommsAdapter();
+    const proposal = await seedPendingCampaign(state, proposalStore, rulesStore, comms);
+
+    const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore, rulesStore, comms, bus: throwingBus });
+    const res = await app.inject({
+      method: "POST",
+      url: `/approvals/${proposal.id}/approve`,
+      headers: { authorization: "Bearer good" },
+      payload: { version: proposal.version },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("executed");
+    expect(comms.recorded).toHaveLength(1); // the approve genuinely executed, not short-circuited
+    await app.close();
+  });
+
+  it("reject still returns 200/rejected when bus.publish throws", async () => {
+    const state = new InMemoryRuntimeStore();
+    const proposalStore = new InMemoryProposalStore(state);
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const comms = new SandboxCommsAdapter();
+    const proposal = await seedPendingCampaign(state, proposalStore, rulesStore, comms);
+
+    const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore, rulesStore, comms, bus: throwingBus });
+    const res = await app.inject({
+      method: "POST",
+      url: `/approvals/${proposal.id}/reject`,
+      headers: { authorization: "Bearer good" },
+      payload: { reason: "off-brand" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("rejected");
+    await app.close();
+  });
+
+  it("kill still returns 200/killed:true when bus.publish throws — the halt itself must never be reported as failed", async () => {
+    const state = new InMemoryRuntimeStore();
+    const app = await buildServer({ store: state, identity: identityFor(operator), bus: throwingBus });
+    const res = await app.inject({
+      method: "POST",
+      url: "/kill",
+      headers: { authorization: "Bearer good" },
+      payload: { reason: "halt" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ killed: true });
+
+    // the halt genuinely took effect despite the publish failure
+    const statusRes = await app.inject({ method: "GET", url: "/kill", headers: { authorization: "Bearer good" } });
+    expect(statusRes.json()).toEqual({ killed: true });
+    await app.close();
+  });
+
+  it("unkill still returns 200/killed:false when bus.publish throws", async () => {
+    const state = new InMemoryRuntimeStore();
+    const killApp = await buildServer({ store: state, identity: identityFor(operator), bus: throwingBus });
+    await killApp.inject({
+      method: "POST",
+      url: "/kill",
+      headers: { authorization: "Bearer good" },
+      payload: { reason: "halt" },
+    });
+    await killApp.close();
+
+    const app = await buildServer({ store: state, identity: identityFor(owner), bus: throwingBus }); // manager+ for /unkill
+    const res = await app.inject({ method: "POST", url: "/unkill", headers: { authorization: "Bearer good" } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ killed: false });
     await app.close();
   });
 });

@@ -227,8 +227,17 @@ export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRou
           const updated = await executeApproved(ctx, id, principal.userId, now, engineDeps);
           // T7: best-effort live-update — the store transition above has already committed, so a
           // dropped/absent subscriber never loses the decision (the console reconciles via
-          // GET /approvals/:id).
-          deps.bus.publish(ctx.tenantId, { type: "proposal.decided", id, status: updated.status });
+          // GET /approvals/:id). Wrapped in its OWN try/catch (coordinator review): `executeApproved`
+          // has already succeeded by this point, so a `publish` failure must never surface as a
+          // failure of the approve itself — it must not fall into the `catch` below, which would
+          // rethrow a generic 500 for an action that already landed. `InMemoryEventBus.publish`
+          // happens to swallow per-listener errors today, but that guarantee lives on that concrete
+          // class, not this call site — a future bus (e.g. a real pub/sub adapter) could throw.
+          try {
+            deps.bus.publish(ctx.tenantId, { type: "proposal.decided", id, status: updated.status });
+          } catch (publishErr) {
+            req.log.error({ err: publishErr }, "event publish failed after a committed approve");
+          }
           return updated;
         } catch (e) {
           // C1 (§3 error-masking + info-leak hardening): map ONLY the typed §3 errors to a specific
@@ -282,8 +291,13 @@ export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRou
 
       try {
         const updated = await rejectProposal(ctx, id, principal.userId, reason, now, engineDeps);
-        // T7: same best-effort publish as approve above.
-        deps.bus.publish(ctx.tenantId, { type: "proposal.decided", id, status: updated.status });
+        // T7: same best-effort publish as approve above, same OWN try/catch — a publish failure must
+        // never turn an already-committed reject into a 500.
+        try {
+          deps.bus.publish(ctx.tenantId, { type: "proposal.decided", id, status: updated.status });
+        } catch (publishErr) {
+          req.log.error({ err: publishErr }, "event publish failed after a committed reject");
+        }
         return updated;
       } catch (e) {
         // C1: same typed-only mapping as approve — see that route's comment. `rejectProposal`'s own
