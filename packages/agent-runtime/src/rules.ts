@@ -87,3 +87,109 @@ export const CONSERVATIVE_DEFAULTS: Readonly<MerchantRuleSet> = {
   subscription: { allowedAuto: false },
   autonomy_scope: { allowedAuto: false },
 };
+
+// --- Task 2: MerchantRulesStore + in-memory adapter ---------------------------------------------
+//
+// Registry pattern over `RuntimeStatePort` (mirrors `cost-cap-registry.ts` /
+// `runtime-consent-store.ts`): one KV row per tenant holding whatever the merchant has explicitly
+// SET (a possibly-partial `MerchantRuleSet`); `get` always merges it over `CONSERVATIVE_DEFAULTS`
+// so an untouched category still returns a safe, fully-populated envelope. Tenant isolation comes
+// from `RuntimeStateCtx.tenantId`, which the port itself enforces (a tenant can never read/write
+// another tenant's row).
+
+const RULES_COLLECTION = "merchant_rules";
+const RULES_KEY = "envelope"; // one row per tenant — the whole rule set, not split per category
+
+// "Big jump" thresholds — a heuristic flag surfaced to the caller (e.g. the merchant console can
+// require extra confirmation), NOT itself a HITL boundary; `classifyAction`/`PALUP_FLOORS` are what
+// actually gate autonomy. A flip from off to on is always flagged regardless of the numeric delta —
+// enabling auto-act at all is the biggest single jump in autonomy a merchant can make.
+const BIG_JUMP_PCT_DELTA = 10; // >10 percentage points in one change
+const BIG_JUMP_USD_DELTA = 50; // >$50 in one change
+
+/** The result of `MerchantRulesStore.set`: the new EFFECTIVE (defaults-merged) envelope plus
+ * whether this particular change looks like a big jump in autonomy. */
+export interface RuleSetChangeResult {
+  envelope: MerchantRuleSet;
+  bigJump: boolean;
+}
+
+/** Tenant-scoped store for a merchant's own automation-rule envelope. `get` never returns an
+ * incomplete/undefined category — every `ProposalCategory` key is present, defaults-merged. `set`
+ * is a PARTIAL patch (only the categories provided are touched) and is fully audited (NN#5): who
+ * (`by`), what changed (before/after), and why (`provenance`, e.g. `"merchant_set"` vs
+ * `"support_override"`). */
+export interface MerchantRulesStore {
+  get(ctx: RuntimeStateCtx): Promise<MerchantRuleSet>;
+  set(
+    ctx: RuntimeStateCtx,
+    patch: MerchantRuleSet,
+    by: string,
+    provenance: string,
+  ): Promise<RuleSetChangeResult>;
+}
+
+function effectiveCategory(cat: ProposalCategory, stored: MerchantRuleSet): CategoryRuleEnvelope {
+  return { ...(CONSERVATIVE_DEFAULTS[cat] ?? { allowedAuto: false }), ...(stored[cat] ?? {}) };
+}
+
+function mergeOverDefaults(stored: MerchantRuleSet): MerchantRuleSet {
+  const merged: MerchantRuleSet = {};
+  for (const cat of Object.keys(CONSERVATIVE_DEFAULTS) as ProposalCategory[]) {
+    merged[cat] = effectiveCategory(cat, stored);
+  }
+  return merged;
+}
+
+/** True when moving from `before` to `after` (one category) looks like a meaningful autonomy
+ * increase: enabling auto-act at all, or raising a numeric ceiling past the delta thresholds above.
+ * Never flags a DECREASE (tightening a rule is always safe, never a "jump" worth flagging). */
+function isBigJump(before: CategoryRuleEnvelope, after: CategoryRuleEnvelope): boolean {
+  if (!before.allowedAuto && after.allowedAuto) return true;
+  if (after.maxPct !== undefined && after.maxPct - (before.maxPct ?? 0) > BIG_JUMP_PCT_DELTA) return true;
+  if (after.maxUsd !== undefined && after.maxUsd - (before.maxUsd ?? 0) > BIG_JUMP_USD_DELTA) return true;
+  return false;
+}
+
+export class InMemoryMerchantRulesStore implements MerchantRulesStore {
+  constructor(private readonly store: RuntimeStatePort) {}
+
+  async get(ctx: RuntimeStateCtx): Promise<MerchantRuleSet> {
+    const stored = (await this.store.get<MerchantRuleSet>(ctx, RULES_COLLECTION, RULES_KEY)) ?? {};
+    return mergeOverDefaults(stored);
+  }
+
+  async set(
+    ctx: RuntimeStateCtx,
+    patch: MerchantRuleSet,
+    by: string,
+    provenance: string,
+  ): Promise<RuleSetChangeResult> {
+    // Read-modify-write + audit inside one tx so the stored envelope and its audit record commit
+    // together or not at all (NN#5 — no silent/partial state change).
+    return this.store.tx(ctx, async (t) => {
+      const storedBefore = (await t.get<MerchantRuleSet>(RULES_COLLECTION, RULES_KEY)) ?? {};
+      const before = mergeOverDefaults(storedBefore);
+      const storedAfter: MerchantRuleSet = { ...storedBefore };
+      let bigJump = false;
+      for (const [key, envPatch] of Object.entries(patch)) {
+        if (!envPatch) continue;
+        const cat = key as ProposalCategory;
+        const beforeCat = before[cat] ?? { allowedAuto: false };
+        const afterCat: CategoryRuleEnvelope = { ...beforeCat, ...envPatch };
+        storedAfter[cat] = afterCat;
+        if (isBigJump(beforeCat, afterCat)) bigJump = true;
+      }
+      await t.put(RULES_COLLECTION, RULES_KEY, storedAfter);
+      const after = mergeOverDefaults(storedAfter);
+      await t.audit({
+        actor: by,
+        action: "rules.changed",
+        input: { patch, provenance },
+        decision: { before, after, bigJump },
+        reversalPath: `MerchantRulesStore.set(ctx, <before-envelope>, "${by}", "reversal") restores the prior envelope for tenant ${ctx.tenantId}`,
+      });
+      return { envelope: after, bigJump };
+    });
+  }
+}
