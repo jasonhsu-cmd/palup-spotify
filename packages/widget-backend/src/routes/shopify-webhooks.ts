@@ -829,9 +829,15 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
     "the tenant's catalog corpus namespace + its corpus-state ledger (best-effort — see catalog.clear_failed if it did not take)",
   ];
   const notErased = [...SHOP_REDACT_RESIDUAL];
-  if (deps.adminTokens) erased.push("the merchant's Shopify Admin API offline token — HARD-DELETED, irreversible (see admin_token.delete in this tenant's chain)");
+  if (deps.adminTokens)
+    erased.push(
+      "the merchant's Shopify Admin API offline token — HARD-DELETED, irreversible (best-effort — see admin_token.delete_failed if it did not take)",
+    );
   else notErased.push("the merchant's Shopify Admin API offline token — no admin-token store wired for this delivery");
-  if (deps.catalogProduct) erased.push("the tenant's catalog_product rows — HARD-DELETED via deleteTenant, irreversible");
+  if (deps.catalogProduct)
+    erased.push(
+      "the tenant's catalog_product rows — HARD-DELETED via deleteTenant, irreversible (best-effort — see catalog_product.delete_tenant_failed if it did not take)",
+    );
   else notErased.push("the tenant's catalog_product rows — no catalog-product store wired for this delivery");
 
   // AUDIT FIRST (header note): if this throws, nothing below runs and no unaudited erasure lands.
@@ -865,18 +871,72 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
   // spoofed header. Each call is independently caught: a failure in one must not abort the other erasures
   // this handler already performs, and must never 500 a webhook Shopify will retry into a lost
   // compliance subscription (the file header's own rationale for every other best-effort call here).
+  //
+  // REVIEW FIX (F1 hardening): the upfront `shop.redact_applied` audit above CLAIMS these are
+  // hard-deleted (audit-first, per the header note) — so a caught failure here MUST land its own audit
+  // row, exactly like `eraseCatalogCorpus`/`tombstoneCatalogProducts` already do for their own best-effort
+  // actions. `console.error` alone is not enough for the two most compliance-sensitive actions in this
+  // file: without a durable, immutable record of the residual, the audit trail would permanently and
+  // silently assert a statutory erasure that never happened.
   if (deps.adminTokens) {
     try {
       await deps.adminTokens.delete(tenantId, { actor: "system:shop-redact" });
     } catch (e) {
-      console.error(`[shop/redact] admin token delete failed tenant=${tenantId}: ${(e as Error).message}`);
+      const message = (e as Error).message;
+      console.error(`[shop/redact] admin token delete failed tenant=${tenantId}: ${message}`);
+      try {
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: "system:shopify-webhook",
+            action: "admin_token.delete_failed",
+            input: { tenantId, topic: "shop/redact" },
+            decision: {
+              complete: false,
+              erased: [],
+              notErased: [`the merchant's Shopify Admin API offline token — adminTokens.delete threw: ${message}`],
+              reason:
+                "adminTokens.delete threw; the webhook still acknowledges 200 (per [W1]/[W2]) so Shopify's retries " +
+                "are not burned over a residual this record already discloses — the upfront shop.redact_applied " +
+                "audit's claim of erasure is corrected by this row",
+            },
+            reversalPath: `n/a — nothing was deleted. Retry by hand once the underlying fault is fixed (this delivery is deduped/terminal and will not retry).`,
+          },
+        );
+      } catch {
+        // Same tradeoff as `eraseCatalogCorpus`'s own catch: a secondary audit-write failure must not 500
+        // this statutory webhook. `console.error` above is the only remaining trace.
+      }
     }
   }
   if (deps.catalogProduct) {
     try {
       await deps.catalogProduct.deleteTenant(tenantId);
     } catch (e) {
-      console.error(`[shop/redact] catalog_product deleteTenant failed tenant=${tenantId}: ${(e as Error).message}`);
+      const message = (e as Error).message;
+      console.error(`[shop/redact] catalog_product deleteTenant failed tenant=${tenantId}: ${message}`);
+      try {
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: "system:shopify-webhook",
+            action: "catalog_product.delete_tenant_failed",
+            input: { tenantId, topic: "shop/redact" },
+            decision: {
+              complete: false,
+              erased: [],
+              notErased: [`the tenant's catalog_product rows — catalogProduct.deleteTenant threw: ${message}`],
+              reason:
+                "catalogProduct.deleteTenant threw; the webhook still acknowledges 200 (per [W1]/[W2]) so Shopify's " +
+                "retries are not burned over a residual this record already discloses — the upfront " +
+                "shop.redact_applied audit's claim of erasure is corrected by this row",
+            },
+            reversalPath: `n/a — nothing was deleted. Retry by hand once the underlying fault is fixed (this delivery is deduped/terminal and will not retry).`,
+          },
+        );
+      } catch {
+        // Same tradeoff as above: a secondary audit-write failure must not 500 this statutory webhook.
+      }
     }
   }
   try {

@@ -34,12 +34,26 @@ function nextWebhookId(): string {
   return `wh-admin-token-${webhookSeq}`;
 }
 
-function fakeAdminTokens(): Pick<AdminTokenStore, "delete"> & { deleteCalls: Array<{ tenantId: string; opts: { actor: string } }> } {
+function fakeAdminTokens(
+  opts: { throwOnDelete?: boolean } = {},
+): Pick<AdminTokenStore, "delete"> & { deleteCalls: Array<{ tenantId: string; opts: { actor: string } }> } {
   const deleteCalls: Array<{ tenantId: string; opts: { actor: string } }> = [];
   return {
     deleteCalls,
-    async delete(tenantId, opts) {
-      deleteCalls.push({ tenantId, opts });
+    async delete(tenantId, deleteOpts) {
+      deleteCalls.push({ tenantId, opts: deleteOpts });
+      if (opts.throwOnDelete) throw new Error("simulated admin token store failure");
+    },
+  };
+}
+
+/** Wraps a real CatalogProductPort but makes `deleteTenant` throw — for REVIEW-FIX RED evidence that a
+ *  thrown hard-retire is caught and separately audited, never silently swallowed behind a 200. */
+function throwingDeleteTenant(inner: CatalogProductPort): CatalogProductPort {
+  return {
+    ...inner,
+    async deleteTenant() {
+      throw new Error("simulated catalog_product store failure");
     },
   };
 }
@@ -53,13 +67,25 @@ interface Harness {
   catalogProduct: CatalogProductPort;
 }
 
-async function harness(opts: { killCheck?: (tenantId: string) => Promise<boolean>; withCatalogProduct?: boolean; withAdminTokens?: boolean } = {}): Promise<Harness> {
+async function harness(
+  opts: {
+    killCheck?: (tenantId: string) => Promise<boolean>;
+    withCatalogProduct?: boolean;
+    withAdminTokens?: boolean;
+    adminTokensThrowOnDelete?: boolean;
+    catalogProductThrowOnDeleteTenant?: boolean;
+  } = {},
+): Promise<Harness> {
   const app = Fastify();
   const store = new InMemoryRuntimeStore();
   const registry = createInMemoryMerchantRegistry();
   const vector: VectorPort = createInMemoryVectorStore();
-  const adminTokens = fakeAdminTokens();
+  const adminTokens = fakeAdminTokens({ throwOnDelete: opts.adminTokensThrowOnDelete });
+  // The port exposed to test assertions (seeding, reading rows back) is always the REAL in-memory store;
+  // `deps.catalogProduct` may instead be a throwing WRAPPER around it, so a simulated deleteTenant failure
+  // never actually removes the seeded row underneath the assertions below.
   const catalogProduct = createInMemoryCatalogProductStore();
+  const catalogProductDep = opts.catalogProductThrowOnDeleteTenant ? throwingDeleteTenant(catalogProduct) : catalogProduct;
   await registry.create({ tenantId: TENANT, shopDomain: SHOP, embedKey: EMBED_KEY, region: "us" });
 
   const deps: ShopifyWebhookDeps = {
@@ -70,7 +96,7 @@ async function harness(opts: { killCheck?: (tenantId: string) => Promise<boolean
     killCheck: opts.killCheck ?? (async () => false),
     now: () => Date.now(),
     ...(opts.withAdminTokens === false ? {} : { adminTokens }),
-    ...(opts.withCatalogProduct === false ? {} : { catalogProduct }),
+    ...(opts.withCatalogProduct === false ? {} : { catalogProduct: catalogProductDep }),
   };
   registerShopifyWebhookRoutes(app, deps);
   await app.ready();
@@ -231,6 +257,48 @@ describe("Task 9 (ADR-0022 F1) — two-step Admin-token + catalog teardown", () 
     const h = await harness({ withCatalogProduct: false });
     const res = await h.post(WEBHOOK_ROUTES.appUninstalled, "app/uninstalled", appUninstalledBody());
     expect(res.statusCode).toBe(200);
+  });
+
+  it("REVIEW FIX: adminTokens.delete throwing on shop/redact's applied path is caught, still 200, and writes a failure audit entry (never a silent false claim)", async () => {
+    const h = await harness({ adminTokensThrowOnDelete: true });
+    await seedProducts(h.catalogProduct);
+
+    const res = await h.post(WEBHOOK_ROUTES.shopRedact, "shop/redact", shopRedactBody());
+    expect(res.statusCode).toBe(200); // never a 500 — Shopify's retries must not be burned over this
+
+    // The upfront audit-first record still exists (audit-first-then-act), but the trail must NOT be left
+    // silently asserting an erasure that did not occur — a corrective failure audit is required.
+    const audit = await h.store.readAudit({ tenantId: TENANT });
+    expect(audit.find((r) => r.action === "shop.redact_applied")).toBeTruthy();
+    const failRec = audit.find((r) => r.action === "admin_token.delete_failed");
+    expect(failRec, "a caught adminTokens.delete failure must be audited, not just console.error'd").toBeTruthy();
+    const decision = failRec!.decision as { complete?: unknown; notErased?: unknown };
+    expect(decision.complete).toBe(false);
+    expect((decision.notErased as string[]).join(" ")).toMatch(/admin.*token/i);
+
+    // The independent catalog_product hard-retire must still have run (each call is caught separately).
+    expect(await h.catalogProduct.listByTenant(TENANT, { includeDeleted: true })).toEqual([]);
+  });
+
+  it("REVIEW FIX: catalogProduct.deleteTenant throwing on shop/redact's applied path is caught, still 200, and writes a failure audit entry", async () => {
+    const h = await harness({ catalogProductThrowOnDeleteTenant: true });
+    await seedProducts(h.catalogProduct);
+
+    const res = await h.post(WEBHOOK_ROUTES.shopRedact, "shop/redact", shopRedactBody());
+    expect(res.statusCode).toBe(200);
+
+    expect(h.adminTokens.deleteCalls).toHaveLength(1); // the independent admin-token delete still ran
+
+    const audit = await h.store.readAudit({ tenantId: TENANT });
+    const failRec = audit.find((r) => r.action === "catalog_product.delete_tenant_failed");
+    expect(failRec, "a caught catalogProduct.deleteTenant failure must be audited, not just console.error'd").toBeTruthy();
+    const decision = failRec!.decision as { complete?: unknown; notErased?: unknown };
+    expect(decision.complete).toBe(false);
+    expect((decision.notErased as string[]).join(" ")).toMatch(/catalog_product/i);
+
+    // The row survived the (simulated) failed hard-retire — it's on the REAL underlying store, untouched
+    // by the throwing wrapper.
+    expect(await h.catalogProduct.listByTenant(TENANT, { includeDeleted: true })).toHaveLength(1);
   });
 
   it("HMAC verify still precedes the teardown: a bad HMAC on shop/redact is refused and deletes nothing", async () => {
