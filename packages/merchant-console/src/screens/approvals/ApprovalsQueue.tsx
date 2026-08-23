@@ -17,11 +17,15 @@ export interface ApprovalsQueueProps {
   /** Called with the proposal id when the merchant asks to review one. Wires to navigation
    *  (e.g. react-router) at the call site — this component has no routing opinion of its own. */
   onSelect?: (id: string) => void;
+  /** T7: bump to force a re-fetch (e.g. after an approve/reject reconciles, or the Approval Center
+   *  screen's `useApprovalsLive` observed a live SSE nudge) — this component still owns and fetches
+   *  its own list; this is just an extra effect dependency, never a second data source. */
+  refreshKey?: number;
 }
 
 type LoadState = "loading" | "ready" | "error";
 
-export function ApprovalsQueue({ api, onSelect }: ApprovalsQueueProps) {
+export function ApprovalsQueue({ api, onSelect, refreshKey }: ApprovalsQueueProps) {
   const [state, setState] = useState<LoadState>("loading");
   const [items, setItems] = useState<Proposal[]>([]);
 
@@ -40,7 +44,10 @@ export function ApprovalsQueue({ api, onSelect }: ApprovalsQueueProps) {
 
   useEffect(() => {
     load();
-  }, [load]);
+    // `refreshKey` is intentionally an extra dependency with no use inside the effect body — it
+    // exists purely to force this re-fetch when the caller bumps it (T7).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load, refreshKey]);
 
   if (state === "loading") {
     return (

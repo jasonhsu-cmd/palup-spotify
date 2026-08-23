@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Proposal } from "@palup/platform-ports";
 import type { ApiClient } from "../../app/api";
@@ -70,6 +70,19 @@ describe("ApprovalsQueue", () => {
     render(<ApprovalsQueue api={fakeApi([proposal({ id: "p1" })])} onSelect={onSelect} />);
     await userEvent.click(await screen.findByRole("button", { name: "Review" }));
     expect(onSelect).toHaveBeenCalledWith("p1");
+  });
+
+  it("re-fetches when `refreshKey` changes (e.g. after an approve/reject reconciles, T7 assembly) — same `api` reference both times", async () => {
+    const api = fakeApi([]); // one stable object — proves the re-fetch is driven by refreshKey, not a new `api` prop
+    const { rerender } = render(<ApprovalsQueue api={api} refreshKey={0} />);
+    await waitFor(() => expect(api.listApprovals).toHaveBeenCalledTimes(1));
+
+    rerender(<ApprovalsQueue api={api} refreshKey={1} />);
+    await waitFor(() => expect(api.listApprovals).toHaveBeenCalledTimes(2));
+
+    rerender(<ApprovalsQueue api={api} refreshKey={1} />);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(api.listApprovals).toHaveBeenCalledTimes(2); // an unchanged refreshKey never re-fetches
   });
 
   it("shows an error state and can retry when the fetch fails", async () => {

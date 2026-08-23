@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { makeApiClient, ConflictError, KilledError, AuthError } from "./api.js";
+import { waitFor } from "@testing-library/react";
+import { makeApiClient, ConflictError, KilledError, AuthError, type ConsoleEvent } from "./api.js";
 
 // Typed helper so `.mock.calls[n]` is a real `[string, RequestInit]` tuple (not `[]`) under this
 // repo's `noUncheckedIndexedAccess` — matches the `vi.fn<typeof fetch>(...)` idiom already used
@@ -103,6 +104,90 @@ describe("makeApiClient", () => {
     expect(fetchSpy.mock.calls[1]![0]).toBe("/api/kill");
     expect(fetchSpy.mock.calls[1]![1]!.method).toBe("POST");
     expect(fetchSpy.mock.calls[2]![0]).toBe("/api/unkill");
+  });
+
+  it("openEvents opens a fetch-based SSE stream authorized by the bearer HEADER, never a URL token", async () => {
+    const events: ConsoleEvent[] = [];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"type":"proposal.created","id":"p1"}\n\n'));
+        controller.close();
+      },
+    });
+    const fetchSpy = vi.fn<typeof fetch>(async (url, init) => {
+      expect(String(url)).toBe("/api/events");
+      expect(String(url)).not.toContain("token=");
+      expect(headersOf(init).Authorization).toBe("Bearer sess-tok");
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "sess-tok", fetch: fetchSpy });
+
+    const unsubscribe = api.openEvents((e) => events.push(e));
+    await waitFor(() => expect(events).toHaveLength(1));
+    expect(events[0]).toEqual({ type: "proposal.created", id: "p1" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("openEvents parses multiple SSE frames delivered across separate chunks", async () => {
+    const events: ConsoleEvent[] = [];
+    const encoder = new TextEncoder();
+    let pushSecond: (() => void) | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"type":"kill.changed","killed":true}\n\n'));
+        pushSecond = () => {
+          controller.enqueue(encoder.encode('data: {"type":"proposal.decided","id":"p2","status":"approved"}\n\n'));
+          controller.close();
+        };
+      },
+    });
+    const fetchSpy = vi.fn<typeof fetch>(
+      async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    );
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+
+    const unsubscribe = api.openEvents((e) => events.push(e));
+    await waitFor(() => expect(events).toHaveLength(1));
+    pushSecond?.();
+    await waitFor(() => expect(events).toHaveLength(2));
+    expect(events).toEqual([
+      { type: "kill.changed", killed: true },
+      { type: "proposal.decided", id: "p2", status: "approved" },
+    ]);
+    unsubscribe();
+  });
+
+  it("openEvents retries the stream on error/end and reports it via the onStreamError callback", async () => {
+    let calls = 0;
+    const fetchSpy = vi.fn<typeof fetch>(async () => {
+      calls += 1;
+      throw new Error("network down");
+    });
+    const onStreamError = vi.fn();
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy, sseRetryMs: 5 });
+
+    const unsubscribe = api.openEvents(() => {}, onStreamError);
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
+    expect(onStreamError).toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("openEvents' unsubscribe stops further reconnect attempts", async () => {
+    let calls = 0;
+    const fetchSpy = vi.fn<typeof fetch>(async () => {
+      calls += 1;
+      throw new Error("network down");
+    });
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy, sseRetryMs: 5 });
+
+    const unsubscribe = api.openEvents(() => {});
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(1));
+    unsubscribe();
+    const callsAtUnsubscribe = calls;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(calls).toBe(callsAtUnsubscribe);
   });
 
   it("listAudit returns the safe audit entries", async () => {

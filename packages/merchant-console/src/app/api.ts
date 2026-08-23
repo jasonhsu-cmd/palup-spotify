@@ -96,27 +96,29 @@ export interface ApiClient {
   listAudit(cursor?: string): Promise<{ items: AuditEntry[]; cursor?: string }>;
   /** Subscribes to the tenant's SSE `/events` stream; returns an unsubscribe function. Best-effort
    *  live nudge only (events.ts's own contract) — a dropped/never-opened stream never loses data,
-   *  because the store (`listApprovals`/`getKill`) stays the source of truth (see the plan's
-   *  Task 7 `useApprovalsLive`, which re-fetches on every event rather than trusting its payload).
+   *  because the store (`listApprovals`/`getKill`) stays the source of truth (see
+   *  `useApprovalsLive`, which re-fetches on every event rather than trusting its payload).
    *
-   *  KNOWN LIMITATION (not fabricated as working): the browser's native `EventSource` cannot set an
-   *  `Authorization` header, and W1-API's `bearer()` (identity-shopify/fastify-plugin.ts) reads ONLY
-   *  that header — it has no query-param fallback. This passes the current token as a `token` query
-   *  param as a forward-compatible best effort; against the ACTUAL deployed W1-API today that still
-   *  401s (no data loss — the store re-fetch is what actually reconciles). Wiring a real
-   *  query-param/ticket auth path for this route is a W1-API-side decision for whoever wires Task 7,
-   *  not made here. */
-  openEvents(onEvent: (e: ConsoleEvent) => void): () => void;
+   *  T7 SSE-AUTH FIX: the browser's native `EventSource` cannot set an `Authorization` header, and
+   *  W1-API's `bearer()` (identity-shopify/fastify-plugin.ts) reads ONLY that header — no
+   *  query-param fallback. A `?token=` in the URL would ALSO be unsafe regardless (logged by
+   *  proxies, visible in `Referer`, cached in browser history) — so this is not "EventSource plus a
+   *  workaround," it's a hand-rolled fetch-based SSE reader: `fetch(GET /events, {headers:
+   *  {Authorization: Bearer <token>}})`, reading `response.body` as a stream and parsing `data: <json>
+   *  \n\n` frames itself. The token is NEVER placed in the URL. On a stream error/end, `onStreamError`
+   *  fires (if provided) and the reader reconnects on its own after `sseRetryMs` — `onStreamError` is
+   *  the hook for a caller (`useApprovalsLive`) to trigger its own full re-fetch as a safety net for
+   *  whatever was missed while disconnected; the automatic reconnect is otherwise invisible plumbing. */
+  openEvents(onEvent: (e: ConsoleEvent) => void, onStreamError?: () => void): () => void;
 }
 
 export interface MakeApiClientArgs {
   baseUrl: string;
   getToken: () => Promise<string>;
   fetch: typeof fetch;
-  /** Injectable for tests (jsdom has no global `EventSource`); defaults to `globalThis.EventSource`,
-   *  resolved lazily inside `openEvents` — never referenced at `makeApiClient()` call time, so
-   *  constructing a client never throws in a test/SSR environment that has no `EventSource`. */
-  EventSourceImpl?: typeof EventSource;
+  /** Delay (ms) before `openEvents` retries a dropped/failed SSE connection. Defaults to 3000;
+   *  overridable so tests don't have to wait out a real multi-second backoff. */
+  sseRetryMs?: number;
 }
 
 function toQuery(params: Record<string, string | undefined>): string {
@@ -134,7 +136,7 @@ async function safeJson(res: Response): Promise<Record<string, unknown> | undefi
 }
 
 export function makeApiClient(args: MakeApiClientArgs): ApiClient {
-  const { baseUrl, getToken, fetch: fetchFn, EventSourceImpl } = args;
+  const { baseUrl, getToken, fetch: fetchFn, sseRetryMs = 3000 } = args;
 
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const attempt = async (): Promise<Response> => {
@@ -203,32 +205,81 @@ export function makeApiClient(args: MakeApiClientArgs): ApiClient {
       const query = toQuery({ cursor });
       return request<{ items: AuditEntry[]; cursor?: string }>(`/audit${query}`);
     },
-    openEvents(onEvent) {
-      let source: InstanceType<typeof EventSource> | undefined;
+    openEvents(onEvent, onStreamError) {
       let closed = false;
-      getToken()
-        .then((token) => {
-          if (closed) return;
-          const Ctor = EventSourceImpl ?? (globalThis as { EventSource?: typeof EventSource }).EventSource;
-          if (!Ctor) return; // no EventSource in this environment (e.g. SSR/tests) — best-effort, never throws
-          const query = toQuery({ token });
-          source = new Ctor(`${baseUrl}/events${query}`);
-          source.onmessage = (ev: MessageEvent<string>) => {
-            try {
-              onEvent(JSON.parse(ev.data) as ConsoleEvent);
-            } catch {
-              // a malformed SSE payload is dropped, never crashes the subscriber — the store
-              // re-fetch remains authoritative regardless of what this stream carries.
+      let retryTimer: ReturnType<typeof setTimeout> | undefined;
+      const controller = new AbortController();
+
+      function scheduleReconnect() {
+        if (closed) return;
+        onStreamError?.();
+        retryTimer = setTimeout(() => {
+          void connectOnce();
+        }, sseRetryMs);
+      }
+
+      async function connectOnce(): Promise<void> {
+        if (closed) return;
+        let token: string;
+        try {
+          token = await getToken();
+        } catch {
+          scheduleReconnect(); // a failed token fetch is treated the same as a dropped connection
+          return;
+        }
+        if (closed) return;
+
+        let res: Response;
+        try {
+          res = await fetchFn(`${baseUrl}/events`, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${token}`, accept: "text/event-stream" },
+            signal: controller.signal,
+          });
+        } catch {
+          scheduleReconnect();
+          return;
+        }
+        if (closed) return;
+        if (!res.ok || !res.body) {
+          scheduleReconnect();
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        try {
+          while (!closed) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let boundary: number;
+            while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+              const frame = buffer.slice(0, boundary);
+              buffer = buffer.slice(boundary + 2);
+              const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+              if (dataLine === undefined) continue;
+              try {
+                onEvent(JSON.parse(dataLine.slice(5).trim()) as ConsoleEvent);
+              } catch {
+                // a malformed SSE frame is dropped, never crashes the subscriber — the store
+                // re-fetch remains authoritative regardless of what this stream carries.
+              }
             }
-          };
-        })
-        .catch(() => {
-          // a failed token fetch just means no live updates this session; the store stays
-          // authoritative (events.ts's own module contract).
-        });
+          }
+        } catch {
+          // a stream read error falls through to the same reconnect path as a clean end-of-stream.
+        }
+        if (!closed) scheduleReconnect();
+      }
+
+      void connectOnce();
+
       return () => {
         closed = true;
-        source?.close();
+        if (retryTimer !== undefined) clearTimeout(retryTimer);
+        controller.abort();
       };
     },
   };
