@@ -23,13 +23,16 @@ export interface ProposalDetailProps {
   onApproved?: (updated: Proposal) => void;
   onConflict?: () => void;
   notify?: (message: string) => void;
+  /** T6/T7: forwarded straight to the wired `ApproveDialog` — see its own doc comment. Global Kill
+   *  Switch state, not a per-view guess. */
+  killed?: boolean;
   /** An additional/alternate action area, rendered after the wired `ApproveDialog` (if any) —
-   *  e.g. a future Reject button. Left generic so this view never needs to know every possible
+   *  e.g. the T5 `RejectDialog`. Left generic so this view never needs to know every possible
    *  action's own wiring. */
   actions?: ReactNode;
 }
 
-export function ProposalDetail({ proposal, api, onApproved, onConflict, notify, actions }: ProposalDetailProps) {
+export function ProposalDetail({ proposal, api, onApproved, onConflict, notify, killed, actions }: ProposalDetailProps) {
   const irreversible = isIrreversible(proposal);
 
   return (
@@ -71,6 +74,7 @@ export function ProposalDetail({ proposal, api, onApproved, onConflict, notify, 
                 onApproved={onApproved}
                 onConflict={onConflict}
                 notify={notify}
+                killed={killed}
               />
             )}
             {actions}

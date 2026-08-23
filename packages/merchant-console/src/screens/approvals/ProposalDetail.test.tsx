@@ -71,4 +71,9 @@ describe("ProposalDetail", () => {
 
     expect(approve).toHaveBeenCalledWith(p.id, p.version);
   });
+
+  it("forwards `killed` (T6/T7 global Kill Switch state) so Approve is disabled while halted", () => {
+    render(<ProposalDetail proposal={irreversibleCampaign()} api={{ approve: vi.fn() }} killed />);
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+  });
 });

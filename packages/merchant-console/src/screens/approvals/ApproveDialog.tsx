@@ -40,15 +40,28 @@ export interface ApproveDialogProps {
   /** Optional success notification hook (e.g. the app-level `useToast().toast`); this component
    *  has no opinion on HOW a toast is shown, only that it fires on a real, committed approve. */
   notify?: (message: string) => void;
+  /** T6/T7: the GLOBAL Kill Switch state (from `useApprovalsLive`'s `getKill()`-sourced value, not
+   *  a per-component guess) — when true, Approve is disabled regardless of whether THIS instance
+   *  has ever itself seen a 423. Reflects real system state (CLAUDE.md §3.4: never a code path an
+   *  operator's halt fails to stop) even for a proposal this component hasn't tried to approve yet.
+   *  Defaults to `false` so existing callers that don't know about the Kill Switch are unaffected. */
+  killed?: boolean;
 }
 
 type ErrorState = { kind: "conflict" | "killed" | "other"; message: string } | null;
 
-export function ApproveDialog({ api, proposal, onApproved, onConflict, notify }: ApproveDialogProps) {
+export function ApproveDialog({
+  api,
+  proposal,
+  onApproved,
+  onConflict,
+  notify,
+  killed: killedProp = false,
+}: ApproveDialogProps) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ErrorState>(null);
-  const killed = error?.kind === "killed";
+  const killed = killedProp || error?.kind === "killed";
 
   async function handleConfirm() {
     setBusy(true);

@@ -83,6 +83,13 @@ describe("ApproveDialog", () => {
     expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
   });
 
+  it("an externally-supplied `killed` prop (the global Kill Switch, T6/T7) disables Approve on its own — no local 423 required", async () => {
+    const approve = vi.fn();
+    render(<ApproveDialog api={{ approve }} proposal={proposal()} killed />);
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+    expect(approve).not.toHaveBeenCalled();
+  });
+
   it("calls the injected notify hook on a successful approve", async () => {
     const p = proposal();
     const approve = vi.fn(async () => ({ ...p, status: "approved" as const }));
