@@ -1,9 +1,23 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
-import { type RuntimeStatePort, type MerchantIdentityPort, createEnvSecrets, createInMemoryMerchantRegistry } from "@palup/platform-ports";
+import {
+  type RuntimeStatePort,
+  type MerchantIdentityPort,
+  type CampaignCommsPort,
+  type CustomerListingCommerce,
+  type MerchantRulesStore,
+  type ProposalStore,
+  createEnvSecrets,
+  createInMemoryMerchantRegistry,
+  InMemoryMerchantRulesStore,
+  InMemoryProposalStore,
+  SandboxCommsAdapter,
+  SandboxCustomerDirectory,
+} from "@palup/platform-ports";
 import { createRuntimeStore, PostgresMerchantRegistry } from "@palup/state-postgres";
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
 import { registerMeRoutes } from "./routes/me.js";
+import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
 import "./types.js";
 
 // Task 4 composition root: `store`/`identity` stay injectable (every existing test suite injects fakes
@@ -23,10 +37,27 @@ import "./types.js";
 //                 real shop can't resolve until then; that is fail-closed by construction, not a bypass.
 //   • SHOPIFY_APP_CLIENT_ID is the OAuth client id (NOT a secret — it ships in the URL, same convention
 //     widget-backend uses at server.ts:1196) so it is read directly from the environment.
-export async function buildServer(opts?: { store?: RuntimeStatePort; identity?: MerchantIdentityPort }): Promise<FastifyInstance> {
+export async function buildServer(opts?: {
+  store?: RuntimeStatePort;
+  identity?: MerchantIdentityPort;
+  // Task 5 (WB win-back staging trigger route) — every one of these stays injectable so its tests
+  // (and every other suite in this package) never need a real DB/comms provider. Absent opts default
+  // to sandbox/in-memory adapters wrapping `store` — the exact same "inject for tests, sandbox/mock
+  // for real deploys until a governed live adapter is wired" convention `identity`/`registry` above
+  // already follow.
+  commerce?: CustomerListingCommerce;
+  comms?: CampaignCommsPort;
+  proposalStore?: ProposalStore;
+  rulesStore?: MerchantRulesStore;
+}): Promise<FastifyInstance> {
   const runtimeResult = opts?.store ? undefined : await createRuntimeStore();
   const store: RuntimeStatePort = opts?.store ?? runtimeResult!.store;
-  void store; // wired into routes as W1-W7 land; unused for now beyond proving the injectable seam.
+  const commerce: CustomerListingCommerce = opts?.commerce ?? new SandboxCustomerDirectory({});
+  // SandboxCommsAdapter records every send and NEVER delivers — the only comms adapter this service
+  // may default to until a real (still consent/DLP-gated) provider adapter is wired + prod-enabled.
+  const comms: CampaignCommsPort = opts?.comms ?? new SandboxCommsAdapter();
+  const proposalStore: ProposalStore = opts?.proposalStore ?? new InMemoryProposalStore(store);
+  const rulesStore: MerchantRulesStore = opts?.rulesStore ?? new InMemoryMerchantRulesStore(store);
   const identity: MerchantIdentityPort =
     opts?.identity ??
     createShopifyAppBridgeIdentity({
@@ -75,6 +106,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort; identity?: 
   await app.register(async (merchantPlane) => {
     merchantPlane.addHook("preHandler", requireMerchant(identity));
     registerMeRoutes(merchantPlane);
+    registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
   });
 
   return app;
