@@ -74,6 +74,18 @@ describe("design tokens stay identical to the canonical tokens.css", () => {
     expect(theme.sidebarWidth).toBe(tokens["sidebar-w"]);
   });
 
+  it("theme.ts on-tint note-ink colors match tokens.css exactly", () => {
+    expect(theme.color.noteInfoInk).toBe(tokens["note-info-ink"]);
+    expect(theme.color.noteWarnInk).toBe(tokens["note-warn-ink"]);
+    expect(theme.color.noteDangInk).toBe(tokens["note-dang-ink"]);
+  });
+
+  it("theme.ts font-family tokens match tokens.css exactly (--ff/--fd/--fm)", () => {
+    expect(theme.font.sans).toBe(tokens["ff"]);
+    expect(theme.font.display).toBe(tokens["fd"]);
+    expect(theme.font.mono).toBe(tokens["fm"]);
+  });
+
   it("tailwind-preset.cjs colors match tokens.css exactly", () => {
     const c = tailwindPreset.theme.extend.colors;
     expect(c.ink.DEFAULT).toBe(tokens["ink"]);
@@ -102,6 +114,9 @@ describe("design tokens stay identical to the canonical tokens.css", () => {
     expect(c.dang.soft).toBe(tokens["dang-soft"]);
     expect(c.info.DEFAULT).toBe(tokens["info"]);
     expect(c.info.soft).toBe(tokens["info-soft"]);
+    expect(c["note-info-ink"]).toBe(tokens["note-info-ink"]);
+    expect(c["note-warn-ink"]).toBe(tokens["note-warn-ink"]);
+    expect(c["note-dang-ink"]).toBe(tokens["note-dang-ink"]);
   });
 
   it("tailwind-preset.cjs radius/shadow match tokens.css exactly", () => {
@@ -114,5 +129,12 @@ describe("design tokens stay identical to the canonical tokens.css", () => {
     expect(s.sm).toBe(tokens["sh-sm"]);
     expect(s.DEFAULT).toBe(tokens["sh"]);
     expect(s.lg).toBe(tokens["sh-lg"]);
+  });
+
+  it("tailwind-preset.cjs font-family arrays, comma-joined, match tokens.css exactly", () => {
+    const f = tailwindPreset.theme.extend.fontFamily;
+    expect(f.sans.join(",")).toBe(tokens["ff"]);
+    expect(f.display.join(",")).toBe(tokens["fd"]);
+    expect(f.mono.join(",")).toBe(tokens["fm"]);
   });
 });

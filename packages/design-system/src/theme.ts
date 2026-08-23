@@ -49,9 +49,12 @@ export const theme = {
     lg: "0 18px 48px -12px rgba(22,32,27,.20),0 6px 16px -8px rgba(22,32,27,.12)",
   },
   font: {
-    sans: '"Hanken Grotesk", system-ui, sans-serif',
-    display: '"Schibsted Grotesk", system-ui, sans-serif',
-    mono: '"IBM Plex Mono", ui-monospace, monospace',
+    // No space after the commas — must be byte-identical to tokens.css's --ff/--fd/--fm
+    // (test/theme-tokens-consistency.test.ts caught the drift where this previously had
+    // "family, family" spacing that tokens.css does not).
+    sans: '"Hanken Grotesk",system-ui,sans-serif',
+    display: '"Schibsted Grotesk",system-ui,sans-serif',
+    mono: '"IBM Plex Mono",ui-monospace,monospace',
   },
   sidebarWidth: "264px",
 } as const;
