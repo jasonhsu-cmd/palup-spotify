@@ -193,3 +193,89 @@ export class InMemoryMerchantRulesStore implements MerchantRulesStore {
     });
   }
 }
+
+// --- Task 3: createRulesProvider — the E1 RulesProvider, floor-clamped -------------------------
+//
+// IMPORTANT DEVIATION FROM THE TASK-3 BRIEF'S SHORTHAND: the brief describes this as
+// `palupFloor(category) = PALUP_FLOORS[category]`, but E1's ALREADY-MERGED `RulesProvider`
+// interface (`classify.ts`) pins `palupFloor(): PalupFloor | Promise<PalupFloor>` — no `category`
+// argument, called once per `classifyAction` invocation as `rules.palupFloor()`. That signature is
+// explicitly "pinned... do not change... without updating every consumer" (`proposal-store.ts`), so
+// this module implements against the REAL signature rather than the brief's paraphrase. The
+// consequence: `palupFloor()` can only return ONE category-agnostic `PalupFloor`; the actual
+// per-category ceiling from `PALUP_FLOORS[category]` is enforced entirely inside `autoActLimit`
+// (which DOES receive `category`), by clamping the merchant's envelope down to it before it is ever
+// returned. See `GLOBAL_PALUP_FLOOR` below for why its numbers are chosen the way they are.
+
+/**
+ * The single, category-agnostic `PalupFloor` handed to `classifyAction` via `palupFloor()`.
+ *   - `massSendRecipientFloor` (500): identical across every `PALUP_FLOORS` entry, so any one of
+ *     them is the right global value — this is the number `classifyAction` enforces unconditionally
+ *     (invariant 1), independent of category.
+ *   - `maxAutoPct` (100): the LARGEST `maxAutoPct` across all `PALUP_FLOORS` entries. `classifyAction`
+ *     computes `cap = Math.min(limit.maxPct, floor.maxAutoPct)`, and `limit.maxPct` (from
+ *     `autoActLimit`, below) is ALREADY clamped to that category's own, possibly tighter,
+ *     `PALUP_FLOORS[category].maxAutoPct`. Choosing anything smaller than 100 here (e.g.
+ *     `autonomy_scope`'s 0) would let one category's floor silently over-restrict every OTHER
+ *     category through a number that has nothing to do with it. This global value is a structural
+ *     no-op layered on top of the real, per-category clamp — never a second, independent ceiling.
+ *   - no `maxAutoUsd`: unnecessary for the mirror-image reason — `autoActLimit` already returns a
+ *     `maxUsd` bounded by `PALUP_FLOORS[category].maxAutoUsd` for every dollar-denominated category
+ *     (never `undefined` when that category defines a floor), so `classifyAction`'s fail-closed
+ *     "neither side configures a ceiling" branch never fires for them; leaving this `undefined`
+ *     avoids repeating the same "must be ≥ every category's own cap" bookkeeping for no benefit.
+ */
+const GLOBAL_PALUP_FLOOR: Readonly<PalupFloor> = {
+  maxAutoPct: 100,
+  massSendRecipientFloor: 500,
+};
+
+/** True when this category's OWN `PALUP_FLOORS` entry leaves any room at all for auto-act — false
+ * for a category floor-pinned to 0% with no dollar alternative (currently only `autonomy_scope`).
+ * `autoActLimit`'s numeric clamp already forces `pct > cap` to fail in that case, but this makes the
+ * closure explicit in `allowedAuto` itself too, so a caller inspecting the limit directly (not just
+ * `classifyAction`'s derived decision) sees an honest `allowedAuto: false` rather than a `true`
+ * bundled with a `maxPct: 0` that only prevents auto-act via a second computation. */
+function withinFloor(floor: PalupFloor): boolean {
+  const pctRoom = floor.maxAutoPct > 0;
+  const usdRoom = floor.maxAutoUsd === undefined || floor.maxAutoUsd > 0;
+  return pctRoom && usdRoom;
+}
+
+/**
+ * Builds E1's `RulesProvider` on top of a `MerchantRulesStore`: `autoActLimit` reads the merchant's
+ * stored envelope for the category and CLAMPS its numeric ceilings down to `PALUP_FLOORS[category]`
+ * — the merchant can only ever be as permissive as (or tighter than) the platform floor, never
+ * looser, even if the stored envelope itself is misconfigured (e.g. `maxPct: 100`). `palupFloor`
+ * returns the fixed, category-agnostic `GLOBAL_PALUP_FLOOR` (see above for why it must be
+ * category-agnostic and why its specific numbers are safe).
+ */
+export function createRulesProvider(store: MerchantRulesStore): RulesProvider {
+  return {
+    async autoActLimit(
+      ctx: RuntimeStateCtx,
+      category: ProposalCategory,
+      _action: AgentAction,
+    ): Promise<AutoActLimit> {
+      const ruleSet = await store.get(ctx);
+      const envelope: CategoryRuleEnvelope = ruleSet[category] ?? { allowedAuto: false };
+      const floor = PALUP_FLOORS[category];
+      // Clamp: a merchant-set ceiling above the floor is pulled DOWN to the floor; an absent
+      // merchant ceiling defaults to the floor itself (never "unlimited") — this is what makes the
+      // floor a real ceiling rather than advisory.
+      const maxPct = Math.min(envelope.maxPct ?? floor.maxAutoPct, floor.maxAutoPct);
+      const maxUsd =
+        floor.maxAutoUsd !== undefined
+          ? Math.min(envelope.maxUsd ?? floor.maxAutoUsd, floor.maxAutoUsd)
+          : envelope.maxUsd;
+      return {
+        maxPct,
+        maxUsd,
+        allowedAuto: envelope.allowedAuto && withinFloor(floor),
+      };
+    },
+    palupFloor(): PalupFloor {
+      return GLOBAL_PALUP_FLOOR;
+    },
+  };
+}
