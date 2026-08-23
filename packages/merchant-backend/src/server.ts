@@ -19,6 +19,7 @@ import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIden
 import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
 import { registerApprovalsRoutes } from "./routes/approvals.js";
+import { registerKillRoutes } from "./routes/kill.js";
 import "./types.js";
 
 // Task 4 composition root: `store`/`identity` stay injectable (every existing test suite injects fakes
@@ -135,6 +136,7 @@ export async function buildServer(opts?: {
     registerMeRoutes(merchantPlane);
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
     registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms });
+    registerKillRoutes(merchantPlane, { state: store });
   });
 
   return app;
