@@ -14,7 +14,18 @@ import type { RuntimeStateCtx, RuntimeStatePort } from "@palup/platform-ports";
 import { classifyAction, type RulesProvider } from "./classify.js";
 import { assertNotKilled } from "./kill.js";
 import { ProposalNotFoundError, type ProposalStore } from "./proposal-store.js";
-import { ttlForCategory, type AgentAction, type Proposal, type ProposalCategory, type ReversalPlan } from "./types.js";
+import {
+  ttlForCategory,
+  type AgentAction,
+  type Proposal,
+  type ProposalCategory,
+  type ProposalStatus,
+  type ReversalPlan,
+} from "./types.js";
+
+/** Statuses `executeApproved` refuses to move past — a human (or the TTL) has already settled this
+ * proposal's fate; re-approving it would silently overturn that decision. */
+const TERMINAL_BLOCKING_STATUSES: ReadonlySet<ProposalStatus> = new Set(["rejected", "withdrawn", "expired", "killed"]);
 
 /** The outcome of running an `AgentAction` through the injected `Executor`. */
 export interface ExecutionResult {
@@ -191,6 +202,9 @@ export async function executeApproved(
   await assertNotKilled(deps.state, ctx, proposal.agentType);
 
   if (proposal.status === "executed") return proposal; // idempotent short-circuit
+  if (TERMINAL_BLOCKING_STATUSES.has(proposal.status)) {
+    throw new Error(`executeApproved: proposal ${id} is ${proposal.status}, cannot execute`);
+  }
 
   const validation = await deps.validate(proposal, ctx);
   if (!validation.valid) {
@@ -289,4 +303,101 @@ export async function executeApproved(
     now,
   );
   return done;
+}
+
+/**
+ * A human (or automated policy) rejects a pending proposal. Optimistic-locked + audited; a rejected
+ * proposal is terminal — `executeApproved` refuses to move it forward afterward.
+ */
+export async function rejectProposal(
+  ctx: RuntimeStateCtx,
+  id: string,
+  decidedBy: string,
+  reason: string,
+  now: string,
+  deps: EngineDeps,
+): Promise<Proposal> {
+  const proposal = await deps.store.get(ctx, id);
+  if (!proposal) throw new ProposalNotFoundError(id);
+  const rejected = await deps.store.transition(ctx, id, proposal.version, {
+    status: "rejected",
+    decidedBy,
+    decidedAt: now,
+    decisionNote: reason,
+  });
+  await deps.state.audit(
+    ctx,
+    {
+      actor: decidedBy,
+      action: "proposal.rejected",
+      input: { id, reason },
+      decision: { status: rejected.status },
+      reversalPath: rejected.reversalPlan.plan,
+    },
+    now,
+  );
+  return rejected;
+}
+
+/**
+ * The proposing agent (or an operator on its behalf) withdraws a still-pending proposal — e.g. the
+ * opportunity it was chasing evaporated. Optimistic-locked + audited; terminal, same as `reject`.
+ */
+export async function withdrawProposal(
+  ctx: RuntimeStateCtx,
+  id: string,
+  reason: string,
+  now: string,
+  deps: EngineDeps,
+): Promise<Proposal> {
+  const proposal = await deps.store.get(ctx, id);
+  if (!proposal) throw new ProposalNotFoundError(id);
+  const withdrawn = await deps.store.transition(ctx, id, proposal.version, {
+    status: "withdrawn",
+    decidedAt: now,
+    decisionNote: reason,
+  });
+  await deps.state.audit(
+    ctx,
+    {
+      actor: proposal.agentId,
+      action: "proposal.withdrawn",
+      input: { id, reason },
+      decision: { status: withdrawn.status },
+      reversalPath: withdrawn.reversalPlan.plan,
+    },
+    now,
+  );
+  return withdrawn;
+}
+
+/**
+ * Sweeps this tenant's pending proposals and expires any whose `expiresAt` has elapsed (`<= now`).
+ * Called periodically (a cron/job, not per-request); each expiry is optimistic-locked + audited
+ * individually so a concurrent decision on the same proposal can't be silently clobbered.
+ */
+export async function expireStale(ctx: RuntimeStateCtx, now: string, deps: EngineDeps): Promise<Proposal[]> {
+  const { items } = await deps.store.list(ctx, { status: "pending" });
+  const expired: Proposal[] = [];
+  for (const p of items) {
+    if (p.expiresAt > now) continue;
+    const done = await deps.store.transition(ctx, p.id, p.version, {
+      status: "expired",
+      decidedAt: now,
+      decisionNote: "ttl elapsed",
+    });
+    await deps.state.audit(
+      ctx,
+      {
+        actor: "system",
+        action: "proposal.expired",
+        input: { id: p.id, expiresAt: p.expiresAt },
+        decision: { status: done.status },
+        reversalPath: done.reversalPlan.plan,
+      },
+      now,
+    );
+    expired.push(done);
+  }
+  return expired;
 }
