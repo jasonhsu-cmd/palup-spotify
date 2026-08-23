@@ -1262,13 +1262,29 @@ export async function reconcileProducts(
   // onlineStoreUrl) would be permanently nulled by the very next product webhook, because both
   // `CatalogProductPort` adapters do an unconditional full-column upsert. Absent (the default — no
   // composition wires it yet; that is Task 13's job) this is BYTE-IDENTICAL to Task 6.
+  //
+  // FIX (review round 1, Task 7) — the admin-source lookup is scoped to `fetched`'s ids (the products
+  // `deps.catalogById` actually confirmed are still live), NOT the raw `validProductIds` batch. A batch
+  // can legitimately mix a live id with a delisted one (`stale`, computed above); `stale` ids are
+  // soft-deleted a few lines below this block. `makeCatalogProductByIdSource` filters only by GID shape,
+  // not publish state, so it CAN still return a record for an unpublished-but-not-yet-pruned product —
+  // querying it for a stale id and then upserting whatever comes back would UN-TOMBSTONE a product this
+  // same call just soft-deleted. Scoping to `fetched`'s ids matches exactly what the thin path it replaces
+  // (`catalogProductRecordsFrom(fetched, …)`) was already scoped to.
   if (deps.catalogProduct && fetched.length > 0) {
     let catalogUpserted = false;
     let catalogCount = 0;
     try {
       let catalogRecords: CatalogProductRecord[] | undefined;
       if (deps.catalogProductAdminSource) {
-        catalogRecords = await deps.catalogProductAdminSource(tenantId, validProductIds);
+        const liveIds = new Set(fetched.map((p) => p.id));
+        const adminRecords = await deps.catalogProductAdminSource(tenantId, [...liveIds]);
+        // Defense-in-depth (mirrors FIX 3's re-validation-at-the-consumer-boundary discipline elsewhere in
+        // this function): even though the call above was scoped to `liveIds`, do not trust a source
+        // implementation to have honored that scoping — drop anything for an id we did NOT just confirm
+        // live. Without this, a permissive/buggy source returning a stale id's record would resurrect a
+        // product `stale` (below) is about to soft-delete.
+        catalogRecords = adminRecords?.filter((r) => liveIds.has(r.productId));
       }
       // Falls back to the thin projection when no rich source is wired, OR the rich source itself
       // reports nothing for these ids (e.g. a tenant never backfilled) — never silently write zero rows
