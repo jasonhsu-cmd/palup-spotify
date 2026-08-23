@@ -1,0 +1,24 @@
+# Merchant-backend container for staging (Cloud Run). Runs the F3 merchant-plane service via tsx (no
+# build step). Mirrors ./Dockerfile (widget backend) and Dockerfile.control-plane exactly except for the
+# port and entrypoint — see those files first if you're changing this one.
+FROM node:22-slim
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true PORT=8991 HOST=0.0.0.0
+RUN corepack enable
+WORKDIR /app
+
+# Install deps first (better layer caching). Needs all workspace manifests + the lockfile.
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+COPY packages ./packages
+RUN pnpm install --frozen-lockfile
+
+EXPOSE 8991
+# Cloud Run sets $PORT; server.ts reads it (falls back to 8991 locally). HOST=0.0.0.0 above is what lets
+# Cloud Run's network health check reach the process — server.ts already defaults HOST to 0.0.0.0 itself
+# (unlike control-plane's original loopback-only default, which broke its first Cloud Run rollout — see
+# project memory), but this env is set explicitly anyway so the image is correct even if that default
+# ever changes.
+#
+# Deploy: see packages/merchant-backend/DEPLOY.md — this is a human/enablement step, not run by this
+# build. Public ingress (--allow-unauthenticated): unlike control-plane, auth here is the merchant
+# session token (F2's requireMerchant), not Cloud Run IAM — see DEPLOY.md for why.
+CMD ["pnpm", "merchant-backend"]
