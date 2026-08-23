@@ -6,6 +6,7 @@
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
     "@palup/platform-ports": "workspace:*",
-    "@palup/state-postgres": "workspace:*"
+    "@palup/state-postgres": "workspace:*",
+    "@palup/evolution": "workspace:*"
   }
 }

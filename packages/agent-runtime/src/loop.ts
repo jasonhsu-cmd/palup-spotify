@@ -9,11 +9,11 @@
 // Determinism: `now` is caller-supplied ISO (no `Date.now()` here) so the loop is a pure function
 // of its inputs given a fixed `now` — replayable in tests and evals.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { RuntimeStateCtx, RuntimeStatePort } from "@palup/platform-ports";
 import { classifyAction, type RulesProvider } from "./classify.js";
 import { assertNotKilled } from "./kill.js";
-import type { ProposalStore } from "./proposal-store.js";
+import { ProposalNotFoundError, type ProposalStore } from "./proposal-store.js";
 import { ttlForCategory, type AgentAction, type Proposal, type ProposalCategory, type ReversalPlan } from "./types.js";
 
 /** The outcome of running an `AgentAction` through the injected `Executor`. */
@@ -159,4 +159,134 @@ export async function proposeOrExecute(input: ProposeInput, deps: EngineDeps): P
     input.now,
   );
   return { kind: "proposed", proposal: created };
+}
+
+/** A deterministic idempotency key for one execution attempt — same `(id, decidedBy)` always
+ * mints the same `executionId`, so a downstream commerce port can itself dedupe a retried call. */
+function mintExecutionId(id: string, decidedBy: string): string {
+  return createHash("sha256").update(`${id}:${decidedBy}`).digest("hex");
+}
+
+/**
+ * Execute a proposal a human has approved (W1's `POST /approvals/:id/approve`). Re-validates
+ * preconditions immediately before executing (the world may have moved on since the proposal was
+ * created) and is idempotent: calling it again on an already-`executed` proposal is a no-op that
+ * returns the settled row without touching the executor. Every transition is audited
+ * (governance non-negotiable #5); the Kill-Switch is checked before any execution (#4).
+ *
+ * Takes `ctx` explicitly (not folded into `deps`) because every `ProposalStore`/`RuntimeStatePort`
+ * call underneath is tenant-scoped — there is no cross-tenant lookup-by-id surface, by design
+ * (tenant isolation is the port's core guarantee).
+ */
+export async function executeApproved(
+  ctx: RuntimeStateCtx,
+  id: string,
+  decidedBy: string,
+  now: string,
+  deps: EngineDeps,
+): Promise<Proposal> {
+  const proposal = await deps.store.get(ctx, id);
+  if (!proposal) throw new ProposalNotFoundError(id);
+
+  await assertNotKilled(deps.state, ctx, proposal.agentType);
+
+  if (proposal.status === "executed") return proposal; // idempotent short-circuit
+
+  const validation = await deps.validate(proposal, ctx);
+  if (!validation.valid) {
+    await deps.state.audit(
+      ctx,
+      {
+        actor: decidedBy,
+        action: "proposal.revalidation_failed",
+        input: { id, reason: validation.reason },
+        decision: { status: proposal.status },
+        reversalPath: proposal.reversalPlan.plan,
+      },
+      now,
+    );
+    throw new Error(`executeApproved: precondition no longer holds for proposal ${id}: ${validation.reason ?? "invalid"}`);
+  }
+
+  const executionId = mintExecutionId(id, decidedBy);
+
+  const approved = await deps.store.transition(ctx, id, proposal.version, {
+    status: "approved",
+    decidedBy,
+    decidedAt: now,
+  });
+  await deps.state.audit(
+    ctx,
+    {
+      actor: decidedBy,
+      action: "proposal.approved",
+      input: { id },
+      decision: { status: approved.status },
+      reversalPath: approved.reversalPlan.plan,
+    },
+    now,
+  );
+
+  const executing = await deps.store.transition(ctx, id, approved.version, {
+    status: "executing",
+    executionId,
+  });
+  await deps.state.audit(
+    ctx,
+    {
+      actor: decidedBy,
+      action: "proposal.executing",
+      input: { id, executionId },
+      decision: { status: executing.status },
+      reversalPath: executing.reversalPlan.plan,
+    },
+    now,
+  );
+
+  let result: ExecutionResult;
+  try {
+    result = await deps.executor({
+      ctx,
+      agentId: executing.agentId,
+      agentType: executing.agentType,
+      action: executing.action,
+      executionId,
+    });
+  } catch (e) {
+    const failed = await deps.store.transition(ctx, id, executing.version, {
+      status: "execution_failed",
+      executionResult: { ok: false, detail: e instanceof Error ? e.message : String(e) },
+    });
+    await deps.state.audit(
+      ctx,
+      {
+        actor: decidedBy,
+        action: "proposal.execution_failed",
+        input: { id, executionId },
+        decision: { status: failed.status, error: e instanceof Error ? e.message : String(e) },
+        reversalPath: failed.reversalPlan.plan,
+      },
+      now,
+    );
+    return failed;
+  }
+
+  const finalStatus = result.ok ? "executed" : "execution_failed";
+  const done = await deps.store.transition(ctx, id, executing.version, {
+    status: finalStatus,
+    executedAt: now,
+    executionResult: result,
+  });
+  await deps.state.audit(
+    ctx,
+    {
+      actor: decidedBy,
+      action: finalStatus === "executed" ? "proposal.executed" : "proposal.execution_failed",
+      input: { id, executionId },
+      decision: { status: done.status, result },
+      reversalPath: done.reversalPlan.plan,
+    },
+    now,
+  );
+  return done;
 }
