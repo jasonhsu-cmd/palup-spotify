@@ -64,4 +64,19 @@ describe("classifyAction", () => {
     expect(c.decision).toBe("requires_approval");
     expect(c.boundaryReasons.some(b=>b.rule.includes("usd") || b.rule.includes("refund"))).toBe(true);
   });
+
+  // F2 REGRESSION GUARD: a dollar-category action carrying BOTH a `pct` and a `usd` param must not
+  // bypass its USD cap just because its `pct` happens to pass — the pct branch must never
+  // short-circuit before the usd branch is evaluated. Coordinator repro: an ad-spend action within
+  // its pct allowance (10% of some notional 30% cap) but wildly over its $500 USD floor must still
+  // require approval.
+  it("evaluates BOTH pct and usd — a within-pct dollar action is still caught by its USD cap (no short-circuit)", async () => {
+    const c = await classifyAction(
+      { type:"run_ad_campaign", params:{ pct: 10, usd: 50000 } },
+      ctx,
+      usdRules({}, { maxAutoUsd: 500 }),
+    );
+    expect(c.decision).toBe("requires_approval");
+    expect(c.boundaryReasons.some(b=>b.rule.includes("usd_over_cap"))).toBe(true);
+  });
 });

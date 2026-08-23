@@ -39,11 +39,23 @@ export type MerchantRuleSet = Partial<Record<ProposalCategory, CategoryRuleEnvel
  * Every entry is a `PalupFloor` (mirrors `classify.ts`'s shape exactly) so `createRulesProvider`
  * can return `PALUP_FLOORS[category]` directly from `palupFloor()`.
  */
+// F1 hardening (§3-critical review finding): EVERY category below defines a real `maxAutoUsd`, not
+// just the categories this module currently treats as "dollar-denominated." Before this fix, a
+// category with no `maxAutoUsd` here (discount/campaign/subscription/autonomy_scope) let
+// `createRulesProvider` pass a merchant's raw `maxUsd` through UNCLAMPED — e.g. a mis-set
+// `{discount:{allowedAuto:true, maxUsd:999999}}` auto-approved a $500,000 "discount" specified in
+// dollars rather than percent. `action.params` is caller-supplied `Record<string, unknown>` (no
+// schema ties a category to only-pct or only-usd), so ANY category could in principle carry a `usd`
+// param — every one now gets a real, conservative dollar ceiling so `clampToFloor`'s clamp is never
+// a no-op. See `clampToFloor` below for the second half of the fix (fail-closed when a floor is
+// somehow still missing one).
 export const PALUP_FLOORS: Readonly<Record<ProposalCategory, PalupFloor>> = {
   // A discount is bounded, reversible (a coupon can be revoked/expired) and self-limiting per order
   // — 30% is deep enough to close most single-order objections without training shoppers to expect
-  // near-giveaway pricing or eroding margin on every auto-approved order.
-  discount: { maxAutoPct: 30, massSendRecipientFloor: 500 },
+  // near-giveaway pricing or eroding margin on every auto-approved order. A FLAT-DOLLAR discount is
+  // the unusual case (most are pct-based), so its dollar ceiling is kept tight — $50 covers a
+  // routine order-value credit without approaching refund-scale abuse exposure.
+  discount: { maxAutoPct: 30, maxAutoUsd: 50, massSendRecipientFloor: 500 },
   // Ad spend is real cash leaving the merchant's account with delayed, hard-to-reverse feedback
   // (a bad campaign can burn budget for days before ROAS data catches it) — $500/action caps the
   // blast radius of one automated buy while a human still owns the campaign-level budget.
@@ -56,17 +68,19 @@ export const PALUP_FLOORS: Readonly<Record<ProposalCategory, PalupFloor>> = {
   // A campaign send's damage is reach, not dollars — mirrored by `classifyAction`'s own
   // `massSendRecipientFloor` invariant (blastRadius >= 500 is ALWAYS requires_approval no matter what
   // any rule returns). 500 matches that hard invariant so the floor here and the one in the
-  // classifier never disagree.
-  campaign: { maxAutoPct: 100, massSendRecipientFloor: 500 },
+  // classifier never disagree. A campaign could still carry a dollar "budget" param in a future
+  // action shape — $100 is a tight sanity ceiling for that case, well under the ad-spend ceiling.
+  campaign: { maxAutoPct: 100, maxAutoUsd: 100, massSendRecipientFloor: 500 },
   // A subscription change (skip/pause/cancel) touches recurring revenue and a standing customer
-  // relationship — no percentage/dollar amount describes its risk, so the floor only carries the
-  // mass-send guard; per-category auto-eligibility is still gated by `allowedAuto` below.
-  subscription: { maxAutoPct: 100, massSendRecipientFloor: 500 },
+  // relationship. No percentage describes its risk, but a future action could carry a proration or
+  // account-credit dollar amount — $50 is a tight sanity ceiling for that, well under refund's $200.
+  subscription: { maxAutoPct: 100, maxAutoUsd: 50, massSendRecipientFloor: 500 },
   // `autonomy_scope` is the fallback bucket `categoryForAction` assigns to any UNMAPPED action type
-  // (`classify.ts` invariant 2) — it must never itself be a wide-open category, so its pct ceiling is
-  // the tightest of all (0): an action landing here has no known shape, so nothing about it is
-  // auto-eligible by floor, only by explicit future re-classification into a real category.
-  autonomy_scope: { maxAutoPct: 0, massSendRecipientFloor: 500 },
+  // (`classify.ts` invariant 2) — it must never itself be a wide-open category, so BOTH ceilings are
+  // pinned to 0: an action landing here has no known shape, so nothing about it — percentage OR
+  // dollar — is auto-eligible by floor, only by explicit future re-classification into a real
+  // category.
+  autonomy_scope: { maxAutoPct: 0, maxAutoUsd: 0, massSendRecipientFloor: 500 },
 };
 
 /**
@@ -243,12 +257,35 @@ function withinFloor(floor: PalupFloor): boolean {
 }
 
 /**
+ * Pure clamp: pulls a merchant's `CategoryRuleEnvelope` down to a `PalupFloor`. Exported (not just
+ * used internally by `createRulesProvider`) so this exact fail-closed semantics can be unit-tested
+ * directly against a SYNTHETIC floor — e.g. one that omits `maxAutoUsd` — independent of whatever
+ * `PALUP_FLOORS` currently defines (every entry there defines a real `maxAutoUsd` today, task F1a,
+ * but this function must not silently rely on that always being true for every category forever).
+ *
+ * F1(b) — FAIL CLOSED (§3-critical): a merchant-set ceiling above the floor is pulled DOWN to the
+ * floor; an absent merchant ceiling defaults to the floor itself (never "unlimited"). And if the
+ * FLOOR ITSELF is somehow missing a `maxAutoUsd` for this category, the merchant's `maxUsd` is
+ * NEVER passed through unclamped — the effective auto USD cap becomes 0, not the merchant's number
+ * and not `Infinity`. An absent platform ceiling is uncertainty, never permission.
+ */
+export function clampToFloor(envelope: CategoryRuleEnvelope, floor: PalupFloor): AutoActLimit {
+  const maxPct = Math.min(envelope.maxPct ?? floor.maxAutoPct, floor.maxAutoPct);
+  const maxUsd = floor.maxAutoUsd !== undefined ? Math.min(envelope.maxUsd ?? floor.maxAutoUsd, floor.maxAutoUsd) : 0;
+  return {
+    maxPct,
+    maxUsd,
+    allowedAuto: envelope.allowedAuto && withinFloor(floor),
+  };
+}
+
+/**
  * Builds E1's `RulesProvider` on top of a `MerchantRulesStore`: `autoActLimit` reads the merchant's
- * stored envelope for the category and CLAMPS its numeric ceilings down to `PALUP_FLOORS[category]`
+ * stored envelope for the category and delegates to `clampToFloor` against `PALUP_FLOORS[category]`
  * — the merchant can only ever be as permissive as (or tighter than) the platform floor, never
- * looser, even if the stored envelope itself is misconfigured (e.g. `maxPct: 100`). `palupFloor`
- * returns the fixed, category-agnostic `GLOBAL_PALUP_FLOOR` (see above for why it must be
- * category-agnostic and why its specific numbers are safe).
+ * looser, even if the stored envelope itself is misconfigured (e.g. `maxPct: 100` or an absurd
+ * `maxUsd`). `palupFloor` returns the fixed, category-agnostic `GLOBAL_PALUP_FLOOR` (see above for
+ * why it must be category-agnostic and why its specific numbers are safe).
  */
 export function createRulesProvider(store: MerchantRulesStore): RulesProvider {
   return {
@@ -259,20 +296,7 @@ export function createRulesProvider(store: MerchantRulesStore): RulesProvider {
     ): Promise<AutoActLimit> {
       const ruleSet = await store.get(ctx);
       const envelope: CategoryRuleEnvelope = ruleSet[category] ?? { allowedAuto: false };
-      const floor = PALUP_FLOORS[category];
-      // Clamp: a merchant-set ceiling above the floor is pulled DOWN to the floor; an absent
-      // merchant ceiling defaults to the floor itself (never "unlimited") — this is what makes the
-      // floor a real ceiling rather than advisory.
-      const maxPct = Math.min(envelope.maxPct ?? floor.maxAutoPct, floor.maxAutoPct);
-      const maxUsd =
-        floor.maxAutoUsd !== undefined
-          ? Math.min(envelope.maxUsd ?? floor.maxAutoUsd, floor.maxAutoUsd)
-          : envelope.maxUsd;
-      return {
-        maxPct,
-        maxUsd,
-        allowedAuto: envelope.allowedAuto && withinFloor(floor),
-      };
+      return clampToFloor(envelope, PALUP_FLOORS[category]);
     },
     palupFloor(): PalupFloor {
       return GLOBAL_PALUP_FLOOR;
