@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryRuntimeStore } from "@palup/platform-ports";
-import { verifyAuditChain } from "@palup/evolution";
 import { InMemoryProposalStore } from "../src/proposal-store.js";
 import { proposeOrExecute, executeApproved, rejectProposal, expireStale, withdrawProposal } from "../src/loop.js";
 
@@ -56,7 +55,14 @@ describe("rejectProposal", () => {
 
     const audit = await deps.state.readAudit(ctx);
     expect(audit.some((r: any) => r.action === "proposal.rejected")).toBe(true);
-    expect(verifyAuditChain(audit as any).ok).toBe(true);
+    expect((await deps.state.verifyAudit(ctx)).ok).toBe(true);
+  });
+
+  // Nit: "reason required" (brief) — an empty string previously passed silently.
+  it("rejects an empty reason", async () => {
+    const deps = mkDeps();
+    const p = await seedPending(deps);
+    await expect(rejectProposal(ctx, p.id, "owner", "", "2026-08-23T01:00:00Z", deps)).rejects.toThrow(/reason/);
   });
 });
 
@@ -78,7 +84,7 @@ describe("expireStale", () => {
 
     const audit = await deps.state.readAudit(ctx);
     expect(audit.some((r: any) => r.action === "proposal.expired")).toBe(true);
-    expect(verifyAuditChain(audit as any).ok).toBe(true);
+    expect((await deps.state.verifyAudit(ctx)).ok).toBe(true);
   });
 });
 
@@ -92,6 +98,13 @@ describe("withdrawProposal", () => {
 
     const audit = await deps.state.readAudit(ctx);
     expect(audit.some((r: any) => r.action === "proposal.withdrawn")).toBe(true);
-    expect(verifyAuditChain(audit as any).ok).toBe(true);
+    expect((await deps.state.verifyAudit(ctx)).ok).toBe(true);
+  });
+
+  // Nit: "reason required" (brief) — an empty string previously passed silently.
+  it("rejects an empty reason", async () => {
+    const deps = mkDeps();
+    const p = await seedPending(deps);
+    await expect(withdrawProposal(ctx, p.id, "", "2026-08-23T01:00:00Z", deps)).rejects.toThrow(/reason/);
   });
 });

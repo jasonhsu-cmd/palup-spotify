@@ -61,4 +61,21 @@ describe("proposeOrExecute", () => {
       ),
     ).rejects.toThrow(/reversalPlan/);
   });
+
+  // F1 (governance gap fix): the auto branch must write a pre-execution INTENT audit record
+  // before ever calling the executor — money moving with zero audit if the executor throws (or the
+  // process dies between execute and audit) violates NN#5. A thrown executor error must itself be
+  // audited (not silently swallowed) and still propagate.
+  it("audits an execution intent BEFORE calling the executor, and audits a failure without swallowing the throw", async () => {
+    const failing = vi.fn(async () => {
+      throw new Error("network blip");
+    });
+    const deps = mkDeps({ executor: failing });
+    await expect(proposeOrExecute(input(), deps)).rejects.toThrow(/network blip/);
+    const audit = await deps.state.readAudit(ctx);
+    // The intent record must exist even though the executor threw — i.e. it was written BEFORE the
+    // executor call, not after (there is no "after" on this path: the function throws).
+    expect(audit.some((r: any) => r.action === "agent.action.auto.intent")).toBe(true);
+    expect(audit.some((r: any) => r.action === "agent.action.failed")).toBe(true);
+  });
 });

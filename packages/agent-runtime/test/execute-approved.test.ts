@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { InMemoryRuntimeStore } from "@palup/platform-ports";
-import { verifyAuditChain } from "@palup/evolution";
 import { InMemoryProposalStore } from "../src/proposal-store.js";
 import { proposeOrExecute, executeApproved } from "../src/loop.js";
+import { killMerchant, KillSwitchError } from "../src/kill.js";
 
 const ctx = { tenantId: "t1" };
 
@@ -65,10 +65,46 @@ describe("executeApproved", () => {
     expect(done.status).toBe("executed");
     await executeApproved(ctx, p.id, "owner", "2026-08-23T01:00:00Z", deps); // idempotent re-call
     expect(deps.executor).toHaveBeenCalledOnce();
-    // verifyAuditChain (evolution) is typed for its own build-time AuditEntry shape; the hash
-    // algorithm it runs (sha256 over canonicalized "all fields but hash") is IDENTICAL to
-    // RuntimeStatePort's (see packages/platform-ports/src/audit-hash.ts) — the cast is a shape
-    // adaptation, not a behavior change.
-    expect(verifyAuditChain((await deps.state.readAudit(ctx)) as any).ok).toBe(true);
+    // F5: RuntimeStatePort's own `verifyAudit` has identical hash-chain semantics to
+    // `@palup/evolution`'s `verifyAuditChain` — use the native port method instead of pulling in
+    // the evolution engine as a prod dependency for a type-incompatible cast.
+    expect((await deps.state.verifyAudit(ctx)).ok).toBe(true);
+  });
+
+  // F2 (governance gap coverage): the Kill-Switch guard at the top of `executeApproved` was
+  // previously unprotected by any test — a regression there would silently let a killed merchant's
+  // approved proposal execute. Assert it blocks even an approval-eligible, precondition-valid
+  // proposal, and that the executor is never reached.
+  it("blocks execution when the merchant is killed, even for an approval-eligible proposal", async () => {
+    const deps = mkDeps();
+    const p = await seedPending(deps);
+    await killMerchant(deps.state, ctx, "operator halt");
+    await expect(executeApproved(ctx, p.id, "owner", "2026-08-23T01:00:00Z", deps)).rejects.toBeInstanceOf(
+      KillSwitchError,
+    );
+    expect(deps.executor).not.toHaveBeenCalled();
+    expect((await deps.store.get(ctx, p.id))?.status).toBe("pending");
+  });
+
+  // F3 (double-spend ruling): executionId must be stable across retries by DIFFERENT approvers —
+  // it is minted from the proposal id alone, not `(id, decidedBy)`. Otherwise a failed execution
+  // retried by a different human mints a new idempotency key and a downstream commerce port's
+  // dedup can't catch the double charge/refund.
+  it("mints the SAME executionId on retry after execution_failed, even when a different decidedBy re-approves", async () => {
+    const deps = mkDeps({
+      executor: vi.fn(async () => {
+        throw new Error("network blip");
+      }),
+    });
+    const p = await seedPending(deps);
+    const failed = await executeApproved(ctx, p.id, "ownerA", "2026-08-23T01:00:00Z", deps);
+    expect(failed.status).toBe("execution_failed");
+    const firstExecutionId = failed.executionId;
+    expect(firstExecutionId).toBeTruthy();
+
+    deps.executor = vi.fn(async () => ({ ok: true, detail: "done" })); // retry succeeds
+    const retried = await executeApproved(ctx, p.id, "ownerB", "2026-08-23T02:00:00Z", deps);
+    expect(retried.status).toBe("executed");
+    expect(retried.executionId).toBe(firstExecutionId);
   });
 });

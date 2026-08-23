@@ -35,9 +35,6 @@ importers:
 
   packages/agent-runtime:
     dependencies:
-      '@palup/evolution':
-        specifier: workspace:*
-        version: link:../evolution
       '@palup/platform-ports':
         specifier: workspace:*
         version: link:../platform-ports

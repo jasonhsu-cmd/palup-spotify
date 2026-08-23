@@ -119,18 +119,55 @@ export async function proposeOrExecute(input: ProposeInput, deps: EngineDeps): P
     // proposing is not autonomous execution; `executeApproved` (Task 6) re-checks this same gate
     // before it would ever execute an approved proposal.
     await assertNotKilled(deps.state, input.ctx, input.agentType);
-    const result = await deps.executor({
-      ctx: input.ctx,
-      agentId: input.agentId,
-      agentType: input.agentType,
-      action: input.action,
-    });
+
+    // F1 (NN#5 — no silent actions): write the INTENT record BEFORE calling the executor. If the
+    // executor throws, or the process dies between the executor call and a result audit, this
+    // record still exists — money never moves with zero audit trail. `deps.state.audit` commits
+    // immediately (it is not part of a buffered tx), so this write is durable the instant it
+    // resolves, independent of whatever happens next.
+    const executionId = randomUUID();
+    await deps.state.audit(
+      input.ctx,
+      {
+        actor: input.agentId,
+        action: "agent.action.auto.intent",
+        input: { agentType: input.agentType, category: classification.category, action: input.action, executionId },
+        decision: { status: "executing" },
+        reversalPath: input.reversalPlan.plan,
+      },
+      input.now,
+    );
+
+    let result: ExecutionResult;
+    try {
+      result = await deps.executor({
+        ctx: input.ctx,
+        agentId: input.agentId,
+        agentType: input.agentType,
+        action: input.action,
+        executionId,
+      });
+    } catch (e) {
+      await deps.state.audit(
+        input.ctx,
+        {
+          actor: input.agentId,
+          action: "agent.action.failed",
+          input: { agentType: input.agentType, category: classification.category, action: input.action, executionId },
+          decision: { error: e instanceof Error ? e.message : String(e) },
+          reversalPath: input.reversalPlan.plan,
+        },
+        input.now,
+      );
+      throw e;
+    }
+
     await deps.state.audit(
       input.ctx,
       {
         actor: input.agentId,
         action: "agent.action.auto",
-        input: { agentType: input.agentType, category: classification.category, action: input.action },
+        input: { agentType: input.agentType, category: classification.category, action: input.action, executionId },
         decision: { result },
         reversalPath: input.reversalPlan.plan,
       },
@@ -172,10 +209,14 @@ export async function proposeOrExecute(input: ProposeInput, deps: EngineDeps): P
   return { kind: "proposed", proposal: created };
 }
 
-/** A deterministic idempotency key for one execution attempt — same `(id, decidedBy)` always
- * mints the same `executionId`, so a downstream commerce port can itself dedupe a retried call. */
-function mintExecutionId(id: string, decidedBy: string): string {
-  return createHash("sha256").update(`${id}:${decidedBy}`).digest("hex");
+/** A deterministic idempotency key for one proposal — derived from `id` ALONE (never `decidedBy`).
+ * F3 RULING: `execution_failed` is retryable (not in `TERMINAL_BLOCKING_STATUSES`), and a retry can
+ * legitimately be re-approved by a DIFFERENT human than the one who approved the failed attempt.
+ * Keying on `decidedBy` too would mint a NEW `executionId` for that retry, so a downstream commerce
+ * port's idempotency check would no longer catch it — a double charge/refund. Keying on `id` alone
+ * keeps the idempotency key stable across every retry of the same proposal, whoever approves it. */
+function mintExecutionId(id: string): string {
+  return createHash("sha256").update(id).digest("hex");
 }
 
 /**
@@ -222,7 +263,7 @@ export async function executeApproved(
     throw new Error(`executeApproved: precondition no longer holds for proposal ${id}: ${validation.reason ?? "invalid"}`);
   }
 
-  const executionId = mintExecutionId(id, decidedBy);
+  const executionId = mintExecutionId(id);
 
   const approved = await deps.store.transition(ctx, id, proposal.version, {
     status: "approved",
@@ -317,6 +358,9 @@ export async function rejectProposal(
   now: string,
   deps: EngineDeps,
 ): Promise<Proposal> {
+  if (!reason || !reason.trim()) {
+    throw new Error("rejectProposal: reason is required");
+  }
   const proposal = await deps.store.get(ctx, id);
   if (!proposal) throw new ProposalNotFoundError(id);
   const rejected = await deps.store.transition(ctx, id, proposal.version, {
@@ -350,6 +394,9 @@ export async function withdrawProposal(
   now: string,
   deps: EngineDeps,
 ): Promise<Proposal> {
+  if (!reason || !reason.trim()) {
+    throw new Error("withdrawProposal: reason is required");
+  }
   const proposal = await deps.store.get(ctx, id);
   if (!proposal) throw new ProposalNotFoundError(id);
   const withdrawn = await deps.store.transition(ctx, id, proposal.version, {
@@ -380,7 +427,9 @@ export async function expireStale(ctx: RuntimeStateCtx, now: string, deps: Engin
   const { items } = await deps.store.list(ctx, { status: "pending" });
   const expired: Proposal[] = [];
   for (const p of items) {
-    if (p.expiresAt > now) continue;
+    // F4: compare as instants, not strings — string comparison is lexicographic and gets the
+    // ordering wrong across differing ISO precisions (e.g. "...Z" vs "....123Z").
+    if (Date.parse(p.expiresAt) > Date.parse(now)) continue;
     const done = await deps.store.transition(ctx, p.id, p.version, {
       status: "expired",
       decidedAt: now,
