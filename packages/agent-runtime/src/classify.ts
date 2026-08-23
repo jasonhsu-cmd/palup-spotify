@@ -24,33 +24,23 @@
 // Determinism: no `Date.now()`/`Math.random()` here — classification is a pure function of
 // (action, ctx, rules-at-call-time).
 
-import type { AgentAction, BoundaryReason, ProposalCategory } from "@palup/platform-ports";
+import type { AgentAction, AutoActLimit, BoundaryReason, PalupFloor, ProposalCategory } from "@palup/platform-ports";
 
-/** The merchant-configured ceiling for auto-acting in one category, as W4-min (Rules) resolves it
- * for this tenant/category/action. Either field may be absent when not applicable to the category
- * (e.g. a refund cares about `maxUsd`, a discount about `maxPct`). */
-export interface AutoActLimit {
-  /** Percentage cap (e.g. discount %), if this category is percentage-denominated. */
-  maxPct?: number;
-  /** USD cap (e.g. refund/ad-spend amount), if this category is dollar-denominated. */
-  maxUsd?: number;
-  /** Whether the merchant has enabled auto-act for this category at all. `false` forces approval
-   * even when every numeric check would otherwise pass. */
-  allowedAuto: boolean;
-}
-
-/** PalUp's platform-wide, non-merchant-configurable ceiling — the floor under every merchant's own
- * (possibly looser) `autoActLimit`. These are the numbers CLAUDE.md §3 calls "inviolable." */
-export interface PalupFloor {
-  /** Platform-wide max auto-act percentage, regardless of what a merchant configures higher. */
-  maxAutoPct: number;
-  /** Platform-wide max auto-act USD amount, if applicable. */
-  maxAutoUsd?: number;
-  /** Recipient/blast-radius count at or above which a send is ALWAYS `requires_approval` — see
-   * invariant 1. This is the one number `classifyAction` itself enforces no matter what any
-   * `RulesProvider` returns. */
-  massSendRecipientFloor: number;
-}
+// `AutoActLimit`/`PalupFloor` are DEFINED in `@palup/platform-ports` (`merchant-rules-store.ts`) — moved
+// there so `@palup/state-postgres`'s `PostgresMerchantRulesStore` can implement `MerchantRulesStore`
+// (which uses these shapes via `clampToFloor`) without a package cycle (`agent-runtime` already depends
+// on `state-postgres`). NOT re-exported from here (only USED, below, by `RulesProvider`) — `./rules.js`
+// is the one place that re-exports them (avoids `index.ts`'s `export *` from both files colliding on
+// the same names); a caller wanting the type by name imports it from there / `@palup/agent-runtime`'s
+// index, same shape either way:
+//   - `AutoActLimit` — the merchant-configured ceiling for auto-acting in one category, as W4-min
+//     (Rules) resolves it for this tenant/category/action. Either field may be absent when not
+//     applicable to the category (e.g. a refund cares about `maxUsd`, a discount about `maxPct`).
+//   - `PalupFloor` — PalUp's platform-wide, non-merchant-configurable ceiling — the floor under every
+//     merchant's own (possibly looser) `autoActLimit`. These are the numbers CLAUDE.md §3 calls
+//     "inviolable." `massSendRecipientFloor` is the recipient/blast-radius count at or above which a
+//     send is ALWAYS `requires_approval` — see invariant 1 below — the one number `classifyAction`
+//     itself enforces no matter what any `RulesProvider` returns.
 
 /** The seam `classifyAction` reads for the two tunables above. W4-min (Rules) implements this for
  * real, merchant-scoped config; tests supply a fake. Return values may be sync or async so a simple

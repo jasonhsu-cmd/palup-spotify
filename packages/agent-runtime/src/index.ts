@@ -21,3 +21,9 @@ export {
 export * from "./classify.js";
 export * from "./kill.js";
 export * from "./loop.js";
+// W4-min: `MerchantRulesStore`/`CONSERVATIVE_DEFAULTS`/`PALUP_FLOORS`/etc. are DEFINED in
+// `@palup/platform-ports` (moved there, task 5 — see `rules.ts`'s header) and re-exported by
+// `rules.ts`; `createRulesProvider` stays defined here. `export *` surfaces both together so a
+// future `@palup/agent-runtime` consumer (e.g. `merchant-backend`'s `GET/PUT /rules`, task 4) can
+// import everything from one place, exactly like `ProposalStore`'s re-export via this same file.
+export * from "./rules.js";

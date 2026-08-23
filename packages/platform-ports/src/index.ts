@@ -99,6 +99,24 @@ export type {
   ProposalTransitionPatch,
 } from "./proposal-store.js";
 export { ttlForCategory, VersionConflictError, ProposalNotFoundError, InMemoryProposalStore } from "./proposal-store.js";
+export type {
+  CategoryRuleEnvelope,
+  MerchantRuleSet,
+  RuleProvenance,
+  AutoActLimit,
+  PalupFloor,
+  RuleSetChangeResult,
+  MerchantRulesStore,
+} from "./merchant-rules-store.js";
+export {
+  PALUP_FLOORS,
+  CONSERVATIVE_DEFAULTS,
+  effectiveCategory,
+  mergeOverDefaults,
+  isBigJump,
+  InMemoryMerchantRulesStore,
+  clampToFloor,
+} from "./merchant-rules-store.js";
 export type { VectorPort, VectorRecord, VectorQuery, VectorMatch, VectorListItem, VectorListOpts } from "./vector-port.js";
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type { ProductFactsPort, ProductFact } from "./product-facts-port.js";
