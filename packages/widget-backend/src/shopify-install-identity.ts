@@ -255,10 +255,21 @@ export function buildInstallAuthorizeUrl(args: AuthorizeUrlArgs): string {
 
 /** What the exchange yields, in portable terms — no Shopify type crosses out of this module. */
 export interface InstallGrant {
-  /** The PARENT offline access token. SECRET. Used once, in memory, to mint the delegate token. */
+  /** The PARENT offline access token. SECRET. Used once, in memory, to mint the delegate token, and (Task
+   *  5, ADR-0022 F2) custodied under the Admin-token store when the caller wires one in. */
   accessToken: string;
   /** The scopes the merchant actually granted, split from the response's comma-separated `scope`. */
   grantedScopes: string[];
+  /**
+   * Task 5 (F6) — non-secret expiry for the parent Admin token, so a refresh helper built above this
+   * module can tell a stale token from a fresh one without a schema change (mirrors the `expiresAt` field
+   * `AdminTokenStore` already carries verbatim — admin-token-store.ts). ALWAYS `undefined` today:
+   * `exchangeInstallCode` requests the default (`expiring` unset, i.e. `0`), and [S1] documents that
+   * response as `{ access_token, scope }` with no `expires_in` for a non-expiring OFFLINE token — so there
+   * is nothing to parse yet. Left here, typed and unpopulated, as the seam a future online/expiring grant
+   * path would fill; NOT fabricated from a field the current response does not send.
+   */
+  expiresAt?: string;
 }
 
 export interface ExchangeArgs {

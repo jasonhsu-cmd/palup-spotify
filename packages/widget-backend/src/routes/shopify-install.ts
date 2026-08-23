@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { AuditInput, MerchantRecord, MerchantRegion, MerchantRegistryPort, RuntimeStatePort } from "@palup/platform-ports";
+import type { AdminTokenStore } from "@palup/state-postgres";
 import { randomToken } from "../shopify-customer-account-identity.js";
 import { clientIpKey } from "../rate-limit.js";
 import {
@@ -115,6 +116,19 @@ export interface ShopifyInstallDeps {
   registry: MerchantRegistryPort;
   /** REQUIRED. See the header: no custody ⇒ the routes are not registered at all. */
   credentials: MerchantCredentialSink;
+  /**
+   * Task 5 (ADR-0022 F2/F7) — OPTIONAL custody for the PARENT Admin offline token (`grant.accessToken`),
+   * narrowed to `put` ONLY, for the identical least-privilege reason `MerchantCredentialSink` is narrowed
+   * above: this flow never reads an Admin token back, so a dependency that could read every merchant's
+   * token would be more privilege than install requires. OPTIONAL (not required, unlike `credentials`):
+   * the Admin token is a NEW custody surface (Task 4) layered onto an already-shipped flow, and its absence
+   * must be byte-identical to today's behaviour (no custody attempted, no test broken) rather than a second
+   * gate that disables installs. When present, it is only ever called AFTER the shop-binding check that
+   * `completeInstallInner` already performs against the signed `state`'s pending record (F7 — see the call
+   * site), so a state minted for shop A can never result in shop B's Admin token — or any Admin token —
+   * being custodied under the wrong tenant.
+   */
+  adminTokens?: Pick<AdminTokenStore, "put">;
   /** Resolves the APP-scoped OAuth client secret. Called per request so a rotation takes effect without a
    *  redeploy, and so the secret is never captured in a closure at boot. */
   clientSecret: () => Promise<string | undefined>;
@@ -416,6 +430,30 @@ async function completeInstallInner(
     // The error is swallowed on purpose: it is raised by a component holding the token, and this function's
     // result is rendered to an attacker-reachable response.
     return { ok: false, failed: "custody_failed" };
+  }
+
+  // Task 5 (ADR-0022 F2/F6/F7) — capture the PARENT Admin offline token too, once one's caller has opted
+  // in. THE F7 PROPERTY: this line is reached only after `pending.shopDomain !== shopDomain` was already
+  // checked and found EQUAL, above — `pending.shopDomain` came from the SERVER-SIDE record keyed by the
+  // signed, single-use `state` nonce, and `shopDomain` is the callback's own (HMAC-verified) `shop`. So a
+  // callback whose shop disagrees with the shop `state` was minted for is refused (`shop_mismatch`) long
+  // before this point, and `deps.adminTokens.put` — like `deps.credentials.put` above it — is simply never
+  // reached for it. There is no SEPARATE "grant shop" to re-check: Shopify's token-exchange response
+  // carries no shop field ([S1]/`exchangeInstallCode`), and the exchange itself was made against the
+  // already-verified `shopDomain`, not an attacker-suppliable one. OPTIONAL and ADDITIVE: absent
+  // `adminTokens` ⇒ zero behaviour change from before this task (the surrounding `try` for the delegate
+  // token above deliberately does NOT also cover this — an Admin-token custody failure must not undo a
+  // delegate token that is already safely stored, so it maps to its own outcome instead of `custody_failed`).
+  if (deps.adminTokens) {
+    try {
+      await deps.adminTokens.put(tenantId, grant.accessToken, { actor: "system:shopify-install", expiresAt: grant.expiresAt });
+    } catch {
+      // Never let an Admin-token custody failure surface the parent token in a response/log; same leak
+      // boundary as every other catch in this function. A merchant who reaches here already has a working
+      // delegate credential (servable for catalog reads), so this refuses the WHOLE install rather than
+      // silently leaving Admin-token custody half-done and reporting success.
+      return { ok: false, failed: "custody_failed" };
+    }
   }
 
   // Shop-specific webhook registration — BEST-EFFORT / NON-FATAL, and only when the composition root
