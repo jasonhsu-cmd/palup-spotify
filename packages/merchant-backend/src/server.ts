@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
 import {
   type RuntimeStatePort,
@@ -18,6 +18,11 @@ import { createRuntimeStore, PostgresMerchantRegistry } from "@palup/state-postg
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
 import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
+import { registerApprovalsRoutes } from "./routes/approvals.js";
+import { registerKillRoutes } from "./routes/kill.js";
+import { registerAuditRoutes } from "./routes/audit.js";
+import { registerEventsRoutes } from "./routes/events.js";
+import { InMemoryEventBus, type EventBus } from "./events.js";
 import "./types.js";
 
 // Task 4 composition root: `store`/`identity` stay injectable (every existing test suite injects fakes
@@ -49,6 +54,11 @@ export async function buildServer(opts?: {
   comms?: CampaignCommsPort;
   proposalStore?: ProposalStore;
   rulesStore?: MerchantRulesStore;
+  // Task 7 (SSE live-update channel): injectable for tests (each test that shares a bus across two
+  // `buildServer()` calls, e.g. one connecting to `/events` and one driving an approve, needs the
+  // SAME bus instance). Absent -> a fresh `InMemoryEventBus` per server — single-instance only; see
+  // events.ts's TODO for the multi-instance Cloud Run follow-up.
+  bus?: EventBus;
 }): Promise<FastifyInstance> {
   const runtimeResult = opts?.store ? undefined : await createRuntimeStore();
   const store: RuntimeStatePort = opts?.store ?? runtimeResult!.store;
@@ -58,6 +68,7 @@ export async function buildServer(opts?: {
   const comms: CampaignCommsPort = opts?.comms ?? new SandboxCommsAdapter();
   const proposalStore: ProposalStore = opts?.proposalStore ?? new InMemoryProposalStore(store);
   const rulesStore: MerchantRulesStore = opts?.rulesStore ?? new InMemoryMerchantRulesStore(store);
+  const bus: EventBus = opts?.bus ?? new InMemoryEventBus();
   const identity: MerchantIdentityPort =
     opts?.identity ??
     createShopifyAppBridgeIdentity({
@@ -70,6 +81,32 @@ export async function buildServer(opts?: {
     });
 
   const app = Fastify({ logger: false });
+
+  // C1 hardening (found while fixing the approve/reject routes' error mapping — coordinator review):
+  // Fastify's OWN default error handler echoes the raw `err.message` of any uncaught error in the
+  // JSON response body (verified empirically: `throw new Error("x")` from a route -> HTTP 500 body
+  // `{..., message: "x"}`) — a real info leak for a genuine bug or infra failure (e.g.
+  // `deps.state.audit()` throwing after a transition already committed) once approve/reject stop
+  // catching every `Error` into a 409. Every typed §3 error (`VersionConflictError`/`KillSwitchError`/
+  // `ProposalNotFoundError`/`TerminalStateError`) is already mapped to a specific status code INSIDE
+  // the route via an explicit `reply.code(...).send(...)` before it would ever reach here — this
+  // handler is the redacted fallback for everything else.
+  //
+  // FIX (coordinator re-review, 2nd pass): an EARLIER version of this handler redacted
+  // UNCONDITIONALLY to 500, which also clobbered legitimate Fastify-NATIVE 4xx errors (e.g. a
+  // malformed/empty JSON body -> `FST_ERR_CTP_INVALID_JSON_BODY`, a real 400) into a misleading 500 —
+  // breaking client retry logic (5xx retryable, 4xx not) and misdirecting on-call triage on every POST
+  // route. Pass through a well-formed 4xx `statusCode` (still WITHOUT ever echoing `err.message` —
+  // `err.name`/a fixed code is the most detail sent), and redact to a generic message-free 500 ONLY
+  // when the status is absent or >= 500 (a genuine bug/infra failure).
+  app.setErrorHandler((err: FastifyError, req, reply) => {
+    req.log.error({ err }, "unhandled error");
+    const sc = err.statusCode;
+    if (typeof sc === "number" && sc >= 400 && sc < 500) {
+      return reply.code(sc).send({ statusCode: sc, error: err.name ?? "Bad Request" }); // never err.message
+    }
+    reply.code(500).send({ statusCode: 500, error: "Internal Server Error" });
+  });
 
   // Structural-safety backstop (coordinator review, W1-API is about to add many routes): collect
   // EVERY route Fastify actually registers, regardless of which context (root `app` vs the
@@ -107,6 +144,10 @@ export async function buildServer(opts?: {
     merchantPlane.addHook("preHandler", requireMerchant(identity));
     registerMeRoutes(merchantPlane);
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
+    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus });
+    registerKillRoutes(merchantPlane, { state: store, bus });
+    registerAuditRoutes(merchantPlane, { state: store });
+    registerEventsRoutes(merchantPlane, { bus });
   });
 
   return app;
