@@ -31,6 +31,11 @@ export const theme = {
     dangSoft: "#FBE7E4",
     info: "#2B66D9",
     infoSoft: "#E6EEFB",
+    // On-tint ink for .note — text-info/warn/dang fail WCAG AA on their *-soft backgrounds;
+    // these (from the mockup's own .note.info/.warn/.dang rules) clear AA. See tokens.css.
+    noteInfoInk: "#1B4596",
+    noteWarnInk: "#8A5A06",
+    noteDangInk: "#9E261A",
   },
   radius: {
     sm: "8px",

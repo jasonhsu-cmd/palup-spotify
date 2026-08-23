@@ -23,6 +23,11 @@ module.exports = {
         warn: { DEFAULT: "#C9810C", soft: "#FBF0D9" },
         dang: { DEFAULT: "#D33B2C", soft: "#FBE7E4" },
         info: { DEFAULT: "#2B66D9", soft: "#E6EEFB" },
+        // On-tint ink for .note (see tokens.css) — flat hyphenated keys so they resolve to
+        // `text-note-info-ink` / `text-note-warn-ink` / `text-note-dang-ink`.
+        "note-info-ink": "#1B4596",
+        "note-warn-ink": "#8A5A06",
+        "note-dang-ink": "#9E261A",
       },
       borderRadius: { sm: "8px", DEFAULT: "12px", lg: "18px", xl: "26px" },
       fontFamily: {
