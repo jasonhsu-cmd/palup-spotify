@@ -18,6 +18,7 @@ import { createRuntimeStore, PostgresMerchantRegistry } from "@palup/state-postg
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
 import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
+import { registerApprovalsRoutes } from "./routes/approvals.js";
 import "./types.js";
 
 // Task 4 composition root: `store`/`identity` stay injectable (every existing test suite injects fakes
@@ -107,6 +108,7 @@ export async function buildServer(opts?: {
     merchantPlane.addHook("preHandler", requireMerchant(identity));
     registerMeRoutes(merchantPlane);
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
+    registerApprovalsRoutes(merchantPlane, { proposalStore });
   });
 
   return app;
