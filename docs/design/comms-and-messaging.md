@@ -35,6 +35,33 @@ every send/opt-out is audited. Untrusted inbound content is **data, never instru
    it. Pre-approved-template + in-frequency nurture is auto-allowed (HITL §2).
 Sends are **idempotent** (dedup key = message id) and metered (email=1, SMS=13×segments credits).
 
+## 1a. Campaign sends (batch, run-time campaign agents)
+
+A run-time campaign agent (e.g. the win-back agent, `@palup/agent-runtime`) sends the same kind of
+outbound message as §1, but to a whole **segment** of recipients at once, via a batch
+`CampaignCommsPort.send(messages, ctx)` (`platform-ports/src/comms-port.ts`) rather than one
+`CommsPort.send(msg)` call per recipient. The batch call is a **convenience for the campaign
+agent** — it is not a second send path with its own, looser rules:
+
+- A **live** `CampaignCommsPort` implementation MUST resolve **every** recipient in the batch
+  through the same §1 pre-send gate (consent → suppression → frequency → quiet-hours → rate → DLP)
+  **before** sending. A recipient failing any gate step is **dropped** from the batch, never sent
+  anyway — the batch shape never becomes a way to skip a check that a single-recipient
+  `CommsPort.send` would have enforced.
+- `SandboxCommsAdapter` (the dev/test/staging implementation) deliberately runs **none** of that
+  gate — it only records, deterministically, and never delivers to a real provider. It is
+  staging-safe **only** because nothing it does ever reaches a shopper; it must never be mistaken
+  for a compliant live path, and it carries no `consent` field (unlike `CommsMessage`) precisely so
+  it can't be confused for one.
+- Building the live, gated `CampaignCommsPort` adapter is a **separate, legal-gated task**
+  (CAN-SPAM/TCPA sign-off) — not implied by the sandbox adapter's existence or by the win-back
+  agent's propose/execute flow, which only ever calls the executor after a human has approved the
+  campaign in the Approval Center (`docs/HITL-POLICY.md`).
+
+This keeps invariant #1 below ("no send without a valid consent record + passing suppression/
+frequency/quiet-hours/rate/DLP gate") true for campaign batches too — there is no batch-sized
+exception to it.
+
 ## 2. Deliverability infrastructure (email)
 
 - **Sending IP strategy:** shared pools for low-volume tenants; **dedicated IPs** for high-volume /

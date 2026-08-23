@@ -163,11 +163,16 @@ export interface CustomerListingCommerce {
  * calls a real commerce system. The win-back agent's dev/test/staging seam until a real Shopify
  * Admin-API adapter is wired (a later, human-gated staging-enablement step, same pattern as
  * `SandboxCommsAdapter` in `comms-port.ts`).
+ *
+ * Fixtures are keyed by `tenantId` (constructor takes `Record<tenantId, CustomerLastOrder[]>`), so
+ * `listCustomersWithLastOrder` honors `ctx.tenantId` — an unknown/unseeded tenant gets an empty
+ * list, never another tenant's fixtures. This mirrors `CommercePort`'s own tenant-isolation
+ * discipline; a test/staging double must not be the one place that leaks across tenants.
  */
 export class SandboxCustomerDirectory implements CustomerListingCommerce {
-  constructor(private readonly customers: CustomerLastOrder[] = []) {}
+  constructor(private readonly customersByTenant: Readonly<Record<string, CustomerLastOrder[]>> = {}) {}
 
-  async listCustomersWithLastOrder(_ctx: { tenantId: string }): Promise<CustomerLastOrder[]> {
-    return this.customers.map((c) => ({ ...c }));
+  async listCustomersWithLastOrder(ctx: { tenantId: string }): Promise<CustomerLastOrder[]> {
+    return (this.customersByTenant[ctx.tenantId] ?? []).map((c) => ({ ...c }));
   }
 }

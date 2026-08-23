@@ -339,12 +339,14 @@ export function createInMemoryComms(opts: InMemoryCommsOpts = {}): InMemoryComms
 // not `CommsPort`/`CommsMessage`) so this addition never collides with, weakens, or bypasses that
 // existing compliance gate.
 //
-// OPEN CONCERN (flag before any live enablement): `SandboxCommsAdapter` itself runs NO consent/
+// OPEN CONCERN (flag before any live enablement — see `CampaignCommsPort`'s own doc-comment below
+// for the MANDATORY requirement, and docs/design/comms-and-messaging.md's "Campaign sends"
+// subsection for the authoritative design doc): `SandboxCommsAdapter` itself runs NO consent/
 // suppression/DLP check — it only records, deterministically, and never delivers, which is exactly
 // what makes it safe for dev/test/staging (a campaign agent wired to this adapter can send nothing
 // to a real shopper). A LIVE adapter for real campaign sends must still clear the same consent/
 // suppression/DLP guardrails `CommsPort` already enforces (CAN-SPAM/TCPA) before it ships — that
-// wiring is a later, human-gated task, not assumed here.
+// wiring is a separate, legal-gated task, not assumed here.
 
 /** The outbound channels a campaign send may use. Reuses `CommsPort`'s channel vocabulary so a
  *  future live adapter can share it rather than defining a second, divergent union. */
@@ -364,8 +366,21 @@ export interface CampaignSendResult {
   ids: string[];
 }
 
-/** The batch-campaign-send port a run-time campaign agent's executor depends on (never a vendor
- *  SDK directly — ADR-0001). */
+/**
+ * The batch-campaign-send port a run-time campaign agent's executor depends on (never a vendor SDK
+ * directly — ADR-0001).
+ *
+ * MANDATORY FOR ANY LIVE IMPLEMENTATION (docs/design/comms-and-messaging.md — "Campaign sends"):
+ * a live `CampaignCommsPort` MUST resolve EACH recipient through the consent-gated `CommsPort`
+ * above (consent + suppression + quiet-hours + frequency + DLP) BEFORE sending it. A recipient
+ * that fails any one of those gates MUST be dropped from the batch, never sent anyway — the batch
+ * call is a convenience for the campaign agent, not a bypass of the per-recipient gate.
+ * `SandboxCommsAdapter` (below) is records-only and deliberately runs NONE of that gate; it is
+ * staging-safe ONLY because it never delivers to a real provider. A live adapter that calls a
+ * provider SDK (SendGrid/SES/Twilio) directly, without first clearing every recipient through
+ * `CommsPort`, is a CAN-SPAM/TCPA violation, not a shortcut — building that live adapter is a
+ * separate, legal-gated task (out of scope here).
+ */
 export interface CampaignCommsPort {
   send(messages: CampaignMessage[], ctx: { tenantId: string }): Promise<CampaignSendResult>;
 }
