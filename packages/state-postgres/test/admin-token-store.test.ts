@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryRuntimeStore, createAesGcmCrypto, createEnvSecrets, keyScopeSecretName } from "@palup/platform-ports";
-import type { CryptoPort, RuntimeStatePort } from "@palup/platform-ports";
+import type { CryptoPort, RuntimeStateCtx, RuntimeStatePort, RuntimeStateTx } from "@palup/platform-ports";
 import {
   createAdminTokenStore,
   ADMIN_CRED_KEY_SCOPE,
@@ -158,4 +158,78 @@ describe("admin-token-store", () => {
     expect(await s.read("t1")).toEqual({ status: "missing" });
     expect(await state.readAudit({ tenantId: "t1" })).toEqual([]);
   });
+
+  // ---- ATOMICITY: the KV write and its audit commit TOGETHER, in every op ---------------------------
+  // Copied from merchant-credential-store.test.ts's `auditFailingStore` double (lines ~432-450 there):
+  // wraps a real RuntimeStatePort so the in-transaction audit sink throws, proving `writeAndAudit`'s
+  // `state.tx(...)` callback is the ONLY place either the KV write or the audit call happen — a future
+  // edit that pulled the audit call out of the tx (or reordered it after a bare `state.put`) would leave
+  // an unaudited admin token behind, and this is a store with shop-wide admin-API blast radius.
+  it("put: an audit failure inside the tx leaves NO stored token behind (rolled back, not partially written)", async () => {
+    const state = new InMemoryRuntimeStore();
+    const crypto = standardCrypto();
+    const failing = createAdminTokenStore(auditFailingStore(state), crypto);
+    await expect(failing.put("t1", TOKEN, { actor: "system:test" })).rejects.toThrow(/audit sink/);
+    // Verified via a SEPARATE, non-failing store instance over the same underlying state — the read
+    // path itself is not what's under test here, only whether anything survived the failed write.
+    expect(await createAdminTokenStore(state, crypto).read("t1")).toEqual({ status: "missing" });
+    expect(await state.readAudit({ tenantId: "t1" })).toEqual([]);
+  });
+
+  it("refresh: an audit failure inside the tx leaves the PRIOR token intact (no partial rotation)", async () => {
+    const state = new InMemoryRuntimeStore();
+    const crypto = standardCrypto();
+    const store = createAdminTokenStore(state, crypto);
+    await store.put("t1", "atk", { actor: "system:test" });
+
+    const failing = createAdminTokenStore(auditFailingStore(state), crypto);
+    await expect(failing.refresh("t1", "atk2", { actor: "system:refresh" })).rejects.toThrow(/audit sink/);
+
+    expect(await store.read("t1")).toEqual({ status: "found", token: "atk" }); // NOT "atk2"
+  });
+
+  it("delete: an audit failure inside the tx leaves the token IN PLACE (not deleted)", async () => {
+    const state = new InMemoryRuntimeStore();
+    const crypto = standardCrypto();
+    const store = createAdminTokenStore(state, crypto);
+    await store.put("t1", "atk", { actor: "system:test" });
+
+    const failing = createAdminTokenStore(auditFailingStore(state), crypto);
+    await expect(failing.delete("t1", { actor: "system:test" })).rejects.toThrow(/audit sink/);
+
+    expect(await store.read("t1")).toEqual({ status: "found", token: "atk" });
+  });
 });
+
+// --- test doubles ---------------------------------------------------------------------------------
+
+/** Same store, but the in-transaction audit sink is broken — the write must not survive it. Copied
+ *  verbatim (structure-wise) from merchant-credential-store.test.ts's own `auditFailingStore`. */
+function auditFailingStore(inner: RuntimeStatePort): RuntimeStatePort {
+  return {
+    get: (ctx, c, k) => inner.get(ctx, c, k),
+    put: (ctx, c, k, v, opts) => inner.put(ctx, c, k, v, opts),
+    delete: (ctx, c, k) => inner.delete(ctx, c, k),
+    list: (ctx, c) => inner.list(ctx, c),
+    append: (ctx, s, e) => inner.append(ctx, s, e),
+    readStream: (ctx, s, o) => inner.readStream(ctx, s, o),
+    incrementWindow: (ctx, k, w) => inner.incrementWindow(ctx, k, w),
+    sweepExpired: () => inner.sweepExpired(),
+    trimStream: (ctx, s, k) => inner.trimStream(ctx, s, k),
+    audit: (ctx, e, at) => inner.audit(ctx, e, at),
+    readAudit: (ctx, o) => inner.readAudit(ctx, o),
+    verifyAudit: (ctx, o) => inner.verifyAudit(ctx, o),
+    tx: <T>(ctx: RuntimeStateCtx, fn: (t: RuntimeStateTx) => Promise<T>) =>
+      inner.tx(ctx, (t) =>
+        fn({
+          get: (c, k) => t.get(c, k),
+          put: (c, k, v, opts) => t.put(c, k, v, opts),
+          delete: (c, k) => t.delete(c, k),
+          append: (s, e) => t.append(s, e),
+          audit: async () => {
+            throw new Error("audit sink unavailable");
+          },
+        }),
+      ),
+  };
+}
