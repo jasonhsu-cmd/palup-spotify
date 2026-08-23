@@ -7,6 +7,9 @@ export { PostgresVectorStore } from "./postgres-vector-store.js";
 export { PgVectorStore, PgVectorTextQueryUnsupported } from "./pgvector-store.js";
 export { PostgresProductFactsStore } from "./postgres-product-facts-store.js";
 export { PostgresPresentmentPriceStore } from "./postgres-presentment-price-store.js";
+// E1 Task 8 adapter (`ProposalStore`, `@palup/platform-ports`). Exported so a later caller can wire it
+// where staging needs durable proposals; the in-memory adapter (Task 2) stays the default until then.
+export { PostgresProposalStore } from "./proposal-store.js";
 // B1 adapter. Exported so C1's OAuth routes can wire it; NOTHING imports it yet (see the file header).
 export {
   PostgresMerchantRegistry,

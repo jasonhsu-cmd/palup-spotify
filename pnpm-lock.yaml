@@ -33,6 +33,15 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@26.1.2)(jsdom@30.0.1)
 
+  packages/agent-runtime:
+    dependencies:
+      '@palup/platform-ports':
+        specifier: workspace:*
+        version: link:../platform-ports
+      '@palup/state-postgres':
+        specifier: workspace:*
+        version: link:../state-postgres
+
   packages/control-plane:
     dependencies:
       '@palup/eval':
