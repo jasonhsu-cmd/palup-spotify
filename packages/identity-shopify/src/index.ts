@@ -1,6 +1,7 @@
-export { verifyShopifySessionToken } from "./session-token.js";
-export type { ShopifySessionClaims, SessionVerifyResult } from "./session-token.js";
-export { createInMemoryJtiGuard } from "./jti-guard.js";
-export type { JtiReplayGuard } from "./jti-guard.js";
-export { exchangeSessionToken } from "./token-exchange.js";
-export type { AssociatedUser, TokenExchangeResult } from "./token-exchange.js";
+export { verifyShopifySessionToken, type ShopifySessionClaims, type SessionVerifyResult } from "./session-token.js";
+export { createInMemoryJtiGuard, type JtiReplayGuard } from "./jti-guard.js";
+export { exchangeSessionToken, type AssociatedUser, type TokenExchangeResult } from "./token-exchange.js";
+export { mapShopifyRole, type RoleOverrideSource } from "./role-map.js";
+export { mintMerchantSession, verifyMerchantSession } from "./palup-session.js";
+export { createShopifyAppBridgeIdentity, type ShopifyIdentityDeps, type EstablishResult } from "./identity.js";
+export { requireMerchant, requirePermission, shopifyEmbedFrameAncestors } from "./fastify-plugin.js";
