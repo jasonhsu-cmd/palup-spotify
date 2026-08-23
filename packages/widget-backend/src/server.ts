@@ -104,6 +104,7 @@ import { createReconcileCoalescer, CATALOG_RECONCILE_COALESCE_MS_DEFAULT } from 
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
 import { reconcileByReason, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
+import { makeMultiTenantCatalogProductAdminSource } from "./jobs/catalog-backfill.js";
 import { createChannelHealth } from "./channel-health.js";
 import { registerMemoryWritePushRoute } from "./routes/pubsub-push-memory.js";
 import { dispatchMemoryWrite } from "./memory-write-dispatch.js";
@@ -954,6 +955,36 @@ export async function buildServer(opts?: {
   const offerCheckModel = OUTGOING_OFFER_CHECK
     ? createMeteringModelPort(activeModelPort, telemetry, { agentType: OFFER_CHECK_AGENT_TYPE })
     : undefined;
+  // Task 13 (ADR-0022 F2/F6/F7) — Admin-token custody, a NEW, OPT-IN capability layered onto the
+  // already-shipped install/webhook flows. Unlike `merchantCredentials` (REQUIRED, unconditional — the
+  // delegate token is what serving needs), this is gated on its OWN flag: ADMIN_TOKEN_CUSTODY_ENABLED
+  // defaults OFF, so an unconfigured deployment constructs nothing here and `adminTokens` stays `undefined`
+  // everywhere below — byte-identical to every build before Task 13. When on, `createAdminTokenStore` is
+  // built over the SAME `store` + the distinct `adminCredCrypto()` scope (F2, see that function's own
+  // comment). A production admin-scope OAuth REQUEST is a separate, not-yet-built step (Task 12's own
+  // note, and shopify-install.ts's comment at the `deps.adminTokens.put` call site) — this flag only
+  // controls whether custody of whatever Admin token the existing install grant already produced is
+  // ATTEMPTED; the least-privilege scopes a real production request should use are `ADMIN_SYNC_SCOPES`
+  // (read_products, read_inventory — shopify-webhook-identity.ts, Task 12/F3), referenced here so the two
+  // stay visibly linked rather than drifting apart.
+  //
+  // MOVED HERE (final-review fix, whole-branch review 2026-08-23) from just above the C1 install block:
+  // this construction has no dependency on anything install-specific (`store` and `adminCredCrypto()` are
+  // both available from function start), and `reconcileDeps` below needs `adminTokens` to build the
+  // paired `catalogProductAdminSource` seam without a forward reference. `registerShopifyInstallRoutes`'s
+  // own use of `adminTokens` (further down, unchanged) still reads the SAME variable, just declared here now.
+  const ADMIN_TOKEN_CUSTODY_ENABLED = process.env.ADMIN_TOKEN_CUSTODY_ENABLED === "true";
+  const adminTokens: AdminTokenStore | undefined = ADMIN_TOKEN_CUSTODY_ENABLED
+    ? (opts?.adminTokens ?? createAdminTokenStore(store, adminCredCrypto()))
+    : undefined;
+  if (ADMIN_TOKEN_CUSTODY_ENABLED) {
+    console.warn(
+      `[boot] ADMIN_TOKEN_CUSTODY_ENABLED=true — custodying the Shopify Admin offline token per shop under a ` +
+        `DISTINCT crypto scope from merchant-cred (ADR-0022 F2). Sync-plane only: serving reads only the ` +
+        `delegate token. A production Admin-scope request (not yet built) should request exactly ` +
+        `ADMIN_SYNC_SCOPES=${ADMIN_SYNC_SCOPES.join(",")}, never a write scope.`,
+    );
+  }
   // Pillar 1 (serve-time read-through) — `reconcileDeps` built UNCONDITIONALLY (moved out of the
   // CATALOG_WEBHOOKS/pubsub-push block below, which still builds nothing else early) so `refreshFacts`
   // (below) can be wired into `brainFor` regardless of whether the webhook/pubsub worker is enabled. Cheap
@@ -980,10 +1011,44 @@ export async function buildServer(opts?: {
     // store over the same table — so a write through this path and a read through grounding always see the
     // same rows.
     catalogProduct: CATALOG_BACKFILL_ENABLED ? localCatalogProduct : undefined,
+    // Final-review fix (whole-branch review, 2026-08-23) — the PAIRED clobber-fix field (Task 6/7's
+    // `CatalogIndexDeps.catalogProductAdminSource`) that Task 13 left unwired above. STRUCTURALLY paired
+    // with `catalogProduct`: both read off the SAME `CATALOG_BACKFILL_ENABLED` gate, and the boot-time
+    // guard just below refuses to start if that pairing did not actually succeed (e.g. custody is off), so
+    // the write-plane can never again be half-wired the way it was before this fix. Built from
+    // `makeMultiTenantCatalogProductAdminSource` (catalog-backfill.ts) over the SAME `adminTokens` store
+    // `registerShopifyInstallRoutes` below already writes into (F2/F6/F7) — a tenant whose admin token this
+    // resolves is exactly a tenant that could have a rich Bulk-Ops backfill row to protect. `undefined`
+    // when custody is off (ADMIN_TOKEN_CUSTODY_ENABLED defaults OFF) — see the guard below for what that
+    // means when `catalogProduct` is ALSO wired.
+    catalogProductAdminSource:
+      CATALOG_BACKFILL_ENABLED && ADMIN_TOKEN_CUSTODY_ENABLED && adminTokens
+        ? makeMultiTenantCatalogProductAdminSource(adminTokens, parseStoreDomains())
+        : undefined,
     // Pillar 1b — a successful money-fact upsert here is a live producer run; record it for channel-health
     // regardless of PRICE_REQUIRES_LIVE_CHANNEL (see channelHealth's own construction comment above).
     onProducerOk: (t: string) => channelHealth.recordProducerOk(t),
   };
+  // Final-review fix (whole-branch review, 2026-08-23) — THE STRUCTURAL GUARD that makes the pairing above
+  // impossible to silently break: refuse to boot if the rich delta WRITE plane (`catalogProduct`) is wired
+  // while its paired admin-shape READ source (`catalogProductAdminSource`) is not. Without this, an
+  // operator could flip `CATALOG_BACKFILL_ENABLED=true` alone (without also turning on
+  // `ADMIN_TOKEN_CUSTODY_ENABLED`) and reintroduce, silently, the exact clobber the Task 6/7 review ruling
+  // called load-bearing: every delta write would fall back to the thin projection forever, nulling any rich
+  // row a real Bulk-Ops backfill (which itself requires the SAME admin-token custody) had written. This is
+  // a pure boot-time composition check — it costs nothing at runtime and changes nothing for either flag's
+  // default-off posture (both are OFF everywhere today, so this never fires in production).
+  if (reconcileDeps.catalogProduct && !reconcileDeps.catalogProductAdminSource) {
+    throw new Error(
+      "CATALOG_BACKFILL_ENABLED wires the durable catalog_product delta write-plane, but " +
+        "catalogProductAdminSource could not be constructed (ADMIN_TOKEN_CUSTODY_ENABLED is off, or no " +
+        "admin-token store is configured) — refusing to boot. Writing thin delta records while a rich " +
+        "Bulk-Ops backfill row could exist would silently clobber it on the very next product webhook " +
+        "(the Task 6/7 clobber). Enable ADMIN_TOKEN_CUSTODY_ENABLED (with a real admin-token store) in the " +
+        "SAME change that turns on CATALOG_BACKFILL_ENABLED — see docs/superpowers/plans/" +
+        "2026-08-23-durable-catalog-sync.md's Task 13 operator note.",
+    );
+  }
   // Pillar 1 (serve-time read-through) — the PORT-CLEAN callback wired into the brain (createBrain position
   // 28): a vendor-neutral `(tenantId, productIds) => Promise<void>` that re-fetches just the named SKUs
   // through the SAME targeted reconcile the catalog webhook path uses (reconcileByReason → reconcileProducts:
@@ -1326,30 +1391,11 @@ export async function buildServer(opts?: {
   // exposing merchant credentials (crypto-port key separation).
   const merchantCredentials: MerchantCredentialSink | undefined =
     opts?.merchantCredentials ?? createMerchantCredentialStore(store, merchantCredCrypto());
-  // Task 13 (ADR-0022 F2/F6/F7) — Admin-token custody, a NEW, OPT-IN capability layered onto the
-  // already-shipped install/webhook flows. Unlike `merchantCredentials` above (REQUIRED, unconditional —
-  // the delegate token is what serving needs), this is gated on its OWN flag: ADMIN_TOKEN_CUSTODY_ENABLED
-  // defaults OFF, so an unconfigured deployment constructs nothing here and `adminTokens` stays `undefined`
-  // everywhere below — byte-identical to every build before this task. When on, `createAdminTokenStore`
-  // is built over the SAME `store` + the distinct `adminCredCrypto()` scope (F2, see its own comment above).
-  // A production admin-scope OAuth REQUEST is a separate, not-yet-built step (Task 12's own note, and
-  // shopify-install.ts's comment at the `deps.adminTokens.put` call site) — this flag only controls whether
-  // custody of whatever Admin token the existing install grant already produced is ATTEMPTED; the
-  // least-privilege scopes a real production request should use are `ADMIN_SYNC_SCOPES`
-  // (read_products, read_inventory — shopify-webhook-identity.ts, Task 12/F3), referenced here so the two
-  // stay visibly linked rather than drifting apart.
-  const ADMIN_TOKEN_CUSTODY_ENABLED = process.env.ADMIN_TOKEN_CUSTODY_ENABLED === "true";
-  const adminTokens: AdminTokenStore | undefined = ADMIN_TOKEN_CUSTODY_ENABLED
-    ? (opts?.adminTokens ?? createAdminTokenStore(store, adminCredCrypto()))
-    : undefined;
-  if (ADMIN_TOKEN_CUSTODY_ENABLED) {
-    console.warn(
-      `[boot] ADMIN_TOKEN_CUSTODY_ENABLED=true — custodying the Shopify Admin offline token per shop under a ` +
-        `DISTINCT crypto scope from merchant-cred (ADR-0022 F2). Sync-plane only: serving reads only the ` +
-        `delegate token. A production Admin-scope request (not yet built) should request exactly ` +
-        `ADMIN_SYNC_SCOPES=${ADMIN_SYNC_SCOPES.join(",")}, never a write scope.`,
-    );
-  }
+  // Task 13 (ADR-0022 F2/F6/F7) — Admin-token custody (`ADMIN_TOKEN_CUSTODY_ENABLED` / `adminTokens`) is
+  // now constructed EARLIER (final-review fix, see the `reconcileDeps` block below), so the
+  // `catalogProductAdminSource` seam paired with `reconcileDeps.catalogProduct` can read it without a
+  // forward reference. Both names are declared above and reused verbatim here — see that construction
+  // site's own comment for the full ADR-0022 F2/F6/F7 rationale.
   // HOISTED above the C1 install block (their defining comment blocks stay in the C2 section below) so the
   // install flow can build its shop-specific webhook subscription list. Under `use_legacy_install_flow`
   // declarative `[webhooks]` are forbidden, so webhooks are subscribed via the Admin API DURING install;

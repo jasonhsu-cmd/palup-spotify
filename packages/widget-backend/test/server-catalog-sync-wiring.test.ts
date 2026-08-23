@@ -310,16 +310,48 @@ describe("server.ts composition — durable catalog-sync (Task 13)", () => {
     }
   });
 
-  it("boots successfully with CATALOG_BACKFILL_ENABLED on and off (reconcileDeps composes either way)", async () => {
-    for (const flag of ["true", "false"]) {
-      process.env.CATALOG_BACKFILL_ENABLED = flag;
-      const app = await buildServer({ store: new InMemoryRuntimeStore() });
-      try {
-        const res = await app.inject({ method: "GET", url: "/health" });
-        expect(res.statusCode).toBe(200);
-      } finally {
-        await app.close();
-      }
+  it("boots successfully with CATALOG_BACKFILL_ENABLED off, regardless of admin-token custody", async () => {
+    process.env.CATALOG_BACKFILL_ENABLED = "false";
+    const app = await buildServer({ store: new InMemoryRuntimeStore() });
+    try {
+      const res = await app.inject({ method: "GET", url: "/health" });
+      expect(res.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+
+  // Final-review fix (whole-branch review, 2026-08-23) — Task 13 wired `reconcileDeps.catalogProduct`
+  // (the durable delta WRITE plane) into composition but never wired the paired clobber-fix field
+  // `catalogProductAdminSource`. Left alone, turning CATALOG_BACKFILL_ENABLED on by itself (exactly what
+  // the OLD version of this test proved "boots fine either way") would silently reintroduce the Task 6/7
+  // clobber the moment a real Bulk-Ops backfill populated a rich row. The fix makes the two fields
+  // STRUCTURALLY paired: `buildServer` now refuses to boot when the rich write-plane is wired without its
+  // admin-shape read source.
+  it("FAILS FAST at composition when CATALOG_BACKFILL_ENABLED=true but the admin-shape source cannot be built (ADMIN_TOKEN_CUSTODY_ENABLED off) — the trap can no longer boot silently", async () => {
+    process.env.CATALOG_BACKFILL_ENABLED = "true";
+    delete process.env.ADMIN_TOKEN_CUSTODY_ENABLED;
+    await expect(buildServer({ store: new InMemoryRuntimeStore() })).rejects.toThrow(/catalogProductAdminSource/i);
+  });
+
+  it("boots and wires the paired admin-shape source when BOTH CATALOG_BACKFILL_ENABLED and ADMIN_TOKEN_CUSTODY_ENABLED are on (the safe, paired posture)", async () => {
+    process.env.CATALOG_BACKFILL_ENABLED = "true";
+    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
+    const fakeAdminTokens: AdminTokenStore = {
+      put: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+      async read() {
+        return { status: "missing" };
+      },
+      async refresh() {},
+    };
+
+    const app = await buildServer({ store: new InMemoryRuntimeStore(), adminTokens: fakeAdminTokens });
+    try {
+      const res = await app.inject({ method: "GET", url: "/health" });
+      expect(res.statusCode).toBe(200);
+    } finally {
+      await app.close();
     }
   });
 });

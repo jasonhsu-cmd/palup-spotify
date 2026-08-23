@@ -6,7 +6,7 @@ import type {
   ProductFactsPort,
   RuntimeStatePort,
 } from "@palup/platform-ports";
-import { matchedCostCap, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
+import { matchedCostCap, matchedKill, RUNTIME_AGENT_TYPE, type AdminTokenStore } from "@palup/state-postgres";
 import {
   createShopifyAdminClient,
   ShopifyClientError,
@@ -708,5 +708,64 @@ export function makeCatalogProductByIdSource(client: ShopifyAdminClient, now: ()
     if (products.length === 0) return undefined;
     const at = now();
     return products.map((p) => mapAdminProductNode(p, at));
+  };
+}
+
+/**
+ * Final-review fix (whole-branch review, 2026-08-23) — the MULTI-TENANT composition wrapper
+ * `server.ts` actually wires as `CatalogIndexDeps.catalogProductAdminSource`. `makeCatalogProductByIdSource`
+ * above is bound to ONE already-authenticated `ShopifyAdminClient`; this server runs many tenants behind
+ * one process, so something has to resolve, per call, WHICH tenant's shop domain and admin token to build
+ * that client from. This is that something, and it is what Task 13 left unbuilt: Task 13 wired
+ * `reconcileDeps.catalogProduct` (the delta WRITE plane) but never constructed or wired
+ * `catalogProductAdminSource` at all, so every delta write took the thin-projection fallback — silently
+ * reintroducing the exact clobber Task 6/7 resolved, the moment a real Bulk-Ops backfill (Task 7, also
+ * still unwired) ever populates a rich row.
+ *
+ * READ-ONLY, NO REFRESH — deliberately. `runCatalogBackfill`'s `getFreshAdminToken` (this file) exists
+ * because a whole-catalog Bulk Operation can outlive a token's remaining life; a single by-id lookup here
+ * cannot, and — separately — there is nothing to refresh yet: `InstallGrant.expiresAt`
+ * (shopify-install-identity.ts) is ALWAYS `undefined` today, because `exchangeInstallCode` requests the
+ * default, non-expiring OFFLINE token and Shopify's response for that grant carries no `expires_in` to
+ * parse (see that file's own doc comment on `InstallGrant.expiresAt`). So the ONLY admin token this store
+ * ever custodies today cannot expire, and a live-refresh/OAuth-rotation path (F9) is a SEPARATE, still-
+ * deferred capability this function does not fabricate — it reads whatever is already custodied and
+ * refuses (see below) rather than pretend to refresh anything.
+ *
+ * PER-TENANT OUTCOMES, and why each is honest rather than a guess:
+ *   • no configured shop domain for this tenant           → `undefined` (no rich source; same as absent)
+ *   • `AdminTokenStore.read` reports `"missing"`           → `undefined`. A tenant with no custodied admin
+ *     token has never been able to run `runCatalogBackfill` either (it needs the SAME token from the SAME
+ *     store), so there is provably no rich row for the caller's thin fallback to clobber.
+ *   • `AdminTokenStore.read` reports `"unreadable"`        → THROWS (never a silent `undefined`). Unlike
+ *     `"missing"`, `"unreadable"` can mean a token that WORKED at backfill time (so a rich row may already
+ *     exist) has since become undecryptable — collapsing that into `undefined` would make the delta path
+ *     silently overwrite that rich row with a thin one, which is exactly the clobber this whole seam
+ *     exists to prevent. Throwing lets `reconcileProducts`'s own try/catch (catalog-index.ts) alert and
+ *     skip the write entirely, leaving the existing row untouched — mirrors `makeAdminTokenRefresher`'s own
+ *     fail-closed-on-`unreadable` rule (admin-token-refresh.ts).
+ *   • found + configured                                  → a real `nodes(ids:)` fetch via
+ *     `makeCatalogProductByIdSource`, scoped to that tenant's shop.
+ */
+export function makeMultiTenantCatalogProductAdminSource(
+  tokens: Pick<AdminTokenStore, "read">,
+  domains: Record<string, string>,
+  opts: { createClient?: (creds: ShopifyAdminCreds) => ShopifyAdminClient; now?: () => Date } = {},
+): CatalogProductByIdSource {
+  const createClient = opts.createClient ?? ((creds: ShopifyAdminCreds) => createShopifyAdminClient({ creds }));
+  return async (tenantId, ids) => {
+    if (!Object.hasOwn(domains, tenantId)) return undefined;
+    const shopDomain = domains[tenantId]!;
+    const tokenRead = await tokens.read(tenantId);
+    if (tokenRead.status === "missing") return undefined;
+    if (tokenRead.status === "unreadable") {
+      throw new Error(
+        `admin token unreadable for tenant "${tenantId}" (${tokenRead.reason}) — refusing to silently fall ` +
+          "back to a thin catalog_product write, which could clobber a rich row a prior (readable-token) " +
+          "backfill already wrote; reinstall/re-custody the Admin token to restore the rich delta path",
+      );
+    }
+    const client = createClient({ shopDomain, accessToken: tokenRead.token });
+    return makeCatalogProductByIdSource(client, opts.now)(tenantId, ids);
   };
 }

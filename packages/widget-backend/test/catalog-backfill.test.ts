@@ -6,7 +6,7 @@ import {
   type CatalogProductRecord,
 } from "@palup/platform-ports";
 import type { ShopifyAdminClient, BulkStatus } from "../src/shopify-client.js";
-import { runCatalogBackfill, type CatalogBackfillDeps } from "../src/jobs/catalog-backfill.js";
+import { runCatalogBackfill, makeMultiTenantCatalogProductAdminSource, type CatalogBackfillDeps } from "../src/jobs/catalog-backfill.js";
 import { reconcileProducts, type CatalogIndexDeps, type CatalogSource } from "../src/jobs/catalog-index.js";
 
 // Task 7 (durable-catalog-sync) — the Bulk-Operations backfill driver, plus the load-bearing clobber
@@ -408,5 +408,70 @@ describe("clobber preservation (load-bearing, carried in from Task 6 review)", (
     for (const call of catalogProductAdminSource.mock.calls) {
       expect(call[1]).not.toContain("gid://shopify/Product/2");
     }
+  });
+});
+
+// Final-review fix (whole-branch review, 2026-08-23) — Task 13 wired `reconcileDeps.catalogProduct` into
+// server.ts's composition but never constructed or wired `catalogProductAdminSource`, so every real delta
+// write would have taken the thin-projection fallback exercised above ("without the admin source...").
+// `makeMultiTenantCatalogProductAdminSource` is the per-tenant wrapper server.ts now composes as that
+// field, resolving which tenant's shop domain + custodied admin token to build a `ShopifyAdminClient` from
+// before delegating to `makeCatalogProductByIdSource`.
+describe("makeMultiTenantCatalogProductAdminSource (final-review fix) — the per-tenant seam server.ts composes as catalogProductAdminSource", () => {
+  const DOMAINS = { acme: "acme.myshopify.com" };
+
+  function fakeGraphqlClient(nodes: unknown[]): ShopifyAdminClient {
+    return {
+      graphql: vi.fn(async () => ({ data: { nodes } })),
+      runBulkQuery: vi.fn(),
+      pollBulk: vi.fn(),
+      downloadJsonl: vi.fn(),
+    } as unknown as ShopifyAdminClient;
+  }
+
+  it("found token + configured domain: builds a client from the tenant's own creds and returns the real rich record", async () => {
+    const client = fakeGraphqlClient([
+      {
+        id: "gid://shopify/Product/1",
+        handle: "alpha-serum",
+        title: "Alpha Serum",
+        descriptionHtml: "<p>Great serum</p>",
+        status: "ACTIVE",
+        tags: ["hydrating", "vegan"],
+      },
+    ]);
+    const tokens = { read: vi.fn(async () => ({ status: "found" as const, token: "admin-tok-acme" })) };
+    const createClient = vi.fn(() => client);
+
+    const source = makeMultiTenantCatalogProductAdminSource(tokens, DOMAINS, { createClient });
+    const records = await source("acme", ["gid://shopify/Product/1"]);
+
+    expect(createClient).toHaveBeenCalledWith({ shopDomain: "acme.myshopify.com", accessToken: "admin-tok-acme" });
+    expect(records).toHaveLength(1);
+    expect(records![0]!.title).toBe("Alpha Serum");
+    expect(records![0]!.tags).toEqual(["hydrating", "vegan"]);
+    expect(records![0]!.descriptionText).toContain("serum");
+  });
+
+  it("no configured shop domain for this tenant: returns undefined without ever reading the token store", async () => {
+    const tokens = { read: vi.fn(async () => ({ status: "found" as const, token: "x" })) };
+    const source = makeMultiTenantCatalogProductAdminSource(tokens, {}, {});
+
+    expect(await source("acme", ["gid://shopify/Product/1"])).toBeUndefined();
+    expect(tokens.read).not.toHaveBeenCalled();
+  });
+
+  it('admin token "missing": returns undefined (no rich source) — safe, because a tenant with no custodied token could never have run a backfill to produce a rich row either', async () => {
+    const tokens = { read: vi.fn(async () => ({ status: "missing" as const })) };
+    const source = makeMultiTenantCatalogProductAdminSource(tokens, DOMAINS, {});
+
+    expect(await source("acme", ["gid://shopify/Product/1"])).toBeUndefined();
+  });
+
+  it('admin token "unreadable": THROWS rather than silently falling back — an unreadable token might have worked at backfill time, so silently returning undefined here could let the delta path clobber an existing rich row', async () => {
+    const tokens = { read: vi.fn(async () => ({ status: "unreadable" as const, reason: "undecryptable" as const })) };
+    const source = makeMultiTenantCatalogProductAdminSource(tokens, DOMAINS, {});
+
+    await expect(source("acme", ["gid://shopify/Product/1"])).rejects.toThrow(/unreadable/i);
   });
 });
