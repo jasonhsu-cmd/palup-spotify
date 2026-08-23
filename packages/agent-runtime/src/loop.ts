@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import type { RuntimeStateCtx, RuntimeStatePort } from "@palup/platform-ports";
 import { classifyAction, type RulesProvider } from "./classify.js";
+import { assertNotKilled } from "./kill.js";
 import type { ProposalStore } from "./proposal-store.js";
 import { ttlForCategory, type AgentAction, type Proposal, type ProposalCategory, type ReversalPlan } from "./types.js";
 
@@ -101,6 +102,12 @@ export async function proposeOrExecute(input: ProposeInput, deps: EngineDeps): P
   const classification = await classifyAction(input.action, input.ctx, deps.rules);
 
   if (classification.decision === "auto") {
+    // Kill-Switch gate (governance non-negotiable #4): checked immediately before the ONLY
+    // execution path in this function, so a killed merchant/agent-type/global halt can never reach
+    // the executor. A `requires_approval` classification still creates its proposal below —
+    // proposing is not autonomous execution; `executeApproved` (Task 6) re-checks this same gate
+    // before it would ever execute an approved proposal.
+    await assertNotKilled(deps.state, input.ctx, input.agentType);
     const result = await deps.executor({
       ctx: input.ctx,
       agentId: input.agentId,
