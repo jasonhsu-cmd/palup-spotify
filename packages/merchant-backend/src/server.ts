@@ -20,6 +20,7 @@ import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
 import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
+import { registerAuditRoutes } from "./routes/audit.js";
 import "./types.js";
 
 // Task 4 composition root: `store`/`identity` stay injectable (every existing test suite injects fakes
@@ -137,6 +138,7 @@ export async function buildServer(opts?: {
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
     registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms });
     registerKillRoutes(merchantPlane, { state: store });
+    registerAuditRoutes(merchantPlane, { state: store });
   });
 
   return app;
