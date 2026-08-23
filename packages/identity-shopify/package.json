@@ -1,0 +1,14 @@
+{
+  "name": "@palup/identity-shopify",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@palup/platform-ports": "workspace:*"
+  },
+  "devDependencies": {
+    "fastify": "^5.0.0",
+    "vitest": "^2.1.0"
+  }
+}

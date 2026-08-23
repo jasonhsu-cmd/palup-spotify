@@ -52,6 +52,11 @@ export { InMemoryRuntimeStore } from "./in-memory-runtime-store.js";
 export { canonicalize, hashAuditBase } from "./audit-hash.js";
 export type { IdentityPort, Principal } from "./identity-port.js";
 export { authorize, buildShopifyShopperId, shopperIdTenant } from "./identity-port.js";
+export type {
+  MerchantIdentityPort, MerchantPrincipal, AnonymousPrincipal, MerchantAuthResult,
+  MerchantRole, AuthLevel, Permission,
+} from "./merchant-identity-port.js";
+export { DEFAULT_ROLE_PERMISSIONS, can, canApproveMoney } from "./merchant-identity-port.js";
 export { createOperatorTokenIdentity } from "./operator-identity.js";
 export { mintStepUp, verifyStepUp, STEPUP_MAX_AGE_MS, STEPUP_CLOCK_SKEW_MS, type StepUpClaims, type StepUpResult } from "./step-up.js";
 export { createWidgetTokenIdentity, mintWidgetToken } from "./widget-token-identity.js";
@@ -113,5 +118,6 @@ export type {
 } from "./outcome-ledger.js";
 export { EMPTY_ARM_AGG, MIN_EXPOSURES_PER_ARM, computeIncrementalLift } from "./outcome-ledger.js";
 export type { CartPort, CartLine, CartCheckout } from "./cart-port.js";
+export { b64url, b64urlDecode, hmacSign, constantTimeEqual } from "./token-codec.js";
 // NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
 // into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.
