@@ -1,5 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -19,32 +18,26 @@ import { ORDER_ATTRIBUTION_ADMIN_SCOPE } from "../src/shopify-webhook-identity.j
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-function git(args: string[]): string {
-  const out = spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });
-  if (out.error) throw out.error;
-  if (out.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${out.stderr}`);
-  return out.stdout;
-}
-
-/** Every path this branch has touched relative to `main`, INCLUDING uncommitted working-tree changes
- *  and untracked new files — so this test is meaningful whether run before or after `git commit`. */
-function changedPaths(): string[] {
-  const mergeBase = git(["merge-base", "main", "HEAD"]).trim();
-  const tracked = git(["diff", "--name-only", mergeBase]).split("\n");
-  const untracked = git(["ls-files", "--others", "--exclude-standard"]).split("\n");
-  return [...tracked, ...untracked].map((p) => p.trim()).filter(Boolean);
-}
-
-describe("W2-C — shopify.app.toml is untouched and grants no new scope", () => {
-  it("shopify.app.toml is not among the files this branch changed", () => {
-    expect(changedPaths()).not.toContain("shopify.app.toml");
-  });
-
-  it("shopify.app.toml (as it exists on disk right now) does not declare read_orders or any order/customer scope", () => {
+// W2-C (LOOSENED 2026-08-23, owner-authorized — jason): the original pins here were "shopify.app.toml is
+// untouched" and "declares NO order/customer scope", labeled an OWNER-gated step outside a build agent's
+// authority. The owner has now gated it: the DEV Dashboard app declares `write_customers,write_orders` to
+// seed test-shopper fixtures on the DEVELOPMENT store (see shopify.app.toml's own comment; dev-store apps
+// need no Shopify PCD review). PRODUCTION will be a SEPARATE app, so these scopes must not reach prod. The
+// anti-scope-CREEP intent is PRESERVED as an exact allowlist below — any scope beyond the four authorized
+// ones (incl. read_all_orders or a standalone read_orders) still fails CI. The old `changedPaths()` "toml
+// untouched" pin is retired (the toml is now intentionally changed) — the disk-state allowlist is stronger.
+describe("shopify.app.toml declares only the owner-authorized scope set (anti-creep)", () => {
+  it("declares exactly the allowed scopes — no un-authorized order/customer/creep scope", () => {
     const toml = readFileSync(join(repoRoot, "shopify.app.toml"), "utf8");
     const scopesLine = toml.split("\n").find((l) => l.trim().startsWith("scopes ="));
     expect(scopesLine, "shopify.app.toml must declare an [access_scopes] scopes line").toBeDefined();
-    expect(scopesLine).not.toMatch(/read_orders|write_orders|read_customers|write_customers/);
+    const scopes = (scopesLine.split('"')[1] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    const ALLOWED = new Set(["read_products", "read_inventory", "write_customers", "write_orders"]);
+    const unexpected = scopes.filter((s) => !ALLOWED.has(s));
+    expect(unexpected, `un-authorized scope(s) in shopify.app.toml (owner-gated): ${unexpected.join(", ")}`).toEqual([]);
+    // Belt-and-braces on the two escalations we explicitly did NOT authorize:
+    expect(scopes).not.toContain("read_all_orders");
+    expect(scopes).not.toContain("read_orders"); // write_orders already includes read; a standalone read_orders is not wanted
   });
 });
 
