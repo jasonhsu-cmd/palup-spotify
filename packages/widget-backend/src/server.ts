@@ -15,7 +15,7 @@ import {
 import { DEFAULT_POLICY, normalizeHistory, OFFER_CHECK_AGENT_TYPE } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
 import { classifyGuardSignals, GUARD_CLASSIFIER_AGENT_TYPE } from "./guard-classifier.js";
-import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort, Arm, CartLine } from "@palup/platform-ports";
+import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort, Arm, CartLine, CatalogProductPort } from "@palup/platform-ports";
 import {
   createWidgetTokenIdentity,
   mintWidgetToken,
@@ -50,7 +50,8 @@ import {
   tombstoneKey,
   mergeGuestIntoAccount,
 } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, PostgresCatalogProductStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, PostgresCatalogProductStore, createMerchantCredentialStore, createAdminTokenStore, accumulateArmTally, type Sql, type ConsentRecord, type AdminTokenStore } from "@palup/state-postgres";
+import { ADMIN_SYNC_SCOPES } from "./shopify-webhook-identity.js";
 import { createModelPort, createGroundingPort, createCommercePort, createLocalCatalogDecision } from "./model.js";
 import { createLocalCatalogGroundingPort } from "./local-catalog-grounding.js";
 import { createRuntimeSessionStore } from "./session-store.js";
@@ -349,6 +350,25 @@ export async function buildServer(opts?: {
    * store — the Storefront token comes from `SecretsPort` (merchant-store.ts). That is D2.
    */
   merchantCredentials?: MerchantCredentialSink;
+  /**
+   * Task 13 test seam (mirrors `merchantCredentials`): the Admin-token custody store `createGroundingPort`
+   * never reads (it is sync-plane-only), but `registerShopifyInstallRoutes`/`registerShopifyWebhookRoutes`
+   * do. A missing override ⇒ the composition root builds its own `createAdminTokenStore(store,
+   * adminCredCrypto())` — but ONLY when `ADMIN_TOKEN_CUSTODY_ENABLED` is on; unlike `merchantCredentials`
+   * (required, unconditional), Admin-token custody is an OPT-IN new capability (ADR-0022), so an
+   * unconfigured deployment constructs nothing and installs/webhooks behave byte-identically to before
+   * this task.
+   */
+  adminTokens?: AdminTokenStore;
+  /**
+   * Task 8/13 test seam (mirrors `merchantCredentials`/`adminTokens`): the durable `catalog_product` store.
+   * A missing override ⇒ the composition root builds its own (`PostgresCatalogProductStore` when a pool
+   * exists, else the in-memory reference adapter) — UNCONDITIONALLY, exactly as Task 8 already does for
+   * grounding, since this ONE instance is shared across grounding (Task 8), the delta-reconcile write path
+   * (Task 13, gated on `CATALOG_BACKFILL_ENABLED`) and the shop/redact + app/uninstalled teardown paths
+   * (Task 9/13, unconditional — see their own gating notes at the call sites).
+   */
+  catalogProduct?: CatalogProductPort;
   /** D2 test seam (mirrors `caaFetch`/`installFetch`): the Storefront API fetch `createGroundingPort`'s
    * Shopify adapter uses when read-back resolves a `live` credential. There is otherwise no way to inject
    * a fake Storefront fetch into `buildServer`. Prod uses the live Storefront call (`storefrontFetch()`,
@@ -435,6 +455,22 @@ export async function buildServer(opts?: {
     MERCHANT_CRED_SHARED_KEY_ENABLED
       ? createAesGcmCrypto(secrets, { sharedKeyTenantId: MERCHANT_CRED_SHARED_KEY_TENANT })
       : createAesGcmCrypto(secrets);
+  // Task 13 (ADR-0022 F2) — a NAMED, DISTINCT crypto factory for Admin-token custody, mirroring
+  // `merchantCredCrypto` immediately above. The distinct-scope property (F2's whole point: a compromise or
+  // rotation of the merchant-cred key must never expose or perturb the Admin-cred key, and vice versa) is
+  // enforced INSIDE `admin-token-store.ts` itself, which always calls `crypto.encrypt`/`decrypt` with
+  // `ADMIN_CRED_KEY_SCOPE` ("admin-cred") — a DIFFERENT scope from `MERCHANT_CRED_KEY_SCOPE`
+  // ("merchant-cred") `merchant-credential-store.ts` always passes. `keyScopeSecretName` (crypto-port.ts)
+  // turns that into a genuinely different provisioned secret name per scope
+  // (`MEMORY_ENCRYPTION_KEY__admin-cred` vs. `MEMORY_ENCRYPTION_KEY__merchant-cred`), so this can safely be
+  // the SAME kind of generic `createAesGcmCrypto(secrets)` adapter `merchantCredCrypto()` builds — no
+  // separate `CryptoPort` implementation is needed, and no `sharedKeyTenantId` option is threaded here:
+  // MERCHANT_CRED_SHARED_KEY_ENABLED is a self-serve-install friction reducer scoped explicitly to
+  // merchant-cred custody (its own doc comment above), not a decision this task extends to Admin-token
+  // custody without a separate directive. An unprovisioned admin-cred key therefore fails closed exactly
+  // like an unprovisioned merchant-cred key would — see the non-fatal custody-failure handling this task
+  // added to `routes/shopify-install.ts` for what happens when that throw is hit at install time.
+  const adminCredCrypto = () => createAesGcmCrypto(secrets);
   // ── D1 — the merchant registry, and the resolver that is now the ONLY way the serving path decides
   // which merchant a request belongs to and whether it may still be served. See merchant-resolver.ts for
   // the precedence rule, what stayed on env, and why. HOISTED HERE (it used to be constructed ~300 lines
@@ -528,7 +564,17 @@ export async function buildServer(opts?: {
   // builds more than one `ProductFactsPort` handle over the same underlying table/map, and that has never
   // been a correctness issue since every op is scoped by (tenantId, productId)).
   const CATALOG_LOCAL_SERVING = process.env.CATALOG_LOCAL_SERVING !== "false";
-  const localCatalogProduct = runtimeResult.sql ? new PostgresCatalogProductStore(runtimeResult.sql) : createInMemoryCatalogProductStore();
+  // Task 13 — CATALOG_BACKFILL_ENABLED gates the durable-catalog-sync WRITE plane: whether the catalog
+  // webhook/poll delta-reconcile (Tasks 6/7, `reconcileDeps` below) is allowed to write into
+  // `catalog_product` at all. Deliberately a SEPARATE flag from `CATALOG_LOCAL_SERVING` (the READ plane —
+  // whether grounding is allowed to SERVE from `catalog_product`): default OFF, unlike
+  // `CATALOG_LOCAL_SERVING`, because this is new WRITE machinery reaching into a durable store, whereas
+  // local serving falling back to Shopify when `catalog_product` is empty is always safe. A deployment can
+  // therefore turn on local-serving reads with zero risk while leaving the write-plane off until an
+  // operator deliberately opts in (staging default-on is an operator/deploy-config decision, §7 below — not
+  // a code default). See ADMIN_TOKEN_CUSTODY_ENABLED just below for the equivalent gate on custody itself.
+  const CATALOG_BACKFILL_ENABLED = process.env.CATALOG_BACKFILL_ENABLED === "true";
+  const localCatalogProduct = opts?.catalogProduct ?? (runtimeResult.sql ? new PostgresCatalogProductStore(runtimeResult.sql) : createInMemoryCatalogProductStore());
   if (localCatalogProduct instanceof PostgresCatalogProductStore) await localCatalogProduct.migrate();
   const localProductFacts = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
   if (localProductFacts instanceof PostgresProductFactsStore) await localProductFacts.migrate();
@@ -925,6 +971,15 @@ export async function buildServer(opts?: {
     catalog: shopifyCatalogSource(secrets),
     catalogById: shopifyCatalogByIdSource(secrets),
     productFacts: reconcileFactsStore,
+    // Task 13 (durable-catalog-sync, §4.2/F8) — the durable `catalog_product` write path (Tasks 6/7's
+    // `indexOneTenant`/`reconcileProducts` blocks, which are already no-ops unless this field is present).
+    // Gated on CATALOG_BACKFILL_ENABLED, not CATALOG_LOCAL_SERVING: this is the WRITE plane (populating
+    // catalog_product from the poll/webhook delta-reconcile), independent of whether grounding is currently
+    // reading FROM it (see CATALOG_BACKFILL_ENABLED's own comment, above, for the full read/write split).
+    // Reuses the SAME `localCatalogProduct` instance Task 8 already built for grounding — never a second
+    // store over the same table — so a write through this path and a read through grounding always see the
+    // same rows.
+    catalogProduct: CATALOG_BACKFILL_ENABLED ? localCatalogProduct : undefined,
     // Pillar 1b — a successful money-fact upsert here is a live producer run; record it for channel-health
     // regardless of PRICE_REQUIRES_LIVE_CHANNEL (see channelHealth's own construction comment above).
     onProducerOk: (t: string) => channelHealth.recordProducerOk(t),
@@ -1271,6 +1326,30 @@ export async function buildServer(opts?: {
   // exposing merchant credentials (crypto-port key separation).
   const merchantCredentials: MerchantCredentialSink | undefined =
     opts?.merchantCredentials ?? createMerchantCredentialStore(store, merchantCredCrypto());
+  // Task 13 (ADR-0022 F2/F6/F7) — Admin-token custody, a NEW, OPT-IN capability layered onto the
+  // already-shipped install/webhook flows. Unlike `merchantCredentials` above (REQUIRED, unconditional —
+  // the delegate token is what serving needs), this is gated on its OWN flag: ADMIN_TOKEN_CUSTODY_ENABLED
+  // defaults OFF, so an unconfigured deployment constructs nothing here and `adminTokens` stays `undefined`
+  // everywhere below — byte-identical to every build before this task. When on, `createAdminTokenStore`
+  // is built over the SAME `store` + the distinct `adminCredCrypto()` scope (F2, see its own comment above).
+  // A production admin-scope OAuth REQUEST is a separate, not-yet-built step (Task 12's own note, and
+  // shopify-install.ts's comment at the `deps.adminTokens.put` call site) — this flag only controls whether
+  // custody of whatever Admin token the existing install grant already produced is ATTEMPTED; the
+  // least-privilege scopes a real production request should use are `ADMIN_SYNC_SCOPES`
+  // (read_products, read_inventory — shopify-webhook-identity.ts, Task 12/F3), referenced here so the two
+  // stay visibly linked rather than drifting apart.
+  const ADMIN_TOKEN_CUSTODY_ENABLED = process.env.ADMIN_TOKEN_CUSTODY_ENABLED === "true";
+  const adminTokens: AdminTokenStore | undefined = ADMIN_TOKEN_CUSTODY_ENABLED
+    ? (opts?.adminTokens ?? createAdminTokenStore(store, adminCredCrypto()))
+    : undefined;
+  if (ADMIN_TOKEN_CUSTODY_ENABLED) {
+    console.warn(
+      `[boot] ADMIN_TOKEN_CUSTODY_ENABLED=true — custodying the Shopify Admin offline token per shop under a ` +
+        `DISTINCT crypto scope from merchant-cred (ADR-0022 F2). Sync-plane only: serving reads only the ` +
+        `delegate token. A production Admin-scope request (not yet built) should request exactly ` +
+        `ADMIN_SYNC_SCOPES=${ADMIN_SYNC_SCOPES.join(",")}, never a write scope.`,
+    );
+  }
   // HOISTED above the C1 install block (their defining comment blocks stay in the C2 section below) so the
   // install flow can build its shop-specific webhook subscription list. Under `use_legacy_install_flow`
   // declarative `[webhooks]` are forbidden, so webhooks are subscribed via the Admin API DURING install;
@@ -1349,6 +1428,10 @@ export async function buildServer(opts?: {
       store,
       registry: merchantRegistry!,
       credentials: merchantCredentials!,
+      // Task 13 — put-only (structurally, `AdminTokenStore` satisfies `Pick<AdminTokenStore,"put">`).
+      // `undefined` when ADMIN_TOKEN_CUSTODY_ENABLED is off — install behaves byte-identically to before
+      // this task (Task 5's own "absent adminTokens ⇒ zero behaviour change" contract).
+      adminTokens,
       clientSecret: () => secrets.get(SHOPIFY_APP_SECRET_SCOPE, SHOPIFY_APP_CLIENT_SECRET_NAME),
       fetchFn: opts?.installFetch ?? globalThis.fetch,
       clientId: SHOPIFY_APP_CLIENT_ID!,
@@ -1619,6 +1702,19 @@ export async function buildServer(opts?: {
       // W2-C — present ONLY when ORDER_ATTRIBUTION_WEBHOOKS is on, so the order-attribution routes
       // register only then (else 404) — the same inert-by-absence pattern as `queue` above.
       orderQueue,
+      // Task 9/13 (ADR-0022 F1/F2) — delete-only (structurally, `AdminTokenStore` satisfies
+      // `Pick<AdminTokenStore,"delete">`). `undefined` when ADMIN_TOKEN_CUSTODY_ENABLED is off, matching
+      // `adminTokens`'s own gating at the install call site above — if custody was never attempted there is
+      // nothing here to ever need deleting, and Task 9's own handler is already a safe no-op on absence.
+      adminTokens,
+      // Task 9/13 — UNCONDITIONAL, unlike `adminTokens`/`catalogProduct`'s write-plane gating elsewhere in
+      // this file: `localCatalogProduct` (Task 8) is always constructed regardless of flags, and a
+      // shop/redact hard-delete or an app/uninstalled tombstone is a COMPLIANCE action, not a
+      // serving/write-plane feature — it must not depend on whether CATALOG_LOCAL_SERVING or
+      // CATALOG_BACKFILL_ENABLED happen to be on today. An empty store makes both calls harmless no-ops;
+      // wiring it always means no stale row can ever survive a merchant's erasure request just because a
+      // flag was off at the time the row was written (e.g. by a manual backfill CLI run) or is off now.
+      catalogProduct: localCatalogProduct,
     });
   }
 

@@ -443,7 +443,7 @@ async function completeInstallInner(
   // already-verified `shopDomain`, not an attacker-suppliable one. OPTIONAL and ADDITIVE: absent
   // `adminTokens` ⇒ zero behaviour change from before this task (the surrounding `try` for the delegate
   // token above deliberately does NOT also cover this — an Admin-token custody failure must not undo a
-  // delegate token that is already safely stored, so it maps to its own outcome instead of `custody_failed`).
+  // delegate token that is already safely stored).
   // Task 12 (ADR-0022 F3) — this call custodies whatever Admin scopes the SAME OAuth grant above already
   // obtained (a delegate-token exchange); it does not itself request Admin scopes, so there is nothing here
   // yet to pin against `ADMIN_SYNC_SCOPES` (shopify-webhook-identity.ts) — the least-privilege
@@ -451,15 +451,48 @@ async function completeInstallInner(
   // Noted here as the landing spot: whichever task wires a real production Admin-token scope request
   // (Task 13) requests exactly `ADMIN_SYNC_SCOPES`, never a write scope (F3's own pin,
   // order-attribution-scope-pinning.test.ts).
+  //
+  // Task 13 (forward-carry from Task 5's own review note): a custody failure here is NON-FATAL to the
+  // install. The Admin token is SYNC-PLANE-ONLY (it feeds the catalog-backfill/reconcile jobs); the
+  // DELEGATE token custodied above is what SERVING needs, and it is already safely stored by this point.
+  // Refusing the whole install over a degraded sync-plane capability would strand a merchant with a
+  // perfectly good, servable delegate credential behind a failed install page — worse than landing them
+  // with serving working and sync degraded until a re-install/re-auth re-attempts custody. So: catch, log,
+  // audit `admin_token.custody_failed` (best-effort — a secondary audit-write failure must not abort an
+  // otherwise-successful install either, mirroring every other best-effort audit in this file/package,
+  // e.g. shopify-webhooks.ts's `admin_token.delete_failed`), and fall through to the rest of this function
+  // exactly as if `adminTokens` had been absent.
   if (deps.adminTokens) {
     try {
       await deps.adminTokens.put(tenantId, grant.accessToken, { actor: "system:shopify-install", expiresAt: grant.expiresAt });
-    } catch {
+    } catch (e) {
       // Never let an Admin-token custody failure surface the parent token in a response/log; same leak
-      // boundary as every other catch in this function. A merchant who reaches here already has a working
-      // delegate credential (servable for catalog reads), so this refuses the WHOLE install rather than
-      // silently leaving Admin-token custody half-done and reporting success.
-      return { ok: false, failed: "custody_failed" };
+      // boundary as every other catch in this function.
+      const message = (e as Error).message;
+      console.error(`[shopify-install] admin token custody failed tenant=${tenantId}: ${message}`);
+      try {
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: "system:shopify-install",
+            action: "admin_token.custody_failed",
+            input: { tenantId, shopDomain },
+            decision: {
+              complete: false,
+              reason: `adminTokens.put threw: ${message}; the delegate token is already custodied and the ` +
+                "install continues — sync-plane capability (catalog backfill/reconcile) is degraded until " +
+                "re-custody, but serving is unaffected",
+            },
+            reversalPath:
+              "re-run the install/OAuth flow to re-attempt Admin-token custody (idempotent — re-custody simply " +
+              "overwrites); the delegate token and servability are unaffected in the meantime",
+          },
+        );
+      } catch {
+        // Same tradeoff as every other best-effort audit in this file/package: a secondary audit-write
+        // failure must not abort or fail an otherwise-successful install. `console.error` above is the
+        // residual trace.
+      }
     }
   }
 

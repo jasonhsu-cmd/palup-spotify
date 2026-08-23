@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import Fastify from "fastify";
 import { InMemoryRuntimeStore, createInMemoryMerchantRegistry } from "@palup/platform-ports";
-import { registerShopifyInstallRoutes, type ShopifyInstallDeps, type MerchantCredentialSink } from "../src/routes/shopify-install.js";
+import type { RuntimeStatePort } from "@palup/platform-ports";
+import { registerShopifyInstallRoutes, tenantIdForShop, type ShopifyInstallDeps, type MerchantCredentialSink } from "../src/routes/shopify-install.js";
 
 // Task 5 (ADR-0022 F6/F7) — capturing and custodying the parent Admin offline token at install, under the
 // Task-4 AdminTokenStore, WITHOUT weakening the existing confused-deputy defence: custody must only happen
@@ -156,5 +157,53 @@ describe("Task 5 — install captures + custodies the parent Admin token (F6/F7)
       warn.mockRestore();
       log.mockRestore();
     }
+  });
+});
+
+describe("Task 13 (forward-carry from Task 5) — admin-token custody failure is NON-FATAL to install", () => {
+  it("adminTokens.put throwing does NOT fail the install — the delegate token is stored, the install succeeds, and admin_token.custody_failed is audited", async () => {
+    const store: RuntimeStatePort = new InMemoryRuntimeStore();
+    const credentials: MerchantCredentialSink & { puts: Array<{ tenantId: string; token: string }> } = {
+      puts: [],
+      async put(tenantId, token) {
+        credentials.puts.push({ tenantId, token });
+      },
+    };
+    const put = vi.fn(async () => {
+      throw new Error("admin-cred key not provisioned");
+    });
+    const deps = makeDeps({ store, credentials, adminTokens: { put } });
+    const app = await buildApp(deps);
+    const { state, cookie } = await begin(app);
+    const res = await callback(app, { state, cookie });
+
+    // The install as a whole SUCCEEDS despite the admin-token custody failure.
+    expect(res.statusCode).toBe(200);
+    expect(put).toHaveBeenCalledTimes(1);
+    // The delegate token was already safely custodied before the admin-token attempt, and stays custodied.
+    expect(credentials.puts).toHaveLength(1);
+    expect(credentials.puts[0]!.token).toBe(DELEGATE_TOKEN);
+
+    // A corrective audit entry records the residual — the install's success does not silently overclaim
+    // that Admin-token custody also succeeded.
+    const tenantId = credentials.puts[0]!.tenantId;
+    const audits = await store.readAudit({ tenantId });
+    const failure = audits.find((a) => a.action === "admin_token.custody_failed");
+    expect(failure).toBeTruthy();
+    expect(failure!.decision).toMatchObject({ complete: false });
+    // Never leak the parent Admin token into the audit trail.
+    expect(JSON.stringify(failure)).not.toContain(PARENT_TOKEN);
+  });
+
+  it("without adminTokens configured at all, install behaves exactly as before (no custody attempted, no audit entry)", async () => {
+    const store: RuntimeStatePort = new InMemoryRuntimeStore();
+    const deps = makeDeps({ store }); // no adminTokens
+    const app = await buildApp(deps);
+    const { state, cookie } = await begin(app);
+    const res = await callback(app, { state, cookie });
+    expect(res.statusCode).toBe(200);
+
+    const audits = await store.readAudit({ tenantId: tenantIdForShop(SHOP) });
+    expect(audits.some((a) => a.action === "admin_token.custody_failed")).toBe(false);
   });
 });
