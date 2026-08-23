@@ -36,3 +36,82 @@ it("downloadJsonl rejects a non-allowlisted result host and never sends the admi
   const headers = (okFetch.mock.calls[0][1]?.headers ?? {}) as Record<string, string>;
   expect(JSON.stringify(headers)).not.toContain("admintok"); // F4: no token on pre-signed download
 });
+
+// ── runBulkQuery / pollBulk — the module's OWN parsing/branching logic ─────────────────────────────
+// These fixtures assume a `bulkOperationRunQuery { bulkOperation { id status } userErrors { field
+// message } }` mutation shape and a `node(id:) { ... on BulkOperation { id status errorCode
+// objectCount url partialDataUrl } }` poll shape (matching what shopify-client.ts sends). The field
+// names/paths themselves are NOT asserted to be live-Shopify-correct here — that wire-shape
+// verification stays deferred to a live bulk run (spec §13.3, see the file-level "NOT LIVE-VERIFIED"
+// comment in shopify-client.ts). These tests only exercise how THIS module parses/branches on a
+// response already shaped that way.
+
+it("runBulkQuery throws a typed error when the response carries userErrors", async () => {
+  const fetchFn = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({ data: { bulkOperationRunQuery: { bulkOperation: null, userErrors: [{ field: ["query"], message: "bad query" }] } } }),
+      { status: 200 },
+    ),
+  );
+  const c = createShopifyAdminClient({ fetchFn, creds });
+  await expect(c.runBulkQuery("{ products { edges { node { id } } } }")).rejects.toThrow(/userErrors|error/i);
+});
+
+it("runBulkQuery returns the bulk operation id on a clean response", async () => {
+  const fetchFn = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        data: { bulkOperationRunQuery: { bulkOperation: { id: "gid://shopify/BulkOperation/123", status: "CREATED" }, userErrors: [] } },
+      }),
+      { status: 200 },
+    ),
+  );
+  const c = createShopifyAdminClient({ fetchFn, creds });
+  const r = await c.runBulkQuery("{ products { edges { node { id } } } }");
+  expect(r).toEqual({ id: "gid://shopify/BulkOperation/123" });
+});
+
+it("pollBulk coerces a string objectCount to a number", async () => {
+  const fetchFn = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({ data: { node: { id: "gid://shopify/BulkOperation/123", status: "COMPLETED", objectCount: "42", url: "https://storage.googleapis.com/x.jsonl" } } }),
+      { status: 200 },
+    ),
+  );
+  const c = createShopifyAdminClient({ fetchFn, creds });
+  const r = await c.pollBulk("gid://shopify/BulkOperation/123");
+  expect(r.objectCount).toBe(42);
+  expect(typeof r.objectCount).toBe("number");
+});
+
+it("pollBulk prefers `url` over `partialDataUrl` when both are present, and falls back to `partialDataUrl` when `url` is absent", async () => {
+  const bothFetch = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({ data: { node: { status: "COMPLETED", url: "https://storage.googleapis.com/full.jsonl", partialDataUrl: "https://storage.googleapis.com/partial.jsonl" } } }),
+      { status: 200 },
+    ),
+  );
+  const cBoth = createShopifyAdminClient({ fetchFn: bothFetch, creds });
+  expect((await cBoth.pollBulk("id")).url).toBe("https://storage.googleapis.com/full.jsonl");
+
+  const partialOnlyFetch = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ data: { node: { status: "RUNNING", partialDataUrl: "https://storage.googleapis.com/partial.jsonl" } } }), { status: 200 }),
+  );
+  const cPartial = createShopifyAdminClient({ fetchFn: partialOnlyFetch, creds });
+  expect((await cPartial.pollBulk("id")).url).toBe("https://storage.googleapis.com/partial.jsonl");
+});
+
+it("pollBulk maps the status field through for both a running and a completed operation", async () => {
+  const runningFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { node: { status: "RUNNING" } } }), { status: 200 }));
+  const cRunning = createShopifyAdminClient({ fetchFn: runningFetch, creds });
+  expect((await cRunning.pollBulk("id")).status).toBe("RUNNING");
+
+  const completedFetch = vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({ data: { node: { status: "COMPLETED", objectCount: "7", url: "https://storage.googleapis.com/done.jsonl" } } }), { status: 200 }),
+  );
+  const cCompleted = createShopifyAdminClient({ fetchFn: completedFetch, creds });
+  const completed = await cCompleted.pollBulk("id");
+  expect(completed.status).toBe("COMPLETED");
+  expect(completed.objectCount).toBe(7);
+  expect(completed.url).toBe("https://storage.googleapis.com/done.jsonl");
+});
