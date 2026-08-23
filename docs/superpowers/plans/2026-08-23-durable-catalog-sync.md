@@ -512,17 +512,31 @@ it("reconcileProducts upserts full fields to catalog_product and tombstones deli
 - Consumes: the Task 3 client (`runBulkQuery`/`pollBulk`/`downloadJsonl`), the Task 5 `getFreshAdminToken`, `CatalogProductPort`, `ProductFactsPort`, and the embed enqueue path (reuse `reconcileProducts`/vector upsert).
 - Produces: `runCatalogBackfill(deps, tenantId, opts?): Promise<BackfillReport>` — `{ tenantId, productCount, truncated: boolean, outcome }`.
 
-- [ ] **Step 1: Write failing test** — a fake client whose `downloadJsonl` returns 2 product JSONL lines loads 2 rows into `catalog_product` + `product_facts`; a re-run with unchanged `contentHash` performs **zero** rewrites; exceeding `MAX_INDEXED_PRODUCTS` sets `truncated: true` and logs it:
+> **Controller ruling carried in (from Task 6 review — load-bearing):** Task 6's reconcile/delta
+> path writes a THIN `catalog_product` record (the storefront-shaped `Product` carries one flat
+> variant, no description/tags/multi-variant/productType/vendor/options/onlineStoreUrl). Because both
+> `CatalogProductPort` adapters do an unconditional full-column `upsertMany`, a delta write would
+> **clobber** the RICH row this backfill lands — on *every* future product webhook, permanently,
+> until a re-backfill. Task 7 must resolve this so the rich fields survive deltas. **Preferred fix:**
+> make the reconcile/delta path fetch the changed product(s) in the **full Admin shape** via the
+> Task 3 client (single-source-shape — both paths then write complete records). **Acceptable
+> alternative** if the full-refetch is too large: give `CatalogProductPort` a **merge-preserving**
+> write (or a documented money/availability/title/image *subset* update) that never nulls
+> backfill-owned rich columns, and route the delta path through it. Either way, add the preservation
+> test below.
+
+- [ ] **Step 1: Write failing tests** — (a) a fake client whose `downloadJsonl` returns 2 product JSONL lines loads 2 rows into `catalog_product` + `product_facts`; a re-run with unchanged `contentHash` performs **zero** rewrites; exceeding `MAX_INDEXED_PRODUCTS` sets `truncated: true` and logs it; (b) **clobber-preservation (load-bearing):** after a rich backfill row is written (multi-variant, description, tags, productType), a subsequent `reconcileProducts` delta for that same product **preserves** those rich fields (they are not nulled):
 
 ```ts
 it("loads bulk JSONL into catalog_product + product_facts; re-run with same hashes is a no-op", async () => { /* ... */ });
 it("sets truncated + logs when the catalog exceeds MAX_INDEXED_PRODUCTS (no silent cap)", async () => { /* ... */ });
+it("a delta webhook after a rich backfill does NOT clobber the rich fields (variants/description/tags survive)", async () => { /* ... */ });
 ```
 
-- [ ] **Step 2: Run to verify it fails** → FAIL.
-- [ ] **Step 3: Implement.** `runCatalogBackfill`: `token = await getFreshAdminToken(tenantId)`; construct the client with `{ creds: { shopDomain, accessToken: token } }`; `runBulkQuery(PRODUCTS_QUERY)`; poll to completion; `downloadJsonl(url)`; parse JSONL (products + nested variants — Bulk flattens connections into separate lines joined by `__parentId`); map to `CatalogProductRecord[]` + `ProductFact[]`; `upsertMany` both (content-hash skip on re-run); enqueue embeddings via the existing reconcile/vector path; cap at `MAX_INDEXED_PRODUCTS` (50000) and on overflow set `truncated` + `log`/audit the drop (NN#5). Idempotent + resumable (record progress in a manifest KV, mirroring `writeManifestAndAudit`).
-- [ ] **Step 4: Run to verify it passes** → PASS.
-- [ ] **Step 5: Commit** — `feat(widget-backend): Bulk-Operations catalog backfill driver (idempotent, truncation-logged)`.
+- [ ] **Step 2: Run to verify they fail** → FAIL.
+- [ ] **Step 3: Implement.** `runCatalogBackfill`: `token = await getFreshAdminToken(tenantId)`; construct the client with `{ creds: { shopDomain, accessToken: token } }`; `runBulkQuery(PRODUCTS_QUERY)`; poll to completion; `downloadJsonl(url)`; parse JSONL (products + nested variants — Bulk flattens connections into separate lines joined by `__parentId`); map to `CatalogProductRecord[]` + `ProductFact[]`; `upsertMany` both (content-hash skip on re-run); enqueue embeddings via the existing reconcile/vector path; cap at `MAX_INDEXED_PRODUCTS` (50000) and on overflow set `truncated` + `log`/audit the drop (NN#5). Idempotent + resumable (record progress in a manifest KV, mirroring `writeManifestAndAudit`). **Also resolve the clobber per the ruling above** (delta full-refetch via the Admin client, or a merge-preserving write) so the preservation test passes.
+- [ ] **Step 4: Run to verify they pass** → PASS.
+- [ ] **Step 5: Commit** — `feat(widget-backend): Bulk-Operations catalog backfill driver (idempotent, truncation-logged, delta-preserving)`.
 
 > **Implementation note:** the JSONL join-by-`__parentId` shape is a Bulk-Operations detail — confirm against a live bulk export (spec §13.3) before finalizing the parser.
 
