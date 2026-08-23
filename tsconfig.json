@@ -20,6 +20,7 @@
     { "path": "packages/evolution/tsconfig.json" },
     { "path": "packages/eval/tsconfig.json" },
     { "path": "packages/control-plane/tsconfig.json" },
-    { "path": "packages/widget/tsconfig.json" }
+    { "path": "packages/widget/tsconfig.json" },
+    { "path": "packages/identity-shopify/tsconfig.json" }
   ]
 }
