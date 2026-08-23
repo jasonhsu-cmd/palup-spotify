@@ -1,315 +1,379 @@
-# Durable Product-Catalog Sync — Design
+# Durable Product-Catalog Sync — Design (public-app scale)
 
 **Date:** 2026-08-23
-**Status:** Design (awaiting owner review → writing-plans)
-**Plane:** Build-time work producing run-time infra. Touches no HITL money/model/business
-boundary (§3). Portability-constrained (ADR-0001): all Shopify access stays behind a port/adapter.
-**Author:** Claude Code (brainstorming → architectural path)
+**Status:** Design (awaiting owner review → superseding ADR for 0020-D1 → writing-plans)
+**Plane:** Build-time work producing run-time infra. Crosses no HITL money/model/business
+boundary (§3 of CLAUDE.md). **Supersedes ADR-0020 D1** (Storefront-delegate-only, no persisted
+Admin token) — that reversal is a governance/security decision requiring a superseding ADR +
+`security-reviewer` pass + owner sign-off (see §6).
+**Portability:** ADR-0001 — all Shopify access stays behind a port + adapter; store columns neutral.
+**Author:** Claude Code (brainstorming → architectural path). Shopify facts verified on shopify.dev
+2026-08-23 — see Appendix A.
 
 ---
 
-## 1. Problem
+## 1. Problem & scale target
 
-PalUp's assistant grounds every answer in the merchant's product catalog. Today catalog data
-reaches the assistant two different ways, and **neither is a durable source of truth**:
+PalUp's assistant grounds every answer in the merchant's product catalog. The end-state is a
+**Shopify public app** on the App Store, installed on **millions of merchant stores** via OAuth,
+serving **hundreds of millions of shoppers**, with catalogs up to (and past) the ~50k-SKU design
+ceiling. Catalog sync must be correct and durable at that scale.
 
-1. **Small catalogs (≤1000 SKUs)** are fetched live from the Shopify Storefront API on demand and
-   memoized in a short-TTL cache (`shopify-grounding.ts` `storefrontFetch` at ~:356,
-   `MAX_CATALOG_PAGES = 4`; `grounding-cache.ts` TTL 1800s). If the live fetch fails the assistant
-   fails **closed** to an empty catalog — the shopper sees no products.
-2. **Large catalogs (>1000 SKUs)** are indexed into pgvector for retrieval
-   (`jobs/catalog-index.ts` `runCatalogIndex`, `pgvector-store.ts` namespace `${tenant}::catalog`)
-   with price/availability in a side table (`postgres-product-facts-store.ts` `product_facts`).
-   But the pgvector row holds only an **embedding plus thin metadata**
-   (`{productId, contentHash, title, variantId, imageUrl}`) — not enough to *render* a product,
-   and the >1000-SKU path is the reason the sample storefront shows nothing unless catalog
-   retrieval is enabled (see memory `storefront-demo-catalog-over-1000-skus`).
+Today it is neither — catalog data reaches the assistant two ways, **neither a durable source of
+truth**:
 
-Consequences that block the durability bar the owner set ("live chat must be durable, top-tier
-US sales agent"):
+1. **Small catalogs (≤1000 SKUs)** — fetched live from the Shopify **Storefront API** on demand and
+   memoized in a short-TTL cache (`shopify-grounding.ts` `storefrontFetch` ~:356, `MAX_CATALOG_PAGES
+   = 4`; `grounding-cache.ts` TTL 1800s). On failure the assistant fails **closed** to an empty
+   catalog — the shopper sees no products.
+2. **Large catalogs (>1000 SKUs)** — indexed into pgvector (`jobs/catalog-index.ts`
+   `runCatalogIndex`, `pgvector-store.ts` namespace `${tenant}::catalog`) with price/availability in
+   `product_facts` (`postgres-product-facts-store.ts`). The pgvector row holds only **embedding +
+   thin metadata** (`{productId, contentHash, title, variantId, imageUrl}`) — enough to *retrieve* an
+   id, not to *render* a product. This is why the >1000-SKU sample store shows nothing unless
+   retrieval is enabled (memory `storefront-demo-catalog-over-1000-skus`).
 
-- **A live-API dependency on the hot path.** Every cold cache turn re-hits Shopify. Shopify rate
-  limits (Storefront API cost-based throttle) or a Shopify incident degrades the assistant
-  directly. There is **no local fallback** for the ≤1000 path.
-- **No single render/serving source of truth.** Full product fields (description, handle, tags,
-  variants, options, images) live only in Shopify. pgvector has enough to *retrieve* an id but not
-  to *show* the product; `product_facts` has price/availability but not descriptive fields.
-- **No rate-limited Shopify client.** Backfill (`runCatalogIndex`) and delta reconcile
-  (`reconcileProducts`) both call Shopify directly with page caps (`MAX_INDEX_CATALOG_PAGES = 200`,
-  `MAX_CATALOG_PAGES = 4`) and **no cost-aware throttle or backoff** — fine at demo scale, unsafe
-  at "millions of merchants."
+Why this fails the durability bar the owner set ("live chat must be durable, top-tier US sales
+agent") **at public-app scale**:
+
+- **A live Shopify dependency on the hot path.** Every cold-cache turn re-hits Shopify. A Shopify
+  incident or throttle degrades the assistant directly. The ≤1000 path has **no local fallback**.
+- **No local render/serving source of truth.** Full fields (description, handle, tags, variants,
+  options, images, status) live only in Shopify.
+- **No rate-limited Shopify client.** Backfill and delta both call Shopify directly with page caps
+  and **no cost-aware throttle or backoff** — unsafe across millions of stores.
+- **No scalable backfill.** Paging the Storefront API to load millions of large catalogs is the
+  operational bottleneck; Shopify's answer (Bulk Operations) needs the Admin API, which ADR-0020 D1
+  currently forbids persisting a token for.
 
 ## 2. Goal & non-goals
 
-**Goal.** One **durable, per-tenant, local source of truth** for the product catalog inside
-PalUp: backfilled once from Shopify, kept fresh by incremental webhook deltas through a
-**rate-limited** Shopify client, and served to the assistant **from PalUp's own store** for every
-catalog size — so the hot path never depends on a live Shopify call.
+**Goal.** One **durable, per-tenant, local source of truth** for the catalog inside PalUp, designed
+for the **public-app multi-tenant** end-state: backfilled once per shop from Shopify via Bulk
+Operations, kept fresh by declarative webhook deltas through a **rate-limited** Shopify client, and
+served to the assistant **from PalUp's own store** for every catalog size — so the shopper hot path
+depends on **neither** Shopify surface.
 
-**Non-goals (explicitly out of scope for this spec):**
+**Non-goals:**
+- Changing retrieval/ranking. pgvector stays the retrieval index; this changes where *render/serving*
+  data comes from, not how candidates are *ranked*.
+- Non-Shopify platform adapters. The port stays neutral (ADR-0001) so WooCommerce/BigCommerce drop
+  in later; only the Shopify adapter is built here.
+- Any HITL money/model/business surface. Catalog data is descriptive; nothing here auto-applies a
+  §3-gated change.
+- Enabling **production**. Staging first (owner directive: staging now, no real shoppers, defer
+  legal/human gates to prod). Prod promotion + the D1-superseding ADR sign-off are §5/human steps.
 
-- Changing the retrieval/ranking model. pgvector + embeddings stay the retrieval index; this spec
-  changes where *rendering/serving* data comes from, not how candidates are *ranked*.
-- Multi-platform adapters beyond Shopify. The port stays platform-neutral (ADR-0001) so a future
-  WooCommerce/BigCommerce adapter drops in, but only the Shopify adapter is built here.
-- Any HITL money/model/business surface. Catalog data is descriptive, not a money/agent-autonomy
-  boundary; nothing here auto-applies a §3-gated change.
-- Enabling anything in **production**. This targets **staging** (owner directive: staging now, no
-  real shoppers, defer legal/human gates to prod). Prod promotion stays a §5 human step.
-
-## 3. Durability invariant (the bar every component must meet)
+## 3. Durability invariant (every component must meet this)
 
 > **The assistant serves the catalog from PalUp's local store. A live Shopify call is only ever a
-> background freshness mechanism, never on the shopper's hot path. If Shopify is down, slow, or
+> background sync mechanism, never on the shopper's hot path. If Shopify is down, slow, or
 > rate-limiting, the shopper still sees the full, last-known-good catalog.**
 
 Corollaries:
-- Reads for serving hit Postgres only (the new `catalog_product` table + `product_facts` +
-  pgvector for candidate ids). No serving read calls Shopify.
-- Every Shopify call (backfill + delta) goes through **one** rate-limited client with cost-aware
-  throttling and bounded retry/backoff. No feature code calls `fetch(shopify)` directly.
-- Freshness is eventually-consistent: a webhook delta updates the local store within seconds under
-  normal load; if the delta pipeline is behind, the shopper sees slightly stale data, never *no*
-  data. Staleness is observable (a per-product `synced_at`).
+- Serving reads hit Postgres only (`catalog_product` + `product_facts` + pgvector ids). No serving
+  read calls Shopify.
+- Every Shopify call (backfill + delta + reconcile) goes through **one** rate-limited client. No
+  feature code calls Shopify directly.
+- Freshness is eventually-consistent: a webhook delta updates the local store within seconds
+  normally; if behind, the shopper sees slightly stale data, never *no* data. Staleness is
+  observable via per-row `synced_at`, with a hard staleness ceiling on money facts (price/stock)
+  that makes the agent say "let me confirm current price/availability" rather than quote a stale
+  number (ADR-0020 D2 — fail-honest, NN#1).
 
-## 4. Chosen approach — Option A: one persistent per-tenant catalog store
+## 4. Architecture
 
-Rejected alternatives (from brainstorming):
-- **Option B — keep live-fetch, just cache harder.** Longer TTLs reduce Shopify hits but keep the
-  live dependency on the cold path and still fail closed. Doesn't meet the invariant.
-- **Option C — index everything into pgvector including full render fields.** Overloads the vector
-  store with non-embedding data it isn't shaped for, couples rendering to the retrieval index, and
-  still leaves the ≤1000 path on live fetch. Rejected.
+Three planes, cleanly separated by credential and by hot/cold path:
 
-Option A backfills each tenant's catalog once into a **local render/serving source of truth**,
-keeps it fresh with **incremental deltas**, and serves **all catalog sizes** from the local store.
+| Plane | When | Credential | Shopify surface |
+|---|---|---|---|
+| **Serving** | shopper hot path | none (local Postgres) | **none** |
+| **Delta** | real-time, per shop | app-level (declarative webhooks) | Admin webhook delivery |
+| **Sync** | background: install backfill + periodic reconcile | per-shop **offline Admin token** | Admin GraphQL (Bulk Operations) |
 
-### 4.1 Store shape — dedicated `catalog_product` table (confirmed decision)
+### 4.1 Serving plane — read local, default-on
 
-A dedicated per-tenant Postgres table is the render/serving source of truth, **alongside** (not
-replacing) the two existing stores, each keeping its current job:
+Retrieval resolves candidate `product_id`s from pgvector (unchanged). The render/serving layer
+hydrates those ids from `catalog_product` (full fields) + `product_facts` (fresh price/stock)
+**locally**. The ≤1000-SKU path stops calling `storefrontFetch` on the hot path. Catalog serving is
+**on by default** on staging once a tenant is backfilled (owner directive: all axes default-on on
+staging); the enablement registry gates whether a tenant is *synced*, and `synced_at` gates
+money-fact honesty.
 
-| Store | Role after this change | Change |
+### 4.2 `catalog_product` — the local render/serving source of truth (confirmed decision)
+
+A dedicated per-tenant Postgres table, **alongside** (not replacing) the two existing stores:
+
+| Store | Role | Change |
 |---|---|---|
-| **`catalog_product`** (NEW) | Full product render/serving fields — the source of truth for *showing* a product | net-new table + store module |
-| **pgvector** `vp_ann` (`${tenant}::catalog`) | Retrieval index — embeddings + thin metadata to resolve *which* product ids match a query | unchanged shape; still delta-maintained |
-| **`product_facts`** | Fast price/currency/availability lookup (already the money-truth channel) | unchanged; already delta-maintained |
+| **`catalog_product`** (NEW) | full product render/serving fields | net-new table + store module |
+| pgvector `vp_ann` (`${tenant}::catalog`) | retrieval index (embeddings + thin metadata) | unchanged shape |
+| `product_facts` | fast price/currency/availability (money-truth) | unchanged |
 
-`catalog_product` columns (per tenant, keyed by `product_id`):
-
-```
-tenant_id            text      not null
-product_id           text      not null          -- Shopify product GID, stable key
-handle               text      not null          -- URL/permalink handle
-title                text      not null
-description_html     text                          -- rendered body
-description_text     text                          -- plain-text, for grounding snippets
-product_type         text
-vendor               text
-tags                 text[]                         -- for filtering/facets
-status               text      not null            -- active | archived | draft
-options              jsonb                          -- [{name, values[]}]
-variants             jsonb     not null            -- [{variantId, title, sku, price, currency,
-                                                   --   availableForSale, inventoryQty, imageUrl, options{}}]
-featured_image_url   text
-image_urls           text[]
-online_store_url     text                          -- canonical storefront URL when present
-content_hash         text      not null            -- for delta short-circuit (mirrors pgvector)
-synced_at            timestamptz not null          -- last successful sync of THIS row (staleness signal)
-deleted_at           timestamptz                    -- soft-delete tombstone (product removed in Shopify)
-primary key (tenant_id, product_id)
-```
-
-Notes:
-- **Variants inline as `jsonb`.** Variants are read as a unit when rendering one product and rarely
-  queried across products; a child table would add a join for no serving benefit. Price/availability
-  that *is* queried hot stays in `product_facts` (unchanged). The `variants` jsonb is the render
-  copy; `product_facts` remains the authoritative fast-path for price/stock. Both are written in the
-  same delta transaction from the same Shopify payload, so they cannot disagree beyond one delta.
-- **Soft delete, not hard delete.** `deleted_at` tombstones a product removed in Shopify so a
-  concurrent serving read never 404s mid-delete and so we can audit removals; a periodic prune
-  hard-deletes rows tombstoned longer than a retention window.
-- **`content_hash` mirrors the pgvector delta key** so the same "did this product actually change?"
-  short-circuit that already guards embedding recompute (`reconcileProducts`) also guards the
-  `catalog_product` upsert — no wasted writes.
-- Portable shape: columns are platform-neutral; the Shopify-specific field mapping lives only in the
-  adapter. A future platform adapter fills the same columns.
-
-### 4.2 Rate-limited Shopify client (NEW `shopify-client.ts`)
-
-One module wraps every Shopify Admin/Storefront/Bulk call behind the existing port. It owns:
-- **Cost-aware throttling.** Shopify's Admin GraphQL uses a leaky-bucket *query cost* model; the
-  client reads `extensions.cost.throttleStatus` from each response and paces to stay under the
-  restore rate. (Exact fields verified against shopify.dev before implementation — flagged as a
-  fact-check item, not asserted from memory.)
-- **Bounded retry/backoff** on `THROTTLED` and 5xx/timeout, with a hard attempt cap; surfaces a
-  typed error upward rather than looping.
-- **A single choke point** so backfill and delta share one budget per tenant and cannot collectively
-  overrun Shopify.
-
-All existing direct Shopify calls (`runCatalogIndex`, `reconcileProducts`, `storefrontFetch`) are
-refactored to route through this client. This is the "no un-throttled Shopify call" half of the
-durability invariant.
-
-### 4.3 Backfill — Shopify Bulk Operations (extend `catalog-index.ts`)
-
-The one-time (and re-runnable) full load uses **Shopify Bulk Operations** (async JSONL export of
-the whole catalog) instead of paging the Storefront API, so a large catalog backfills in one bulk
-job rather than hundreds of throttled pages. The backfill:
-1. Kicks off a bulk query for all products+variants, polls for completion via the rate-limited
-   client, downloads the JSONL result.
-2. Upserts each product into `catalog_product` (+ `product_facts` + enqueues embedding for pgvector),
-   using `content_hash` to skip unchanged rows on a re-run.
-3. Records progress so a re-run is idempotent and resumable.
-
-`MAX_INDEXED_PRODUCTS = 50000` (existing ceiling) still applies as a safety cap; when a catalog
-exceeds it the backfill logs the truncation explicitly (no silent cap — memory
-`open-findings-not-in-repo` names silent truncation as a standing hazard).
-
-### 4.4 Delta freshness — extend the existing webhook→queue→reconcile path
-
-The delta pipeline already exists and is reused wholesale:
-`catalog-webhook-queue.ts` (message carries `productIds` + `reason`) → `reconcileProducts`
-(delta by-id, content-hash short-circuit, upsert/delete). Two extensions:
-1. **Persist full fields.** `reconcileProducts` currently writes pgvector thin-metadata +
-   `product_facts`; extend it to also upsert the full `catalog_product` row (and set `deleted_at`
-   on a delete) in the same transaction, from the same fetched payload.
-2. **Inventory deltas.** Subscribe the inventory-level webhook topic so stock changes update
-   `product_facts` (and the `catalog_product` variant copy) without a full product refetch.
-
-Webhook subscription + HMAC verification reuse the existing verified adapter
-(`shopify-webhook-identity.ts`) and the compliance-webhook requirements already documented there.
-No new scope is required for product/inventory webhooks (`read_products`, `read_inventory` — both
-already declared on the staging app).
-
-### 4.5 Serving — read local, default-on
-
-A serving seam returns catalog data for the assistant from `catalog_product` + `product_facts` +
-pgvector candidate ids, **never** a live Shopify call. Concretely:
-- Retrieval resolves candidate `product_id`s from pgvector as today.
-- The render/serving layer hydrates those ids from `catalog_product` (full fields) and
-  `product_facts` (fresh price/stock) locally.
-- The ≤1000-SKU path stops calling `storefrontFetch` on the hot path; it reads the same local store.
-  `storefrontFetch` survives only as a backfill/delta fetch behind the rate-limited client.
-
-Because the store is local and durable, catalog serving is **on by default** on staging (owner
-directive: all axes enabled by default on staging). The existing enablement registry gates whether
-a tenant's catalog is *backfilled/synced*; once synced, serving from local is the default.
-
-## 5. Reuse vs. net-new (grounded in the reuse inventory)
-
-**Reuse unchanged:** pgvector store (`pgvector-store.ts`), `product_facts`
-(`postgres-product-facts-store.ts`), webhook→queue plumbing (`catalog-webhook-queue.ts`),
-HMAC/webhook identity adapter (`shopify-webhook-identity.ts`), grounding cache wrapper
-(`grounding-cache.ts`) as a thin read cache in front of the local store, the enablement registry.
-
-**Extend:** `reconcileProducts` (persist full `catalog_product` fields + inventory deltas);
-`catalog-index.ts` backfill (Bulk Operations + write `catalog_product`); the serving path
-(`shopify-grounding.ts` / catalog-retriever) to read local instead of live.
-
-**Net-new:** `catalog_product` table + migration + store module (in `state-postgres`);
-`shopify-client.ts` rate-limited client (behind the existing commerce/grounding port);
-Bulk-Operations backfill driver; inventory-delta application; serving-from-local read path.
-
-## 6. Component boundaries (isolation & testability)
-
-- **`catalog-product-store.ts`** (`state-postgres`) — CRUD over `catalog_product` behind a narrow
-  interface (`upsert`, `softDelete`, `getByIds`, `listByTenant`, `pruneTombstoned`). Testable with
-  the pgvector testcontainer already in the gate. Knows nothing about Shopify.
-- **`shopify-client.ts`** — the only module that knows Shopify's rate-limit wire format. Injectable
-  `fetchFn` (mirrors the existing `storefrontFetch` injection at ~:357) so unit tests drive throttle
-  branches with a fake. Knows nothing about `catalog_product`.
-- **backfill driver** — orchestrates client → store; no wire-format or SQL of its own.
-- **delta extension** — lives inside `reconcileProducts`; one transaction writes all three stores.
-- **serving read** — depends only on the three stores, never the client.
-
-Each unit answers: *what it does / how you call it / what it depends on* — and none reaches across
-a boundary (adapter never touches SQL; store never touches Shopify).
-
-## 7. Data flow
+Columns (per tenant, keyed by `product_id`):
 
 ```
-BACKFILL (once / re-runnable):
-  enablement=on → backfill driver → shopify-client (Bulk Op, throttled)
+tenant_id, product_id (Shopify product GID, stable key)   -- PK (tenant_id, product_id)
+handle, title, description_html, description_text
+product_type, vendor, tags text[], status                 -- active | archived | draft
+options jsonb                                              -- [{name, values[]}]
+variants jsonb  -- [{variantId,title,sku,price,currency,availableForSale,inventoryQty,imageUrl,options{}}]
+featured_image_url, image_urls text[], online_store_url
+content_hash        -- delta short-circuit (mirrors the pgvector delta key)
+synced_at timestamptz not null   -- staleness signal
+deleted_at timestamptz           -- soft-delete tombstone
+```
+
+- **Variants inline as `jsonb`** — read as a unit when rendering one product; the money-hot fields
+  (price/stock) also live in `product_facts` (unchanged, authoritative fast path). Both are written
+  in the **same delta transaction** from the same payload, so they cannot disagree beyond one delta.
+- **Soft delete** (`deleted_at`) so a concurrent serving read never 404s mid-delete and removals are
+  auditable; a periodic prune hard-deletes rows past a retention window.
+- **`content_hash` mirrors the pgvector delta key** so the existing "did it actually change?"
+  short-circuit also guards the `catalog_product` upsert — no wasted writes.
+- Columns are platform-neutral; Shopify field mapping lives only in the adapter.
+
+### 4.3 Rate-limited Shopify client (NEW `shopify-client.ts`)
+
+The **only** module that knows Shopify's rate-limit wire format. Behind the existing commerce/
+grounding port. Owns (all fields VERIFIED, Appendix A):
+- **Cost-aware throttling.** Admin GraphQL is a leaky-bucket *query-cost* model; the client reads
+  `extensions.cost.throttleStatus` (`maximumAvailable`, `currentlyAvailable`, `restoreRate`) and
+  paces to stay under the per-plan restore rate (50 / 200 / 1000 / 2000 pts/s). Limits are per
+  **app+store**, so the budget is naturally per-tenant.
+- **Bounded retry/backoff** on `THROTTLED` / 5xx / timeout, hard attempt cap, typed error upward
+  (no infinite loop).
+- **Single choke point** — backfill, reconcile, and any residual Storefront read share it.
+
+Injectable `fetchFn` (mirrors `storefrontFetch`'s injection ~:357) so unit tests drive throttle
+branches with a fake. Knows nothing about `catalog_product`.
+
+### 4.4 Backfill — Shopify Bulk Operations (extend `catalog-index.ts`)
+
+One-time (and re-runnable/resumable) full load per shop uses **Bulk Operations** (VERIFIED:
+Admin-GraphQL-only, async JSONL export) — not Storefront paging — so a 50k-SKU catalog loads in one
+async job off PalUp's request budget:
+1. `bulkOperationRunQuery` for all products+variants via the rate-limited client; poll for
+   completion; download JSONL.
+2. Upsert each product into `catalog_product` (+ `product_facts` + enqueue embedding for pgvector),
+   `content_hash`-skipping unchanged rows on a re-run.
+3. Record progress → idempotent, resumable.
+
+Concurrency (VERIFIED, corrected from an earlier draft): API ≥2026-01 allows **up to 5 concurrent
+bulk query operations per shop**; PalUp runs **one backfill per shop** and controls *fleet* fan-out
+(how many shops backfill at once) in the scheduler (§5.3), not by per-shop concurrency. The
+`MAX_INDEXED_PRODUCTS = 50000` ceiling still applies; exceeding it **logs the truncation explicitly**
+(no silent cap — memory `open-findings-not-in-repo`).
+
+### 4.5 Delta freshness — declarative webhooks → existing queue → extended reconcile
+
+Reuses the existing path wholesale: `catalog-webhook-queue.ts` (message carries `productIds` +
+`reason`) → `reconcileProducts` (delta by-id, content-hash short-circuit, upsert/delete). Changes:
+1. **Persist full fields.** Extend `reconcileProducts` to also upsert the full `catalog_product` row
+   (and set `deleted_at` on a delete) in the **same transaction** that writes pgvector + `product_facts`.
+2. **Inventory deltas.** Subscribe `inventory_levels/update` so stock changes update `product_facts`
+   (+ the `catalog_product` variant copy) without a full product refetch.
+3. **Declarative subscription** (VERIFIED path): `products/create|update|delete` and
+   `inventory_levels/update` declared in `shopify.app.toml [[webhooks.subscriptions]]`, pinned to a
+   stable API version — Shopify auto-subscribes every shop at install (no per-shop API call). This
+   **restores** the declarative webhooks the staging toml lost during the earlier config split.
+
+HMAC verification reuses the existing verified adapter (`shopify-webhook-identity.ts`).
+
+## 5. Public-app multi-tenant model (the part the first draft missed)
+
+### 5.1 Per-shop token custody
+A public app receives a **per-shop offline Admin access token** at OAuth install (VERIFIED: default
+token, persists across sessions, for background/scheduled jobs). Under **managed install / token
+exchange** it is a **refreshable expiring** offline token. Custody design:
+- Stored **encrypted, per tenant, via the secrets port** (never in code/logs — CLAUDE.md §5).
+- **Least privilege:** read-only Admin scopes `read_products`, `read_inventory` only — no write,
+  order, or customer scope. Holding `read_inventory` does **not** authorize surfacing stock counts;
+  the boolean `availableForSale` contract stays (ADR-0020 §8a).
+- **Refresh** handled by the client (token-exchange refresh) so background sync keeps working.
+- **Revoke on uninstall:** subscribe `app/uninstalled` (VERIFIED: fires on uninstall; token access
+  ends) → delete the stored token + halt the tenant's sync + tombstone/retire its catalog per the
+  data-retention policy. Custody ends cleanly at uninstall.
+
+### 5.2 Compliance webhooks (App Store requirement)
+Public-app listing requires subscribing `customers/data_request`, `customers/redact`, `shop/redact`
+(VERIFIED). These are **not catalog-specific** but are a listing prerequisite and interact with
+`shop/redact` (erase a shop's catalog + token on request). Handlers must return 401 on bad HMAC,
+200 on success. This spec **notes** them as a dependency of shipping a public app; the erasure/legal
+semantics are owner/legal-gated (deferred to prod).
+
+### 5.3 Fleet backfill scheduling
+Backfilling millions of shops is orchestrated, not on-demand:
+- Backfill is triggered at install (offline token available) and re-runnable for periodic full
+  reconcile (repairs missed webhooks — inevitable at fleet scale).
+- A scheduler bounds **how many shops** backfill concurrently (protects PalUp's own compute + the
+  embedding pipeline), independent of Shopify's per-shop 5-op allowance.
+- Each backfill is idempotent/resumable (§4.4) so a crash resumes without duplication.
+
+### 5.4 Serving stays local (scale payoff)
+With the local store, the **Storefront delegate token's hot-path role disappears** — shopper serving
+touches neither Shopify surface. The Admin token is a **sync-plane-only** credential. This is what
+makes the assistant durable under a Shopify outage across the whole fleet.
+
+## 6. Governance — this supersedes ADR-0020 D1
+
+ADR-0020 D1 chose "reads on the Storefront delegate token, **no persisted offline Admin token**,
+declarative webhooks only" for **lowest blast radius** on a single/dev store. For a public app at
+$30B scale that is the wrong end-state, because (a) a public app **already** receives an offline
+Admin token at install, (b) the Storefront API has **no bulk export** so fleet backfill needs Bulk
+Operations (Admin-only), and (c) fleet-scale missed webhooks require periodic full reconcile, also
+Admin-only.
+
+**Required before this ships:**
+1. A **superseding ADR** (0020-D1 → new ADR) recording: persist a per-shop offline Admin token,
+   read-only `read_products`/`read_inventory`, encrypted secrets-port custody, refresh + revoke-on-
+   uninstall, kill-switch + audit. Named human owner (governance-touching).
+2. A **`security-reviewer`** pass on the token-custody design (storage, rotation, revocation, blast
+   radius, kill switch).
+3. **Owner sign-off** on the D1 reversal.
+
+Other §3 checks:
+- **§3.1 money/model/business:** none crossed. Catalog data is descriptive; price *display* comes
+  from `product_facts` (already exists, not a decision surface).
+- **Portability (ADR-0001):** all Shopify access behind the client/adapter; neutral store columns.
+- **Kill switch / audit:** sync is a background job under the enablement registry + kill switch;
+  disabling a tenant halts sync and serving falls back to last-known-good local data. Every
+  backfill/delta/token action logs to the audit log (actor, input, decision, reversal).
+- **Secrets:** Admin token + any delegate token via the secrets port; never in code/logs.
+
+## 7. Reuse vs. net-new
+
+**Reuse unchanged:** pgvector store, `product_facts`, webhook→queue plumbing
+(`catalog-webhook-queue.ts`), HMAC adapter (`shopify-webhook-identity.ts`), grounding cache as a
+thin read cache in front of the local store (or retire it — §12), enablement registry, kill switch.
+
+**Extend:** `reconcileProducts` (persist full `catalog_product` + inventory deltas);
+`catalog-index.ts` backfill (Bulk Operations + write `catalog_product`); serving path
+(`shopify-grounding.ts` / catalog-retriever) to read local; `shopify.app.toml` (restore declarative
+webhook subscriptions).
+
+**Net-new:** `catalog_product` table + migration + store module (`state-postgres`);
+`shopify-client.ts` rate-limited client; Bulk-Operations backfill driver; inventory-delta
+application; per-shop Admin-token custody (mint/store/refresh/revoke behind the secrets port);
+`app/uninstalled` handler; fleet backfill scheduler; serve-from-local read path.
+
+## 8. Component boundaries (isolation & testability)
+
+- **`catalog-product-store.ts`** (`state-postgres`) — CRUD over `catalog_product`
+  (`upsert`/`softDelete`/`getByIds`/`listByTenant`/`pruneTombstoned`) behind a narrow interface.
+  Tested with the pgvector testcontainer already in the gate. Knows nothing about Shopify.
+- **`shopify-client.ts`** — only module that knows Shopify's rate-limit + Bulk-Op wire format.
+  Injectable `fetchFn`. Knows nothing about `catalog_product`.
+- **token-custody module** — mint/store/refresh/revoke behind the secrets port; the only module that
+  holds the Admin token. Knows nothing about SQL or catalog shape.
+- **backfill driver / fleet scheduler** — orchestrate client → store; no wire-format or SQL of their own.
+- **delta extension** — inside `reconcileProducts`; one transaction writes all three stores.
+- **serving read** — depends only on the three stores, never the client or token module.
+
+Each unit answers *what it does / how you call it / what it depends on*, and none reaches across a
+boundary (adapter never touches SQL; store never touches Shopify; serving never touches a token).
+
+## 9. Data flow
+
+```
+INSTALL (per shop):
+  OAuth (managed install / token exchange) → offline Admin token → secrets port (encrypted)
+  declarative webhooks auto-subscribed by Shopify
+
+BACKFILL (install + periodic reconcile, fleet-scheduled):
+  scheduler → backfill driver → shopify-client (bulkOperationRunQuery, throttled)
     → JSONL → upsert catalog_product + product_facts + enqueue embed → pgvector
 
 DELTA (steady state):
-  Shopify product/inventory webhook → HMAC verify (existing adapter)
-    → catalog-webhook-queue (productIds+reason)
-    → reconcileProducts (content-hash short-circuit)
-        → upsert/softDelete catalog_product + product_facts + re-embed pgvector  [one txn]
+  Shopify products/* or inventory_levels/update webhook → HMAC verify (existing adapter)
+    → catalog-webhook-queue → reconcileProducts (content-hash short-circuit)
+        → upsert/softDelete catalog_product + product_facts + re-embed pgvector   [one txn]
 
 SERVE (hot path, NO Shopify call):
   shopper turn → retrieval (pgvector candidate ids)
-    → hydrate from catalog_product + product_facts (local)
-    → assistant grounds answer
+    → hydrate from catalog_product + product_facts (local) → assistant grounds answer
+
+UNINSTALL:
+  app/uninstalled webhook → delete token + halt sync + retire catalog (retention policy)
 ```
 
-## 8. Error handling & durability behavior
+## 10. Error handling & durability
 
-- **Shopify throttled/down during backfill or delta:** the rate-limited client backs off and
-  retries within its cap; the local store keeps serving last-known-good. A stuck delta raises the
-  per-product `synced_at` age, which is observable/alertable — it never blanks the catalog.
-- **Delta arrives for an unknown product (never backfilled):** reconcile fetches and inserts it
-  (self-healing); a missed webhook is repaired by the next touch or a periodic reconcile sweep.
-- **Product deleted in Shopify:** `deleted_at` tombstone; serving filters tombstoned rows; prune
-  removes them after the retention window.
-- **Bulk backfill exceeds the 50k ceiling:** truncate + **log explicitly** (no silent cap).
-- **Cold start with an empty local store (not yet backfilled):** serving returns empty **only** for
-  a tenant with catalog sync not yet enabled — matches today's behavior for that tenant, and the
-  fix is to enable/backfill, not a live-fetch fallback that would reintroduce the dependency.
+- **Shopify throttled/down during backfill/delta:** the client backs off within its cap; local
+  store serves last-known-good. A stuck delta raises `synced_at` age (observable/alertable); money
+  facts past the staleness ceiling flip to "let me confirm" (fail-honest). Never blanks the catalog.
+- **Missed webhook (inevitable at fleet scale):** the periodic Bulk reconcile repairs it; a delta
+  for an unknown product self-heals (fetch + insert).
+- **Product deleted in Shopify:** `deleted_at` tombstone; serving filters it; prune after retention.
+- **Backfill exceeds the 50k ceiling:** truncate + **log explicitly** (no silent cap).
+- **Token expired/revoked:** refresh; on `app/uninstalled` or refresh failure, halt sync + surface
+  a re-auth signal — never fall back to a live shopper-path Shopify call.
+- **Cold start (not yet backfilled):** serving returns empty **only** for a not-yet-synced tenant
+  (matches today); the fix is enable/backfill, not a hot-path live fetch.
 
-## 9. Testing (ATDD — tests first, per CLAUDE.md §4)
+## 11. Testing (ATDD — tests first, CLAUDE.md §4)
 
-Acceptance criteria → tests, each failing before implementation:
-
-- **Store:** upsert/get/soft-delete/prune round-trips against the pgvector testcontainer; tenant
-  isolation (tenant A never reads tenant B); `content_hash` short-circuit skips an unchanged upsert.
-- **Rate-limited client:** with a fake `fetchFn`, a `THROTTLED` response triggers backoff-then-retry;
-  the attempt cap surfaces a typed error, not an infinite loop; cost pacing stays under a configured
-  restore rate.
+Each acceptance criterion → a test that fails before implementation:
+- **Store:** upsert/get/soft-delete/prune round-trips (pgvector testcontainer); tenant isolation
+  (A never reads B); `content_hash` short-circuit skips an unchanged upsert.
+- **Rate-limited client:** fake `fetchFn` — a `THROTTLED` response backs-off-then-retries; the
+  attempt cap surfaces a typed error (no infinite loop); pacing respects a configured restore rate.
 - **Backfill:** a fake bulk JSONL loads N products into all three stores; a re-run with unchanged
-  hashes performs zero rewrites; exceeding the ceiling logs the truncation.
-- **Delta:** a product-update webhook payload updates `catalog_product` + `product_facts` + pgvector
-  in one transaction; a delete tombstones; an inventory-level webhook updates stock without a full
-  product refetch.
-- **Serving durability (the invariant):** with the Shopify client stubbed to **throw on every
-  call**, a shopper turn still returns the full catalog from the local store. This is the test that
-  encodes §3.
-- **Portability:** no feature/serving module imports a Shopify symbol directly (grep-style guard,
-  mirroring the existing scope-pinning test precedent).
+  hashes does zero rewrites; exceeding the ceiling logs the truncation.
+- **Delta:** a product-update webhook updates all three stores in one transaction; a delete
+  tombstones; an `inventory_levels/update` webhook updates stock without a full refetch.
+- **Token custody:** token stored via a fake secrets port is encrypted-at-rest (never plaintext in
+  logs); `app/uninstalled` deletes it + halts sync; a refresh path renews an expiring token.
+- **Serving durability (encodes §3):** with the Shopify client stubbed to **throw on every call**, a
+  shopper turn still returns the full catalog from the local store.
+- **Portability:** no feature/serving module imports a Shopify symbol directly (grep-guard, mirroring
+  the existing scope-pinning test precedent).
+- **Least-privilege scope pin:** the app declares no scope beyond `read_products`, `read_inventory`
+  (+ the already-authorized staging set) — extend the existing `order-attribution-scope-pinning`
+  precedent.
 
-Gate: the full local `merge-gate.sh` set (typecheck, unit, eval, 4× e2e, pgvector testcontainer).
-Never set `GOOGLE_CLOUD_PROJECT` for the gate (memory `merge-gate-mock-path`).
+Gate: full local `merge-gate.sh` (typecheck, unit, eval, 4× e2e, pgvector testcontainer). Never set
+`GOOGLE_CLOUD_PROJECT` for the gate (memory `merge-gate-mock-path`).
 
-## 10. Rollout
+## 12. Rollout
 
-- Staging only. Catalog serving-from-local default-on once a tenant is backfilled; enablement
-  registry gates backfill/sync per tenant.
-- Backfill `palup-skincare-jason` (the >1000-SKU staging store) as the first real exercise — this
-  is exactly the store that today shows no products on the sample storefront
-  (memory `storefront-demo-catalog-over-1000-skus`); success = the storefront and assistant show
-  products with no live Shopify call on the hot path.
-- Production promotion (and any prod Shopify scope/PCD questions) is deferred to a §5 human step,
-  out of scope here.
+- **Staging first.** The staging dev app is **increment 1** of the public-app design — a single
+  tenant with its own offline token, exercising the exact same code path, not a different
+  architecture.
+- Backfill `palup-skincare-jason` (the >1000-SKU staging store that today shows no products) as the
+  first real exercise; success = storefront + assistant show products with no live Shopify call on
+  the hot path.
+- **Production** promotion, the D1-superseding ADR sign-off, the `security-reviewer` custody pass,
+  compliance-webhook legal semantics, and any prod scope/PCD questions are deferred to §5/human
+  steps — out of scope for the build.
 
-## 11. Governance check
+## 13. Open items to verify during writing-plans (not assert from memory)
 
-- **§3 boundaries:** none crossed. Catalog data is descriptive; no pricing/margin/marketing/model
-  change auto-applies. (Price *display* comes from `product_facts`, which already exists and is not
-  a decision surface.)
-- **Portability (ADR-0001):** all Shopify access behind the client/adapter; store columns neutral.
-- **Least privilege:** no new Shopify scope (`read_products`, `read_inventory` already granted on
-  staging). No customer/order scope involved.
-- **Kill switch / audit:** sync is a background job under the existing enablement registry; disabling
-  a tenant halts sync; serving then reads last-known-good local data. Backfill/delta actions log.
-- **Secrets:** Shopify credentials via the existing secrets port; never in code/logs.
+1. Exact current signatures of `reconcileProducts`, `runCatalogIndex`, and the serving entry point —
+   read before extending (files named in §1/§7).
+2. Managed-install token-exchange refresh mechanics (endpoint, expiry, refresh trigger) — confirm on
+   shopify.dev before coding the custody module.
+3. Exact `bulkOperationRunQuery` lifecycle (poll field names, `url` expiry, partial-result handling).
+4. Whether `grounding-cache.ts` stays in front of the local store or is retired (measure a local
+   Postgres read; don't assume).
+5. Per-topic webhook→scope strings — re-confirm the D1 verification (2026-08-07) still holds for the
+   pinned API version.
 
-## 12. Open items to verify during writing-plans (not assert from memory)
+---
 
-1. Shopify Admin GraphQL cost/throttle response fields + Bulk Operations lifecycle — confirm on
-   shopify.dev before coding `shopify-client.ts`.
-2. Exact current signatures of `reconcileProducts` and `runCatalogIndex` and the serving entry
-   point — read before extending (files named in §1/§5).
-3. Whether `grounding-cache.ts` should remain in front of the local store or be retired (a local
-   Postgres read may be fast enough to drop the cache layer — measure, don't assume).
+## Appendix A — Shopify facts verified 2026-08-23 (shopify.dev)
+
+| # | Fact | Verdict | Source |
+|---|---|---|---|
+| 1 | Public app gets a per-shop **offline** Admin token at install; persists across sessions; for background/scheduled jobs. Managed install → refreshable expiring offline token. | VERIFIED | shopify.dev/docs/apps/build/authentication-authorization/access-tokens |
+| 2 | Bulk Operations = **Admin GraphQL only**, not Storefront; async **JSONL**. | VERIFIED | shopify.dev/docs/api/usage/bulk-operations/queries |
+| 3 | Concurrency: API **≥2026-01 allows up to 5 concurrent bulk query ops per shop** (pre-2026-01 was one-per-type). | VERIFIED (corrects an earlier draft) | same as #2 |
+| 4 | Storefront API has **no** bulk equivalent; full reads = cursor pagination. | VERIFIED | #2 + shopify.dev/docs/api/usage/pagination-graphql |
+| 5 | `read_products` covers Product+ProductVariant (bulk query OK). Per-topic webhook→scope strings not verbatim-quotable now, but ADR-0020 D1 verified them 2026-08-07. | PARTIAL (treat as consistent-with-docs + prior verification) | shopify.dev/docs/api/usage/access-scopes |
+| 6 | Uninstall fires `app/uninstalled`; token access ends on uninstall/secret revoke. | VERIFIED | webhook reference + access-tokens page |
+| 7 | Webhooks declarable in `shopify.app.toml [[webhooks.subscriptions]]`; Shopify auto-subscribes each shop at install. | VERIFIED | shopify.dev/docs/apps/build/webhooks/subscribe |
+| 8 | App Store compliance webhooks: `customers/data_request`, `customers/redact`, `shop/redact`. | VERIFIED | shopify.dev/docs/apps/build/privacy-law-compliance |
+| 9 | Admin rate limit = leaky bucket, cost points, restore 50/200/1000/2000 pts/s by plan; `extensions.cost.throttleStatus` = `{maximumAvailable, currentlyAvailable, restoreRate}`; per app+store. | VERIFIED | shopify.dev/docs/api/usage/limits |
+
+shopify.dev pages show no publication date; all fetched 2026-08-23. Assistant knowledge cutoff
+Jan 2026 — facts above are from live fetches, not memory.
