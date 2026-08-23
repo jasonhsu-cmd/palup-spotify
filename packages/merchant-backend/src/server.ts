@@ -14,7 +14,7 @@ import {
   SandboxCommsAdapter,
   SandboxCustomerDirectory,
 } from "@palup/platform-ports";
-import { createRuntimeStore, PostgresMerchantRegistry } from "@palup/state-postgres";
+import { createRuntimeStore, PostgresMerchantRegistry, PostgresMerchantRulesStore } from "@palup/state-postgres";
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
 import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
@@ -22,6 +22,7 @@ import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
 import { registerEventsRoutes } from "./routes/events.js";
+import { registerRulesRoutes } from "./routes/rules.js";
 import { InMemoryEventBus, type EventBus } from "./events.js";
 import "./types.js";
 
@@ -67,7 +68,14 @@ export async function buildServer(opts?: {
   // may default to until a real (still consent/DLP-gated) provider adapter is wired + prod-enabled.
   const comms: CampaignCommsPort = opts?.comms ?? new SandboxCommsAdapter();
   const proposalStore: ProposalStore = opts?.proposalStore ?? new InMemoryProposalStore(store);
-  const rulesStore: MerchantRulesStore = opts?.rulesStore ?? new InMemoryMerchantRulesStore(store);
+  // Task 4 composition default: mirrors the `identity`/registry pattern just below — a real
+  // `PostgresMerchantRulesStore` sharing the SAME pool `createRuntimeStore()` opened when a durable
+  // store is available (DATABASE_URL set), else the in-memory adapter every other service falls back
+  // to locally/in tests. `state` is `store` itself, so the `"rules.changed"` audit record `set()`
+  // writes lands in the SAME `rs_audit` table every other governed mutation in this deployment uses.
+  const rulesStore: MerchantRulesStore =
+    opts?.rulesStore ??
+    (runtimeResult?.sql ? new PostgresMerchantRulesStore(runtimeResult.sql, store) : new InMemoryMerchantRulesStore(store));
   const bus: EventBus = opts?.bus ?? new InMemoryEventBus();
   const identity: MerchantIdentityPort =
     opts?.identity ??
@@ -148,6 +156,7 @@ export async function buildServer(opts?: {
     registerKillRoutes(merchantPlane, { state: store, bus });
     registerAuditRoutes(merchantPlane, { state: store });
     registerEventsRoutes(merchantPlane, { bus });
+    registerRulesRoutes(merchantPlane, { rulesStore });
   });
 
   return app;
