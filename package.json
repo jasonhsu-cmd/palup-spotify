@@ -31,6 +31,7 @@
     "shopify:verify": "tsx packages/widget-backend/src/shopify-verify-smoke.ts",
     "push:smoke": "tsx packages/widget-backend/src/pubsub-push-smoke.ts",
     "backend": "tsx packages/widget-backend/src/server.ts",
+    "merchant-backend": "tsx packages/merchant-backend/src/server.ts",
     "sweep": "tsx packages/widget-backend/src/jobs/retention-sweep.ts",
     "kill:arm": "tsx packages/widget-backend/src/jobs/kill-switch.ts arm",
     "kill:status": "tsx packages/widget-backend/src/jobs/kill-switch.ts status",
