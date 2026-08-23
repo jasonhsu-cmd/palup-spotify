@@ -11,7 +11,8 @@
 // Determinism: no `Date.now()`/`Math.random()` anywhere in this module — `now` is always
 // caller-supplied so the agent is replayable in tests/evals (same discipline as `loop.ts`).
 
-import type { CustomerLastOrder, CustomerListingCommerce, RuntimeStateCtx } from "@palup/platform-ports";
+import type { AgentAction, CustomerLastOrder, CustomerListingCommerce, ReversalPlan, RuntimeStateCtx } from "@palup/platform-ports";
+import { proposeOrExecute, type EngineDeps, type ProposeOrExecuteResult } from "../loop.js";
 
 // --- Task 2: findLapsedSegment + draftWinBack -----------------------------------------------------
 
@@ -60,4 +61,77 @@ export function draftWinBack(_segment: CustomerLastOrder[], brand: string): WinB
     subject: `We miss you at ${brand}`,
     body: `Hi there — it's been a while since your last order with ${brand}. Come back and enjoy 10% off your next purchase. We'd love to see you again.`,
   };
+}
+
+// --- Task 3: proposeWinBack — ALWAYS proposes, NEVER auto-sends ------------------------------------
+//
+// A `send_campaign` action carries no pct/usd param (`AUTO_ELIGIBLE_DIMENSIONS.campaign = []` in
+// `@palup/platform-ports`'s `merchant-rules-store.ts`), so the real `classifyAction` can never
+// classify one as "auto" — invariant 4 (unmeasured action) fires unconditionally. This function's
+// own defensive check below is belt-and-suspenders on TOP of that structural guarantee: campaigns
+// must never auto-send even if a future change to the classifier or its rules ever widened that.
+
+export interface ProposeWinBackInput {
+  segment: CustomerLastOrder[];
+  draft: WinBackDraft;
+  ctx: RuntimeStateCtx;
+  /** ISO-8601; caller-supplied (no `Date.now()` in this module). */
+  now: string;
+  /** Defaults to `"win_back_agent"` — override for multi-instance/test traceability. */
+  agentId?: string;
+}
+
+/**
+ * Builds the win-back campaign's `AgentAction` and routes it through `proposeOrExecute` — which
+ * ALWAYS lands a pending `campaign` `Proposal` for a human via the Approval Center; this agent has
+ * no direct send path at all. Throws if the loop ever reported `"executed"` for a campaign — that
+ * would be a governance breach (CLAUDE.md §3 non-negotiable #1), never a case to silently accept.
+ */
+export async function proposeWinBack(input: ProposeWinBackInput, deps: EngineDeps): Promise<ProposeOrExecuteResult> {
+  const action: AgentAction = {
+    type: "send_campaign",
+    params: {
+      recipients: input.segment.map((s) => s.contact),
+      channel: input.draft.channel,
+      subject: input.draft.subject,
+      body: input.draft.body,
+    },
+    irreversible: true,
+    blastRadius: input.segment.length,
+  };
+
+  const reversalPlan: ReversalPlan = {
+    reversible: false,
+    plan:
+      "An email/SMS send cannot be unsent once delivered. Containment: reject/withdraw this " +
+      "proposal before approval to stop it entirely; if already approved-and-sent in error, " +
+      "immediately halt the win-back agent (kill switch) and send a correction/apology to the " +
+      "same segment — the way back is containment + correction, never a true undo.",
+  };
+
+  const result = await proposeOrExecute(
+    {
+      ctx: input.ctx,
+      agentId: input.agentId ?? "win_back_agent",
+      agentType: "win_back",
+      category: "campaign",
+      rationale: `Win-back campaign for ${input.segment.length} lapsed customer(s).`,
+      reversalPlan,
+      now: input.now,
+      action,
+      estimatedImpact: { reach: input.segment.length },
+    },
+    deps,
+  );
+
+  // Defensive (§3-critical): a campaign action must NEVER auto-execute. This agent has no direct
+  // send path — if the loop ever returns "executed" here, that is a governance breach, not a
+  // result to hand back silently.
+  if (result.kind === "executed") {
+    throw new Error(
+      "proposeWinBack: a campaign action was auto-executed — this must never happen (CLAUDE.md §3 HITL non-negotiable); the win-back agent has no direct send path",
+    );
+  }
+
+  return result;
 }
