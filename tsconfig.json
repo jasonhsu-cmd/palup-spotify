@@ -22,6 +22,7 @@
     { "path": "packages/control-plane/tsconfig.json" },
     { "path": "packages/widget/tsconfig.json" },
     { "path": "packages/identity-shopify/tsconfig.json" },
-    { "path": "packages/agent-runtime/tsconfig.json" }
+    { "path": "packages/agent-runtime/tsconfig.json" },
+    { "path": "packages/merchant-backend/tsconfig.json" }
   ]
 }

@@ -130,6 +130,21 @@ importers:
         specifier: workspace:*
         version: link:../platform-ports
 
+  packages/merchant-backend:
+    dependencies:
+      '@palup/identity-shopify':
+        specifier: workspace:*
+        version: link:../identity-shopify
+      '@palup/platform-ports':
+        specifier: workspace:*
+        version: link:../platform-ports
+      '@palup/state-postgres':
+        specifier: workspace:*
+        version: link:../state-postgres
+      fastify:
+        specifier: ^5.0.0
+        version: 5.10.0
+
   packages/model-vertex:
     dependencies:
       '@google/genai':
