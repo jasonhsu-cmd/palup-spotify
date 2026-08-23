@@ -379,6 +379,17 @@ export interface CatalogBackfillOpts {
   pollIntervalMs?: number;
   /** Poll attempts before giving up (bulk operations can legitimately take minutes on a large catalog). */
   maxPolls?: number;
+  /**
+   * Task 11 (F5) — an ABORT SIGNAL re-checked between poll/page steps, so an operator kill armed
+   * MID-RUN stops this job promptly instead of waiting out a whole (potentially minutes-long) bulk
+   * operation. This is a SEPARATE check from the up-front `matchedKill(..., RUNTIME_AGENT_TYPE)` above
+   * (the live-shopper serving plane) — the scheduler that calls this job supplies a closure re-checking
+   * `matchedKill(store, { tenantId, agentType: CATALOG_SYNC_AGENT_TYPE })`, the sync-plane's OWN kill
+   * scope. Optional and absent by default: a caller that does not supply it gets byte-identical behavior
+   * to before Task 11 (only the up-front halt/cap checks apply). Never thrown from — a `false`/resolved
+   * value is all this reads.
+   */
+  shouldAbort?: () => Promise<boolean>;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
@@ -436,14 +447,30 @@ export interface CatalogBackfillDeps {
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Task 11 (F5) — a private sentinel thrown when `shouldAbort()` reports true. Caught only inside
+ * `runCatalogBackfill`, which turns it into a clean `{ outcome: "halted" }` report (never surfaced to a
+ * caller as a generic failure, and never confused with a real `FAILED`/`CANCELED` bulk-op error).
+ */
+class CatalogSyncAbortedSignal extends Error {}
+
 /** Poll `pollBulk` until COMPLETED, throwing on FAILED/CANCELED or attempt exhaustion — never an infinite
- *  loop (mirrors `ShopifyThrottleError`'s bounded-attempts discipline in shopify-client.ts). */
+ *  loop (mirrors `ShopifyThrottleError`'s bounded-attempts discipline in shopify-client.ts). Re-checks
+ *  `shouldAbort` (Task 11, F5) at the START of every attempt — before the very first poll, and again
+ *  before each subsequent one — so a kill armed mid-run is honored between poll steps rather than only at
+ *  entry, throwing `CatalogSyncAbortedSignal` instead of polling further. */
 async function pollUntilComplete(
   client: ShopifyAdminClient,
   id: string,
-  opts: { sleep: (ms: number) => Promise<void>; pollIntervalMs: number; maxPolls: number },
+  opts: {
+    sleep: (ms: number) => Promise<void>;
+    pollIntervalMs: number;
+    maxPolls: number;
+    shouldAbort?: () => Promise<boolean>;
+  },
 ): Promise<BulkStatus> {
   for (let attempt = 1; attempt <= opts.maxPolls; attempt++) {
+    if (opts.shouldAbort && (await opts.shouldAbort())) throw new CatalogSyncAbortedSignal();
     const status = await client.pollBulk(id);
     if (status.status === "COMPLETED") return status;
     if (status.status === "FAILED" || status.status === "CANCELED") {
@@ -488,6 +515,12 @@ export async function runCatalogBackfill(
   if (await matchedCostCap(deps.store, { tenantId })) {
     return { tenantId, productCount: 0, truncated: false, outcome: "capped" };
   }
+  // Task 11 (F5) — the sync-plane abort signal, checked up front too: no step (not even acquiring a
+  // token) should run once a kill has already armed by the time this tenant's turn comes up in the
+  // scheduler's bounded pool.
+  if (opts.shouldAbort && (await opts.shouldAbort())) {
+    return { tenantId, productCount: 0, truncated: false, outcome: "halted" };
+  }
 
   const token = await deps.getFreshAdminToken(tenantId);
   const shopDomain = await deps.shopDomainOf(tenantId);
@@ -497,11 +530,30 @@ export async function runCatalogBackfill(
     : createShopifyAdminClient({ creds, fetchFn: deps.fetchFn, sleep });
 
   const { id } = await client.runBulkQuery(PRODUCTS_BULK_QUERY);
-  const status = await pollUntilComplete(client, id, {
-    sleep,
-    pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
-    maxPolls: opts.maxPolls ?? DEFAULT_MAX_POLLS,
-  });
+  let status: BulkStatus;
+  try {
+    status = await pollUntilComplete(client, id, {
+      sleep,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+      maxPolls: opts.maxPolls ?? DEFAULT_MAX_POLLS,
+      shouldAbort: opts.shouldAbort,
+    });
+  } catch (e) {
+    // Task 11 (F5) — a kill armed BETWEEN poll steps: report a clean halt, not a generic failure. Nothing
+    // has been written yet (the bulk operation itself keeps running Shopify-side, unaffected — this job
+    // simply stops WATCHING it and writes nothing on a deleted/killed token).
+    if (e instanceof CatalogSyncAbortedSignal) {
+      return { tenantId, productCount: 0, truncated: false, outcome: "halted" };
+    }
+    throw e;
+  }
+
+  // Task 11 (F5) — re-checked once more before spending the download/parse/write steps: a kill armed
+  // during the (potentially long) poll loop's LAST iteration, right as it completed, must still stop the
+  // job before any token-authenticated download or any store write happens.
+  if (opts.shouldAbort && (await opts.shouldAbort())) {
+    return { tenantId, productCount: 0, truncated: false, outcome: "halted" };
+  }
 
   // A COMPLETED bulk operation with zero matching rows can legitimately omit `url` (NOT LIVE-VERIFIED —
   // file banner) — treated as an empty catalog, not a failure.
@@ -524,6 +576,12 @@ export async function runCatalogBackfill(
 
   const at = now();
   const records = candidates.map((p) => mapAdminProductNode(p, at));
+
+  // Task 11 (F5) — the LAST checkpoint before any store write: a kill that armed during download/parsing
+  // must still stop this tenant before `catalog_product`/`product_facts` are touched at all.
+  if (opts.shouldAbort && (await opts.shouldAbort())) {
+    return { tenantId, productCount: 0, truncated: false, outcome: "halted" };
+  }
 
   const manifest = await deps.store.get<BackfillManifest>({ tenantId }, BACKFILL_MANIFEST_COLLECTION, BACKFILL_MANIFEST_KEY);
   const priorHashes = manifest?.hashes ?? {};

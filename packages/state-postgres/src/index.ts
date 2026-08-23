@@ -46,6 +46,7 @@ export {
   disarmKill,
   killStatus,
   RUNTIME_AGENT_TYPE,
+  CATALOG_SYNC_AGENT_TYPE,
   type KillScope,
   type KillEntry,
 } from "./runtime-kill-registry.js";

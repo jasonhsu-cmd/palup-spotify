@@ -27,6 +27,18 @@ export interface KillEntry {
  */
 export const RUNTIME_AGENT_TYPE = "shopper";
 
+/**
+ * Task 11 (durable-catalog-sync, ADR-0022 F5) — the agent-type for the FLEET CATALOG-SYNC PLANE (the
+ * scheduler in `widget-backend/src/jobs/catalog-sync-scheduler.ts` that runs `runCatalogBackfill` +
+ * `runCatalogIndex` across tenants). Deliberately DISTINCT from `RUNTIME_AGENT_TYPE` ("shopper"): the sync
+ * plane is a background job that pulls/writes catalog data, not the live shopper-facing serving path, and
+ * an operator halting one must not require (or accidentally imply) halting the other. `matchedKill(store,
+ * { tenantId, agentType: CATALOG_SYNC_AGENT_TYPE })` is the check the scheduler runs per tenant before
+ * starting, and the `shouldAbort` closure it threads into `runCatalogBackfill` re-checks the SAME scope so
+ * a kill armed mid-run stops the poll loop promptly rather than waiting for the whole bulk operation.
+ */
+export const CATALOG_SYNC_AGENT_TYPE = "catalog-sync";
+
 const SYSTEM = { tenantId: "__system__" };
 const KILL = "kill"; // KV collection under the system tenant
 
