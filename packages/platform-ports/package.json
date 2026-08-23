@@ -16,6 +16,7 @@
     "./contract/vector-ann": "./src/contract/vector-port-ann.contract.ts",
     "./contract/product-facts": "./src/contract/product-facts-port.contract.ts",
     "./contract/queue": "./src/contract/queue-port.contract.ts",
-    "./contract/presentment-price": "./src/contract/presentment-price-port.contract.ts"
+    "./contract/presentment-price": "./src/contract/presentment-price-port.contract.ts",
+    "./contract/merchant-identity": "./src/contract/merchant-identity-port.contract.ts"
   }
 }
