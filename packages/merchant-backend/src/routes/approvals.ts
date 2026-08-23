@@ -7,6 +7,10 @@ import {
   VersionConflictError,
   createRulesProvider,
   executeApproved,
+  rejectProposal,
+  type EngineDeps,
+  type Executor,
+  type PreconditionValidator,
 } from "@palup/agent-runtime";
 import { buildEngineDeps } from "../engine-wiring.js";
 
@@ -79,6 +83,23 @@ interface ApproveBody {
    *  TODO: wire once `executeApproved` grows a note param. */
   note?: string;
 }
+
+interface RejectBody {
+  reason: string;
+}
+
+/** A poison `Executor`/`PreconditionValidator` pair for the reject path: `rejectProposal`
+ *  (agent-runtime/loop.ts) only ever touches `deps.store`/`deps.state` — it never calls `executor`
+ *  or `validate` (those exist solely to satisfy `EngineDeps`'s shape). Wiring real ones here would
+ *  either require resolving an executor/validator for a proposal we are about to REJECT (pointless),
+ *  or silently mask a future change that made `rejectProposal` execute something it shouldn't. These
+ *  throw loudly instead, so that regression fails a test immediately rather than shipping quiet. */
+const poisonExecutor: Executor = async () => {
+  throw new Error("reject route: Executor must never be invoked — rejectProposal does not execute");
+};
+const poisonValidate: PreconditionValidator = async () => {
+  throw new Error("reject route: PreconditionValidator must never be invoked — rejectProposal does not validate");
+};
 
 export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRoutesDeps): void {
   app.get<{ Querystring: ApprovalsListQuery }>(
@@ -166,6 +187,53 @@ export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRou
         if (e instanceof ProposalNotFoundError) {
           return reply.code(404).send({ error: "not found" });
         }
+        // Found via reject.test.ts's reject-then-approve case: `executeApproved`'s own
+        // TERMINAL_BLOCKING_STATUSES guard (already rejected/withdrawn/expired/killed) throws a
+        // plain `Error`, not a typed one — map it to a clean 409 rather than an unhandled 500 (a
+        // settled decision must fail the retry cleanly, never crash the request).
+        if (e instanceof Error) {
+          return reply.code(409).send({ error: e.message });
+        }
+        throw e;
+      }
+    },
+  );
+
+  // T4: POST /approvals/:id/reject — same `approve_money` gate as approve. `rejectProposal` never
+  // executes (see the poison `EngineDeps` above), only transitions the proposal to `rejected` +
+  // audits — so a later `executeApproved` on the same id fails cleanly (TERMINAL_BLOCKING_STATUSES).
+  app.post<{ Params: ApprovalsDetailParams; Body: RejectBody }>(
+    "/approvals/:id/reject",
+    { preHandler: requirePermission("approve_money") },
+    async (req, reply) => {
+      const principal = req.principal!;
+      const ctx = { tenantId: principal.merchantId };
+      const { id } = req.params;
+      const reason = req.body?.reason;
+
+      if (!reason || !reason.trim()) {
+        return reply.code(400).send({ error: "reason is required" });
+      }
+
+      const now = new Date().toISOString();
+      const engineDeps: EngineDeps = {
+        store: deps.proposalStore,
+        state: deps.state,
+        rules: createRulesProvider(deps.rulesStore),
+        executor: poisonExecutor,
+        validate: poisonValidate,
+      };
+
+      try {
+        const updated = await rejectProposal(ctx, id, principal.userId, reason, now, engineDeps);
+        return updated;
+      } catch (e) {
+        if (e instanceof ProposalNotFoundError) return reply.code(404).send({ error: "not found" });
+        if (e instanceof VersionConflictError) return reply.code(409).send({ error: "version conflict" });
+        // `rejectProposal`'s own terminal-state guard (e.g. already executed/rejected) throws a plain
+        // `Error` — map it to a clean 409 rather than an unhandled 500 (spec: "rejecting a non-pending
+        // proposal must fail cleanly").
+        if (e instanceof Error) return reply.code(409).send({ error: e.message });
         throw e;
       }
     },
