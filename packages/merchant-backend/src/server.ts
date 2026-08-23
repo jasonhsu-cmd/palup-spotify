@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
 import { type RuntimeStatePort, type MerchantIdentityPort, InMemoryRuntimeStore } from "@palup/platform-ports";
 import { requireMerchant, shopifyEmbedFrameAncestors } from "@palup/identity-shopify";
+import { registerMeRoutes } from "./routes/me.js";
 import "./types.js";
 
 // F3 skeleton (F4 real composition): `store`/`identity` are injectable so tests can supply fakes
@@ -42,13 +43,7 @@ export async function buildServer(opts?: { store?: RuntimeStatePort; identity?: 
   // one attaches `req.principal` for the handler + any `requirePermission` preHandler mounted per-route.
   await app.register(async (merchantPlane) => {
     merchantPlane.addHook("preHandler", requireMerchant(identity));
-
-    // Temporary stub proving the auth chain end-to-end; Task 3 replaces this with the real
-    // routes/me.ts (same response shape) and adds the RBAC-gated probe.
-    merchantPlane.get("/me", async (req) => {
-      const p = req.principal!;
-      return { merchantId: p.merchantId, userId: p.userId, role: p.role, authLevel: p.authLevel };
-    });
+    registerMeRoutes(merchantPlane);
   });
 
   return app;
