@@ -44,6 +44,14 @@ instance, and merchant-backend's `buildServer()` composition root (Task 4) const
 `PostgresRuntimeStore`/`PostgresMerchantRegistry` adapters against whatever `DATABASE_URL` it's given —
 point it at a different database and a halt armed against the shared store would not be visible here.
 
+⚠️ **Single-use session-token exchange (the jti replay guard) is currently IN-MEMORY / per-instance
+only** — there is no durable/shared `JtiReplayGuard` adapter yet (`createInMemoryJtiGuard()`,
+`@palup/identity-shopify`, wired in `packages/merchant-backend/src/server.ts`). Unlike `DATABASE_URL`
+above, this guard does NOT ride the shared Cloud SQL store, so it is NOT consistent across multiple Cloud
+Run instances. Until a durable adapter lands, pin the service to `--max-instances 1`, OR accept that a
+session token could be replayed once per additional instance within its short validity window. Do NOT
+scale this service beyond one instance for production without a durable guard.
+
 ## Shopify app secret — via the secrets port, never env-inline
 
 The Shopify app client secret and the PalUp session-signing secret are read through the **secrets port**

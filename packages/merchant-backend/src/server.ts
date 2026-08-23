@@ -33,6 +33,8 @@ export async function buildServer(opts?: { store?: RuntimeStatePort; identity?: 
       clientId: process.env.SHOPIFY_APP_CLIENT_ID ?? "",
       secrets: createEnvSecrets(),
       registry: runtimeResult?.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : createInMemoryMerchantRegistry(),
+      // PER-INSTANCE, not shared — see DEPLOY.md "Shared state" ⚠️ for the multi-instance replay-window
+      // caveat and the --max-instances 1 mitigation until a durable JtiReplayGuard adapter exists.
       jtiGuard: createInMemoryJtiGuard(),
     });
 
