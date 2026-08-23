@@ -11,8 +11,16 @@
 // Determinism: no `Date.now()`/`Math.random()` anywhere in this module — `now` is always
 // caller-supplied so the agent is replayable in tests/evals (same discipline as `loop.ts`).
 
-import type { AgentAction, CustomerLastOrder, CustomerListingCommerce, ReversalPlan, RuntimeStateCtx } from "@palup/platform-ports";
-import { proposeOrExecute, type EngineDeps, type ProposeOrExecuteResult } from "../loop.js";
+import type {
+  AgentAction,
+  CampaignCommsPort,
+  CampaignMessage,
+  CustomerLastOrder,
+  CustomerListingCommerce,
+  ReversalPlan,
+  RuntimeStateCtx,
+} from "@palup/platform-ports";
+import { proposeOrExecute, type EngineDeps, type Executor, type ProposeOrExecuteResult } from "../loop.js";
 
 // --- Task 2: findLapsedSegment + draftWinBack -----------------------------------------------------
 
@@ -134,4 +142,43 @@ export async function proposeWinBack(input: ProposeWinBackInput, deps: EngineDep
   }
 
   return result;
+}
+
+// --- Task 4: campaignExecutor — the approved-send path ----------------------------------------------
+//
+// Only ever called by `executeApproved` (E1, `loop.ts`) AFTER a human has approved the pending
+// proposal `proposeWinBack` created — never directly, and never before approval. Idempotency is
+// `executeApproved`'s job (its `status === "executed"` short-circuit, task 6); this executor is
+// pure with respect to its inputs — the same `action` always builds the same `CampaignMessage[]`.
+
+function requireRecipients(params: AgentAction["params"]): string[] {
+  const v = params.recipients;
+  if (!Array.isArray(v) || !v.every((r) => typeof r === "string")) {
+    throw new Error("campaignExecutor: action.params.recipients must be a string[]");
+  }
+  return v;
+}
+
+function requireString(params: AgentAction["params"], key: string): string {
+  const v = params[key];
+  if (typeof v !== "string") throw new Error(`campaignExecutor: action.params.${key} must be a string`);
+  return v;
+}
+
+/**
+ * Builds an `Executor` (E1's injected side-effect seam) that sends a `send_campaign` action's
+ * recipients via the given `CampaignCommsPort` — `SandboxCommsAdapter` in dev/test/staging, a real
+ * (still consent/DLP-gated — see `comms-port.ts`'s header) provider adapter once one is wired.
+ */
+export function campaignExecutor(comms: CampaignCommsPort): Executor {
+  return async ({ ctx, action }) => {
+    const recipients = requireRecipients(action.params);
+    const channel = requireString(action.params, "channel") as CampaignMessage["channel"];
+    const subject = typeof action.params.subject === "string" ? action.params.subject : undefined;
+    const body = requireString(action.params, "body");
+
+    const messages: CampaignMessage[] = recipients.map((to) => ({ channel, to, subject, body }));
+    const { sent } = await comms.send(messages, ctx);
+    return { ok: true, detail: `sent ${sent}` };
+  };
 }
