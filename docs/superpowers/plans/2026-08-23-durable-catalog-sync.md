@@ -553,6 +553,24 @@ it("a delta webhook after a rich backfill does NOT clobber the rich fields (vari
 - Consumes: `CatalogProductPort`, `ProductFactsPort`, and a per-tenant profile KV (`brandName` + `policy`) written by backfill (Task 7) — read via `RuntimeStatePort`.
 - Produces: `createLocalCatalogGroundingPort(deps): GroundingPort` implementing `getContext`/`getShell`/`getProductsByIds` (`grounding-port.ts:90-107`) **with no Shopify call**.
 
+> **Controller ruling carried in (pre-flight + Task 7 review — load-bearing):**
+> 1. **Per-tenant gating (pre-flight ruling):** local serving is active **only for a tenant that has a
+>    `catalog_product` corpus** (backfilled — detect via the backfill manifest or a non-empty
+>    `listByTenant`). A not-yet-backfilled tenant keeps the existing storefront grounding path, so
+>    flipping the flag on globally never blanks a currently-working ≤1000-SKU tenant. Implement as a
+>    routing `GroundingPort` that delegates per-tenant to local-or-storefront.
+> 2. **Retrieval-path hydration (Task 7 review — the target store):** the RETRIEVAL serving path
+>    (>1000-SKU tenants, incl. the staging target `palup-skincare-jason`) currently renders candidates
+>    from **vector-record metadata + `product_facts`** and does **not** read `catalog_product` at all
+>    (verified: no `catalog_product` refs in `widget-brain/src` / `server.ts` retrieval path;
+>    `catalog-retriever.ts:104-164`, `brain.ts:~1196-1222`). Per spec §4.1 the render layer must hydrate
+>    the retrieved candidate ids from `catalog_product` (+ `product_facts`). Task 8 must make the
+>    retrieval render path hydrate via `getProductsByIds(tenantId, candidateIds)` (served locally from
+>    `catalog_product`) for a backfilled tenant, falling back to the existing metadata rendering when
+>    the tenant is not backfilled or `getProductsByIds` returns empty. Without this, the rich store
+>    never improves the >1000-SKU target store. **If this brain-side change makes Task 8 too large to
+>    review as one unit, STOP and report — it will be split into Task 8b.**
+
 - [ ] **Step 1: Write the failing durability test (encodes §3, F-invariant):**
 
 ```ts
@@ -573,9 +591,10 @@ it("maps CatalogProductRecord + ProductFact -> grounding Product (price/availabl
 
 - [ ] **Step 2: Run to verify it fails** → FAIL.
 - [ ] **Step 3: Implement `createLocalCatalogGroundingPort`.** `getContext(tenantId)`: `listByTenant(tenantId, { limit: MAX_CATALOG_PRODUCTS })`, hydrate price/`availableForSale` from `productFacts.getMany`, map each `CatalogProductRecord`→`Product` (`grounding-port.ts:6-68`), read `brandName`+`policy` from the profile KV; return `{ tenantId, brandName, products, policy }`. `getShell`: brand+policy only. `getProductsByIds`: `catalogProduct.getMany` + facts hydrate.
-- [ ] **Step 4: Swap at the composition root behind a flag.** In `model.ts createGroundingPort` (~:43), when `CATALOG_LOCAL_SERVING` is on (default **true** on staging), build `createLocalCatalogGroundingPort(...)` instead of `createShopifyGroundingAdapter(...)`; keep the Shopify adapter for the backfill/delta path only. Preserve the `createCachingGroundingPort` wrap at `server.ts:519` (a local read is cheap, but the cache stays as a thin read cache — spec §13.4 leaves retiring it to a measured follow-up).
-- [ ] **Step 5: Run to verify it passes** → PASS. Then `pnpm test` to confirm no regression in existing grounding tests.
-- [ ] **Step 6: Commit** — `feat(widget-backend): serve catalog grounding from local store (durability invariant; default-on staging)`.
+- [ ] **Step 4: Swap at the composition root behind a flag, PER-TENANT.** In `model.ts createGroundingPort` (~:43), when `CATALOG_LOCAL_SERVING` is on (default **true** on staging), build a routing `GroundingPort` that, per tenant, delegates to `createLocalCatalogGroundingPort(...)` **iff** the tenant has a `catalog_product` corpus (backfill manifest present / `listByTenant` non-empty), else to the existing `createShopifyGroundingAdapter(...)`. Keep the Shopify adapter for the backfill/delta path. Preserve the `createCachingGroundingPort` wrap at `server.ts:519` (thin read cache — spec §13.4 leaves retiring it to a measured follow-up).
+- [ ] **Step 5: Retrieval-path hydration (load-bearing carry).** Write a failing test that a backfilled >1000-SKU-style tenant's retrieval render uses `catalog_product` fields (rich) rather than only vector metadata. Then make the retrieval render path (`brain.ts:~1196-1222` / the retriever→shown-products seam) hydrate candidate ids via `getProductsByIds(tenantId, ids)` when local serving is active for that tenant, falling back to the existing metadata rendering otherwise. If this brain-side change is too large to review with the grounding-port change as one unit, STOP and report so it can be split into Task 8b.
+- [ ] **Step 6: Run to verify it passes** → PASS. Then `pnpm test` to confirm no regression in existing grounding/retrieval/brain tests.
+- [ ] **Step 7: Commit** — `feat(widget-backend): serve catalog grounding + retrieval hydration from local store (durability invariant; per-tenant, default-on staging)`.
 
 ---
 
