@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { InMemoryRuntimeStore } from "@palup/platform-ports";
-import { InMemoryProposalStore, VersionConflictError } from "../src/proposal-store.js";
+import { InMemoryProposalStore, ProposalNotFoundError, VersionConflictError } from "../src/proposal-store.js";
 const ctx = { tenantId: "t1" };
 const base = (id: string, over = {}) => ({ id, tenantId:"t1", agentId:"a", agentType:"win_back",
   action:{type:"x",params:{}}, category:"campaign" as const, rationale:"r",
@@ -25,5 +25,9 @@ describe("InMemoryProposalStore", () => {
     const s = new InMemoryProposalStore(new InMemoryRuntimeStore());
     await s.create(base("p1"));
     expect(await s.get({tenantId:"other"}, "p1")).toBeNull();
+  });
+  it("throws ProposalNotFoundError transitioning a missing id", async () => {
+    const s = new InMemoryProposalStore(new InMemoryRuntimeStore());
+    await expect(s.transition(ctx, "nope", 0, { status:"rejected" })).rejects.toBeInstanceOf(ProposalNotFoundError);
   });
 });

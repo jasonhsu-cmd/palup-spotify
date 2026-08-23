@@ -184,6 +184,24 @@ export async function classifyAction(
   }
 
   if (usd !== undefined) {
+    // FAIL CLOSED: an absent USD ceiling on EITHER side must never widen autonomy. Unlike `maxAutoPct`
+    // (required on `PalupFloor`, so the pct path above always has a real number to cap against), both
+    // `limit.maxUsd` and `floor.maxAutoUsd` are optional — treating a missing one as `Infinity` (the
+    // prior bug) let ANY dollar amount auto-approve whenever neither side bothered to configure a cap.
+    // No effective ceiling from either side is uncertainty, not permission — default to
+    // `requires_approval` (CLAUDE.md §3 non-negotiable #1: money never auto-applies).
+    if (limit.maxUsd === undefined && floor.maxAutoUsd === undefined) {
+      return {
+        decision: "requires_approval",
+        category,
+        boundaryReasons: [
+          {
+            rule: `${category}.no_usd_ceiling`,
+            detail: `usd=${usd} but neither the merchant autoActLimit nor the palupFloor configures a maxUsd — an absent cap is never treated as unlimited`,
+          },
+        ],
+      };
+    }
     const cap = Math.min(limit.maxUsd ?? Number.POSITIVE_INFINITY, floor.maxAutoUsd ?? Number.POSITIVE_INFINITY);
     if (usd > cap) {
       return {
