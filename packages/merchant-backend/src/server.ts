@@ -22,6 +22,19 @@ export async function buildServer(opts?: { store?: RuntimeStatePort; identity?: 
 
   const app = Fastify({ logger: false });
 
+  // Structural-safety backstop (coordinator review, W1-API is about to add many routes): collect
+  // EVERY route Fastify actually registers, regardless of which context (root `app` vs the
+  // encapsulated `merchantPlane` below) it's registered in — `onRoute` fires for child-context routes
+  // too. `route-protection.test.ts` walks this list and asserts every non-/health route 401s with no
+  // token, so a future route registered outside `merchantPlane` fails that test instead of shipping
+  // unprotected with green tests and no signal.
+  const registeredRoutes: { method: string; url: string }[] = [];
+  app.addHook("onRoute", (route) => {
+    const methods = Array.isArray(route.method) ? route.method : [route.method];
+    for (const method of methods) registeredRoutes.push({ method, url: route.url });
+  });
+  app.decorate("registeredRoutes", registeredRoutes);
+
   // /health is the ONLY unauthenticated route — registered directly on `app`, outside the encapsulated
   // merchant-plane context below, so it can never accidentally pick up the auth preHandler that context
   // scopes to everything registered inside it.

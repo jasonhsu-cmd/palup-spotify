@@ -14,4 +14,11 @@ declare module "fastify" {
   interface FastifyRequest {
     principal?: MerchantPrincipal;
   }
+  interface FastifyInstance {
+    /** Every route this instance actually registered, collected via `onRoute` (server.ts) — the
+     *  structural-safety backstop `route-protection.test.ts` walks so a future route registered
+     *  outside the authenticated `merchantPlane` context can't ship unprotected without failing that
+     *  test. Populated before `buildServer` returns; do not rely on it before `app.ready()`. */
+    registeredRoutes: { method: string; url: string }[];
+  }
 }
