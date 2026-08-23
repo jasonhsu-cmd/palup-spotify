@@ -1,24 +1,40 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
-import { type RuntimeStatePort, type MerchantIdentityPort, InMemoryRuntimeStore } from "@palup/platform-ports";
-import { requireMerchant, shopifyEmbedFrameAncestors } from "@palup/identity-shopify";
+import { type RuntimeStatePort, type MerchantIdentityPort, createEnvSecrets, createInMemoryMerchantRegistry } from "@palup/platform-ports";
+import { createRuntimeStore, PostgresMerchantRegistry } from "@palup/state-postgres";
+import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
 import { registerMeRoutes } from "./routes/me.js";
 import "./types.js";
 
-// F3 skeleton (F4 real composition): `store`/`identity` are injectable so tests can supply fakes
-// (per F2's ports) without a live Postgres/Shopify session behind them. The real composition —
-// `createRuntimeStore` (@palup/state-postgres) + `createShopifyAppBridgeIdentity`
-// (@palup/identity-shopify) — lands in Task 4; until then these defaults are deliberately minimal and
-// fail-closed (an unauthenticated caller is always denied), never a silent bypass.
-const NOOP_IDENTITY: MerchantIdentityPort = {
-  authenticate: async () => ({ kind: "anonymous" }),
-  authorize: () => false,
-};
-
+// Task 4 composition root: `store`/`identity` stay injectable (every existing test suite injects fakes
+// — InMemoryRuntimeStore + a deterministic MerchantIdentityPort double — so no unit test needs a real
+// Postgres connection or a real Shopify secret). Omitting them wires the REAL deps, mirroring
+// control-plane's `opts?.store ?? (await createRuntimeStore()).store` pattern (control-plane/src/server.ts):
+//   • store    -> `createRuntimeStore()` (@palup/state-postgres): real Cloud SQL Postgres when
+//                 DATABASE_URL is set, else the same in-memory fallback every other service uses locally.
+//   • identity -> `createShopifyAppBridgeIdentity` (@palup/identity-shopify): the real Shopify App
+//                 Bridge session-token/exchange adapter. Its app client secret and PalUp session-signing
+//                 secret are read via the SECRETS PORT (`createEnvSecrets()`, the same adapter and the
+//                 same secret names widget-backend already reads — server.ts:416) — never env-inline.
+//                 The registry it resolves a shop domain against is `PostgresMerchantRegistry` when a
+//                 durable store is available (sharing the SAME pool `createRuntimeStore()` opened, per
+//                 the "one pg.Pool per process" rule state-postgres documents), else the in-memory
+//                 registry — this deployment has no merchants registered until F5+ writes to it, so a
+//                 real shop can't resolve until then; that is fail-closed by construction, not a bypass.
+//   • SHOPIFY_APP_CLIENT_ID is the OAuth client id (NOT a secret — it ships in the URL, same convention
+//     widget-backend uses at server.ts:1196) so it is read directly from the environment.
 export async function buildServer(opts?: { store?: RuntimeStatePort; identity?: MerchantIdentityPort }): Promise<FastifyInstance> {
-  const store: RuntimeStatePort = opts?.store ?? new InMemoryRuntimeStore();
+  const runtimeResult = opts?.store ? undefined : await createRuntimeStore();
+  const store: RuntimeStatePort = opts?.store ?? runtimeResult!.store;
   void store; // wired into routes as W1-W7 land; unused for now beyond proving the injectable seam.
-  const identity: MerchantIdentityPort = opts?.identity ?? NOOP_IDENTITY;
+  const identity: MerchantIdentityPort =
+    opts?.identity ??
+    createShopifyAppBridgeIdentity({
+      clientId: process.env.SHOPIFY_APP_CLIENT_ID ?? "",
+      secrets: createEnvSecrets(),
+      registry: runtimeResult?.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : createInMemoryMerchantRegistry(),
+      jtiGuard: createInMemoryJtiGuard(),
+    });
 
   const app = Fastify({ logger: false });
 
