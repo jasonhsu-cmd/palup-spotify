@@ -1,9 +1,12 @@
 # ADR-0022: Per-shop offline Admin token for catalog sync (supersedes ADR-0020 D1)
 
-- **Status:** **Proposed** — 2026-08-23 (owner: jason.hsu). **Governance-touching** (adds a persisted
-  credential across every merchant store; reverses a prior ADR): merges only on a named-human owner
-  after a **`security-reviewer`** pass on token custody and **owner sign-off**. Until then, nothing in
-  this ADR ships. Load-bearing Shopify world-facts were fact-checked against primary sources on
+- **Status:** **Accepted** — 2026-08-23 (owner: jason.hsu). **Governance-touching** (adds a persisted
+  credential across every merchant store; reverses a prior ADR): accepted after the **`security-reviewer`**
+  pass on token custody (PASS-WITH-CONDITIONS) and **owner sign-off on the ADR-0020 D1 reversal**
+  (jason.hsu, 2026-08-23). *Decision only* — implementation ships behind the standing gates (test-first
+  → merge-gate) and must satisfy every item in **§ Security-review conditions**; nothing enables in
+  **production** without a separate human promotion. Load-bearing Shopify world-facts were fact-checked
+  against primary sources on
   **shopify.dev 2026-08-23** (see the catalog-sync design spec, Appendix A); assistant knowledge
   cutoff is Jan 2026, so post-cutoff facts rest on live fetch, not memory.
 - **Security review:** **PASS-WITH-CONDITIONS** (`security-reviewer`, 2026-08-23). One critical
