@@ -23,6 +23,15 @@ function app() {
   return f;
 }
 
+// `requirePermission` mounted WITHOUT `requireMerchant` ever running first (no app-wide hook here) —
+// the standalone-mount case the code comment calls out. `request.principal` is never set, so this must
+// fail closed (401), never crash and never silently pass a permission check with an undefined principal.
+function standaloneApp() {
+  const f = Fastify();
+  f.post("/approvals/:id/approve", { preHandler: requirePermission("approve_money") }, async () => ({ approved: true }));
+  return f;
+}
+
 describe("Fastify merchant auth preHandlers", () => {
   it("401 with no bearer token", async () => {
     const r = await app().inject({ method: "GET", url: "/home" });
@@ -45,5 +54,11 @@ describe("Fastify merchant auth preHandlers", () => {
   });
   it("CSP helper refuses a non-myshopify host (returns admin-only, never reflects a bad host)", () => {
     expect(shopifyEmbedFrameAncestors("evil.test")).toBe("frame-ancestors https://admin.shopify.com");
+  });
+  it("requirePermission mounted standalone (requireMerchant never ran, no request.principal) fails CLOSED with 401, not a crash or a pass", async () => {
+    const r = await standaloneApp().inject({
+      method: "POST", url: "/approvals/1/approve", headers: { authorization: `Bearer ${ownerTok}` },
+    });
+    expect(r.statusCode).toBe(401);
   });
 });

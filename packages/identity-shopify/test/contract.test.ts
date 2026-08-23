@@ -1,4 +1,4 @@
-import { runMerchantIdentityPortContract } from "@palup/platform-ports";
+import { runMerchantIdentityPortContract } from "@palup/platform-ports/contract/merchant-identity";
 import { createShopifyAppBridgeIdentity } from "../src/identity.js";
 import { createInMemoryJtiGuard } from "../src/jti-guard.js";
 import type { MerchantPrincipal } from "@palup/platform-ports";
