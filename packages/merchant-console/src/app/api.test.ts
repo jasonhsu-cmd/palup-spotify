@@ -1,0 +1,115 @@
+import { describe, it, expect, vi } from "vitest";
+import { makeApiClient, ConflictError, KilledError, AuthError } from "./api.js";
+
+// Typed helper so `.mock.calls[n]` is a real `[string, RequestInit]` tuple (not `[]`) under this
+// repo's `noUncheckedIndexedAccess` — matches the `vi.fn<typeof fetch>(...)` idiom already used
+// elsewhere (e.g. packages/model-vertex/test/vertex-embed.test.ts's `call.mock.calls[0]![0]`).
+function mockFetch(impl: (url: string, init: RequestInit) => Response | Promise<Response>) {
+  return vi.fn<typeof fetch>((url, init) => Promise.resolve(impl(String(url), (init ?? {}) as RequestInit)));
+}
+
+/** `RequestInit["headers"]` is the `HeadersInit` union (`Headers | Record<string,string> |
+ *  [string,string][]`); every request this client builds sends a plain `Record<string,string>`
+ *  (api.ts never uses the array/Headers-object forms), so this narrows for the assertions below. */
+function headersOf(init: RequestInit | undefined): Record<string, string> {
+  return init!.headers as Record<string, string>;
+}
+
+describe("makeApiClient", () => {
+  it("sends the App Bridge session token as a bearer", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ items: [] }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "sess-123", fetch: fetchSpy });
+    await api.listApprovals({ status: "pending" });
+    expect(headersOf(fetchSpy.mock.calls[0]![1]).Authorization).toBe("Bearer sess-123");
+  });
+
+  it("hits the tenant-scoped listApprovals endpoint with the status filter", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ items: [] }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    await api.listApprovals({ status: "pending" });
+    const [url] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/approvals?status=pending");
+  });
+
+  it("refreshes the token once on a 401 and retries", async () => {
+    let calls = 0;
+    const fetchSpy = mockFetch(() => {
+      calls += 1;
+      if (calls === 1) return new Response(JSON.stringify({ error: "unauthenticated" }), { status: 401 });
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    });
+    const getToken = vi.fn(async () => `tok-${getToken.mock.calls.length}`);
+    const api = makeApiClient({ baseUrl: "/api", getToken, fetch: fetchSpy });
+    const result = await api.listApprovals({});
+    expect(result.items).toEqual([]);
+    expect(getToken).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(headersOf(fetchSpy.mock.calls[1]![1]).Authorization).toBe("Bearer tok-2");
+  });
+
+  it("throws AuthError when a refreshed retry still 401s (never a silent success)", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ error: "unauthenticated" }), { status: 401 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    await expect(api.listApprovals({})).rejects.toBeInstanceOf(AuthError);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("maps a 409 to a typed ConflictError carrying the current version", async () => {
+    const fetchSpy = mockFetch(
+      () => new Response(JSON.stringify({ error: "version conflict", currentVersion: 7 }), { status: 409 }),
+    );
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const err = await api.approve("prop-1", 6).catch((e) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect((err as ConflictError).currentVersion).toBe(7);
+  });
+
+  it("maps a 423 to a typed KilledError carrying the reason", async () => {
+    const fetchSpy = mockFetch(
+      () => new Response(JSON.stringify({ error: "kill switch armed", reason: "safety" }), { status: 423 }),
+    );
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const err = await api.approve("prop-1", 1).catch((e) => e);
+    expect(err).toBeInstanceOf(KilledError);
+    expect((err as KilledError).reason).toBe("safety");
+  });
+
+  it("approve POSTs the version so the server can optimistic-lock", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ id: "p1", version: 2 }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    await api.approve("p1", 1);
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/approvals/p1/approve");
+    expect(init!.method).toBe("POST");
+    expect(JSON.parse(String(init!.body))).toEqual({ version: 1 });
+  });
+
+  it("reject POSTs the reason", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ id: "p1", version: 2 }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    await api.reject("p1", "not aligned with brand voice");
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/approvals/p1/reject");
+    expect(JSON.parse(String(init!.body))).toEqual({ reason: "not aligned with brand voice" });
+  });
+
+  it("getKill / kill / unkill hit the kill-switch routes", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ killed: true }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    expect(await api.getKill()).toEqual({ killed: true });
+    await api.kill("emergency halt");
+    await api.unkill();
+    expect(fetchSpy.mock.calls[0]![0]).toBe("/api/kill");
+    expect(fetchSpy.mock.calls[1]![0]).toBe("/api/kill");
+    expect(fetchSpy.mock.calls[1]![1]!.method).toBe("POST");
+    expect(fetchSpy.mock.calls[2]![0]).toBe("/api/unkill");
+  });
+
+  it("listAudit returns the safe audit entries", async () => {
+    const entry = { seq: 1, at: "2026-08-24T00:00:00Z", actor: "owner", action: "approve", hash: "abc" };
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ items: [entry] }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const result = await api.listAudit();
+    expect(result.items).toEqual([entry]);
+  });
+});

@@ -13,6 +13,8 @@ export default defineConfig({
     environmentMatchGlobs: [
       ["packages/widget/**", "jsdom"],
       ["packages/design-system/**", "jsdom"],
+      // packages/merchant-console (React Testing Library, same as design-system above).
+      ["packages/merchant-console/**", "jsdom"],
     ],
     // React Testing Library's auto-cleanup (packages/design-system) only registers itself
     // when a global `afterEach` exists (it does `typeof afterEach === "function"`, checked
