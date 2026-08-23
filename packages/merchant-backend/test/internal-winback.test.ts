@@ -18,6 +18,7 @@ const owner: MerchantPrincipal = {
   kind: "merchant_user", merchantId: "t1", userId: "u1", role: "owner", authLevel: "session", sessionId: "s1",
 };
 const viewer: MerchantPrincipal = { ...owner, role: "viewer" };
+const operator: MerchantPrincipal = { ...owner, role: "operator" };
 
 const identityFor = (p: MerchantPrincipal): MerchantIdentityPort => ({
   authenticate: async (cred) => (cred === "good" ? p : { kind: "anonymous" }),
@@ -62,6 +63,43 @@ describe("POST /_internal/run-winback", () => {
     expect(list.items[0]?.tenantId).toBe("t1");
 
     // Nothing sent pre-approval — the sandbox comms adapter recorded no deliveries at all.
+    expect(comms.recorded).toHaveLength(0);
+
+    await app.close();
+  });
+
+  it("an operator (the invited-teammate default role) triggers a win-back run: 200 + one pending campaign proposal, sends NOTHING", async () => {
+    const state = new InMemoryRuntimeStore();
+    const proposalStore = new InMemoryProposalStore(state);
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const comms = new SandboxCommsAdapter();
+    const commerce = new SandboxCustomerDirectory({
+      t1: [{ customerId: "c1", contact: "c1@x.com", lastOrderAt: "2020-01-01T00:00:00Z" }],
+    });
+
+    const app = await buildServer({
+      store: state,
+      identity: identityFor(operator),
+      commerce,
+      comms,
+      proposalStore,
+      rulesStore,
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/_internal/run-winback",
+      headers: { authorization: "Bearer good" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(typeof body.proposedId).toBe("string");
+
+    const list = await proposalStore.list({ tenantId: "t1" });
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0]?.status).toBe("pending");
+    expect(list.items[0]?.category).toBe("campaign");
+
     expect(comms.recorded).toHaveLength(0);
 
     await app.close();

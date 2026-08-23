@@ -47,6 +47,10 @@ export function registerInternalWinBackRoutes(app: FastifyInstance, deps: RunWin
     const now = new Date().toISOString();
 
     const segment = await findLapsedSegment(deps.commerce, ctx, { lapsedDays: DEFAULT_LAPSED_DAYS, now });
+    // PLACEHOLDER brand name — passes the tenantId, so the draft reads "We miss you at <tenantId>".
+    // Safe ONLY because SandboxCommsAdapter never delivers. A LIVE campaign adapter MUST wire a real
+    // brand-name source (the auto-brand-name / Pillar-5a work) here FIRST — otherwise a real send
+    // ships the raw tenant id to customers.
     const draft = draftWinBack(segment, principal.merchantId);
 
     const engineDeps: EngineDeps = {
