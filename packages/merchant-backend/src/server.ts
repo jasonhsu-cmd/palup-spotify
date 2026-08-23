@@ -21,6 +21,8 @@ import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
 import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
+import { registerEventsRoutes } from "./routes/events.js";
+import { InMemoryEventBus, type EventBus } from "./events.js";
 import "./types.js";
 
 // Task 4 composition root: `store`/`identity` stay injectable (every existing test suite injects fakes
@@ -52,6 +54,11 @@ export async function buildServer(opts?: {
   comms?: CampaignCommsPort;
   proposalStore?: ProposalStore;
   rulesStore?: MerchantRulesStore;
+  // Task 7 (SSE live-update channel): injectable for tests (each test that shares a bus across two
+  // `buildServer()` calls, e.g. one connecting to `/events` and one driving an approve, needs the
+  // SAME bus instance). Absent -> a fresh `InMemoryEventBus` per server — single-instance only; see
+  // events.ts's TODO for the multi-instance Cloud Run follow-up.
+  bus?: EventBus;
 }): Promise<FastifyInstance> {
   const runtimeResult = opts?.store ? undefined : await createRuntimeStore();
   const store: RuntimeStatePort = opts?.store ?? runtimeResult!.store;
@@ -61,6 +68,7 @@ export async function buildServer(opts?: {
   const comms: CampaignCommsPort = opts?.comms ?? new SandboxCommsAdapter();
   const proposalStore: ProposalStore = opts?.proposalStore ?? new InMemoryProposalStore(store);
   const rulesStore: MerchantRulesStore = opts?.rulesStore ?? new InMemoryMerchantRulesStore(store);
+  const bus: EventBus = opts?.bus ?? new InMemoryEventBus();
   const identity: MerchantIdentityPort =
     opts?.identity ??
     createShopifyAppBridgeIdentity({
@@ -136,9 +144,10 @@ export async function buildServer(opts?: {
     merchantPlane.addHook("preHandler", requireMerchant(identity));
     registerMeRoutes(merchantPlane);
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
-    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms });
-    registerKillRoutes(merchantPlane, { state: store });
+    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus });
+    registerKillRoutes(merchantPlane, { state: store, bus });
     registerAuditRoutes(merchantPlane, { state: store });
+    registerEventsRoutes(merchantPlane, { bus });
   });
 
   return app;

@@ -2,6 +2,7 @@ import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { requirePermission } from "@palup/identity-shopify";
 import type { MerchantRole, RuntimeStatePort } from "@palup/platform-ports";
 import { killMerchant, merchantKillStatus, unkillMerchant } from "@palup/agent-runtime";
+import type { EventBus } from "../events.js";
 
 // W1-API Task 5: the merchant Kill Switch (governance non-negotiable #4 — "any agent, at any scope,
 // can be halted instantly"). Thin route layer over `@palup/agent-runtime`'s tenant-scoped wrappers
@@ -15,6 +16,9 @@ import { killMerchant, merchantKillStatus, unkillMerchant } from "@palup/agent-r
 
 export interface KillRoutesDeps {
   state: RuntimeStatePort;
+  /** T7: published on a successful kill/unkill so an open `GET /events` connection for this tenant
+   *  live-updates. Best-effort — see `events.ts`'s module header. */
+  bus: EventBus;
 }
 
 interface KillBody {
@@ -70,6 +74,7 @@ export function registerKillRoutes(app: FastifyInstance, deps: KillRoutesDeps): 
       return reply.code(400).send({ error: "reason is required" });
     }
     await killMerchant(deps.state, ctx, reason);
+    deps.bus.publish(ctx.tenantId, { type: "kill.changed", killed: true });
     return { killed: true };
   });
 
@@ -78,6 +83,7 @@ export function registerKillRoutes(app: FastifyInstance, deps: KillRoutesDeps): 
     const principal = req.principal!;
     const ctx = { tenantId: principal.merchantId };
     await unkillMerchant(deps.state, ctx);
+    deps.bus.publish(ctx.tenantId, { type: "kill.changed", killed: false });
     return { killed: false };
   });
 }

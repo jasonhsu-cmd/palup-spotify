@@ -14,6 +14,7 @@ import {
   type PreconditionValidator,
 } from "@palup/agent-runtime";
 import { buildEngineDeps } from "../engine-wiring.js";
+import type { EventBus } from "../events.js";
 
 // W1-API's Approval Center read surface: `GET /approvals` (list, tenant-scoped, optional
 // status/category filter) + `GET /approvals/:id` (detail). Both registered inside server.ts's
@@ -61,6 +62,10 @@ export interface ApprovalsRoutesDeps {
   /** Needed by approve (T3): `buildEngineDeps` resolves the proposal's action type to an executor
    *  (e.g. `send_campaign` -> `campaignExecutor(comms)`). */
   comms: CampaignCommsPort;
+  /** T7: published to on a successful approve/reject so an open `GET /events` connection for this
+   *  tenant live-updates. Best-effort — see `events.ts`'s module header; never affects the response
+   *  or the store's own transition, which has already committed by the time we publish. */
+  bus: EventBus;
 }
 
 interface ApprovalsListQuery {
@@ -220,6 +225,10 @@ export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRou
 
         try {
           const updated = await executeApproved(ctx, id, principal.userId, now, engineDeps);
+          // T7: best-effort live-update — the store transition above has already committed, so a
+          // dropped/absent subscriber never loses the decision (the console reconciles via
+          // GET /approvals/:id).
+          deps.bus.publish(ctx.tenantId, { type: "proposal.decided", id, status: updated.status });
           return updated;
         } catch (e) {
           // C1 (§3 error-masking + info-leak hardening): map ONLY the typed §3 errors to a specific
@@ -273,6 +282,8 @@ export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRou
 
       try {
         const updated = await rejectProposal(ctx, id, principal.userId, reason, now, engineDeps);
+        // T7: same best-effort publish as approve above.
+        deps.bus.publish(ctx.tenantId, { type: "proposal.decided", id, status: updated.status });
         return updated;
       } catch (e) {
         // C1: same typed-only mapping as approve — see that route's comment. `rejectProposal`'s own
