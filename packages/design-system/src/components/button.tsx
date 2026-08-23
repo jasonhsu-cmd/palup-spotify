@@ -30,8 +30,20 @@ export const buttonVariants = cva(
   }
 );
 
+// `Omit<..., "variant">` guards against a real, load-bearing collision discovered building
+// merchant-console (W1-UI): `@shopify/app-bridge-types` (a dependency of the required
+// `@shopify/app-bridge-react` session-token client — see merchant-console/src/app/session.tsx)
+// globally declaration-merges `declare global { namespace React { interface
+// ButtonHTMLAttributes<T> extends { variant?: "primary" | "breadcrumb" | ... } {} } }` — and
+// because @types/react's own `ButtonHTMLAttributes` is ALSO exposed as that same global ambient
+// `React` namespace (`export as namespace React`), that merge applies program-wide the instant
+// ANY file in the program imports app-bridge-react, silently replacing this interface's own
+// `variant` (from `VariantProps<typeof buttonVariants>` below) with App Bridge's unrelated
+// menu-item `variant` union. Stripping the ambient one before intersecting our own back in is
+// what keeps `<Button variant="outline">` etc. type-checking correctly regardless of which
+// consuming app pulls in app-bridge-react. Regression-guarded in test/button.test.tsx.
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+  extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "variant">,
     VariantProps<typeof buttonVariants> {
   /** Render as the child element instead of a <button> (Radix Slot pattern). */
   asChild?: boolean;
