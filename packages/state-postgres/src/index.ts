@@ -26,6 +26,17 @@ export {
   type MerchantCredentialStoreOpts,
   type MerchantCredentialRead,
 } from "./merchant-credential-store.js";
+// Task 4 (ADR-0022 F2) store. Distinct key scope/collection/record-key from the merchant-cred store above
+// so a compromise or rotation of one credential kind never exposes the other — see the file header.
+export {
+  createAdminTokenStore,
+  ADMIN_CRED_KEY_SCOPE,
+  ADMIN_CRED_COLLECTION,
+  ADMIN_CRED_RECORD_KEY,
+  type AdminTokenStore,
+  type AdminTokenStoreOpts,
+  type AdminTokenRead,
+} from "./admin-token-store.js";
 export { PgPoolSql, pgPoolSqlFromUrl, type Sql } from "./sql.js";
 export { createRuntimeStore } from "./factory.js";
 export { createVectorStore } from "./vector-factory.js";
