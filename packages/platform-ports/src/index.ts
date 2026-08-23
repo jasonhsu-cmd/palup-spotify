@@ -33,8 +33,10 @@ export type {
   Subscription,
   CommercePolicy,
   SubscriptionActionResult,
+  CustomerLastOrder,
+  CustomerListingCommerce,
 } from "./commerce-port.js";
-export { SUBSCRIPTION_SKIP_CAP, CommerceGuardRefusalError } from "./commerce-port.js";
+export { SUBSCRIPTION_SKIP_CAP, CommerceGuardRefusalError, SandboxCustomerDirectory } from "./commerce-port.js";
 export type { StorePort } from "./store-port.js";
 export type {
   RuntimeStatePort,
@@ -137,8 +139,12 @@ export type {
   LiveChatHandle,
   InMemoryComms,
   InMemoryCommsOpts,
+  CampaignMessage,
+  CampaignSendResult,
+  CampaignCommsPort,
+  RecordedCampaignMessage,
 } from "./comms-port.js";
-export { createInMemoryComms, CommsRejection } from "./comms-port.js";
+export { createInMemoryComms, CommsRejection, SandboxCommsAdapter } from "./comms-port.js";
 export type {
   Play,
   Arm,

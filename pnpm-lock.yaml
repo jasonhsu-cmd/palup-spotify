@@ -132,6 +132,9 @@ importers:
 
   packages/merchant-backend:
     dependencies:
+      '@palup/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
       '@palup/identity-shopify':
         specifier: workspace:*
         version: link:../identity-shopify
