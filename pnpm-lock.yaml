@@ -93,6 +93,19 @@ importers:
         specifier: workspace:*
         version: link:../widget-brain
 
+  packages/identity-shopify:
+    dependencies:
+      '@palup/platform-ports':
+        specifier: workspace:*
+        version: link:../platform-ports
+    devDependencies:
+      fastify:
+        specifier: ^5.0.0
+        version: 5.10.0
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@26.1.2)(jsdom@30.0.1)
+
   packages/judge:
     dependencies:
       '@anthropic-ai/sdk':
