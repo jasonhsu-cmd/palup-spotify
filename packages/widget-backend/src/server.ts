@@ -31,6 +31,7 @@ import {
   createMeteringModelPort,
   createRedactingModelPort,
   createInMemoryProductFactsStore,
+  createInMemoryCatalogProductStore,
   createInMemoryQueue,
 } from "@palup/platform-ports";
 import {
@@ -49,7 +50,7 @@ import {
   tombstoneKey,
   mergeGuestIntoAccount,
 } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, PostgresCatalogProductStore, createMerchantCredentialStore, accumulateArmTally, type Sql, type ConsentRecord } from "@palup/state-postgres";
 import { createModelPort, createGroundingPort, createCommercePort } from "./model.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals, classifyDevice } from "./signals.js";
@@ -516,11 +517,28 @@ export async function buildServer(opts?: {
   const credReadHandle = MERCHANT_CRED_READBACK_ENABLED
     ? createMerchantCredentialStore(store, merchantCredCrypto())
     : undefined;
+  // Task 8 (durable-catalog-sync, §3/§13.4) — LOCAL CATALOG SERVING, the durability invariant: a
+  // backfilled tenant's catalog PRODUCTS are served from `CatalogProductPort`/`ProductFactsPort` with no
+  // Shopify call, instead of the Storefront API. Default ON on staging (unset ⇒ true) per the brief;
+  // `CATALOG_LOCAL_SERVING=false` is the escape hatch back to the pre-Task-8 Shopify-or-fixtures-only path.
+  // Constructed here (not lazily) because `createGroundingPort` needs both ports at construction time —
+  // mirrors `productFactsPort`'s own construction further below, which this is intentionally a SEPARATE
+  // instance from (same reasoning `reconcileFactsStore` already documents: this composition root already
+  // builds more than one `ProductFactsPort` handle over the same underlying table/map, and that has never
+  // been a correctness issue since every op is scoped by (tenantId, productId)).
+  const CATALOG_LOCAL_SERVING = process.env.CATALOG_LOCAL_SERVING !== "false";
+  const localCatalogProduct = runtimeResult.sql ? new PostgresCatalogProductStore(runtimeResult.sql) : createInMemoryCatalogProductStore();
+  if (localCatalogProduct instanceof PostgresCatalogProductStore) await localCatalogProduct.migrate();
+  const localProductFacts = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
+  if (localProductFacts instanceof PostgresProductFactsStore) await localProductFacts.migrate();
   const grounding = createGroundingPort(store, secrets, {
     shopDomainFor: (t) => merchants.shopDomainFor(t),
     readbackEnabled: MERCHANT_CRED_READBACK_ENABLED,
     credRead: credReadHandle ? (t) => credReadHandle.read(t) : undefined,
     shopifyFetch: opts?.shopifyFetch,
+    localServingEnabled: CATALOG_LOCAL_SERVING,
+    catalogProduct: localCatalogProduct,
+    productFacts: localProductFacts,
   });
   // Pillar 5 (auto-brand) — resolve the merchant's real Shopify shop NAME (via the light `getShell`), cached
   // on the RuntimeStatePort: at most ONE bounded fetch per tenant per TTL, fail-closed to the neutral default,

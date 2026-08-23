@@ -1,10 +1,11 @@
-import type { CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, Product, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
+import type { CatalogProductPort, CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, Product, ProductFactsPort, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
 import { createRedactingModelPort, createCachingGroundingPort } from "@palup/platform-ports";
 import { MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import type { MerchantCredentialRead } from "@palup/state-postgres";
 import { resolveStorefrontCredential } from "./merchant-store.js";
 import { createShopifyGroundingAdapter, type StorefrontFetch, type StorefrontShellFetch } from "./shopify-grounding.js";
+import { createLocalCatalogGroundingPort } from "./local-catalog-grounding.js";
 import { createCustomerAccountCommerceAdapter } from "./shopify-customer-account-commerce.js";
 import type { CustomerGrantStore } from "./customer-grant-store.js";
 
@@ -53,10 +54,24 @@ export function createGroundingPort(
     credRead?: (tenantId: string) => Promise<MerchantCredentialRead>;
     /** D2: gates the read-back path above; off ⇒ unchanged SecretsPort-only resolution. */
     readbackEnabled?: boolean;
+    /**
+     * Task 8 (durable-catalog-sync, §3/§13.4) — the local-serving deps + gate. All three of
+     * `localServingEnabled`/`catalogProduct`/`productFacts` must be present for a tenant to ever be routed
+     * to `createLocalCatalogGroundingPort`; any one absent (the default) leaves this function byte-identical
+     * to before this task. See the per-tenant gate below `shopifyOrFixtures` for the routing rule itself.
+     */
+    localServingEnabled?: boolean;
+    catalogProduct?: CatalogProductPort;
+    productFacts?: ProductFactsPort;
   } = {},
 ): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
-  const router: GroundingPort = {
+  // The PRE-Task-8 router, unchanged: per-tenant Shopify-or-fixtures, exactly as before. Kept as its own
+  // value (not inlined) for two reasons: it is the fallback for a tenant that has NOT been backfilled, and
+  // — Task 8's brand/policy gap (see local-catalog-grounding.ts's file banner) — it is also the `shellSource`
+  // a BACKFILLED tenant's local port reads brand+policy from, so both paths share one credential-resolution
+  // implementation rather than two that could drift.
+  const shopifyOrFixtures: GroundingPort = {
     async getContext(tenantId: string): Promise<GroundingContext> {
       // tenantId here is the SERVER-DERIVED request tenant (threaded from the verified widget token via
       // the brain) — never client input, so one merchant can never resolve another's store creds.
@@ -96,6 +111,29 @@ export function createGroundingPort(
       return fixtures.getProductsByIds(tenantId, ids);
     },
   };
+
+  let router: GroundingPort = shopifyOrFixtures;
+  if (opts.localServingEnabled && opts.catalogProduct && opts.productFacts) {
+    const catalogProduct = opts.catalogProduct;
+    const local = createLocalCatalogGroundingPort({ catalogProduct, productFacts: opts.productFacts, shellSource: shopifyOrFixtures });
+    // Controller ruling (per-tenant gating, load-bearing) — local serving is active ONLY for a tenant that
+    // HAS a `catalog_product` corpus (backfilled), detected via a non-empty `listByTenant`. A tenant with
+    // none (not yet backfilled) keeps `shopifyOrFixtures` UNCHANGED, so flipping `CATALOG_LOCAL_SERVING` on
+    // globally never blanks a currently-working ≤1000-SKU tenant that has not gone through Task 7's backfill.
+    const hasLocalCatalog = async (tenantId: string): Promise<boolean> =>
+      (await catalogProduct.listByTenant(tenantId, { limit: 1 })).length > 0;
+    router = {
+      async getContext(tenantId) {
+        return (await hasLocalCatalog(tenantId)) ? local.getContext(tenantId) : shopifyOrFixtures.getContext(tenantId);
+      },
+      async getShell(tenantId) {
+        return (await hasLocalCatalog(tenantId)) ? local.getShell(tenantId) : shopifyOrFixtures.getShell(tenantId);
+      },
+      async getProductsByIds(tenantId, ids) {
+        return (await hasLocalCatalog(tenantId)) ? local.getProductsByIds(tenantId, ids) : shopifyOrFixtures.getProductsByIds(tenantId, ids);
+      },
+    };
+  }
   return createCachingGroundingPort(router, store);
 }
 
