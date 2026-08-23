@@ -18,6 +18,7 @@
     "./contract/queue": "./src/contract/queue-port.contract.ts",
     "./contract/presentment-price": "./src/contract/presentment-price-port.contract.ts",
     "./contract/merchant-identity": "./src/contract/merchant-identity-port.contract.ts",
-    "./contract/proposal-store": "./src/contract/proposal-store.contract.ts"
+    "./contract/proposal-store": "./src/contract/proposal-store.contract.ts",
+    "./contract/catalog-product": "./src/contract/catalog-product-port.contract.ts"
   }
 }
