@@ -207,6 +207,14 @@ The shopper widget mounts on a merchant's live storefront via a Shopify **theme 
 (`extensions/palup-widget/`) — not a manual snippet or the deprecated ScriptTag API. Full design:
 `docs/superpowers/specs/2026-08-10-embeddable-widget-design.md`.
 
+> **CONFIG SPLIT (2026-08-23):** the single `shopify.app.toml` was replaced by SEPARATE per-environment
+> Shopify apps/configs. `shopify.app.staging.toml` exists (broad autonomous-testing scopes incl.
+> `write_customers,write_orders,read_all_orders`; `application_url` = the live staging Cloud Run host).
+> The **production** config (`shopify.app.production.toml`, minimal real-feature scopes only) is **deferred**
+> — not yet created. Deploy per-env: `shopify app deploy --config staging` (and later `--config production`).
+> References to a single `shopify.app.toml` below are historical; read them as "the relevant per-env config."
+> The scope split is CI-pinned by `order-attribution-scope-pinning.test.ts`.
+
 **Install path:**
 1. `shopify app deploy` (human, Partners account) registers the app **and** the `palup-widget` app-embed
    extension (`extensions/palup-widget/shopify.extension.toml`: `type = "theme"`, `api_version = "2026-07"`

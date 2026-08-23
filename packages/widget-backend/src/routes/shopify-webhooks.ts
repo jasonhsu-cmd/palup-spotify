@@ -143,8 +143,9 @@ export const WEBHOOK_ROUTES = {
 // REVENUE tally (W2-A's `ArmTally` ledger, via `order-attribution-queue.ts`'s worker) — but they
 // receive NO LIVE Shopify traffic until a human deliberately does BOTH of the following, neither of
 // which this increment does or may do:
-//   1. Grant this app the `read_orders` scope in `shopify.app.toml` (untouched by this change, on
-//      purpose) AND complete Shopify's protected-customer-data review for it — both are OWNER-gated
+//   1. Request `read_orders` via the per-deployment `SHOPIFY_INSTALL_SCOPES` env var (never a static app
+//      config — staging/prod are separate apps; the prod config stays least-privilege) AND complete
+//      Shopify's protected-customer-data review for it — both are OWNER-gated
 //      steps outside a build agent's authority (mirrors `docs/MEMORY-GO-LIVE-CHECKLIST.md`'s posture
 //      for `widget-memory`'s go-live gate).
 //   2. Subscribe the shop to these three webhook topics (which itself requires step 1's scope).

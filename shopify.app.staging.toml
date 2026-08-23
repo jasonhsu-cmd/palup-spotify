@@ -1,0 +1,28 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "9164450357d4a26ee3883546db766c5c"
+application_url = "https://palup-widget-staging-t7xp5lndiq-uc.a.run.app"
+embedded = true
+name = "PalUp staging"
+
+[access_scopes]
+# STAGING autonomous-testing scope set (seed test-shopper fixtures). `config link` blanked this from the
+# fresh app; restored 2026-08-23. write_* include their read. (read_all_orders is NOT declarable here —
+# Shopify rejects it in app_access; it's a request-gated scope. Not needed: write_orders creates the
+# backdated orders, and the agent reads order history via the Customer-Account API, not the Admin API.)
+#
+# SELF-IMPROVING FLYWHEEL note: the revenue-outcome/incrementality signal (order-attribution webhooks
+# orders/create, orders/updated, refunds/create — ADR-0007, server.ts W3-3) needs `read_orders`. On
+# STAGING that is ALREADY covered — `write_orders` includes read access to orders — so the flywheel's
+# attribution can be exercised here (flip `ORDER_ATTRIBUTION_WEBHOOKS=true` to activate the subscriptions).
+# In PRODUCTION `read_orders` is NOT declared in the app config — it's requested per-deployment via
+# SHOPIFY_INSTALL_SCOPES + Shopify PCD approval (see shopify.app.production.toml when created / the guard test).
+scopes = "read_products,read_inventory,write_customers,write_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = [ "https://palup-widget-staging-t7xp5lndiq-uc.a.run.app/shopify/callback" ]
+
+[webhooks]
+api_version = "2026-07"

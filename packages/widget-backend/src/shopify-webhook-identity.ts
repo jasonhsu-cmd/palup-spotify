@@ -185,11 +185,12 @@ export const REFUND_TOPIC = "refunds/create" as const;
  * `CATALOG_TOPICS`' own `read_products`/`read_inventory` pairing, documented in the same [S7] comment)
  * purely for DOCUMENTATION + a pinning test — nothing in this repo requests it automatically. The
  * decision this constant records: `read_orders` is requested (if at all) via the OPERATOR-CONTROLLED,
- * per-deployment `SHOPIFY_INSTALL_SCOPES` env var (server.ts, `docs/DEPLOY.md`) — NEVER via
- * `shopify.app.toml`'s static `[access_scopes]`, which is shared across every deployment including a
- * future production one. `order-attribution-scope-pinning.test.ts` pins both halves: the toml stays
- * untouched, and the code-level DEFAULT (`INSTALL_SCOPES_DEFAULT`) never includes this scope, so a
- * deployment that sets nothing new never requests it. Granting it for real ALSO requires completing
+ * per-deployment `SHOPIFY_INSTALL_SCOPES` env var (server.ts, `docs/DEPLOY.md`) — NEVER via a static
+ * `[access_scopes]`. Staging and prod are SEPARATE app configs (`shopify.app.staging.toml` + the deferred
+ * `shopify.app.production.toml`); `order-attribution-scope-pinning.test.ts` pins the split — staging stays
+ * within its testing allowlist and the prod config stays least-privilege (no read_orders) — and the
+ * code-level DEFAULT (`INSTALL_SCOPES_DEFAULT`) never includes this scope, so a deployment that sets
+ * nothing new never requests it. Granting it for real ALSO requires completing
  * Shopify's protected-customer-data review — an owner-gated step this constant does not perform.
  */
 export const ORDER_ATTRIBUTION_ADMIN_SCOPE = "read_orders" as const;

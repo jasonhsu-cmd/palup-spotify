@@ -1278,7 +1278,7 @@ export async function buildServer(opts?: {
     }
     // W3-3 — order-attribution ingestion (ADR-0007 / the revenue flywheel's incrementality signal). Added
     // to the SAME per-shop, Admin-API subscription call CATALOG_WEBHOOKS's topics use just above — never
-    // to shopify.app.toml's declarative `[webhooks]` (untouched; see order-attribution-scope-pinning.test.ts).
+    // to the app config's declarative `[webhooks]` (shopify.app.staging.toml; see order-attribution-scope-pinning.test.ts).
     // Topic enum names follow the SAME REST-topic→SCREAMING_SNAKE_CASE convention the four lines above
     // already use ("orders/create" → "ORDERS_CREATE", mirroring "products/create" → "PRODUCTS_CREATE").
     // Confirmed against shopify.dev's WebhookSubscriptionTopic enum (retrieved 2026-08-19): ORDERS_CREATE,
@@ -1287,7 +1287,7 @@ export async function buildServer(opts?: {
     // one), never a silent success, so even a future spelling drift fails LOUD, not quiet. Registering these three topics needs the
     // PARENT token to hold `read_orders` (ORDER_ATTRIBUTION_ADMIN_SCOPE, shopify-webhook-identity.ts) — that
     // scope is requested (if at all) via the operator-controlled `SHOPIFY_INSTALL_SCOPES` env var for THIS
-    // deployment only, never via shopify.app.toml, and its grant additionally requires Shopify's
+    // deployment only, never via the static app-config `[access_scopes]`, and its grant additionally requires Shopify's
     // protected-customer-data review to complete before any live delivery is meaningful (routes/shopify-
     // webhooks.ts's W2-C header). Subscribing with the scope ungranted simply fails its own tally, exactly
     // like an under-scoped catalog topic does today.
