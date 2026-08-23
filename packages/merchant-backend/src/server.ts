@@ -72,6 +72,25 @@ export async function buildServer(opts?: {
 
   const app = Fastify({ logger: false });
 
+  // C1 hardening (found while fixing the approve/reject routes' error mapping — coordinator review):
+  // Fastify's OWN default error handler echoes the raw `err.message` of any uncaught error in the
+  // JSON response body (verified empirically: `throw new Error("x")` from a route -> HTTP 500 body
+  // `{..., message: "x"}`) — a real info leak for a genuine bug or infra failure (e.g.
+  // `deps.state.audit()` throwing after a transition already committed) once approve/reject stop
+  // catching every `Error` into a 409. Every typed §3 error (`VersionConflictError`/`KillSwitchError`/
+  // `ProposalNotFoundError`/`TerminalStateError`) is already mapped to a specific status code INSIDE
+  // the route before it would ever reach here — this handler is the redacted fallback for everything
+  // else: log the real message server-side, return a fixed, message-free 500 to the client.
+  app.setErrorHandler((err, req, reply) => {
+    req.log.error({ err }, "unhandled error");
+    // No route in this package throws a Fastify SCHEMA-validation error with a legitimate,
+    // non-sensitive 4xx message (no `schema` option is used anywhere yet) — so redacting
+    // unconditionally to a fixed 500 is safe today; every intentional non-500 response (400/401/403/
+    //404/409/423) is sent explicitly by the route itself via `reply.code(...).send(...)` and never
+    // reaches this handler at all.
+    reply.code(500).send({ statusCode: 500, error: "Internal Server Error" });
+  });
+
   // Structural-safety backstop (coordinator review, W1-API is about to add many routes): collect
   // EVERY route Fastify actually registers, regardless of which context (root `app` vs the
   // encapsulated `merchantPlane` below) it's registered in — `onRoute` fires for child-context routes

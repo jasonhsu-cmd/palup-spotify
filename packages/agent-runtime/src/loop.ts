@@ -29,6 +29,23 @@ import { assertNotKilled } from "./kill.js";
  * proposal's fate; re-approving it would silently overturn that decision. */
 const TERMINAL_BLOCKING_STATUSES: ReadonlySet<ProposalStatus> = new Set(["rejected", "withdrawn", "expired", "killed"]);
 
+/** Thrown by `executeApproved`/`rejectProposal` when the proposal's CURRENT status makes the
+ * requested transition illogical, not a version race (that's `VersionConflictError`) — e.g.
+ * approving an already-`rejected`/`withdrawn`/`expired`/`killed` proposal, or rejecting a
+ * non-`pending` one. Typed (§3 C1 hardening) so callers (W1's approve/reject routes) can map it to
+ * a clean, fixed-message 409 WITHOUT falling back to a broad `instanceof Error` catch-all that would
+ * also swallow real infra failures/bugs as a misleading "conflict, retry" and leak internal error
+ * text to the client. */
+export class TerminalStateError extends Error {
+  constructor(
+    public readonly id: string,
+    public readonly status: ProposalStatus,
+  ) {
+    super(`proposal ${id} is ${status}, this transition is no longer possible`);
+    this.name = "TerminalStateError";
+  }
+}
+
 /** The outcome of running an `AgentAction` through the injected `Executor`. */
 export interface ExecutionResult {
   ok: boolean;
@@ -250,7 +267,7 @@ export async function executeApproved(
 
   if (proposal.status === "executed") return proposal; // idempotent short-circuit
   if (TERMINAL_BLOCKING_STATUSES.has(proposal.status)) {
-    throw new Error(`executeApproved: proposal ${id} is ${proposal.status}, cannot execute`);
+    throw new TerminalStateError(id, proposal.status);
   }
 
   const validation = await deps.validate(proposal, ctx);
@@ -374,7 +391,7 @@ export async function rejectProposal(
   // moved) must never be flipped to `rejected`, overwriting that terminal state. Only `pending` may
   // be rejected.
   if (proposal.status !== "pending") {
-    throw new Error(`rejectProposal: proposal ${id} is ${proposal.status}, cannot reject (only a pending proposal can be rejected)`);
+    throw new TerminalStateError(id, proposal.status);
   }
   const rejected = await deps.store.transition(ctx, id, proposal.version, {
     status: "rejected",

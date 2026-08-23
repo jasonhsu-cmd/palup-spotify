@@ -108,15 +108,16 @@ describe("POST /approvals/:id/reject", () => {
     const audit = await state.readAudit({ tenantId: "t1" });
     expect(audit.some((r) => r.action === "proposal.rejected")).toBe(true);
 
-    // a later approve fails cleanly (not pending anymore) rather than 500ing
+    // a later approve fails cleanly with a typed TerminalStateError -> exactly 409 (a fixed message,
+    // never a raw internal error string, never a 500).
     const approveRes = await app.inject({
       method: "POST",
       url: `/approvals/${proposal.id}/approve`,
       headers: { authorization: "Bearer good" },
       payload: { version: body.version },
     });
-    expect(approveRes.statusCode).toBeGreaterThanOrEqual(400);
-    expect(approveRes.statusCode).toBeLessThan(500);
+    expect(approveRes.statusCode).toBe(409);
+    expect(approveRes.json().error).toBe("proposal is no longer pending");
     expect(comms.recorded).toHaveLength(0);
 
     await app.close();
@@ -216,8 +217,8 @@ describe("POST /approvals/:id/reject", () => {
       headers: { authorization: "Bearer good" },
       payload: { reason: "again" },
     });
-    expect(second.statusCode).toBeGreaterThanOrEqual(400);
-    expect(second.statusCode).toBeLessThan(500);
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toBe("proposal is no longer pending");
     await app.close();
   });
 

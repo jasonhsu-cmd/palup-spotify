@@ -166,6 +166,35 @@ describe("POST /approvals/:id/approve", () => {
     await app.close();
   });
 
+  // C2 (§3 concurrency hardening): two REAL concurrent approves for the SAME pending proposal, both
+  // submitted with the (correct, at-the-time) version — `Promise.all`, no `await` in between, so
+  // both requests are in flight at once, not sequential. Exactly one must land 200 (and the executor
+  // must run EXACTLY once); the other must fail cleanly (409), never a second send.
+  it("two concurrent approves for the same pending proposal: exactly one 200, executor runs exactly once", async () => {
+    const state = new InMemoryRuntimeStore();
+    const proposalStore = new InMemoryProposalStore(state);
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const comms = new SandboxCommsAdapter();
+    const proposal = await seedPendingCampaign(state, proposalStore, rulesStore, comms);
+
+    const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore, rulesStore, comms });
+
+    const approve = () =>
+      app.inject({
+        method: "POST",
+        url: `/approvals/${proposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: proposal.version },
+      });
+
+    const [a, b] = await Promise.all([approve(), approve()]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes).toEqual([200, 409]);
+    expect(comms.recorded).toHaveLength(1); // the executor (campaignExecutor -> comms.send) ran ONCE
+
+    await app.close();
+  });
+
   it("a killed merchant gets 423 on approve, with no execution", async () => {
     const state = new InMemoryRuntimeStore();
     const proposalStore = new InMemoryProposalStore(state);
