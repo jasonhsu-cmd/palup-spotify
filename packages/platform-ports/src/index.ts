@@ -118,5 +118,6 @@ export type {
 } from "./outcome-ledger.js";
 export { EMPTY_ARM_AGG, MIN_EXPOSURES_PER_ARM, computeIncrementalLift } from "./outcome-ledger.js";
 export type { CartPort, CartLine, CartCheckout } from "./cart-port.js";
+export { b64url, b64urlDecode, hmacSign, constantTimeEqual } from "./token-codec.js";
 // NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
 // into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.
