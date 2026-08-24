@@ -60,6 +60,7 @@ const KNOWN_DATA_ROUTES: { method: string; url: string }[] = [
   { method: "GET", url: "/kill" },
   { method: "POST", url: "/unkill" },
   { method: "GET", url: "/audit" },
+  { method: "GET", url: "/activity" },
   { method: "GET", url: "/events" },
   { method: "GET", url: "/me" },
   { method: "GET", url: "/_probe/money" },

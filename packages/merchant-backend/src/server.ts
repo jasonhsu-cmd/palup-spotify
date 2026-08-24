@@ -27,6 +27,7 @@ import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
 import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
+import { registerActivityRoutes } from "./routes/activity.js";
 import { registerEventsRoutes } from "./routes/events.js";
 import { registerRulesRoutes } from "./routes/rules.js";
 import { registerHomeRoutes } from "./routes/home.js";
@@ -273,6 +274,7 @@ export async function buildServer(opts?: {
     registerEventsRoutes(merchantPlane, { bus });
     registerRulesRoutes(merchantPlane, { rulesStore });
     registerHomeRoutes(merchantPlane, { state: store, goalStore });
+    registerActivityRoutes(merchantPlane, { state: store });
   });
 
   return app;
