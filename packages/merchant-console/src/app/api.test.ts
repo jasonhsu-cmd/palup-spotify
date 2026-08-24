@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
-import { makeApiClient, ConflictError, KilledError, AuthError, type ConsoleEvent } from "./api.js";
+import { makeApiClient, ConflictError, KilledError, AuthError, ApiError, type ConsoleEvent } from "./api.js";
 
 // Typed helper so `.mock.calls[n]` is a real `[string, RequestInit]` tuple (not `[]`) under this
 // repo's `noUncheckedIndexedAccess` — matches the `vi.fn<typeof fetch>(...)` idiom already used
@@ -239,5 +239,115 @@ describe("Revenue Home methods (W2 T6)", () => {
 
     await api.setPrimaryGoal("increase_aov", "Q3 push");
     expect(JSON.parse(String(fetchSpy.mock.calls[1]![1]!.body))).toEqual({ kind: "increase_aov", note: "Q3 push" });
+  });
+});
+
+describe("Learned methods (W3 T7)", () => {
+  const insight = {
+    id: "li-1",
+    category: "voice" as const,
+    tier: "private" as const,
+    origin: "merchant_taught" as const,
+    text: "Prefer a warm, casual tone",
+    source: "merchant_taught",
+    sampleSize: 0,
+    confidence: "high" as const,
+    pinned: false,
+    createdAt: "2026-08-24T00:00:00.000Z",
+    updatedAt: "2026-08-24T00:00:00.000Z",
+  };
+
+  it("listLearned GETs /learned with the category filter and the bearer header", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ items: [insight] }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "sess-1", fetch: fetchSpy });
+    const result = await api.listLearned({ category: "voice" });
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/learned?category=voice");
+    expect(headersOf(init).Authorization).toBe("Bearer sess-1");
+    expect(result.items).toEqual([insight]);
+  });
+
+  it("listLearned GETs /learned with no query when category is omitted", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ items: [] }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    await api.listLearned({});
+    expect(fetchSpy.mock.calls[0]![0]).toBe("/api/learned");
+  });
+
+  it("teachLearned POSTs the JSON body to /learned", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ insight }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const req = { category: "voice" as const, text: "Prefer a warm, casual tone" };
+    const result = await api.teachLearned(req);
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/learned");
+    expect(init!.method).toBe("POST");
+    expect(JSON.parse(String(init!.body))).toEqual(req);
+    expect(result.insight).toEqual(insight);
+  });
+
+  it("pinLearned POSTs /learned/<id>/pin with the pinned flag", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ ...insight, pinned: true }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const result = await api.pinLearned("li-1", true);
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/learned/li-1/pin");
+    expect(init!.method).toBe("POST");
+    expect(JSON.parse(String(init!.body))).toEqual({ pinned: true });
+    expect(result.pinned).toBe(true);
+  });
+
+  it("deleteLearned DELETEs /learned/<id>", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ removed: true }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const result = await api.deleteLearned("li-1");
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/learned/li-1");
+    expect(init!.method).toBe("DELETE");
+    expect(result).toEqual({ removed: true });
+  });
+
+  it("maps a 403 on teachLearned to a typed ApiError", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ error: "forbidden" }), { status: 403 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const err = await api.teachLearned({ category: "voice", text: "x" }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(403);
+  });
+
+  it("maps a 400 safety-floor rejection on teachLearned to a typed ApiError with the server's message", async () => {
+    const fetchSpy = mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({ error: "safety floor: a safety-critical guardrail can be tightened but not loosened" }),
+          { status: 400 },
+        ),
+    );
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const err = await api
+      .teachLearned({ category: "policies", text: "loosen it", guardrailKey: "refund_cap", stance: "loosen" })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(400);
+    expect((err as ApiError).message).toMatch(/safety floor/i);
+  });
+
+  // Close the export gap (review-mandated): GET /learned/export returns a wrapping envelope, not
+  // a bare LearnedInsight[] — tenantId + exportedAt + insights + a portability note, per
+  // merchant-backend's routes/learned.ts (verified field-for-field before writing this test).
+  it("exportLearned GETs /learned/export and returns the full export envelope", async () => {
+    const body = {
+      tenantId: "t1",
+      exportedAt: "2026-08-24T00:00:00.000Z",
+      insights: [insight],
+      portabilityNote: "You own your agent's private brain. A signed, portable export format is pending legal review.",
+    };
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify(body), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const result = await api.exportLearned();
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/learned/export");
+    expect(headersOf(init).Authorization).toBe("Bearer t");
+    expect(result).toEqual(body);
   });
 });

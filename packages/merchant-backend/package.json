@@ -9,6 +9,7 @@
     "@palup/state-postgres": "workspace:*",
     "@palup/identity-shopify": "workspace:*",
     "@palup/agent-runtime": "workspace:*",
+    "@palup/widget-memory": "workspace:*",
     "fastify": "^5.0.0"
   }
 }

@@ -33,6 +33,22 @@ export {
   type WinBackDraft,
   type ProposeWinBackInput,
 } from "./agents/win-back.js";
+// W3 Task 5: the insight-synthesizer producer (staging trigger lives in merchant-backend) — named
+// exports (not `export *`) mirroring the win-back re-export just above, for the same reason.
+export {
+  synthesizeInsights,
+  INSIGHT_SYNTHESIZER_AGENT_ID,
+  type SynthesisInput,
+  type SynthesisResult,
+} from "./insight-synthesizer.js";
+// W3 Task 6: agent-proposes / merchant-owns voice — named exports (not `export *`), same reason as
+// win-back/insight-synthesizer above.
+export {
+  proposeVoiceChange,
+  voiceChangeExecutor,
+  VOICE_AGENT_TYPE,
+  type ProposeVoiceChangeInput,
+} from "./voice.js";
 // W4-min: `MerchantRulesStore`/`CONSERVATIVE_DEFAULTS`/`PALUP_FLOORS`/etc. are DEFINED in
 // `@palup/platform-ports` (moved there, task 5 — see `rules.ts`'s header) and re-exported by
 // `rules.ts`; `createRulesProvider` stays defined here. `export *` surfaces both together so a

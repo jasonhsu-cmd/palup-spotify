@@ -132,6 +132,47 @@ export class ApiError extends Error {
   }
 }
 
+// W3 (Learned/Memory & Voice) — mirrors of merchant-backend's `/learned` wire contract
+// (src/routes/learned.ts's `SafeLearnedInsight`/`TeachBody`/`PinBody`). `LearnedCategory` mirrors
+// @palup/platform-ports' own type (a plain string union, safe to duplicate rather than import,
+// same call as AuditEntry above: routes/learned.ts is behind a Fastify service, not a types
+// barrel this frontend package should depend on).
+
+export type LearnedCategory = "customers" | "products" | "voice" | "policies";
+
+export interface LearnedInsight {
+  id: string;
+  category: LearnedCategory;
+  tier: "private" | "aggregate";
+  origin: "synthesized" | "merchant_taught";
+  text: string;
+  source: string;
+  sampleSize: number;
+  confidence: "medium" | "high";
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeachRequest {
+  category: LearnedCategory;
+  text: string;
+  guardrailKey?: string;
+  stance?: "tighten" | "loosen";
+}
+
+/** Mirrors `GET /learned/export`'s response envelope (routes/learned.ts) — deliberately NOT a bare
+ *  `LearnedInsight[]`: the merchant-owns-their-brain promise (spec §10) needs `portabilityNote`
+ *  stated honestly alongside the data (the export mechanism is real today; the signed, portable,
+ *  legally-reviewed FORMAT is still legal-deferred — this type carries that caveat verbatim rather
+ *  than letting a screen imply more than the backend actually guarantees). */
+export interface LearnedExport {
+  tenantId: string;
+  exportedAt: string;
+  insights: LearnedInsight[];
+  portabilityNote: string;
+}
+
 export interface ApiClient {
   listApprovals(q: {
     status?: ProposalStatus | string;
@@ -148,6 +189,11 @@ export interface ApiClient {
   getHomeSummary(): Promise<HomeSummary>;
   getActivity(cursor?: string): Promise<{ items: ActivityEntry[] }>;
   setPrimaryGoal(kind: PrimaryGoalKind, note?: string): Promise<{ goal: PrimaryGoal }>;
+  listLearned(q: { category?: LearnedCategory }): Promise<{ items: LearnedInsight[] }>;
+  teachLearned(req: TeachRequest): Promise<{ insight: LearnedInsight }>;
+  pinLearned(id: string, pinned: boolean): Promise<LearnedInsight>;
+  deleteLearned(id: string): Promise<{ removed: boolean }>;
+  exportLearned(): Promise<LearnedExport>;
   /** Subscribes to the tenant's SSE `/events` stream; returns an unsubscribe function. Best-effort
    *  live nudge only (events.ts's own contract) — a dropped/never-opened stream never loses data,
    *  because the store (`listApprovals`/`getKill`) stays the source of truth (see
@@ -270,6 +316,24 @@ export function makeApiClient(args: MakeApiClientArgs): ApiClient {
         method: "PUT",
         body: JSON.stringify(note === undefined ? { kind } : { kind, note }),
       });
+    },
+    async listLearned(q) {
+      return request<{ items: LearnedInsight[] }>(`/learned${toQuery({ category: q.category })}`);
+    },
+    async teachLearned(req) {
+      return request<{ insight: LearnedInsight }>(`/learned`, { method: "POST", body: JSON.stringify(req) });
+    },
+    async pinLearned(id, pinned) {
+      return request<LearnedInsight>(`/learned/${encodeURIComponent(id)}/pin`, {
+        method: "POST",
+        body: JSON.stringify({ pinned }),
+      });
+    },
+    async deleteLearned(id) {
+      return request<{ removed: boolean }>(`/learned/${encodeURIComponent(id)}`, { method: "DELETE" });
+    },
+    async exportLearned() {
+      return request<LearnedExport>(`/learned/export`);
     },
     openEvents(onEvent, onStreamError) {
       let closed = false;
