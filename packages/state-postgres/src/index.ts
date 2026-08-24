@@ -43,6 +43,9 @@ export {
   PostgresMerchantRulesStore,
   type PostgresMerchantRulesStoreOpts,
 } from "./merchant-rules-store.js";
+// W2 Task 2 adapter (`PrimaryGoalStore`, `@palup/platform-ports`). Exported so a later composition
+// root (W2 Task 4) can wire it; the in-memory adapter stays the default until then.
+export { PostgresPrimaryGoalStore, type PostgresPrimaryGoalStoreOpts } from "./primary-goal-store.js";
 export { PgPoolSql, pgPoolSqlFromUrl, type Sql } from "./sql.js";
 export { createRuntimeStore } from "./factory.js";
 export { createVectorStore } from "./vector-factory.js";

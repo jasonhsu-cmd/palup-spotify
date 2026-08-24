@@ -121,6 +121,13 @@ export {
   InMemoryMerchantRulesStore,
   clampToFloor,
 } from "./merchant-rules-store.js";
+export type {
+  PrimaryGoalKind,
+  PrimaryGoal,
+  PrimaryGoalSetInput,
+  PrimaryGoalStore,
+} from "./primary-goal-store.js";
+export { PRIMARY_GOAL_KINDS, InMemoryPrimaryGoalStore } from "./primary-goal-store.js";
 export type { VectorPort, VectorRecord, VectorQuery, VectorMatch, VectorListItem, VectorListOpts } from "./vector-port.js";
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type { ProductFactsPort, ProductFact } from "./product-facts-port.js";
