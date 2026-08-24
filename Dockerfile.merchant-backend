@@ -19,6 +19,14 @@ RUN pnpm install --frozen-lockfile
 # `tsc -b`'s plain `dist/` so the two build steps don't collide). `merchant-backend` itself has no
 # build step (it runs via `tsx` straight from `src/`, per the CMD below) — this is the ONLY build this
 # image needs.
+#
+# Vite replaces %VITE_SHOPIFY_APP_CLIENT_ID% in index.html at build time from this env var (its
+# documented HTML env-replacement for VITE_-prefixed vars). It is the app's PUBLIC OAuth client id
+# (the `shopify-api-key` meta App Bridge reads), NOT a secret — same value as the backend's
+# SHOPIFY_APP_CLIENT_ID env. Without it the placeholder ships literally and App Bridge cannot start
+# even inside the Shopify admin. Overridable as a build ARG for other apps/environments.
+ARG VITE_SHOPIFY_APP_CLIENT_ID=44fbc8514a50366f0b860ca870618948
+ENV VITE_SHOPIFY_APP_CLIENT_ID=$VITE_SHOPIFY_APP_CLIENT_ID
 RUN pnpm --filter @palup/merchant-console build
 
 EXPOSE 8991
