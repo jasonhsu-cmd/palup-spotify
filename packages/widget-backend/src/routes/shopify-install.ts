@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { AuditInput, MerchantRecord, MerchantRegion, MerchantRegistryPort, RuntimeStatePort } from "@palup/platform-ports";
+import type { AdminTokenStore } from "@palup/state-postgres";
 import { randomToken } from "../shopify-customer-account-identity.js";
 import { clientIpKey } from "../rate-limit.js";
 import {
@@ -115,6 +116,19 @@ export interface ShopifyInstallDeps {
   registry: MerchantRegistryPort;
   /** REQUIRED. See the header: no custody ⇒ the routes are not registered at all. */
   credentials: MerchantCredentialSink;
+  /**
+   * Task 5 (ADR-0022 F2/F7) — OPTIONAL custody for the PARENT Admin offline token (`grant.accessToken`),
+   * narrowed to `put` ONLY, for the identical least-privilege reason `MerchantCredentialSink` is narrowed
+   * above: this flow never reads an Admin token back, so a dependency that could read every merchant's
+   * token would be more privilege than install requires. OPTIONAL (not required, unlike `credentials`):
+   * the Admin token is a NEW custody surface (Task 4) layered onto an already-shipped flow, and its absence
+   * must be byte-identical to today's behaviour (no custody attempted, no test broken) rather than a second
+   * gate that disables installs. When present, it is only ever called AFTER the shop-binding check that
+   * `completeInstallInner` already performs against the signed `state`'s pending record (F7 — see the call
+   * site), so a state minted for shop A can never result in shop B's Admin token — or any Admin token —
+   * being custodied under the wrong tenant.
+   */
+  adminTokens?: Pick<AdminTokenStore, "put">;
   /** Resolves the APP-scoped OAuth client secret. Called per request so a rotation takes effect without a
    *  redeploy, and so the secret is never captured in a closure at boot. */
   clientSecret: () => Promise<string | undefined>;
@@ -416,6 +430,70 @@ async function completeInstallInner(
     // The error is swallowed on purpose: it is raised by a component holding the token, and this function's
     // result is rendered to an attacker-reachable response.
     return { ok: false, failed: "custody_failed" };
+  }
+
+  // Task 5 (ADR-0022 F2/F6/F7) — capture the PARENT Admin offline token too, once one's caller has opted
+  // in. THE F7 PROPERTY: this line is reached only after `pending.shopDomain !== shopDomain` was already
+  // checked and found EQUAL, above — `pending.shopDomain` came from the SERVER-SIDE record keyed by the
+  // signed, single-use `state` nonce, and `shopDomain` is the callback's own (HMAC-verified) `shop`. So a
+  // callback whose shop disagrees with the shop `state` was minted for is refused (`shop_mismatch`) long
+  // before this point, and `deps.adminTokens.put` — like `deps.credentials.put` above it — is simply never
+  // reached for it. There is no SEPARATE "grant shop" to re-check: Shopify's token-exchange response
+  // carries no shop field ([S1]/`exchangeInstallCode`), and the exchange itself was made against the
+  // already-verified `shopDomain`, not an attacker-suppliable one. OPTIONAL and ADDITIVE: absent
+  // `adminTokens` ⇒ zero behaviour change from before this task (the surrounding `try` for the delegate
+  // token above deliberately does NOT also cover this — an Admin-token custody failure must not undo a
+  // delegate token that is already safely stored).
+  // Task 12 (ADR-0022 F3) — this call custodies whatever Admin scopes the SAME OAuth grant above already
+  // obtained (a delegate-token exchange); it does not itself request Admin scopes, so there is nothing here
+  // yet to pin against `ADMIN_SYNC_SCOPES` (shopify-webhook-identity.ts) — the least-privilege
+  // (`read_products`,`read_inventory`) scope set a PRODUCTION catalog-sync admin-token request should use.
+  // Noted here as the landing spot: whichever task wires a real production Admin-token scope request
+  // (Task 13) requests exactly `ADMIN_SYNC_SCOPES`, never a write scope (F3's own pin,
+  // order-attribution-scope-pinning.test.ts).
+  //
+  // Task 13 (forward-carry from Task 5's own review note): a custody failure here is NON-FATAL to the
+  // install. The Admin token is SYNC-PLANE-ONLY (it feeds the catalog-backfill/reconcile jobs); the
+  // DELEGATE token custodied above is what SERVING needs, and it is already safely stored by this point.
+  // Refusing the whole install over a degraded sync-plane capability would strand a merchant with a
+  // perfectly good, servable delegate credential behind a failed install page — worse than landing them
+  // with serving working and sync degraded until a re-install/re-auth re-attempts custody. So: catch, log,
+  // audit `admin_token.custody_failed` (best-effort — a secondary audit-write failure must not abort an
+  // otherwise-successful install either, mirroring every other best-effort audit in this file/package,
+  // e.g. shopify-webhooks.ts's `admin_token.delete_failed`), and fall through to the rest of this function
+  // exactly as if `adminTokens` had been absent.
+  if (deps.adminTokens) {
+    try {
+      await deps.adminTokens.put(tenantId, grant.accessToken, { actor: "system:shopify-install", expiresAt: grant.expiresAt });
+    } catch (e) {
+      // Never let an Admin-token custody failure surface the parent token in a response/log; same leak
+      // boundary as every other catch in this function.
+      const message = (e as Error).message;
+      console.error(`[shopify-install] admin token custody failed tenant=${tenantId}: ${message}`);
+      try {
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: "system:shopify-install",
+            action: "admin_token.custody_failed",
+            input: { tenantId, shopDomain },
+            decision: {
+              complete: false,
+              reason: `adminTokens.put threw: ${message}; the delegate token is already custodied and the ` +
+                "install continues — sync-plane capability (catalog backfill/reconcile) is degraded until " +
+                "re-custody, but serving is unaffected",
+            },
+            reversalPath:
+              "re-run the install/OAuth flow to re-attempt Admin-token custody (idempotent — re-custody simply " +
+              "overwrites); the delegate token and servability are unaffected in the meantime",
+          },
+        );
+      } catch {
+        // Same tradeoff as every other best-effort audit in this file/package: a secondary audit-write
+        // failure must not abort or fail an otherwise-successful install. `console.error` above is the
+        // residual trace.
+      }
+    }
   }
 
   // Shop-specific webhook registration — BEST-EFFORT / NON-FATAL, and only when the composition root

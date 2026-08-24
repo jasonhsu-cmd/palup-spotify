@@ -185,9 +185,20 @@ export interface RetrievedProduct {
   score: number;
   /**
    * S2 — the corpus row's render metadata (title, variantId, …), written by the index job from Task 1's
-   * stable fields. Opaque to the brain except for the known keys it reads (`title`/`variantId`); NEVER
-   * carries price/availability (those live in `ProductFactsPort`, never the corpus, so a stale price
-   * cannot be quoted from it). Optional so a pre-S2 corpus record (no metadata) still type-checks.
+   * stable fields. Opaque to the brain except for the known keys it reads (`title`/`variantId`/`imageUrl`,
+   * and — Task 8b — `description`/`tags`).
+   *
+   * Task 8b (durable-catalog-sync, spec §4.1) UPDATES the decision this comment used to record as absolute:
+   * for a tenant Task 7 has BACKFILLED (Task 8's per-tenant `hasLocalCatalog` decision), the RETRIEVER seam
+   * (widget-backend's `catalog-retriever.ts`, its `localHydration` dep) additionally enriches this object
+   * with `description`/`tags` read from that tenant's own durable `catalog_product` corpus — before the
+   * brain ever sees the hit. A non-backfilled tenant's hit is exactly the pre-Task-8b shape.
+   *
+   * STILL NEVER PRICE/AVAILABILITY, and that half is unchanged and load-bearing: `price`/`availableForSale`/
+   * `priceConfirmed` live ONLY in `ProductFactsPort` (never here, never the corpus, never this hydration),
+   * so a stale or untrusted price can never be quoted through this field — see `CatalogRetrieverPort`'s own
+   * doc comment below for the full contract. Optional so a pre-S2 corpus record (no metadata) still
+   * type-checks.
    */
   metadata?: Record<string, unknown>;
 }
@@ -214,11 +225,25 @@ export interface CatalogRetrievalResult {
  * it and be quoted at a shopper (price is filled in later, by-id, from `ProductFactsPort`).
  *
  * S2 — the render path (`brain.retrieveViaShell`) builds each rendered `Product` directly from a hit's own
- * `metadata`, NOT by resolving against a live `GroundingContext` (that full-catalog fetch is exactly what
- * the shell replaces — see `GroundingPort.getShell`). A hit with no `metadata.title` is dropped (unusable
- * for render) rather than rendered blank; there is deliberately no "is this id still in the live catalog"
- * check on this path — corpus freshness is the index job's job (reconciliation on re-index), not a
- * per-turn one. Older, per-id "resolve against the live catalog and drop what's not found" behaviour
+ * `metadata`, NEVER by resolving anything itself against a live `GroundingContext` (that full-catalog
+ * fetch is exactly what the shell replaces — see `GroundingPort.getShell`); this stays true after Task 8b.
+ *
+ * Task 8b (durable-catalog-sync, spec §4.1) DELIBERATELY WIDENS what a hit's `metadata` may carry, one
+ * layer BELOW this render path: for a BACKFILLED tenant, the RETRIEVER implementation (widget-backend's
+ * `catalog-retriever.ts`) may enrich a hit's `metadata` with `description`/`tags` read from that tenant's
+ * own local, no-Shopify `catalog_product` corpus (reusing Task 8's `hasLocalCatalog` decision — never a
+ * live Shopify call, never the general Shopify-or-fixtures `GroundingPort`, never a second copy of the
+ * money-truth channel). The render path itself is UNCHANGED IN SHAPE: it still reads only known keys off
+ * `metadata` and still performs no resolution of its own — a non-backfilled tenant's hit carries exactly
+ * the pre-Task-8b fields (title/variantId/imageUrl), byte-identical. `price`/`availableForSale`/
+ * `priceConfirmed` are excluded from that enrichment on purpose and remain EXCLUSIVELY the A1b
+ * `ProductFactsPort` overlay's job (`hydrate-facts.ts`, applied after this render path) — Task 8b adds no
+ * second money channel (NN#1).
+ *
+ * A hit with no `metadata.title` is dropped (unusable for render) rather than rendered blank; there is
+ * deliberately no "is this id still in the live catalog" check on this path — corpus freshness is the
+ * index job's job (reconciliation on re-index), not a per-turn one. Older, per-id "resolve against the
+ * live catalog and drop what's not found" behaviour
  * (#157/#180's stale-falsehood lesson) predates S2 and no longer applies to this path; keeping a corpus
  * row from outliving a delisted product is now the producer's responsibility.
  *

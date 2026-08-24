@@ -5,6 +5,9 @@ import {
   createMeteringModelPort,
   createStoreTelemetry,
   requireEmbedAlignment,
+  type CatalogProductPort,
+  type CatalogProductRecord,
+  type CatalogProductVariant,
   type EmbedPurpose,
   type GroundingContext,
   type ModelPort,
@@ -257,6 +260,19 @@ export type CatalogSource = (tenantId: string) => Promise<GroundingContext | und
  *  delisted ids simply do not appear in the returned array (the caller treats those as deletions). */
 export type CatalogByIdSource = (tenantId: string, ids: string[]) => Promise<Product[] | undefined>;
 
+/**
+ * Task 7 (durable-catalog-sync) — the CLOBBER RESOLUTION carried in from the Task 6 review. Resolve the
+ * named products (by corpus GID) in the FULL Admin GraphQL shape (multi-variant, description, tags,
+ * productType, vendor, options, onlineStoreUrl) rather than the thin Storefront-shaped `Product`
+ * `CatalogByIdSource` returns. `undefined` (as a whole, or per-call) means "no rich source configured /
+ * nothing rich known for these ids" — `reconcileProducts` then falls back to the thin projection exactly
+ * as Task 6 built it, so this seam is additive and opt-in. A real implementation (a live Admin
+ * `nodes(ids:)` GraphQL call via the Task 3 client) lives in `catalog-backfill.ts`
+ * (`makeCatalogProductByIdSource`) — NOT wired into any real composition here; server.ts composition is
+ * Task 13's job. This type/field exist purely as the TEST SEAM the brief calls for.
+ */
+export type CatalogProductByIdSource = (tenantId: string, ids: string[]) => Promise<CatalogProductRecord[] | undefined>;
+
 export interface CatalogIndexDeps {
   store: RuntimeStatePort;
   vector: VectorPort;
@@ -274,6 +290,28 @@ export interface CatalogIndexDeps {
    * the vector index (the primary job) still completes.
    */
   productFacts?: ProductFactsPort;
+  /**
+   * Task 6 (durable-catalog-sync) — OPTIONAL durable product-catalog store. When present, each successful
+   * catalog fetch/refresh ALSO upserts the full product record (title, handle, variants, images, status)
+   * here — on EVERY fetch, independent of the vector-corpus embed short-circuit, because price/variant/
+   * image/status changes must persist even when the embedded text (title+tags+description) is unchanged.
+   * A delisted product is soft-deleted here alongside the existing `productFacts.deleteMany` prune. Absent
+   * (the default) ⇒ byte-identical to before: this job writes nothing here. Fail-safe, mirroring
+   * `productFacts`: a write error is logged (ALERT marker) and the vector index (the primary job) still
+   * completes.
+   */
+  catalogProduct?: CatalogProductPort;
+  /**
+   * Task 7 (durable-catalog-sync) — OPTIONAL rich-shape by-id source for the `reconcileProducts` delta
+   * path (see `CatalogProductByIdSource`'s doc comment for the full rationale). When present AND it
+   * returns rich records for the ids being reconciled, `reconcileProducts` writes THOSE to
+   * `catalogProduct` instead of the thin `catalogProductRecordsFrom(fetched, …)` projection — resolving
+   * the clobber where a Bulk-Ops backfill's rich row would otherwise be nulled by the very next product
+   * webhook. Absent (the default — no composition wires it yet) ⇒ byte-identical to Task 6. Ignored by
+   * `runCatalogIndex`'s full-crawl path (`indexOneTenant`): a Storefront-driven full crawl has no by-id
+   * rich source to call per product, so that path is unaffected by this field.
+   */
+  catalogProductAdminSource?: CatalogProductByIdSource;
   /**
    * Pillar 1b — invoked after a SUCCESSFUL money-fact upsert so channel-health records a live producer run.
    * Optional; absent ⇒ no health signal (byte-identical). Never throws by contract.
@@ -327,9 +365,62 @@ export function productFactsFrom(ctx: GroundingContext, now: Date): ProductFact[
   }));
 }
 
-/** sha256 of the embedded text — the change detector that makes a re-run free (see `indexOneTenant`). */
-function contentHash(text: string): string {
+/** sha256 of the embedded text — the change detector that makes a re-run free (see `indexOneTenant`).
+ *  Exported (Task 7) so `catalog-backfill.ts` can reuse the SAME hash primitive for its own change
+ *  detector rather than re-implementing sha256 hashing — the two jobs hash different INPUTS (this job
+ *  hashes embed text only; the backfill hashes a canonical projection of the full rich record), but the
+ *  primitive itself should not drift. */
+export function contentHash(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/**
+ * Task 6 (durable-catalog-sync) — project a fetched catalog into full `CatalogProductRecord`s for the
+ * durable `catalog_product` store. Unlike `productFactsFrom` (volatile money-facts only) and
+ * `productEmbedText` (semantic fields only), this carries every renderable/administrative field the fetch
+ * makes available: title, handle, description, tags, and images, plus a single variant assembled from the
+ * vendor-neutral `Product` shape's flat `variantId`/`price`/`availableForSale`/`imageUrl` fields.
+ *
+ * TWO DOCUMENTED GAPS, not silently papered over (Task 6 report):
+ *   1. `Product` (grounding-port.ts) carries no draft/archived signal at all — the Storefront fetch this
+ *      job uses only ever returns published products. There is no config flag today to opt into
+ *      persisting non-active products, so `status` is hardcoded `"active"` (F8 decision) rather than
+ *      guessed from a field that does not exist. A richer source (Task 7's Bulk Ops backfill) may be able
+ *      to report `draft`/`archived` directly.
+ *   2. `Product` carries only ONE variant's worth of flat fields (`variantId`, `price`, `availableForSale`,
+ *      `imageUrl`), not Shopify's full multi-variant array — so `variants` here is at most a single-entry
+ *      array, never the true variant list. `options`/`productType`/`vendor`/`onlineStoreUrl` are absent
+ *      from `Product` entirely and are therefore never set here.
+ *
+ * `availableForSale` is copied through three-state (never fabricated) as a BOOLEAN only — no raw stock
+ * count ever crosses this boundary (F8 data minimization). Pure; caller supplies `now` (no ambient clock).
+ */
+export function catalogProductRecordsFrom(products: Product[], now: Date): CatalogProductRecord[] {
+  const at = now.toISOString();
+  return products.map((p) => {
+    const variants: CatalogProductVariant[] = p.variantId
+      ? [
+          {
+            variantId: p.variantId,
+            price: p.price,
+            ...(p.availableForSale !== undefined ? { availableForSale: p.availableForSale } : {}),
+            ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
+          },
+        ]
+      : [];
+    return {
+      productId: p.id,
+      handle: p.handle ?? "",
+      title: p.title,
+      descriptionText: p.description,
+      ...(p.tags && p.tags.length > 0 ? { tags: p.tags } : {}),
+      status: "active" as const, // gap 1 above — Product has no draft/archived signal to read
+      variants, // gap 2 above — at most the one variant Product's flat fields describe
+      ...(p.imageUrl ? { featuredImageUrl: p.imageUrl } : {}),
+      contentHash: contentHash(productEmbedText(p)),
+      syncedAt: at,
+    };
+  });
 }
 
 interface PlannedProduct {
@@ -558,6 +649,34 @@ async function indexOneTenant(
     }
   }
 
+  // Task 6 — durable catalog_product store: the FULL product record persisted on EVERY successful fetch,
+  // independent of the vector-corpus embed short-circuit below (a price/variant/image/status change must
+  // persist even when the embedded text is unchanged). Fail-safe (NN#4-adjacent: never abort the primary
+  // vector index on a secondary store's failure) and audited (NN#5), mirroring the productFacts block above.
+  if (deps.catalogProduct) {
+    const catalogRecords = catalogProductRecordsFrom(catalog.products, now());
+    let catalogUpserted = false;
+    try {
+      await deps.catalogProduct.upsertMany(tenantId, catalogRecords);
+      catalogUpserted = true;
+      await deps.store.audit(
+        { tenantId },
+        {
+          actor: CATALOG_INDEX_ACTOR,
+          action: "catalog_product.write",
+          input: { tenantId, count: catalogRecords.length, source: "poll:catalog-index" },
+          decision: "upserted",
+          reversalPath: `the next \`pnpm catalog:index --tenant ${tenantId}\` run overwrites them; CatalogProductPort.deleteTenant erases them`,
+        },
+      );
+    } catch (e) {
+      console.error(
+        `[catalog] ALERT catalog_product_${catalogUpserted ? "audit" : "upsert"}_failed tenant=${tenantId} ` +
+          `error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`,
+      );
+    }
+  }
+
   const plan = planProducts(catalog.products);
 
   // S3 §B — the corpus id→hash set comes from the LEDGER (RuntimeState KV), NOT a vector enumerate. The
@@ -765,6 +884,29 @@ async function indexOneTenant(
         );
       } catch (e) {
         console.error(`[catalog] ALERT product_facts_prune_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
+      }
+    }
+  }
+
+  // Task 6 — tombstone the same delisted ids in catalog_product (soft delete, never a hard delete: the
+  // row stays for audit/history). Fail-safe + audited, mirroring the productFacts prune block above.
+  if (deps.catalogProduct && stale.length > 0) {
+    const staleProductIds = stale.map(productIdFromCatalogRecordId).filter((id): id is string => id !== undefined);
+    if (staleProductIds.length > 0) {
+      try {
+        await deps.catalogProduct.softDeleteMany(tenantId, staleProductIds, { at: now().toISOString() });
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: CATALOG_INDEX_ACTOR,
+            action: "catalog_product.write",
+            input: { tenantId, count: staleProductIds.length, source: "poll:catalog-index" },
+            decision: "soft_deleted",
+            reversalPath: `the next \`pnpm catalog:index --tenant ${tenantId}\` run re-adds any product still in the catalog (upsertMany clears deletedAt)`,
+          },
+        );
+      } catch (e) {
+        console.error(`[catalog] ALERT catalog_product_prune_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
       }
     }
   }
@@ -1065,6 +1207,28 @@ export async function reconcileProducts(
     }
   }
 
+  // Task 6 — tombstone the same delisted ids in catalog_product (mirrors the full path's prune block).
+  if (deps.catalogProduct && stale.length > 0) {
+    const staleCatalogProductIds = stale.map(productIdFromCatalogRecordId).filter((id): id is string => id !== undefined);
+    if (staleCatalogProductIds.length > 0) {
+      try {
+        await deps.catalogProduct.softDeleteMany(tenantId, staleCatalogProductIds, { at: now().toISOString() });
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: CATALOG_INDEX_ACTOR,
+            action: "catalog_product.write",
+            input: { tenantId, count: staleCatalogProductIds.length, source: `reconcile:${opts.reason ?? "product"}` },
+            decision: "soft_deleted",
+            reversalPath: `the next \`pnpm catalog:index --tenant ${tenantId}\` run re-adds any product still in the catalog (upsertMany clears deletedAt)`,
+          },
+        );
+      } catch (e) {
+        console.error(`[catalog] ALERT catalog_product_prune_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`);
+      }
+    }
+  }
+
   // Tier-2 money-facts for the refreshed subset (D2 poll-side, same as the full path). Fail-safe: the
   // vector write is primary, a facts failure is alerted + swallowed.
   if (deps.productFacts && fetched.length > 0) {
@@ -1084,6 +1248,73 @@ export async function reconcileProducts(
       } catch {
         /* best-effort channel-health heartbeat */
       }
+    }
+  }
+
+  // Task 6 — durable catalog_product store for the refreshed subset, on every successful targeted fetch,
+  // independent of the embed short-circuit above (mirrors the full path's block). `fetched` is exactly the
+  // set `deps.catalogById` returned for the requested ids — the same set `productFactsFrom` uses just above.
+  //
+  // Task 7 (clobber resolution, carried in from the Task 6 review — LOAD-BEARING) — when
+  // `deps.catalogProductAdminSource` is wired AND it reports rich records for these ids, write THOSE
+  // instead of the thin `catalogProductRecordsFrom(fetched, …)` projection. Without this, a rich
+  // Bulk-Ops backfill row (multi-variant, description, tags, productType, vendor, options,
+  // onlineStoreUrl) would be permanently nulled by the very next product webhook, because both
+  // `CatalogProductPort` adapters do an unconditional full-column upsert. Absent (the default — no
+  // composition wires it yet; that is Task 13's job) this is BYTE-IDENTICAL to Task 6.
+  //
+  // FIX (review round 1, Task 7) — the admin-source lookup is scoped to `fetched`'s ids (the products
+  // `deps.catalogById` actually confirmed are still live), NOT the raw `validProductIds` batch. A batch
+  // can legitimately mix a live id with a delisted one (`stale`, computed above); `stale` ids are
+  // soft-deleted a few lines below this block. `makeCatalogProductByIdSource` filters only by GID shape,
+  // not publish state, so it CAN still return a record for an unpublished-but-not-yet-pruned product —
+  // querying it for a stale id and then upserting whatever comes back would UN-TOMBSTONE a product this
+  // same call just soft-deleted. Scoping to `fetched`'s ids matches exactly what the thin path it replaces
+  // (`catalogProductRecordsFrom(fetched, …)`) was already scoped to.
+  if (deps.catalogProduct && fetched.length > 0) {
+    let catalogUpserted = false;
+    let catalogCount = 0;
+    try {
+      let catalogRecords: CatalogProductRecord[] | undefined;
+      if (deps.catalogProductAdminSource) {
+        const liveIds = new Set(fetched.map((p) => p.id));
+        const adminRecords = await deps.catalogProductAdminSource(tenantId, [...liveIds]);
+        // Defense-in-depth (mirrors FIX 3's re-validation-at-the-consumer-boundary discipline elsewhere in
+        // this function): even though the call above was scoped to `liveIds`, do not trust a source
+        // implementation to have honored that scoping — drop anything for an id we did NOT just confirm
+        // live. Without this, a permissive/buggy source returning a stale id's record would resurrect a
+        // product `stale` (below) is about to soft-delete.
+        catalogRecords = adminRecords?.filter((r) => liveIds.has(r.productId));
+      }
+      // Falls back to the thin projection when no rich source is wired, OR the rich source itself
+      // reports nothing for these ids (e.g. a tenant never backfilled) — never silently write zero rows
+      // for a product `fetched` just confirmed still exists.
+      if (!catalogRecords || catalogRecords.length === 0) {
+        catalogRecords = catalogProductRecordsFrom(fetched, now());
+      }
+      catalogCount = catalogRecords.length;
+      await deps.catalogProduct.upsertMany(tenantId, catalogRecords);
+      catalogUpserted = true;
+      await deps.store.audit(
+        { tenantId },
+        {
+          actor: CATALOG_INDEX_ACTOR,
+          action: "catalog_product.write",
+          input: {
+            tenantId,
+            count: catalogCount,
+            source: `reconcile:${opts.reason ?? "product"}`,
+            shape: deps.catalogProductAdminSource ? "admin-rich" : "storefront-thin",
+          },
+          decision: "upserted",
+          reversalPath: `the next \`pnpm catalog:index --tenant ${tenantId}\` run overwrites them; CatalogProductPort.deleteTenant erases them`,
+        },
+      );
+    } catch (e) {
+      console.error(
+        `[catalog] ALERT catalog_product_${catalogUpserted ? "audit" : "upsert"}_failed tenant=${tenantId} ` +
+          `error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`,
+      );
     }
   }
 

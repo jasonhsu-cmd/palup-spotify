@@ -1,7 +1,8 @@
 import { createHmac } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { MerchantRecord, MerchantRegistryPort, QueuePort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
+import type { CatalogProductPort, MerchantRecord, MerchantRegistryPort, QueuePort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
 import { buildShopifyShopperId } from "@palup/platform-ports";
+import type { AdminTokenStore } from "@palup/state-postgres";
 import { accountSubjectId, eraseSubject, listSubjects, retireSubject } from "@palup/widget-memory";
 import { clientIpKey } from "../rate-limit.js";
 import { CATALOG_RECONCILE_TOPIC, catalogReconcileMessage, type ReconcileReason } from "../catalog-webhook-queue.js";
@@ -217,6 +218,18 @@ export interface ShopifyWebhookDeps {
    *  W2-C header note above `WEBHOOK_ROUTES`); absent ⇒ these three routes are not registered — 404,
    *  same inert-by-absence pattern as the catalog routes. */
   orderQueue?: QueuePort;
+  /** Task 9 (ADR-0022 F1) — the Admin API offline-token custody store, used for exactly ONE thing here:
+   *  the IRREVERSIBLE hard-delete on `shop/redact`'s applied path. `Pick<…, "delete">` because this file
+   *  never reads or writes a token, only revokes one. NEVER called from `handleAppUninstalled` — that
+   *  topic's shop comes from an UNSIGNED header (`APP_UNINSTALLED_SHOP_SOURCE`), so a replayed/spoofed
+   *  delivery must not be able to destroy an arbitrary tenant's Admin token. Optional; absent ⇒ nothing to
+   *  delete (inert-by-absence, the same pattern `queue`/`orderQueue` use) — Task 13 wires the real one. */
+  adminTokens?: Pick<AdminTokenStore, "delete">;
+  /** Task 9 (ADR-0022 F1) — the durable product-catalog store. `handleAppUninstalled` uses ONLY the
+   *  REVERSIBLE `softDeleteMany` tombstone (header-sourced shop ⇒ only reversible actions allowed).
+   *  `handleShopRedact`'s applied path uses the IRREVERSIBLE `deleteTenant` hard retire (HMAC-covered
+   *  shop ⇒ a genuine statutory erasure request). Optional; absent ⇒ inert-by-absence, same as `queue`. */
+  catalogProduct?: CatalogProductPort;
 }
 
 /** A refusal reason, for the SERVER-SIDE log only. The HTTP response never distinguishes these — a
@@ -394,6 +407,16 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
   if (existing.status === "uninstalled") return "already_handled";
 
   const reason = `${UNINSTALL_TOPIC} webhook (${APP_UNINSTALLED_SHOP_SOURCE})`;
+  // Task 9 (ADR-0022 F1) — declared here, before the audit, ONLY when the port is actually wired: an
+  // absent `deps.catalogProduct` must not have this handler CLAIM a tombstone it will never attempt.
+  const erased: string[] = [
+    "the tenant's catalog corpus namespace + its corpus-state ledger (best-effort — see catalog.clear_failed if it did not take)",
+  ];
+  if (deps.catalogProduct) {
+    erased.push(
+      "the tenant's catalog_product rows — SOFT-DELETED (tombstoned), reversible: best-effort, see catalog_product.tombstone_failed if it did not take",
+    );
+  }
   // Audit BEFORE the write (header note). PII-free by construction: a shop domain is merchant business
   // identity, not customer personal data, and it is the ONE identifier an operator needs to act on this.
   await deps.store.audit(
@@ -407,19 +430,28 @@ async function handleAppUninstalled(deps: ShopifyWebhookDeps, v: Verified): Prom
         previousStatus: existing.status,
         effect: "every registry lookup is now default-inert",
         // Audit-first (header note): the actual erase runs below, unconditionally. A failure there is
-        // caught and separately audited by `eraseCatalogCorpus` rather than corrected here.
-        erased: ["the tenant's catalog corpus namespace + its corpus-state ledger (best-effort — see catalog.clear_failed if it did not take)"],
+        // caught and separately audited by `eraseCatalogCorpus`/`tombstoneCatalogProducts` rather than
+        // corrected here. F1: the Admin token is DELIBERATELY absent from this list — this topic's shop
+        // comes from an unsigned header, so ONLY reversible actions run here.
+        erased,
       },
       reversalPath:
         `${MERCHANT_CLI} status --tenant ${tenantId} --status active ` +
         `(restores servability; the row, embedKey and createdAt were never deleted. ` +
         `A genuine re-install through /shopify/callback reactivates it the same way. The catalog corpus is ` +
-        `NOT restored by this — re-installing and letting the index job run rebuilds it from the CURRENT catalog.)`,
+        `NOT restored by this — re-installing and letting the index job run rebuilds it from the CURRENT ` +
+        `catalog. Same for a catalog_product tombstone (when wired): a soft-delete is a live row with ` +
+        `\`deletedAt\` set, not a destroyed one — the next catalog reconcile re-upserts it as live again.)`,
     },
   );
   await deps.registry.setStatus(tenantId, "uninstalled", { reason });
   // S4 §F — unconditional (see `eraseCatalogCorpus`'s doc for why this is not gated on `deps.killCheck`).
   await eraseCatalogCorpus(deps, tenantId, UNINSTALL_TOPIC, "catalog.clear_failed");
+  // Task 9 (ADR-0022 F1) — REVERSIBLE ONLY. No `deps.adminTokens.delete` call anywhere in this handler:
+  // this topic's shop comes from the spoofable header, so a replayed/forged delivery must never be able
+  // to destroy an arbitrary tenant's Admin token or hard-retire its catalog. `softDeleteMany` tombstones
+  // (sets `deletedAt`), it does not drop rows — a genuine re-install's reconcile un-tombstones them.
+  await tombstoneCatalogProducts(deps, tenantId, UNINSTALL_TOPIC);
   await markHandled(deps, tenantId, UNINSTALL_TOPIC, v.webhookId);
   return "applied";
 }
@@ -648,6 +680,65 @@ async function eraseCatalogCorpus(deps: ShopifyWebhookDeps, tenantId: string, to
   }
 }
 
+/**
+ * Task 9 (ADR-0022 F1) — REVERSIBLE catalog_product tombstone, called ONLY from `app/uninstalled`.
+ * `shop/redact` does NOT call this — it hard-retires via `deps.catalogProduct.deleteTenant` instead
+ * (see `handleShopRedact`), because that topic's shop is HMAC-covered and its erasure is meant to be
+ * irreversible.
+ *
+ * Soft-deletes every LIVE row for this tenant via `softDeleteMany` (`deletedAt` set, row retained) — the
+ * same reversible primitive the catalog sync pipeline itself uses for a product that vanished from
+ * Shopify. A genuine re-install's subsequent catalog reconcile naturally revives any row Shopify still
+ * has by upserting it as live again; `pruneTombstoned` (unused here) is what would later hard-delete an
+ * OLD tombstone, and this function never calls it.
+ *
+ * UNCONDITIONAL, NOT KILL-GATED — mirrors `eraseCatalogCorpus` immediately above: `app/uninstalled`'s
+ * status write already runs unconditionally (its own doc explains why), and a tombstone that only makes
+ * a row invisible to `getMany`/default `listByTenant` reads is strictly less destructive than that write.
+ *
+ * BEST-EFFORT + AUDITED-ON-FAILURE, never a 500, mirroring `eraseCatalogCorpus`: a caught failure is
+ * logged and separately audited as `catalog_product.tombstone_failed` so it can never burn Shopify's
+ * webhook retries, and never claims a tombstone that did not take.
+ *
+ * `deps.catalogProduct` absent ⇒ no-op (inert-by-absence, the same pattern `queue`/`orderQueue` use):
+ * most deployments have not wired this port yet (Task 13 wires the real composition-root instance).
+ */
+async function tombstoneCatalogProducts(deps: ShopifyWebhookDeps, tenantId: string, topic: string): Promise<void> {
+  if (!deps.catalogProduct) return;
+  try {
+    const live = await deps.catalogProduct.listByTenant(tenantId);
+    if (live.length === 0) return;
+    await deps.catalogProduct.softDeleteMany(
+      tenantId,
+      live.map((p) => p.productId),
+      { at: new Date(deps.now()).toISOString() },
+    );
+  } catch (e) {
+    const message = (e as Error).message;
+    console.error(`[${topic}] catalog_product tombstone failed tenant=${tenantId}: ${message}`);
+    try {
+      await deps.store.audit(
+        { tenantId },
+        {
+          actor: "system:shopify-webhook",
+          action: "catalog_product.tombstone_failed",
+          input: { tenantId, topic },
+          decision: {
+            complete: false,
+            erased: [],
+            notErased: [`the tenant's catalog_product rows — softDeleteMany/listByTenant failed: ${message}`],
+            reason: "listByTenant or softDeleteMany threw; the webhook still acknowledges 200 (per [W1]/[W2]) so Shopify's retries are not burned over a residual this record already discloses",
+          },
+          reversalPath: `n/a — nothing was tombstoned. Retry by hand once the underlying fault is fixed, or wait for the next catalog reconcile to re-upsert current rows.`,
+        },
+      );
+    } catch {
+      // Same tradeoff as `eraseCatalogCorpus`'s own catch: a secondary audit-write failure must not 500
+      // this statutory/compliance-adjacent webhook. `console.error` above is the only remaining trace.
+    }
+  }
+}
+
 /** What `shop/redact` provably cannot reach, named in the audit record so no operator reads a 200 as
  *  "this shop is gone from our systems". Each entry states WHY, because a reason is what makes the gap
  *  actionable rather than just disclosed. */
@@ -728,6 +819,27 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
     return "halted_deferred";
   }
 
+  // Task 9 (ADR-0022 F1) — declared here, before the audit, ONLY when each port is actually wired: an
+  // absent `deps.adminTokens`/`deps.catalogProduct` must not have this record CLAIM a hard-delete it
+  // will never attempt (Task 13 wires the real composition-root instances; until then both are absent).
+  const erased: string[] = [
+    "merchant status → uninstalled (inert)",
+    "every memory namespace named by the per-tenant subject index",
+    "the per-tenant traffic log (message + reply text)",
+    "the tenant's catalog corpus namespace + its corpus-state ledger (best-effort — see catalog.clear_failed if it did not take)",
+  ];
+  const notErased = [...SHOP_REDACT_RESIDUAL];
+  if (deps.adminTokens)
+    erased.push(
+      "the merchant's Shopify Admin API offline token — HARD-DELETED, irreversible (best-effort — see admin_token.delete_failed if it did not take)",
+    );
+  else notErased.push("the merchant's Shopify Admin API offline token — no admin-token store wired for this delivery");
+  if (deps.catalogProduct)
+    erased.push(
+      "the tenant's catalog_product rows — HARD-DELETED via deleteTenant, irreversible (best-effort — see catalog_product.delete_tenant_failed if it did not take)",
+    );
+  else notErased.push("the tenant's catalog_product rows — no catalog-product store wired for this delivery");
+
   // AUDIT FIRST (header note): if this throws, nothing below runs and no unaudited erasure lands.
   await deps.store.audit(
     { tenantId },
@@ -739,24 +851,94 @@ async function handleShopRedact(deps: ShopifyWebhookDeps, v: Verified): Promise<
         // `complete: false` is asserted by test, so a future change that starts claiming completeness has
         // to defeat a test rather than quietly ship an overclaim.
         complete: false,
-        erased: [
-          "merchant status → uninstalled (inert)",
-          "every memory namespace named by the per-tenant subject index",
-          "the per-tenant traffic log (message + reply text)",
-          "the tenant's catalog corpus namespace + its corpus-state ledger (best-effort — see catalog.clear_failed if it did not take)",
-        ],
-        notErased: SHOP_REDACT_RESIDUAL,
+        erased,
+        notErased,
       },
       reversalPath:
-        `THE ERASURE IS NOT REVERSIBLE — vector namespaces and traffic entries are deleted outright, which ` +
-        `is the point of a redaction request. Only the STATUS is reversible: ${MERCHANT_CLI} status ` +
-        `--tenant ${tenantId} --status active (which would restore servability for a shop that asked to be ` +
-        `erased — do not, except to correct a wrongly-targeted delivery).`,
+        `THE ERASURE IS NOT REVERSIBLE — vector namespaces, traffic entries, the Admin token (when a store ` +
+        `is wired) and the catalog_product rows (when a store is wired) are deleted outright, which is the ` +
+        `point of a redaction request. Only the STATUS is reversible: ${MERCHANT_CLI} status --tenant ` +
+        `${tenantId} --status active (which would restore servability for a shop that asked to be erased — ` +
+        `do not, except to correct a wrongly-targeted delivery; a genuine reinstall must re-authorize to get ` +
+        `a new Admin token and will resync its catalog from scratch).`,
     },
   );
 
   if (existing.status !== "uninstalled") await deps.registry.setStatus(tenantId, "uninstalled", { reason: "shop/redact webhook" });
   await eraseIndexedSubjects(deps, tenantId);
+  // Task 9 (ADR-0022 F1) — the IRREVERSIBLE step. This topic's shop is HMAC-COVERED (`bodyShopDomain`,
+  // never the header), so — unlike `app/uninstalled` — a hard-delete here cannot be forged by replaying a
+  // spoofed header. Each call is independently caught: a failure in one must not abort the other erasures
+  // this handler already performs, and must never 500 a webhook Shopify will retry into a lost
+  // compliance subscription (the file header's own rationale for every other best-effort call here).
+  //
+  // REVIEW FIX (F1 hardening): the upfront `shop.redact_applied` audit above CLAIMS these are
+  // hard-deleted (audit-first, per the header note) — so a caught failure here MUST land its own audit
+  // row, exactly like `eraseCatalogCorpus`/`tombstoneCatalogProducts` already do for their own best-effort
+  // actions. `console.error` alone is not enough for the two most compliance-sensitive actions in this
+  // file: without a durable, immutable record of the residual, the audit trail would permanently and
+  // silently assert a statutory erasure that never happened.
+  if (deps.adminTokens) {
+    try {
+      await deps.adminTokens.delete(tenantId, { actor: "system:shop-redact" });
+    } catch (e) {
+      const message = (e as Error).message;
+      console.error(`[shop/redact] admin token delete failed tenant=${tenantId}: ${message}`);
+      try {
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: "system:shopify-webhook",
+            action: "admin_token.delete_failed",
+            input: { tenantId, topic: "shop/redact" },
+            decision: {
+              complete: false,
+              erased: [],
+              notErased: [`the merchant's Shopify Admin API offline token — adminTokens.delete threw: ${message}`],
+              reason:
+                "adminTokens.delete threw; the webhook still acknowledges 200 (per [W1]/[W2]) so Shopify's retries " +
+                "are not burned over a residual this record already discloses — the upfront shop.redact_applied " +
+                "audit's claim of erasure is corrected by this row",
+            },
+            reversalPath: `n/a — nothing was deleted. Retry by hand once the underlying fault is fixed (this delivery is deduped/terminal and will not retry).`,
+          },
+        );
+      } catch {
+        // Same tradeoff as `eraseCatalogCorpus`'s own catch: a secondary audit-write failure must not 500
+        // this statutory webhook. `console.error` above is the only remaining trace.
+      }
+    }
+  }
+  if (deps.catalogProduct) {
+    try {
+      await deps.catalogProduct.deleteTenant(tenantId);
+    } catch (e) {
+      const message = (e as Error).message;
+      console.error(`[shop/redact] catalog_product deleteTenant failed tenant=${tenantId}: ${message}`);
+      try {
+        await deps.store.audit(
+          { tenantId },
+          {
+            actor: "system:shopify-webhook",
+            action: "catalog_product.delete_tenant_failed",
+            input: { tenantId, topic: "shop/redact" },
+            decision: {
+              complete: false,
+              erased: [],
+              notErased: [`the tenant's catalog_product rows — catalogProduct.deleteTenant threw: ${message}`],
+              reason:
+                "catalogProduct.deleteTenant threw; the webhook still acknowledges 200 (per [W1]/[W2]) so Shopify's " +
+                "retries are not burned over a residual this record already discloses — the upfront " +
+                "shop.redact_applied audit's claim of erasure is corrected by this row",
+            },
+            reversalPath: `n/a — nothing was deleted. Retry by hand once the underlying fault is fixed (this delivery is deduped/terminal and will not retry).`,
+          },
+        );
+      } catch {
+        // Same tradeoff as above: a secondary audit-write failure must not 500 this statutory webhook.
+      }
+    }
+  }
   try {
     // `keepLast: 0` removes every entry of the tenant's traffic stream. This is the ONE thing in the repo
     // that can erase the traffic log the #185 review flagged as unreachable — unreachable PER SHOPPER

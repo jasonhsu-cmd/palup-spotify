@@ -194,6 +194,34 @@ export const REFUND_TOPIC = "refunds/create" as const;
  */
 export const ORDER_ATTRIBUTION_ADMIN_SCOPE = "read_orders" as const;
 
+/**
+ * Task 12 (ADR-0022 F3) — the least-privilege Admin OAuth scope set a PRODUCTION catalog-sync install
+ * needs, and NOTHING more. Colocated with `ORDER_ATTRIBUTION_ADMIN_SCOPE` because both constants record
+ * the SAME kind of decision (which Admin scope a specific sync capability needs) for a different
+ * capability: order-attribution needs `read_orders`; catalog sync needs exactly these two.
+ *
+ * WHY THESE TWO AND NOTHING ELSE. [S7] (shopify-install-identity.ts, `webhookSubscriptionCreate`) documents
+ * the per-topic scope requirement this repo's own `CATALOG_TOPICS` (above) subscribes to:
+ * `PRODUCTS_CREATE`/`PRODUCTS_UPDATE`/`PRODUCTS_DELETE` → `read_products`, `INVENTORY_LEVELS_UPDATE` →
+ * `read_inventory`. Catalog sync (the poll, the webhook reconcile, and the Bulk-Operations backfill,
+ * catalog-index.ts / catalog-backfill.ts) only ever READS product/inventory data — it never calls a
+ * Shopify Admin mutation — so a `write_*` scope would be strictly more privilege than the capability uses.
+ * F3's boundary: no `write_products`/`write_customers`/`write_orders`/`write_inventory` scope may become a
+ * CODE-LEVEL default for ANY install path (see the F3 pin in
+ * `order-attribution-scope-pinning.test.ts`); `write_customers`/`write_orders` in `shopify.app.toml` today
+ * are an owner-authorized, staging-DEV-app-only exception (that file's own W2-C comment) — never something
+ * this constant, or a future production install, requests.
+ *
+ * NOT YET WIRED TO A LIVE SCOPE REQUEST. `routes/shopify-install.ts`'s `INSTALL_SCOPES_DEFAULT` today
+ * requests only `unauthenticated_read_product_listings` (storefront, unrelated to Admin scopes) — there is
+ * no production Admin-token install flow yet for this constant to feed (the current `deps.adminTokens.put`
+ * call captures the SAME OAuth grant's `accessToken` already obtained for the delegate-token exchange; it
+ * does not itself request Admin scopes). This constant exists now — pinned by test — so that whichever
+ * task wires a production admin-sync scope request (Task 13) has an already-reviewed, least-privilege
+ * value to reach for instead of inventing one inline.
+ */
+export const ADMIN_SYNC_SCOPES = ["read_products", "read_inventory"] as const;
+
 /** The Storefront/Admin GID prefix for an Order node — used only if a future increment needs a
  *  GID-shaped id; the order-attribution KEY SPACE itself (below) deliberately does NOT use GIDs. */
 export const SHOPIFY_ORDER_GID_PREFIX = "gid://shopify/Order/";

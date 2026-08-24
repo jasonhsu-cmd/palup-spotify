@@ -6,6 +6,7 @@ export { PostgresVectorStore } from "./postgres-vector-store.js";
 // under `VECTOR_ANN`, just reachable directly for a test that needs to name the adapter.
 export { PgVectorStore, PgVectorTextQueryUnsupported } from "./pgvector-store.js";
 export { PostgresProductFactsStore } from "./postgres-product-facts-store.js";
+export { PostgresCatalogProductStore } from "./postgres-catalog-product-store.js";
 export { PostgresPresentmentPriceStore } from "./postgres-presentment-price-store.js";
 // E1 Task 8 adapter (`ProposalStore`, `@palup/platform-ports`). Exported so a later caller can wire it
 // where staging needs durable proposals; the in-memory adapter (Task 2) stays the default until then.
@@ -25,6 +26,17 @@ export {
   type MerchantCredentialStoreOpts,
   type MerchantCredentialRead,
 } from "./merchant-credential-store.js";
+// Task 4 (ADR-0022 F2) store. Distinct key scope/collection/record-key from the merchant-cred store above
+// so a compromise or rotation of one credential kind never exposes the other — see the file header.
+export {
+  createAdminTokenStore,
+  ADMIN_CRED_KEY_SCOPE,
+  ADMIN_CRED_COLLECTION,
+  ADMIN_CRED_RECORD_KEY,
+  type AdminTokenStore,
+  type AdminTokenStoreOpts,
+  type AdminTokenRead,
+} from "./admin-token-store.js";
 // W4-min task 5 adapter (`MerchantRulesStore`, `@palup/platform-ports`). Exported so `merchant-backend`'s
 // `GET/PUT /rules` (task 4, not yet built) can wire it; the in-memory adapter stays the default until then.
 export {
@@ -40,6 +52,7 @@ export {
   disarmKill,
   killStatus,
   RUNTIME_AGENT_TYPE,
+  CATALOG_SYNC_AGENT_TYPE,
   type KillScope,
   type KillEntry,
 } from "./runtime-kill-registry.js";
