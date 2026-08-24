@@ -12,11 +12,13 @@ import { InMemoryRuntimeStore, type MerchantIdentityPort } from "@palup/platform
 // this proves the WIRING (migrate is awaited before the server serves), mirroring the
 // `memory-auth-boot-guard.test.ts` pattern (widget-backend): mock the module, then dynamic-import
 // `buildServer` afterward so it picks up the mocked exports.
-const { migrateRulesSpy, migrateRegistrySpy, createRuntimeStoreSpy } = vi.hoisted(() => {
+const { migrateRulesSpy, migrateRegistrySpy, migrateGoalSpy, migrateLearnedSpy, createRuntimeStoreSpy } = vi.hoisted(() => {
   const migrateRulesSpy = vi.fn(async () => {});
   const migrateRegistrySpy = vi.fn(async () => {});
+  const migrateGoalSpy = vi.fn(async () => {});
+  const migrateLearnedSpy = vi.fn(async () => {});
   const createRuntimeStoreSpy = vi.fn();
-  return { migrateRulesSpy, migrateRegistrySpy, createRuntimeStoreSpy };
+  return { migrateRulesSpy, migrateRegistrySpy, migrateGoalSpy, migrateLearnedSpy, createRuntimeStoreSpy };
 });
 
 vi.mock("@palup/state-postgres", async (importOriginal) => {
@@ -39,12 +41,33 @@ vi.mock("@palup/state-postgres", async (importOriginal) => {
     setStatus = vi.fn();
     update = vi.fn();
   }
+  // W2 Task 4's own composition-root addition — same fake-adapter treatment as the two above so this
+  // file's mock of `@palup/state-postgres` doesn't fall through to the REAL PostgresPrimaryGoalStore
+  // (which would call `this.sql.query` against the test's inert `fakeSql = {}` and throw).
+  class FakePostgresPrimaryGoalStore {
+    migrate = migrateGoalSpy;
+    get = vi.fn(async () => null);
+    set = vi.fn();
+  }
+  // W3 Task 4's own composition-root addition — same fake-adapter treatment as the three above so this
+  // file's mock of `@palup/state-postgres` doesn't fall through to the REAL PostgresLearnedStore (which
+  // would call `this.sql.query` against the test's inert `fakeSql = {}` and throw).
+  class FakePostgresLearnedStore {
+    migrate = migrateLearnedSpy;
+    list = vi.fn(async () => []);
+    get = vi.fn(async () => null);
+    record = vi.fn();
+    setPinned = vi.fn();
+    remove = vi.fn();
+  }
 
   return {
     ...actual,
     createRuntimeStore: createRuntimeStoreSpy,
     PostgresMerchantRulesStore: FakePostgresMerchantRulesStore,
     PostgresMerchantRegistry: FakePostgresMerchantRegistry,
+    PostgresPrimaryGoalStore: FakePostgresPrimaryGoalStore,
+    PostgresLearnedStore: FakePostgresLearnedStore,
   };
 });
 
@@ -73,6 +96,8 @@ describe("durable (Postgres) boot path", () => {
 
     expect(migrateRulesSpy).toHaveBeenCalledTimes(1);
     expect(migrateRegistrySpy).toHaveBeenCalledTimes(1);
+    expect(migrateGoalSpy).toHaveBeenCalledTimes(1);
+    expect(migrateLearnedSpy).toHaveBeenCalledTimes(1);
 
     await app.close();
   });
@@ -87,6 +112,8 @@ describe("in-memory boot path (no DATABASE_URL) is unchanged", () => {
 
     expect(migrateRulesSpy).not.toHaveBeenCalled();
     expect(migrateRegistrySpy).not.toHaveBeenCalled();
+    expect(migrateGoalSpy).not.toHaveBeenCalled();
+    expect(migrateLearnedSpy).not.toHaveBeenCalled();
 
     const res = await app.inject({ method: "GET", url: "/health" });
     expect(res.statusCode).toBe(200);

@@ -33,6 +33,57 @@ export type ConsoleEvent =
   | { type: "proposal.decided"; id: string; status: string }
   | { type: "kill.changed"; killed: boolean };
 
+// W2 (Revenue Home) — mirrors of merchant-backend's home/activity wire contract
+// (src/home/read-model.ts's HomeSummary, src/routes/activity.ts's ActivityEntry,
+// @palup/platform-ports' PrimaryGoal). Plain mirrors, not invented; same rationale as AuditEntry.
+
+export type PrimaryGoalKind =
+  | "recover_carts"
+  | "close_more_chat_sales"
+  | "grow_repeat_purchases"
+  | "increase_aov"
+  | "win_back_lapsed";
+
+export interface PrimaryGoal {
+  kind: PrimaryGoalKind;
+  note?: string;
+  setBy: string;
+  setAt: string;
+}
+
+export interface PlayMeasurement {
+  play: string;
+  incrementalLiftUsd: number;
+  relativeLift: number;
+  confidence: number;
+  underpowered: boolean;
+  method: string;
+}
+
+export interface OnboardingHandoff {
+  headline: string;
+  items: Array<{ label: string; detail: string }>;
+  sourceNote: string;
+}
+
+export type NetReason = "ok" | "attribution_underpowered" | "cost_not_metered" | "cost_not_fully_priced";
+
+export interface HomeSummary {
+  period: string;
+  goal: PrimaryGoal | null;
+  attributed: { totalUsd: number; entryCount: number; plays: PlayMeasurement[]; underpowered: boolean };
+  cost: { metered: boolean; totalUsd: number; fullyPriced: boolean; unpricedModels: string[]; events: number };
+  net: { value: number | null; reason: NetReason };
+  handoff: OnboardingHandoff | null;
+}
+
+export interface ActivityEntry {
+  seq: number;
+  at: string;
+  actor: string;
+  action: string;
+}
+
 /** Thrown on a 409 (`ProposalStore.transition`'s optimistic-lock conflict, or a terminal-state
  *  reject). `currentVersion` is `-1` when the server didn't echo one (e.g. the reject route's
  *  409s, which W1-API never attaches a version to) — callers should re-`getApproval` rather than
@@ -81,6 +132,47 @@ export class ApiError extends Error {
   }
 }
 
+// W3 (Learned/Memory & Voice) — mirrors of merchant-backend's `/learned` wire contract
+// (src/routes/learned.ts's `SafeLearnedInsight`/`TeachBody`/`PinBody`). `LearnedCategory` mirrors
+// @palup/platform-ports' own type (a plain string union, safe to duplicate rather than import,
+// same call as AuditEntry above: routes/learned.ts is behind a Fastify service, not a types
+// barrel this frontend package should depend on).
+
+export type LearnedCategory = "customers" | "products" | "voice" | "policies";
+
+export interface LearnedInsight {
+  id: string;
+  category: LearnedCategory;
+  tier: "private" | "aggregate";
+  origin: "synthesized" | "merchant_taught";
+  text: string;
+  source: string;
+  sampleSize: number;
+  confidence: "medium" | "high";
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeachRequest {
+  category: LearnedCategory;
+  text: string;
+  guardrailKey?: string;
+  stance?: "tighten" | "loosen";
+}
+
+/** Mirrors `GET /learned/export`'s response envelope (routes/learned.ts) — deliberately NOT a bare
+ *  `LearnedInsight[]`: the merchant-owns-their-brain promise (spec §10) needs `portabilityNote`
+ *  stated honestly alongside the data (the export mechanism is real today; the signed, portable,
+ *  legally-reviewed FORMAT is still legal-deferred — this type carries that caveat verbatim rather
+ *  than letting a screen imply more than the backend actually guarantees). */
+export interface LearnedExport {
+  tenantId: string;
+  exportedAt: string;
+  insights: LearnedInsight[];
+  portabilityNote: string;
+}
+
 export interface ApiClient {
   listApprovals(q: {
     status?: ProposalStatus | string;
@@ -94,6 +186,14 @@ export interface ApiClient {
   kill(reason: string): Promise<void>;
   unkill(): Promise<void>;
   listAudit(cursor?: string): Promise<{ items: AuditEntry[]; cursor?: string }>;
+  getHomeSummary(): Promise<HomeSummary>;
+  getActivity(cursor?: string): Promise<{ items: ActivityEntry[] }>;
+  setPrimaryGoal(kind: PrimaryGoalKind, note?: string): Promise<{ goal: PrimaryGoal }>;
+  listLearned(q: { category?: LearnedCategory }): Promise<{ items: LearnedInsight[] }>;
+  teachLearned(req: TeachRequest): Promise<{ insight: LearnedInsight }>;
+  pinLearned(id: string, pinned: boolean): Promise<LearnedInsight>;
+  deleteLearned(id: string): Promise<{ removed: boolean }>;
+  exportLearned(): Promise<LearnedExport>;
   /** Subscribes to the tenant's SSE `/events` stream; returns an unsubscribe function. Best-effort
    *  live nudge only (events.ts's own contract) — a dropped/never-opened stream never loses data,
    *  because the store (`listApprovals`/`getKill`) stays the source of truth (see
@@ -204,6 +304,36 @@ export function makeApiClient(args: MakeApiClientArgs): ApiClient {
     async listAudit(cursor) {
       const query = toQuery({ cursor });
       return request<{ items: AuditEntry[]; cursor?: string }>(`/audit${query}`);
+    },
+    async getHomeSummary() {
+      return request<HomeSummary>(`/home/summary`);
+    },
+    async getActivity(cursor) {
+      return request<{ items: ActivityEntry[] }>(`/activity${toQuery({ cursor })}`);
+    },
+    async setPrimaryGoal(kind, note) {
+      return request<{ goal: PrimaryGoal }>(`/home/goal`, {
+        method: "PUT",
+        body: JSON.stringify(note === undefined ? { kind } : { kind, note }),
+      });
+    },
+    async listLearned(q) {
+      return request<{ items: LearnedInsight[] }>(`/learned${toQuery({ category: q.category })}`);
+    },
+    async teachLearned(req) {
+      return request<{ insight: LearnedInsight }>(`/learned`, { method: "POST", body: JSON.stringify(req) });
+    },
+    async pinLearned(id, pinned) {
+      return request<LearnedInsight>(`/learned/${encodeURIComponent(id)}/pin`, {
+        method: "POST",
+        body: JSON.stringify({ pinned }),
+      });
+    },
+    async deleteLearned(id) {
+      return request<{ removed: boolean }>(`/learned/${encodeURIComponent(id)}`, { method: "DELETE" });
+    },
+    async exportLearned() {
+      return request<LearnedExport>(`/learned/export`);
     },
     openEvents(onEvent, onStreamError) {
       let closed = false;

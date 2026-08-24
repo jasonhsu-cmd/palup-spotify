@@ -128,6 +128,13 @@ export {
   InMemoryMerchantRulesStore,
   clampToFloor,
 } from "./merchant-rules-store.js";
+export type {
+  PrimaryGoalKind,
+  PrimaryGoal,
+  PrimaryGoalSetInput,
+  PrimaryGoalStore,
+} from "./primary-goal-store.js";
+export { PRIMARY_GOAL_KINDS, InMemoryPrimaryGoalStore } from "./primary-goal-store.js";
 export type { VectorPort, VectorRecord, VectorQuery, VectorMatch, VectorListItem, VectorListOpts } from "./vector-port.js";
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type { ProductFactsPort, ProductFact } from "./product-facts-port.js";
@@ -169,5 +176,19 @@ export type {
 export { EMPTY_ARM_AGG, MIN_EXPOSURES_PER_ARM, computeIncrementalLift } from "./outcome-ledger.js";
 export type { CartPort, CartLine, CartCheckout } from "./cart-port.js";
 export { b64url, b64urlDecode, hmacSign, constantTimeEqual } from "./token-codec.js";
+export type {
+  LearnedCategory, LearnedTier, LearnedOrigin, ConfidenceTier, LearnedGrounding, LearnedInsight,
+  InsightCandidate, GroundingVerdict, TeachingStance, LearnedListFilter, LearnedStore,
+} from "./learned-store.js";
+export {
+  gradeInsight, isSafetyFloorViolation, SAFETY_CRITICAL_GUARDRAILS,
+  INSIGHT_SURFACE_MIN_SAMPLE, INSIGHT_HIGH_CONFIDENCE_MIN_SAMPLE,
+  InMemoryLearnedStore, LearnedInsightNotFoundError,
+} from "./learned-store.js";
+export type { AggregatePriorContribution, AggregatePrior, AggregatePriorStore } from "./aggregate-priors.js";
+export {
+  AGGREGATE_LEARNING_ADR_ACCEPTED, isAggregateLearningEnabled, MIN_CONTRIBUTING_MERCHANTS,
+  anonymizePrivateInsight, InMemoryAggregatePriorStore,
+} from "./aggregate-priors.js";
 // NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
 // into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.

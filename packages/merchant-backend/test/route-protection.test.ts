@@ -55,13 +55,23 @@ const KNOWN_DATA_ROUTES: { method: string; url: string }[] = [
   { method: "POST", url: "/approvals/p1/approve" },
   { method: "POST", url: "/approvals/p1/reject" },
   { method: "GET", url: "/rules" },
+  { method: "GET", url: "/home/summary" },
+  { method: "PUT", url: "/home/goal" },
   { method: "GET", url: "/kill" },
   { method: "POST", url: "/unkill" },
   { method: "GET", url: "/audit" },
+  { method: "GET", url: "/activity" },
   { method: "GET", url: "/events" },
   { method: "GET", url: "/me" },
   { method: "GET", url: "/_probe/money" },
   { method: "POST", url: "/_internal/run-winback" },
+  { method: "POST", url: "/_internal/run-insights" },
+  { method: "POST", url: "/_internal/propose-voice" },
+  { method: "GET", url: "/learned" },
+  { method: "POST", url: "/learned" },
+  { method: "POST", url: "/learned/l1/pin" },
+  { method: "DELETE", url: "/learned/l1" },
+  { method: "GET", url: "/learned/export" },
 ];
 
 describe("every registered route is protected by construction", () => {

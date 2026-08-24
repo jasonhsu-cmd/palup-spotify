@@ -6,6 +6,7 @@
     { "path": "../platform-ports/tsconfig.json" },
     { "path": "../state-postgres/tsconfig.json" },
     { "path": "../identity-shopify/tsconfig.json" },
-    { "path": "../agent-runtime/tsconfig.json" }
+    { "path": "../agent-runtime/tsconfig.json" },
+    { "path": "../widget-memory/tsconfig.json" }
   ]
 }

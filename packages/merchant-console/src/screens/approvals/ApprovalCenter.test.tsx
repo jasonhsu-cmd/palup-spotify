@@ -60,6 +60,28 @@ function fakeApi(initialItems: Proposal[]): ApiClient & { emit: (e: ConsoleEvent
       killed = false;
     }),
     listAudit: vi.fn(async () => ({ items: [auditEntry()] })),
+    getHomeSummary: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    getActivity: vi.fn(async () => ({ items: [] })),
+    setPrimaryGoal: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    listLearned: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    teachLearned: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    pinLearned: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    deleteLearned: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    exportLearned: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
     openEvents: vi.fn((onEvent: (e: ConsoleEvent) => void) => {
       listener = onEvent;
       return () => {

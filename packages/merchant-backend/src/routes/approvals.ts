@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { requirePermission } from "@palup/identity-shopify";
-import type { CampaignCommsPort, MerchantRulesStore, ProposalCategory, ProposalStatus, ProposalStore, RuntimeStatePort } from "@palup/platform-ports";
+import type { CampaignCommsPort, LearnedStore, MerchantRulesStore, ProposalCategory, ProposalStatus, ProposalStore, RuntimeStatePort } from "@palup/platform-ports";
 import {
   KillSwitchError,
   ProposalNotFoundError,
@@ -62,6 +62,11 @@ export interface ApprovalsRoutesDeps {
   /** Needed by approve (T3): `buildEngineDeps` resolves the proposal's action type to an executor
    *  (e.g. `send_campaign` -> `campaignExecutor(comms)`). */
   comms: CampaignCommsPort;
+  /** W3 Task 6: needed by approve for a `change_voice`/`autonomy_scope` proposal —
+   *  `buildEngineDeps` resolves it to `voiceChangeExecutor(learnedStore, ...)`, the ONLY place a
+   *  voice change is ever written, and only reachable here (on approval), never on proposal
+   *  creation (`internal-voice.ts`'s route never touches this store). */
+  learnedStore: LearnedStore;
   /** T7: published to on a successful approve/reject so an open `GET /events` connection for this
    *  tenant live-updates. Best-effort — see `events.ts`'s module header; never affects the response
    *  or the store's own transition, which has already committed by the time we publish. */
@@ -221,6 +226,7 @@ export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRou
           actionType: proposal.action.type,
           category: proposal.category,
           comms: deps.comms,
+          learnedStore: deps.learnedStore,
         });
 
         try {
