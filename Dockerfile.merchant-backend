@@ -1,6 +1,8 @@
-# Merchant-backend container for staging (Cloud Run). Runs the F3 merchant-plane service via tsx (no
-# build step). Mirrors ./Dockerfile (widget backend) and Dockerfile.control-plane exactly except for the
-# port and entrypoint — see those files first if you're changing this one.
+# Merchant-backend container for staging (Cloud Run). Runs the F3 merchant-plane service via tsx
+# (merchant-backend itself has no build step) and ALSO serves the @palup/merchant-console SPA it builds
+# below, so one Cloud Run service serves both the API and the embedded UI. Mirrors ./Dockerfile (widget
+# backend) and Dockerfile.control-plane exactly except for the port, entrypoint, and the console build
+# step — see those files first if you're changing this one.
 FROM node:22-slim
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH CI=true PORT=8991 HOST=0.0.0.0
 RUN corepack enable
@@ -10,6 +12,14 @@ WORKDIR /app
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
 COPY packages ./packages
 RUN pnpm install --frozen-lockfile
+
+# Build the merchant-console SPA (index.html + hashed assets/*) so this same Cloud Run service can
+# serve it at `/` alongside the API — see server.ts's "Merchant-console SPA" block, which reads the
+# bundle from `packages/merchant-console/dist-web` (vite.config.ts's `build.outDir`, distinct from
+# `tsc -b`'s plain `dist/` so the two build steps don't collide). `merchant-backend` itself has no
+# build step (it runs via `tsx` straight from `src/`, per the CMD below) — this is the ONLY build this
+# image needs.
+RUN pnpm --filter @palup/merchant-console build
 
 EXPOSE 8991
 # Cloud Run sets $PORT; server.ts reads it (falls back to 8991 locally). HOST=0.0.0.0 above is what lets

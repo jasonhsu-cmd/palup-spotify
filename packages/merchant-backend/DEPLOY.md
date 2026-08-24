@@ -13,6 +13,18 @@ distinct from the shopper-facing `palup-widget-staging` (widget-backend) and the
 `palup-control-staging` (control-plane, operator-only). See `docs/adr/0002-two-plane-agent-architecture.md`
 for why these stay separate services with separate ingress postures.
 
+**This service now also serves the merchant-console SPA itself**, at `/` — one Cloud Run service, one
+origin, for both the API and the embedded UI. `server.ts`'s "Merchant-console SPA" block serves the
+`@palup/merchant-console` Vite bundle (`packages/merchant-console/dist-web`, built by
+`Dockerfile.merchant-backend`'s `pnpm --filter @palup/merchant-console build` step) from routes
+registered OUTSIDE `merchantPlane` — `/` and `/index.html` (the app shell) and `/assets/*` (hashed
+JS/CSS chunks, via `@fastify/static`), plus a `setNotFoundHandler` fallback so client-side
+(react-router) routes resolve to the same shell. This is safe to leave unauthenticated: it's pure
+app-shell code with no merchant/customer data — App Bridge only mints a session token AFTER the shell
+has booted, so it has to be reachable before any token exists. Every DATA route is untouched and stays
+behind `requireMerchant` inside `merchantPlane`; `test/route-protection.test.ts` and
+`test/console-serve.test.ts` both assert this structurally and behaviorally.
+
 ## Build
 
 Local sanity build (optional — `gcloud run deploy --source` below builds via Cloud Build using the same
@@ -112,9 +124,12 @@ this document — see `docs/DEPLOY.md` for the standing "production is never aut
 applies here unchanged.
 
 The mounted route set (all merchant-plane routes below fail-close to 401 with no bearer session token —
-`/health` is the only exception; see `test/route-protection.test.ts`):
+`/health` and the merchant-console SPA routes are the only exceptions; see `test/route-protection.test.ts`
+and `test/console-serve.test.ts`):
 
 - `GET /health` — unauthenticated liveness check
+- `GET /`, `GET /index.html`, `GET /assets/*`, and the SPA client-route fallback — the public
+  merchant-console app shell (no merchant/customer data; see the "What this service is" section above)
 - `GET /me` — the authenticated principal; `GET /_probe/money` — an `approve_money` RBAC probe
 - `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, `POST /approvals/:id/reject` —
   the Approval Center list/detail/approve/reject surface (approve/reject gated on `approve_money`)
