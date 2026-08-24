@@ -33,6 +33,7 @@ import {
   createInMemoryProductFactsStore,
   createInMemoryCatalogProductStore,
   createInMemoryQueue,
+  createInMemoryStoreProfileStore,
 } from "@palup/platform-ports";
 import {
   createMemoryService,
@@ -900,7 +901,9 @@ export async function buildServer(opts?: {
   // by `createLocalCatalogGroundingPort`'s own interface but is never invoked on the `getProductsByIds`
   // path this dep calls, so reusing `grounding` here (rather than constructing a second shell source) is
   // safe. Absent (flag off) ⇒ `createCatalogRetriever` gets no `localHydration` dep at all — byte-identical
-  // to before this task.
+  // to before this task. `storeProfile` (Task 4) is likewise required by the interface but unused on this
+  // `getProductsByIds`-only path — an inert in-memory placeholder satisfies the type; wiring a real,
+  // persistent `StoreProfilePort` into this composition root is Task 7/9's job, not this one's.
   const localCatalogHydration = CATALOG_LOCAL_SERVING && hasLocalCatalog
     ? {
         hasLocalCatalog,
@@ -908,6 +911,7 @@ export async function buildServer(opts?: {
           catalogProduct: localCatalogProduct,
           productFacts: localProductFacts,
           shellSource: grounding,
+          storeProfile: createInMemoryStoreProfileStore(),
         }).getProductsByIds,
       }
     : undefined;
