@@ -8,6 +8,7 @@ import { RevenueHome } from "./screens/home/RevenueHome";
 import { LearnedView } from "./screens/learned/LearnedView";
 import { RulesEditor } from "./screens/rules/RulesEditor";
 import { OrdersView } from "./screens/orders/OrdersView";
+import { PaymentsScreen } from "./screens/payments/PaymentsView";
 
 // W1-UI Task 1: wires the shell + routing + a REAL (API-backed) pending-approval count. The
 // Approval Center screen itself (queue/detail/approve/reject/kill/audit/live-reconcile,
@@ -30,7 +31,6 @@ const STUB_ROUTES: Array<{ path: string; title: string }> = [
   { path: "/campaigns", title: "Campaigns" },
   { path: "/outreach", title: "Outreach" },
   { path: "/upsell", title: "Upsell" },
-  { path: "/payments", title: "Payments & Payouts" },
   { path: "/controls", title: "Agent Controls" },
   { path: "/benchmarks", title: "Benchmarks" },
   { path: "/share", title: "Share Results" },
@@ -77,6 +77,7 @@ export function App() {
         <Route path="/learned" element={<LearnedView api={api} />} />
         <Route path="/rules" element={<RulesEditor api={api} />} />
         <Route path="/orders" element={<OrdersView api={api} />} />
+        <Route path="/payments" element={<PaymentsScreen api={api} />} />
         {STUB_ROUTES.map((r) => (
           <Route key={r.path} path={r.path} element={<StubScreen title={r.title} />} />
         ))}
