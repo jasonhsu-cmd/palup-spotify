@@ -26,6 +26,7 @@ import { createRuntimeStore, PostgresMerchantRegistry, PostgresMerchantRulesStor
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
 import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
+import { registerInternalInsightsRoutes } from "./routes/internal-insights.js";
 import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
@@ -289,6 +290,7 @@ export async function buildServer(opts?: {
     merchantPlane.addHook("preHandler", requireMerchant(identity));
     registerMeRoutes(merchantPlane);
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
+    registerInternalInsightsRoutes(merchantPlane, { learnedStore });
     registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus });
     registerKillRoutes(merchantPlane, { state: store, bus });
     registerAuditRoutes(merchantPlane, { state: store });

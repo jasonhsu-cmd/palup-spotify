@@ -65,6 +65,7 @@ const KNOWN_DATA_ROUTES: { method: string; url: string }[] = [
   { method: "GET", url: "/me" },
   { method: "GET", url: "/_probe/money" },
   { method: "POST", url: "/_internal/run-winback" },
+  { method: "POST", url: "/_internal/run-insights" },
   { method: "GET", url: "/learned" },
   { method: "POST", url: "/learned" },
   { method: "POST", url: "/learned/l1/pin" },
