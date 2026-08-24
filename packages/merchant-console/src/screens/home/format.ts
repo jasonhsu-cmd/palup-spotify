@@ -6,9 +6,14 @@ import type { PrimaryGoalKind } from "../../app/api";
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
-/** "$1,234.56"; negatives use the typographic minus the mockup uses ("−$0.50"). */
+/** "$1,234.56"; negatives use the typographic minus the mockup uses ("−$0.50"). Normalizes
+ * negative zero first: `-0 < 0` is `false` in JS, so a bare `-0` falls through to
+ * `usd.format(-0)`, and `Intl.NumberFormat` renders that as "-$0.00" with an ASCII minus (the
+ * exact case a caller like `fmtUsd(-cost.totalUsd)` hits whenever cost is exactly 0). Coercing
+ * `-0` to `0` up front keeps that case as plain "$0.00". */
 export function fmtUsd(n: number): string {
-  return n < 0 ? `−${usd.format(Math.abs(n))}` : usd.format(n);
+  const v = n === 0 ? 0 : n;
+  return v < 0 ? `−${usd.format(Math.abs(v))}` : usd.format(v);
 }
 
 export const GOAL_LABELS: Record<PrimaryGoalKind, string> = {
