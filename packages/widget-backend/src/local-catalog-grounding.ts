@@ -23,21 +23,53 @@ import { MAX_CATALOG_PRODUCTS } from "./shopify-grounding.js";
 // KV that Task 3's unified ingestion populates from the Admin API at backfill time — so the S2 render path
 // (`getShell`) makes NO Shopify/shellSource call at all. `getContext` still falls back to `shellSource` for
 // its own brand/policy fields (out of Task 4's scope — the whole-catalog path already carries the identical
-// degrade-to-neutral behavior below and is unaffected by this change).
+// degrade-to-neutral behavior below and is unaffected by this change) UNLESS `unifiedLocalShell` is set —
+// see Task 7 below.
 //
 // Historical note (superseded above for `getShell` only): the plan originally assumed Task 7 would write a
 // per-tenant profile KV this port could read purely locally; Task 7 (durable-catalog-sync) did not, so
 // `getContext`'s brand/policy fell back to `shellSource.getShell` — the existing, cheap storefront shell
 // fetch — as a narrow, deliberate exception. `getContext`'s products are, and remain, entirely unaffected
 // by any shellSource/store_profile failure (the durability invariant that matters for §8a invariant 11).
+//
+// TASK 7 (credential-enrollment-unification, CATALOG_UNIFIED, ADR-0023 D1) — closes the gap the note above
+// describes as a "narrow, deliberate exception": when `unifiedLocalShell` is true, `getContext`'s own
+// brand+policy ALSO read from `storeProfile` (the exact same `readLocalShell` helper `getShell` calls),
+// retiring the residual Storefront call this file's header used to say `getContext` still made. Threaded as
+// a per-construction FLAG (not "always prefer storeProfile") so every EXISTING caller of this port — which
+// builds it with `localServingEnabled` but no unified cutover — keeps its current, tested `shellSource`
+// behavior byte-for-byte; only the composition root's CATALOG_UNIFIED-gated construction sets it.
 
 export interface LocalCatalogGroundingDeps {
   catalogProduct: CatalogProductPort;
   productFacts: ProductFactsPort;
-  /** Brand + policy source for `getContext` only (see file banner) — `getShell` no longer calls this. */
+  /** Brand + policy source for `getContext` when NOT unified (see file banner) — `getShell` never calls
+   *  this, and neither does `getContext` when `unifiedLocalShell` is true. */
   shellSource: Pick<GroundingPort, "getShell">;
   /** Task 4: the local, tenant-scoped brand + policy record `getShell` serves from — no Shopify call. */
   storeProfile: Pick<StoreProfilePort, "get">;
+  /**
+   * Task 7 (CATALOG_UNIFIED) — when true, `getContext` reads brand+policy from `storeProfile` (via the
+   * SAME `readLocalShell` helper `getShell` uses) instead of `shellSource.getShell`. Absent/false (the
+   * default) ⇒ `getContext` is byte-identical to before this task — still `shellSource`.
+   */
+  unifiedLocalShell?: boolean;
+}
+
+/**
+ * Task 4/7 — read brand+policy from the local `storeProfile` store, degrading to the SAME neutral default
+ * on a missing profile OR a lookup failure (never a throw). Shared by `getShell` (always) and `getContext`
+ * (only when `unifiedLocalShell` is set) so the two paths can never drift into two different "local shell"
+ * implementations.
+ */
+async function readLocalShell(deps: Pick<LocalCatalogGroundingDeps, "storeProfile">, tenantId: string): Promise<GroundingShell> {
+  try {
+    const profile = await deps.storeProfile.get(tenantId);
+    if (!profile) return { tenantId, brandName: FALLBACK_BRAND, policy: FALLBACK_POLICY };
+    return { tenantId, brandName: profile.brandName, policy: profile.policy };
+  } catch {
+    return { tenantId, brandName: FALLBACK_BRAND, policy: FALLBACK_POLICY };
+  }
 }
 
 /** Mirrors `mapStorefrontToContext`'s own fallback brand string (shopify-grounding.ts) so a shell-source
@@ -107,32 +139,29 @@ export function createLocalCatalogGroundingPort(deps: LocalCatalogGroundingDeps)
       if (records.length > MAX_CATALOG_PRODUCTS) throw new LocalCatalogCeilingExceededError(tenantId);
       const products = await hydrate(deps, tenantId, records);
 
-      // Durability invariant: PRODUCTS never depend on this call succeeding. A shell-source failure
-      // (Shopify down, credential revoked, …) degrades brand/policy to a neutral default; the products
-      // above are already resolved and are returned regardless.
+      // Durability invariant: PRODUCTS never depend on this call succeeding. A shell-source/store_profile
+      // failure (Shopify down, credential revoked, missing profile row, …) degrades brand/policy to a
+      // neutral default; the products above are already resolved and are returned regardless.
       let brandName = FALLBACK_BRAND;
       let policy = FALLBACK_POLICY;
       try {
-        const shell = await deps.shellSource.getShell(tenantId);
+        // Task 7 (CATALOG_UNIFIED): unified reads the SAME local source `getShell` does, below — no
+        // Shopify/shellSource call at all when the flag is set. Flag absent/false ⇒ byte-identical to
+        // before this task (still `shellSource.getShell`).
+        const shell = deps.unifiedLocalShell ? await readLocalShell(deps, tenantId) : await deps.shellSource.getShell(tenantId);
         brandName = shell.brandName;
         policy = shell.policy;
       } catch {
-        /* brand/policy degrade to the neutral default above; products are unaffected */
+        /* brand/policy degrade to the neutral default above; products are unaffected. `readLocalShell`
+           never throws (it degrades internally) — this catch remains for the `shellSource` branch. */
       }
       return { tenantId, brandName, products, policy };
     },
     async getShell(tenantId: string): Promise<GroundingShell> {
       // Task 4: served entirely from the local `store_profile` store — no Shopify/shellSource call on
-      // this path. Symmetric with getContext's own degrade: a missing profile OR a store_profile lookup
-      // failure fails CLOSED to the same neutral default rather than throwing (coordinator review fix #1
-      // still holds — this port never surfaces a raw upstream failure to the caller).
-      try {
-        const profile = await deps.storeProfile.get(tenantId);
-        if (!profile) return { tenantId, brandName: FALLBACK_BRAND, policy: FALLBACK_POLICY };
-        return { tenantId, brandName: profile.brandName, policy: profile.policy };
-      } catch {
-        return { tenantId, brandName: FALLBACK_BRAND, policy: FALLBACK_POLICY };
-      }
+      // this path. See `readLocalShell` for the shared degrade-to-neutral logic (coordinator review fix
+      // #1 still holds — this port never surfaces a raw upstream failure to the caller).
+      return readLocalShell(deps, tenantId);
     },
     async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
       if (ids.length === 0) return [];

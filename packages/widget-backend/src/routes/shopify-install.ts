@@ -170,6 +170,16 @@ export interface ShopifyInstallDeps {
   pendingTtlSeconds?: number;
   /** Injectable only so a test can pin the generated embed key; production uses the CSPRNG default. */
   newEmbedKey?: () => string;
+  /**
+   * Task 7 (CATALOG_UNIFIED cutover, ADR-0023 D1) — when true, the Admin offline token (`grant.accessToken`,
+   * custodied via `adminTokens` below) is the SOLE credential this install produces: the delegate
+   * (Storefront) token is never minted (`createDelegateAccessToken` is not called) and never custodied
+   * (`credentials.put` is not called). Absent/false (the default) ⇒ byte-identical to before this task — the
+   * delegate is minted and custodied exactly as always. Does NOT relax `credentials` being required for the
+   * routes to register at all (see the header) — a deployment still wires a custody sink even when this flag
+   * is on; that sink is simply never called on this path while the flag is set.
+   */
+  catalogUnified?: boolean;
 }
 
 interface PendingInstall {
@@ -422,19 +432,31 @@ async function completeInstallInner(
   if (!grant) return { ok: false, failed: "exchange_failed" };
   if (!grantedScopesCover(deps.delegateScopes, grant.grantedScopes)) return { ok: false, failed: "scopes_not_granted" };
 
-  const delegate = await createDelegateAccessToken(
-    { shopDomain, parentAccessToken: grant.accessToken, delegateScopes: deps.delegateScopes },
-    deps.fetchFn,
-  );
-  if (!delegate) return { ok: false, failed: "delegate_failed" };
+  // Task 7 (CATALOG_UNIFIED, ADR-0023 D1) — under the unified cutover the Admin offline token (custodied
+  // below via `deps.adminTokens`) is the SOLE credential; the delegate (Storefront) token is never minted
+  // and never custodied. NOT REMOVED — gated (Task 8 handles removal-guards once one release has passed
+  // with the flag proven on staging). Flag absent/false ⇒ this whole block runs exactly as before this task.
+  let delegateScopesGranted: readonly string[] = deps.delegateScopes;
+  if (!deps.catalogUnified) {
+    const delegate = await createDelegateAccessToken(
+      { shopDomain, parentAccessToken: grant.accessToken, delegateScopes: deps.delegateScopes },
+      deps.fetchFn,
+    );
+    if (!delegate) return { ok: false, failed: "delegate_failed" };
 
-  // Custody first (see the ordering note). B2's `put` audits itself, atomically with its own write.
-  try {
-    await deps.credentials.put(tenantId, delegate.accessToken, { actor: "system:shopify-install" });
-  } catch {
-    // The error is swallowed on purpose: it is raised by a component holding the token, and this function's
-    // result is rendered to an attacker-reachable response.
-    return { ok: false, failed: "custody_failed" };
+    // Custody first (see the ordering note). B2's `put` audits itself, atomically with its own write.
+    try {
+      await deps.credentials.put(tenantId, delegate.accessToken, { actor: "system:shopify-install" });
+    } catch {
+      // The error is swallowed on purpose: it is raised by a component holding the token, and this function's
+      // result is rendered to an attacker-reachable response.
+      return { ok: false, failed: "custody_failed" };
+    }
+  } else {
+    // No delegate was requested or granted this install — the audit record below must say so honestly
+    // rather than implying delegate scopes were minted (kept as the SAME key, `delegateScopes`, so the
+    // audit `input`'s EXACT-key-allowlist test does not need a second shape to assert).
+    delegateScopesGranted = [];
   }
 
   // Task 5 (ADR-0022 F2/F6/F7) — capture the PARENT Admin offline token too, once one's caller has opted
@@ -532,7 +554,7 @@ async function completeInstallInner(
   // later "just record the code / the token / the hmac for debugging" change fails a test rather than
   // shipping. `delegateScopes` is recorded because WHAT privilege was granted is the governance-relevant
   // fact; the credential itself is not, and neither is anything derived from it.
-  const auditInput = { tenantId, shopDomain, region: existing?.region ?? deps.region, delegateScopes: [...deps.delegateScopes] };
+  const auditInput = { tenantId, shopDomain, region: existing?.region ?? deps.region, delegateScopes: [...delegateScopesGranted] };
   // #179 — a reversalPath must name something that EXISTS and that an operator can run. It names the CLI
   // (jobs/merchant.ts) FIRST, exactly as armKill does (runtime-kill-registry.ts:66-70) and for the same
   // reason: deploy-staging.yml deploys `palup-widget-staging` only, and the control plane is deployed

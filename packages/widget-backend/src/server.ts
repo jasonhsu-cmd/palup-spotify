@@ -15,7 +15,7 @@ import {
 import { DEFAULT_POLICY, normalizeHistory, OFFER_CHECK_AGENT_TYPE } from "@palup/widget-brain";
 import { createCatalogRetriever, CATALOG_RETRIEVAL_AGENT_TYPE } from "./catalog-retriever.js";
 import { classifyGuardSignals, GUARD_CLASSIFIER_AGENT_TYPE } from "./guard-classifier.js";
-import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort, Arm, CartLine, CatalogProductPort } from "@palup/platform-ports";
+import type { RuntimeStatePort, ModelPort, VectorPort, Principal, MerchantRegion, MerchantRegistryPort, QueuePort, Arm, CartLine, CatalogProductPort, StoreProfilePort } from "@palup/platform-ports";
 import {
   createWidgetTokenIdentity,
   mintWidgetToken,
@@ -51,10 +51,12 @@ import {
   tombstoneKey,
   mergeGuestIntoAccount,
 } from "@palup/widget-memory";
-import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, PostgresCatalogProductStore, createMerchantCredentialStore, createAdminTokenStore, accumulateArmTally, type Sql, type ConsentRecord, type AdminTokenStore } from "@palup/state-postgres";
+import { createRuntimeStore, createVectorStore, matchedKill, matchedCostCap, catalogRetrievalEnabledFor, RUNTIME_AGENT_TYPE, recordConsent, lookupConsent, lookupHealthDisclosure, revokeGuest, isGuestRevoked, PostgresMerchantRegistry, PostgresProductFactsStore, PostgresCatalogProductStore, PostgresStoreProfileStore, createMerchantCredentialStore, createAdminTokenStore, accumulateArmTally, type Sql, type ConsentRecord, type AdminTokenStore } from "@palup/state-postgres";
 import { ADMIN_SYNC_SCOPES } from "./shopify-webhook-identity.js";
 import { createModelPort, createGroundingPort, createCommercePort, createLocalCatalogDecision } from "./model.js";
 import { createLocalCatalogGroundingPort } from "./local-catalog-grounding.js";
+import { AdminTokenReauthRequiredError } from "./admin-token-refresh.js";
+import { runCatalogSyncScheduler, type CatalogSyncSchedulerDeps } from "./jobs/catalog-sync-scheduler.js";
 import { createRuntimeSessionStore } from "./session-store.js";
 import { deriveServingSignals, classifyDevice } from "./signals.js";
 import { deriveLifecycle } from "./lifecycle.js";
@@ -104,7 +106,7 @@ import { mintOrderJoinToken } from "./order-join-token.js";
 import { createReconcileCoalescer, CATALOG_RECONCILE_COALESCE_MS_DEFAULT } from "./catalog-reconcile-coalescer.js";
 import { createPubSubQueue, type PubSubClientLike } from "./pubsub-queue.js";
 import { registerPubSubPushRoute, type OidcVerifier } from "./routes/pubsub-push.js";
-import { reconcileByReason, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
+import { reconcileByReason, runCatalogIndex, shopifyCatalogByIdSource, shopifyCatalogSource } from "./jobs/catalog-index.js";
 import { makeMultiTenantCatalogProductAdminSource } from "./jobs/catalog-backfill.js";
 import { createChannelHealth } from "./channel-health.js";
 import { registerMemoryWritePushRoute } from "./routes/pubsub-push-memory.js";
@@ -371,6 +373,29 @@ export async function buildServer(opts?: {
    * (Task 9/13, unconditional — see their own gating notes at the call sites).
    */
   catalogProduct?: CatalogProductPort;
+  /**
+   * Task 7 (CATALOG_UNIFIED) test seam (mirrors `catalogProduct`): the durable `store_profile` (brand+
+   * policy) store. A missing override ⇒ the composition root builds its own — a real
+   * `PostgresStoreProfileStore` when a pool exists, else the in-memory reference adapter — but ONLY when
+   * `CATALOG_UNIFIED` is on; with the flag off this seam is unused and the pre-Task-7 inert per-call-site
+   * `createInMemoryStoreProfileStore()` defaults are byte-identical to before.
+   */
+  storeProfile?: StoreProfilePort;
+  /**
+   * Task 7 (CATALOG_UNIFIED) test/composition seams for the catalog-sync scheduler's `backfill`/`index`
+   * (catalog-sync-scheduler.ts's `CatalogSyncSchedulerDeps`). The scheduler itself has no live cron/HTTP
+   * trigger anywhere in this codebase yet (see that file's own "NOT WIRED INTO ANY LIVE CRON/SERVER HERE"
+   * banner) — standing one up, plus the real Admin-token-refresh-backed backfill composition it needs in
+   * production, is Task 9's "remaining composition wiring" (the plan's own words). This task's contribution
+   * is narrower: when `CATALOG_UNIFIED` is on, `catalogSyncSchedulerDeps` (exposed on the returned `app`,
+   * below) is built with the REAL `listActive`-backed `merchantRegistry` (Task 5) wired in, so that
+   * enumeration capability is exercised and regression-locked ahead of Task 9 rather than left to drift.
+   * Absent overrides ⇒ `backfill` throws a clearly-named "not yet composed" error if ever invoked in
+   * production (there is no live caller today), and `index` uses the ALREADY-real `reconcileDeps`
+   * composition (unchanged from what webhook reconcile already uses).
+   */
+  catalogSyncBackfill?: CatalogSyncSchedulerDeps["backfill"];
+  catalogSyncIndex?: CatalogSyncSchedulerDeps["index"];
   /** D2 test seam (mirrors `caaFetch`/`installFetch`): the Storefront API fetch `createGroundingPort`'s
    * Shopify adapter uses when read-back resolves a `live` credential. There is otherwise no way to inject
    * a fake Storefront fetch into `buildServer`. Prod uses the live Storefront call (`storefrontFetch()`,
@@ -565,7 +590,33 @@ export async function buildServer(opts?: {
   // instance from (same reasoning `reconcileFactsStore` already documents: this composition root already
   // builds more than one `ProductFactsPort` handle over the same underlying table/map, and that has never
   // been a correctness issue since every op is scoped by (tenantId, productId)).
-  const CATALOG_LOCAL_SERVING = process.env.CATALOG_LOCAL_SERVING !== "false";
+  // Task 7 (credential-enrollment-unification, ADR-0023 D1) — CATALOG_UNIFIED: the master cutover switch,
+  // layered ON TOP of the durable-catalog-sync seams above/below. Default OFF — unset/false is the
+  // rollback path and MUST stay byte-identical to every build before this task (every flag it forces/gates
+  // below says so explicitly at its own site). When true: (1) local serving is FORCED on for every
+  // backfilled tenant (see `CATALOG_LOCAL_SERVING`'s own line, just below — CATALOG_UNIFIED overrides the
+  // escape hatch rather than requiring an operator to ALSO flip CATALOG_LOCAL_SERVING); (2) the
+  // `store_profile` handle below is upgraded from the inert in-memory default to a real, durable store; (3)
+  // `getContext`'s brand+policy ALSO read that same local store (model.ts's `catalogUnified` opt →
+  // local-catalog-grounding.ts's `unifiedLocalShell`); (4) the Shopify install flow (below) stops minting/
+  // custodying the Storefront delegate token — the Admin offline token becomes the SOLE credential; (5) the
+  // catalog-sync scheduler composition (further below) is wired with the real `listActive`-backed registry.
+  const CATALOG_UNIFIED = process.env.CATALOG_UNIFIED === "true";
+  if (CATALOG_UNIFIED) {
+    console.warn(
+      "[boot] CATALOG_UNIFIED=true — the Admin-only credential-and-enrollment cutover is ON: local serving " +
+        "is forced for every backfilled tenant, brand/policy serve from the local store_profile store, and " +
+        "installs no longer mint a Storefront delegate token (ADR-0023 D1).",
+    );
+  }
+  // Task 8 (durable-catalog-sync, §3/§13.4) — LOCAL CATALOG SERVING, the durability invariant: a
+  // backfilled tenant's catalog PRODUCTS are served from `CatalogProductPort`/`ProductFactsPort` with no
+  // Shopify call, instead of the Storefront API. Default ON on staging (unset ⇒ true) per the brief;
+  // `CATALOG_LOCAL_SERVING=false` is the escape hatch back to the pre-Task-8 Shopify-or-fixtures-only path —
+  // UNLESS `CATALOG_UNIFIED` is on, in which case local serving is the whole point of the cutover and the
+  // escape hatch is overridden (an operator cannot half-enable the unified cutover by also setting
+  // CATALOG_LOCAL_SERVING=false; that combination would silently defeat D1's "serving is 100% local").
+  const CATALOG_LOCAL_SERVING = CATALOG_UNIFIED || process.env.CATALOG_LOCAL_SERVING !== "false";
   // Task 13 — CATALOG_BACKFILL_ENABLED gates the durable-catalog-sync WRITE plane: whether the catalog
   // webhook/poll delta-reconcile (Tasks 6/7, `reconcileDeps` below) is allowed to write into
   // `catalog_product` at all. Deliberately a SEPARATE flag from `CATALOG_LOCAL_SERVING` (the READ plane —
@@ -580,6 +631,18 @@ export async function buildServer(opts?: {
   if (localCatalogProduct instanceof PostgresCatalogProductStore) await localCatalogProduct.migrate();
   const localProductFacts = runtimeResult.sql ? new PostgresProductFactsStore(runtimeResult.sql) : createInMemoryProductFactsStore();
   if (localProductFacts instanceof PostgresProductFactsStore) await localProductFacts.migrate();
+  // Task 7 (CATALOG_UNIFIED, CARRY T4a) — the durable `store_profile` (brand+policy) handle, mirroring
+  // `localProductFacts` immediately above: a real `PostgresStoreProfileStore` when a pool exists, else the
+  // in-memory reference adapter, migrated at construction like every sibling store. Built ONLY when
+  // CATALOG_UNIFIED is on (gated, unlike `localProductFacts`/`localCatalogProduct` above) — with the flag
+  // off this stays `undefined` and every consumer below falls back to its OWN pre-Task-7 inert
+  // `createInMemoryStoreProfileStore()` default, byte-identical to before this task. ONE instance, shared
+  // into BOTH `createGroundingPort`'s `storeProfile` opt AND `localCatalogHydration`'s `storeProfile` below
+  // — never two independently-constructed (and potentially drifting) stores over the same table.
+  const catalogUnifiedStoreProfile: StoreProfilePort | undefined = CATALOG_UNIFIED
+    ? (opts?.storeProfile ?? (runtimeResult.sql ? new PostgresStoreProfileStore(runtimeResult.sql) : createInMemoryStoreProfileStore()))
+    : undefined;
+  if (catalogUnifiedStoreProfile instanceof PostgresStoreProfileStore) await catalogUnifiedStoreProfile.migrate();
   // Task 8b (durable-catalog-sync, spec §4.1) — the SAME memoized per-tenant "is this tenant backfilled"
   // decision Task 8 already built, constructed ONCE here so it can be shared between the grounding router
   // below and the catalog retriever's local-hydration seam further down — never a second, independently
@@ -593,6 +656,8 @@ export async function buildServer(opts?: {
     localServingEnabled: CATALOG_LOCAL_SERVING,
     catalogProduct: localCatalogProduct,
     productFacts: localProductFacts,
+    storeProfile: catalogUnifiedStoreProfile,
+    catalogUnified: CATALOG_UNIFIED,
     hasLocalCatalog,
   });
   // Pillar 5 (auto-brand) — resolve the merchant's real Shopify shop NAME (via the light `getShell`), cached
@@ -902,8 +967,10 @@ export async function buildServer(opts?: {
   // path this dep calls, so reusing `grounding` here (rather than constructing a second shell source) is
   // safe. Absent (flag off) ⇒ `createCatalogRetriever` gets no `localHydration` dep at all — byte-identical
   // to before this task. `storeProfile` (Task 4) is likewise required by the interface but unused on this
-  // `getProductsByIds`-only path — an inert in-memory placeholder satisfies the type; wiring a real,
-  // persistent `StoreProfilePort` into this composition root is Task 7/9's job, not this one's.
+  // `getProductsByIds`-only path. Task 7: reuses the SAME `catalogUnifiedStoreProfile` handle
+  // `createGroundingPort` was given above (never a second, independently-constructed store) when
+  // CATALOG_UNIFIED is on; an inert in-memory placeholder satisfies the type otherwise, byte-identical to
+  // before this task.
   const localCatalogHydration = CATALOG_LOCAL_SERVING && hasLocalCatalog
     ? {
         hasLocalCatalog,
@@ -911,7 +978,7 @@ export async function buildServer(opts?: {
           catalogProduct: localCatalogProduct,
           productFacts: localProductFacts,
           shellSource: grounding,
-          storeProfile: createInMemoryStoreProfileStore(),
+          storeProfile: catalogUnifiedStoreProfile ?? createInMemoryStoreProfileStore(),
         }).getProductsByIds,
       }
     : undefined;
@@ -987,6 +1054,21 @@ export async function buildServer(opts?: {
         `DISTINCT crypto scope from merchant-cred (ADR-0022 F2). Sync-plane only: serving reads only the ` +
         `delegate token. A production Admin-scope request (not yet built) should request exactly ` +
         `ADMIN_SYNC_SCOPES=${ADMIN_SYNC_SCOPES.join(",")}, never a write scope.`,
+    );
+  }
+  // Task 7 (CATALOG_UNIFIED, ADR-0023 D1) — a STRUCTURAL guard, mirroring the paired
+  // `catalogProduct`/`catalogProductAdminSource` refusal further below: D1 makes the Admin offline token
+  // the SOLE credential once unified, and the install flow (below) stops minting/custodying the delegate
+  // token under this flag — so an operator who flips CATALOG_UNIFIED=true without ALSO wiring Admin-token
+  // custody would strand every new install with NO credential at all (neither delegate nor Admin). Refuse
+  // to boot rather than silently accept installs nobody can ever serve. Never fires with the flag off
+  // (both are OFF everywhere today), so this changes nothing about the byte-identical rollback path.
+  if (CATALOG_UNIFIED && !adminTokens) {
+    throw new Error(
+      "CATALOG_UNIFIED=true requires ADMIN_TOKEN_CUSTODY_ENABLED=true (with a real admin-token store) — " +
+        "refusing to boot. Under the unified cutover the Admin offline token is the SOLE credential (ADR-0023 " +
+        "D1); the install flow no longer mints or custodies a Storefront delegate token, so without Admin-" +
+        "token custody a newly installed merchant would have no credential at all.",
     );
   }
   // Pillar 1 (serve-time read-through) — `reconcileDeps` built UNCONDITIONALLY (moved out of the
@@ -1497,6 +1579,11 @@ export async function buildServer(opts?: {
       checkRateLimit: (ipKey) => underLimit(store, { tenantId: "__mint__" }, `ip:${ipKey}`, RL_IP, RL_WINDOW),
       now: nowSec,
       webhookSubscriptions,
+      // Task 7 (CATALOG_UNIFIED, ADR-0023 D1) — off ⇒ byte-identical to before this task (delegate minted
+      // + custodied exactly as always). The boot guard above already refused to start if this is true
+      // without `adminTokens` also being wired, so the Admin token is guaranteed to be the sole credential
+      // custodied on this path when the flag is set.
+      catalogUnified: CATALOG_UNIFIED,
     });
   }
 
@@ -3869,6 +3956,76 @@ export async function buildServer(opts?: {
       };
     }
   });
+
+  // Task 7 (credential-enrollment-unification, CARRY T5) — the catalog-sync scheduler's deps
+  // (catalog-sync-scheduler.ts), wired with the REAL `listActive`-backed merchant registry (Task 5) so
+  // tenant discovery for the fleet backfill/embed-poll job goes through the governed registry enumeration
+  // rather than `SHOPIFY_STORES`/`parseStoreDomains`. Built ONLY when CATALOG_UNIFIED is on — off ⇒
+  // `catalogSyncSchedulerDeps` stays `undefined`, unchanged from before this task (nothing built this
+  // before Task 7 either).
+  //
+  // NOT INVOKED FROM ANYWHERE IN THIS FILE: `runCatalogSyncScheduler` has no live cron/HTTP trigger
+  // anywhere in this codebase today (see that file's own "NOT WIRED INTO ANY LIVE CRON/SERVER HERE"
+  // banner, and `retention-sweep.ts`'s identical situation) — standing one up, plus the real
+  // Admin-token-refresh-backed `backfill` composition production needs (Task 6's `getFreshAdminToken`
+  // lifecycle is not wired into this composition root either), is Task 9's "remaining composition wiring"
+  // per the plan. `index` below is the one REAL piece available today: it reuses the SAME `reconcileDeps`
+  // webhook reconcile already uses, so a scheduler run's embed-poll step is genuinely live, not a stub.
+  // `backfill` defaults to a clearly-named "not yet composed" refusal unless a caller (a test, or Task 9's
+  // eventual cron entry point) supplies `opts.catalogSyncBackfill`.
+  //
+  // EXPOSED ON THE RETURNED `app` (a plain property, not a Fastify decorator — this codebase has no
+  // existing decoration pattern to reuse) purely as a composition-root test/ops seam: `buildServer`
+  // otherwise returns only the bare Fastify instance, and there is today no HTTP route or cron caller that
+  // would otherwise observe this wiring. This is a judgment call, flagged for review.
+  const catalogSyncSchedulerDeps: CatalogSyncSchedulerDeps | undefined =
+    CATALOG_UNIFIED && merchantRegistry
+      ? {
+          store,
+          registry: merchantRegistry,
+          backfill:
+            opts?.catalogSyncBackfill ??
+            (async () => {
+              throw new Error(
+                "catalog-sync-scheduler: no backfill composition wired (CATALOG_UNIFIED is on, but the real " +
+                  "Admin-token-refresh-backed backfill client is Task 9's remaining composition wiring) — " +
+                  "supply opts.catalogSyncBackfill for a test/ops caller in the meantime",
+              );
+            }),
+          // F-G (ADR-0023) — wrapped so an Admin-token reauth-required halt is a distinguishable, audited
+          // SIGNAL rather than silently folding into the scheduler's generic per-tenant "failed" outcome.
+          // This is a log+audit hook only, NOT a monitored/paged destination — that is explicitly carried
+          // to Task 9 (its own "monitored destination" wiring), not built here.
+          index: async (tenantId) => {
+            try {
+              return await (opts?.catalogSyncIndex ?? ((t: string) => runCatalogIndex(reconcileDeps, [t]).then((rs) => rs[0]!)))(tenantId);
+            } catch (e) {
+              if (e instanceof AdminTokenReauthRequiredError) {
+                console.error(
+                  `[catalog-sync] REAUTH REQUIRED tenant=${tenantId} — Admin token custody has lapsed; halting ` +
+                    `rather than serving stale (F-G). A merchant must reinstall/reauthorize.`,
+                );
+                try {
+                  await store.audit(
+                    { tenantId },
+                    {
+                      actor: "system:catalog-sync-scheduler",
+                      action: "catalog_sync.reauth_required",
+                      decision: { halted: true, reason: e.message },
+                      reversalPath: "merchant must reinstall/reauthorize the Admin API connection to resume catalog sync",
+                    },
+                  );
+                } catch {
+                  // Best-effort audit, mirrors shopify-install.ts's own admin_token.custody_failed pattern —
+                  // a secondary audit-write failure must not mask the original reauth signal.
+                }
+              }
+              throw e; // preserve the scheduler's own per-tenant "failed"/errorClass recording
+            }
+          },
+        }
+      : undefined;
+  (app as unknown as { catalogSyncSchedulerDeps?: CatalogSyncSchedulerDeps }).catalogSyncSchedulerDeps = catalogSyncSchedulerDeps;
 
   return app;
 }

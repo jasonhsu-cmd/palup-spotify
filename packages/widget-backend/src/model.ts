@@ -116,6 +116,14 @@ export function createGroundingPort(
      * is unaffected.
      */
     hasLocalCatalog?: (tenantId: string) => Promise<boolean>;
+    /**
+     * Task 7 (CATALOG_UNIFIED, ADR-0023 D1) — threaded straight through to
+     * `createLocalCatalogGroundingPort`'s `unifiedLocalShell`: when true, a backfilled tenant's
+     * `getContext` ALSO reads brand+policy from `storeProfile` (never `shellSource`), closing the last
+     * residual Storefront call on the local-serving path. Absent/false (the default) ⇒ byte-identical to
+     * before this task.
+     */
+    catalogUnified?: boolean;
   } = {},
 ): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
@@ -173,6 +181,7 @@ export function createGroundingPort(
       productFacts: opts.productFacts,
       shellSource: shopifyOrFixtures,
       storeProfile: opts.storeProfile ?? createInMemoryStoreProfileStore(),
+      unifiedLocalShell: opts.catalogUnified,
     });
     // Controller ruling (per-tenant gating, load-bearing) — local serving is active ONLY for a tenant that
     // HAS a `catalog_product` corpus (backfilled), detected via a non-empty `listByTenant`. A tenant with
