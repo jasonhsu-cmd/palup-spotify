@@ -201,5 +201,7 @@ export {
   AGGREGATE_LEARNING_ADR_ACCEPTED, isAggregateLearningEnabled, MIN_CONTRIBUTING_MERCHANTS,
   anonymizePrivateInsight, InMemoryAggregatePriorStore,
 } from "./aggregate-priors.js";
+export type { Payout, PayoutsPort, FeeLine } from "./payouts-port.js";
+export { SandboxPayoutsPort, requirePayoutsTenant, PALUP_ILLUSTRATIVE_TAKE_RATE, computeFeeLine } from "./payouts-port.js";
 // NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
 // into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.
