@@ -34,6 +34,7 @@ import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
 import { registerInternalInsightsRoutes } from "./routes/internal-insights.js";
 import { registerInternalVoiceRoutes } from "./routes/internal-voice.js";
+import { registerInternalRefundRoutes } from "./routes/internal-refund.js";
 import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
@@ -318,6 +319,7 @@ export async function buildServer(opts?: {
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
     registerInternalInsightsRoutes(merchantPlane, { learnedStore });
     registerInternalVoiceRoutes(merchantPlane, { state: store, proposalStore, rulesStore, learnedStore });
+    registerInternalRefundRoutes(merchantPlane, { state: store, proposalStore, rulesStore, refundPort });
     registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus, learnedStore, refundPort });
     registerKillRoutes(merchantPlane, { state: store, bus });
     registerAuditRoutes(merchantPlane, { state: store });
