@@ -110,7 +110,7 @@ function numericParam(action: AgentAction, key: string): number | undefined {
  *  is NOT rejected by invariant 4's pct/usd-only "unmeasured" default. Presence only — the gates
  *  themselves decide auto vs approval. */
 function categoricalDimensionPresent(action: AgentAction, category: ProposalCategory): boolean {
-  if (category === "discount") return action.params.stack === true || Array.isArray(action.params.stackWith);
+  if (category === "discount") return action.params.stack === true || (Array.isArray(action.params.stackWith) && action.params.stackWith.length > 0);
   if (category === "refund") return action.params.priceMatch === true;
   if (category === "subscription") return typeof action.params.subAction === "string";
   return false;

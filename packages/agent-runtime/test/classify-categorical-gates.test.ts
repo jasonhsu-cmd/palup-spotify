@@ -25,6 +25,20 @@ describe("discount stacking gate", () => {
     const r = await classifyAction(a, ctx, rules({ allowedAuto: true, maxPct: 20, stackable: true }));
     expect(r.decision).toBe("auto");
   });
+
+  // REGRESSION (review blocker): an empty stackWith array must NOT count as "the categorical
+  // dimension is present" — categoricalDimensionPresent must mirror the actual stacking gate
+  // (non-empty array only), or an unmeasured discount with no pct/usd silently auto-passes.
+  it("requires_approval: an empty stackWith array with no pct/usd is unmeasured, never auto", async () => {
+    const a: AgentAction = { type: "issue_discount", params: { stackWith: [] } };
+    const r = await classifyAction(a, ctx, rules({ allowedAuto: true, maxPct: 20, stackable: false }));
+    expect(r.decision).toBe("requires_approval");
+  });
+  it("requires_approval: stack:false with no other params is unmeasured, never auto", async () => {
+    const a: AgentAction = { type: "issue_discount", params: { stack: false } };
+    const r = await classifyAction(a, ctx, rules({ allowedAuto: true, maxPct: 20, stackable: false }));
+    expect(r.decision).toBe("requires_approval");
+  });
 });
 
 describe("refund price-match gate", () => {
