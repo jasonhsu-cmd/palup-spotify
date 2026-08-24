@@ -27,11 +27,15 @@ import type { AdminTokenStore, AdminTokenWrite } from "@palup/state-postgres";
 //      the loser would mint against an already-retired refresh_token and strand the tenant needing re-auth.
 //   2. FAIL CLOSED on `unreadable`. A `status: "unreadable"` read is a decryption/corruption failure, not
 //      an ordinary expiry — treating it as "needs refresh" would silently paper over a broken credential by
-//      minting a brand-new one on its behalf. This throws instead, matching every OTHER "unreadable" read in
-//      this codebase (e.g. `MerchantCredentialRead`'s twin union) that refuses to be treated as `missing`.
-//   3. FAIL CLOSED on a missing/lapsed refresh_token (F-H, Task 6). `AdminTokenReauthRequiredError` is a
-//      DISTINCT, exported error type so a caller (a sync job, Task 7/9) can catch it specifically and halt
-//      that tenant's sync with a clear signal, rather than crashing the whole loop on an ordinary `Error`.
+//      minting a brand-new one on its behalf. This is ALSO treated as re-auth-required (F-H, Task 6): it
+//      throws the same `AdminTokenReauthRequiredError` as a missing/lapsed refresh_token, so a caller (a sync
+//      job) can catch ONE error type and halt that tenant's sync, rather than crashing the whole loop on an
+//      ordinary `Error` — matching every OTHER "unreadable" read in this codebase (e.g. `MerchantCredentialRead`'s
+//      twin union) that refuses to be treated as `missing`.
+//   3. FAIL CLOSED on a missing/lapsed refresh_token, or an unreadable stored token (F-H, Task 6).
+//      `AdminTokenReauthRequiredError` is a DISTINCT, exported error type so a caller (a sync job, Task 7/9)
+//      can catch it specifically and halt that tenant's sync with a clear signal, rather than crashing the
+//      whole loop on an ordinary `Error`.
 //
 // `exchange` and `shopDomainOf` are BOTH injected, not implemented here: this module knows nothing about
 // HOW a fresh Admin token is obtained (the exact refresh_token-grant HTTP request/response shape, or a test
@@ -59,9 +63,11 @@ export interface AdminTokenExchangeResult {
 /**
  * Task 6 (ADR-0023, F-H) — thrown instead of ever attempting an `exchange` when this tenant's admin token
  * cannot be refreshed without a human re-authorizing the app: no refresh_token was ever custodied (a
- * pre-schema/legacy row), the custodied refresh_token has lapsed (past its own 90d expiry), or the stored
- * row is missing entirely. A caller (a sync job) MUST catch this specifically and halt that tenant's sync —
- * never crash the whole loop, and never fall back to a stale or synthetic token on the hot path.
+ * pre-schema/legacy row), the custodied refresh_token has lapsed (past its own 90d expiry), the stored row is
+ * missing entirely, or the stored row is unreadable (a decryption/corruption failure — not an ordinary
+ * expiry, but still something only a reinstall/reauth fixes). A caller (a sync job) MUST catch this
+ * specifically and halt that tenant's sync — never crash the whole loop, and never fall back to a stale or
+ * synthetic token on the hot path.
  */
 export class AdminTokenReauthRequiredError extends Error {
   constructor(
@@ -137,8 +143,9 @@ export interface AdminTokenRefresher {
   /**
    * Return a token for `tenantId` that is not (as far as this module can tell) about to expire, refreshing
    * it first if needed. Concurrent calls for the SAME tenant while a refresh is in flight all resolve to the
-   * ONE refresh's result (single-flight, F6). Throws if the stored token is `unreadable` — never a hot-path
-   * fallback to a stale or synthetic value.
+   * ONE refresh's result (single-flight, F6). Throws `AdminTokenReauthRequiredError` if the stored token is
+   * `unreadable`, missing, or has no live refresh_token (F-H) — never a hot-path fallback to a stale or
+   * synthetic value.
    */
   getFreshAdminToken(tenantId: string): Promise<string>;
 }
@@ -157,9 +164,10 @@ export function makeAdminTokenRefresher(deps: AdminTokenRefresherDeps): AdminTok
     const cur = await deps.tokens.read(tenantId);
     if (cur.status === "found" && !expiringSoon(cur.expiresAt, now(), skewMs)) return cur.token;
     if (cur.status === "unreadable") {
-      throw new Error(
-        `admin token unreadable for tenant "${tenantId}" (${cur.reason}) — reinstall required; refusing to ` +
-          "treat a decryption/corruption failure as an ordinary expiry",
+      throw new AdminTokenReauthRequiredError(
+        tenantId,
+        `admin token unreadable (${cur.reason}) — reinstall required; refusing to treat a decryption/corruption ` +
+          "failure as an ordinary expiry",
       );
     }
     // Task 6 (F-H) — everything past this point NEEDS a refresh (either the row is missing entirely, or the

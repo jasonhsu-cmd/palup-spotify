@@ -130,11 +130,12 @@ describe("Task 5/6 — makeAdminTokenRefresher (F6 single-flight + F-B/F-H refre
     expect(exchange).toHaveBeenCalledTimes(2);
   });
 
-  it("an UNREADABLE token THROWS — never a hot-path fallback, and never calls exchange", async () => {
+  it("an UNREADABLE token is ALSO re-auth-required (F-H) — AdminTokenReauthRequiredError, never a hot-path fallback, and never calls exchange", async () => {
     const tokens = fakeStore({ read: vi.fn(async () => ({ status: "unreadable", reason: "undecryptable" }) as AdminTokenRead) });
     const exchange = vi.fn(async () => ({ accessToken: "should-not-be-called" }));
     const { getFreshAdminToken } = makeAdminTokenRefresher({ tokens, exchange, shopDomainOf: async () => "acme-store.myshopify.com" });
 
+    await expect(getFreshAdminToken("acme-store")).rejects.toBeInstanceOf(AdminTokenReauthRequiredError);
     await expect(getFreshAdminToken("acme-store")).rejects.toThrow(/unreadable/i);
     expect(exchange).not.toHaveBeenCalled();
     expect(tokens.refresh).not.toHaveBeenCalled();
