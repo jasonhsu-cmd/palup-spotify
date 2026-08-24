@@ -21,7 +21,12 @@
     { "path": "packages/eval/tsconfig.json" },
     { "path": "packages/control-plane/tsconfig.json" },
     { "path": "packages/widget/tsconfig.json" },
+    // packages/design-system is the first package using React/JSX — its own tsconfig sets
+    // `jsx: "react-jsx"`; nothing else in this graph needs that option.
+    { "path": "packages/design-system/tsconfig.json" },
     { "path": "packages/identity-shopify/tsconfig.json" },
-    { "path": "packages/agent-runtime/tsconfig.json" }
+    { "path": "packages/agent-runtime/tsconfig.json" },
+    { "path": "packages/merchant-backend/tsconfig.json" },
+    { "path": "packages/merchant-console/tsconfig.json" }
   ]
 }

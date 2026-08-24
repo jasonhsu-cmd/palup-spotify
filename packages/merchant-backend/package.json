@@ -1,0 +1,13 @@
+{
+  "name": "@palup/merchant-backend",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/server.ts",
+  "dependencies": {
+    "@palup/platform-ports": "workspace:*",
+    "@palup/state-postgres": "workspace:*",
+    "@palup/identity-shopify": "workspace:*",
+    "@palup/agent-runtime": "workspace:*",
+    "fastify": "^5.0.0"
+  }
+}

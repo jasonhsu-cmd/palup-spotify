@@ -21,3 +21,21 @@ export {
 export * from "./classify.js";
 export * from "./kill.js";
 export * from "./loop.js";
+// WB win-back agent (task 5, merchant-backend's staging trigger route): no external caller existed
+// before this, so these were never re-exported. Named exports (not `export *`) so this module's own
+// internal helpers (`requireRecipients`/`requireString`) stay unexported.
+export {
+  findLapsedSegment,
+  draftWinBack,
+  proposeWinBack,
+  campaignExecutor,
+  type FindLapsedSegmentOpts,
+  type WinBackDraft,
+  type ProposeWinBackInput,
+} from "./agents/win-back.js";
+// W4-min: `MerchantRulesStore`/`CONSERVATIVE_DEFAULTS`/`PALUP_FLOORS`/etc. are DEFINED in
+// `@palup/platform-ports` (moved there, task 5 — see `rules.ts`'s header) and re-exported by
+// `rules.ts`; `createRulesProvider` stays defined here. `export *` surfaces both together so a
+// future `@palup/agent-runtime` consumer (e.g. `merchant-backend`'s `GET/PUT /rules`, task 4) can
+// import everything from one place, exactly like `ProposalStore`'s re-export via this same file.
+export * from "./rules.js";

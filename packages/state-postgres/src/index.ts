@@ -37,6 +37,12 @@ export {
   type AdminTokenStoreOpts,
   type AdminTokenRead,
 } from "./admin-token-store.js";
+// W4-min task 5 adapter (`MerchantRulesStore`, `@palup/platform-ports`). Exported so `merchant-backend`'s
+// `GET/PUT /rules` (task 4, not yet built) can wire it; the in-memory adapter stays the default until then.
+export {
+  PostgresMerchantRulesStore,
+  type PostgresMerchantRulesStoreOpts,
+} from "./merchant-rules-store.js";
 export { PgPoolSql, pgPoolSqlFromUrl, type Sql } from "./sql.js";
 export { createRuntimeStore } from "./factory.js";
 export { createVectorStore } from "./vector-factory.js";

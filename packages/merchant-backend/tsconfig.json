@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "src", "noEmit": true },
+  "include": ["src"],
+  "references": [
+    { "path": "../platform-ports/tsconfig.json" },
+    { "path": "../state-postgres/tsconfig.json" },
+    { "path": "../identity-shopify/tsconfig.json" },
+    { "path": "../agent-runtime/tsconfig.json" }
+  ]
+}

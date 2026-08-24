@@ -24,33 +24,24 @@
 // Determinism: no `Date.now()`/`Math.random()` here — classification is a pure function of
 // (action, ctx, rules-at-call-time).
 
-import type { AgentAction, BoundaryReason, ProposalCategory } from "@palup/platform-ports";
+import { AUTO_ELIGIBLE_DIMENSIONS } from "@palup/platform-ports";
+import type { AgentAction, AutoActLimit, BoundaryReason, PalupFloor, ProposalCategory } from "@palup/platform-ports";
 
-/** The merchant-configured ceiling for auto-acting in one category, as W4-min (Rules) resolves it
- * for this tenant/category/action. Either field may be absent when not applicable to the category
- * (e.g. a refund cares about `maxUsd`, a discount about `maxPct`). */
-export interface AutoActLimit {
-  /** Percentage cap (e.g. discount %), if this category is percentage-denominated. */
-  maxPct?: number;
-  /** USD cap (e.g. refund/ad-spend amount), if this category is dollar-denominated. */
-  maxUsd?: number;
-  /** Whether the merchant has enabled auto-act for this category at all. `false` forces approval
-   * even when every numeric check would otherwise pass. */
-  allowedAuto: boolean;
-}
-
-/** PalUp's platform-wide, non-merchant-configurable ceiling — the floor under every merchant's own
- * (possibly looser) `autoActLimit`. These are the numbers CLAUDE.md §3 calls "inviolable." */
-export interface PalupFloor {
-  /** Platform-wide max auto-act percentage, regardless of what a merchant configures higher. */
-  maxAutoPct: number;
-  /** Platform-wide max auto-act USD amount, if applicable. */
-  maxAutoUsd?: number;
-  /** Recipient/blast-radius count at or above which a send is ALWAYS `requires_approval` — see
-   * invariant 1. This is the one number `classifyAction` itself enforces no matter what any
-   * `RulesProvider` returns. */
-  massSendRecipientFloor: number;
-}
+// `AutoActLimit`/`PalupFloor` are DEFINED in `@palup/platform-ports` (`merchant-rules-store.ts`) — moved
+// there so `@palup/state-postgres`'s `PostgresMerchantRulesStore` can implement `MerchantRulesStore`
+// (which uses these shapes via `clampToFloor`) without a package cycle (`agent-runtime` already depends
+// on `state-postgres`). NOT re-exported from here (only USED, below, by `RulesProvider`) — `./rules.js`
+// is the one place that re-exports them (avoids `index.ts`'s `export *` from both files colliding on
+// the same names); a caller wanting the type by name imports it from there / `@palup/agent-runtime`'s
+// index, same shape either way:
+//   - `AutoActLimit` — the merchant-configured ceiling for auto-acting in one category, as W4-min
+//     (Rules) resolves it for this tenant/category/action. Either field may be absent when not
+//     applicable to the category (e.g. a refund cares about `maxUsd`, a discount about `maxPct`).
+//   - `PalupFloor` — PalUp's platform-wide, non-merchant-configurable ceiling — the floor under every
+//     merchant's own (possibly looser) `autoActLimit`. These are the numbers CLAUDE.md §3 calls
+//     "inviolable." `massSendRecipientFloor` is the recipient/blast-radius count at or above which a
+//     send is ALWAYS `requires_approval` — see invariant 1 below — the one number `classifyAction`
+//     itself enforces no matter what any `RulesProvider` returns.
 
 /** The seam `classifyAction` reads for the two tunables above. W4-min (Rules) implements this for
  * real, merchant-scoped config; tests supply a fake. Return values may be sync or async so a simple
@@ -166,68 +157,93 @@ export async function classifyAction(
   const pct = numericParam(action, "pct");
   const usd = numericParam(action, "usd");
 
+  // Invariant 4 — a known category with nothing measurable to check against a limit is uncertainty,
+  // not a free pass: default to requires_approval.
+  if (pct === undefined && usd === undefined) {
+    return {
+      decision: "requires_approval",
+      category,
+      boundaryReasons: [
+        {
+          rule: `${category}.unmeasured_action`,
+          detail: "no pct/usd param present to evaluate against the auto-act limit",
+        },
+      ],
+    };
+  }
+
+  // F2 FIX (§3-critical): evaluate EVERY dimension present on the action — never short-circuit on
+  // just `pct` and return "auto" before `usd` (or vice versa) has even been checked. The prior code
+  // checked `pct` first and RETURNED on that branch alone, so a dollar-denominated action (e.g.
+  // `run_ad_campaign`) carrying BOTH a `pct` and a `usd` param could pass its (often generous) pct
+  // cap and never have its usd cap evaluated at all — bypassing the dollar ceiling entirely. Now
+  // every present dimension is checked and ALL of their reasons are collected; the decision is
+  // "auto" only when every present dimension passed.
+  //
+  // FOLLOW-UP §3 FIX: some categories (e.g. `refund`, `ad_spend`) are given a `maxAutoPct:100`
+  // floor purely as a structural no-op so `withinFloor`'s pct-AND-usd gate has a number on both
+  // sides (`@palup/platform-ports`'s `PALUP_FLOORS` comment) — NOT because they are actually
+  // percentage-auto-eligible. Without a separate check, a `refund` action carrying ONLY a `pct`
+  // param (no `usd`) would be "measured" (this is not the invariant-4 case above) and checked
+  // against that no-op 100% cap, auto-approving a refund of ARBITRARY dollar size — the real $200
+  // USD floor never evaluated at all. `AUTO_ELIGIBLE_DIMENSIONS[category]` is the authoritative
+  // list of which dimensions a category is ACTUALLY auto-eligible on; a dimension present on the
+  // action but absent from that list is `requires_approval` with an `unexpected_dimension` reason
+  // — it is NEVER checked against that category's (possibly no-op) numeric cap.
+  const eligibleDimensions = AUTO_ELIGIBLE_DIMENSIONS[category];
+  const boundaryReasons: BoundaryReason[] = [];
+
   if (pct !== undefined) {
-    const cap = Math.min(limit.maxPct ?? Number.POSITIVE_INFINITY, floor.maxAutoPct);
-    if (pct > cap) {
-      return {
-        decision: "requires_approval",
-        category,
-        boundaryReasons: [
-          {
-            rule: `${category}.pct_over_cap`,
-            detail: `pct=${pct} exceeds cap=${cap} (merchant maxPct=${limit.maxPct ?? "n/a"}, palupFloor maxAutoPct=${floor.maxAutoPct})`,
-          },
-        ],
-      };
+    if (!eligibleDimensions.includes("pct")) {
+      boundaryReasons.push({
+        rule: `${category}.unexpected_dimension`,
+        detail: `pct=${pct} present but "${category}" is not auto-eligible on the pct dimension (eligible: [${eligibleDimensions.join(", ")}]) — never checked against a possibly no-op percentage cap`,
+      });
+    } else {
+      const cap = Math.min(limit.maxPct ?? Number.POSITIVE_INFINITY, floor.maxAutoPct);
+      if (pct > cap) {
+        boundaryReasons.push({
+          rule: `${category}.pct_over_cap`,
+          detail: `pct=${pct} exceeds cap=${cap} (merchant maxPct=${limit.maxPct ?? "n/a"}, palupFloor maxAutoPct=${floor.maxAutoPct})`,
+        });
+      }
     }
-    return { decision: "auto", category, boundaryReasons: [] };
   }
 
   if (usd !== undefined) {
-    // FAIL CLOSED: an absent USD ceiling on EITHER side must never widen autonomy. Unlike `maxAutoPct`
-    // (required on `PalupFloor`, so the pct path above always has a real number to cap against), both
-    // `limit.maxUsd` and `floor.maxAutoUsd` are optional — treating a missing one as `Infinity` (the
-    // prior bug) let ANY dollar amount auto-approve whenever neither side bothered to configure a cap.
-    // No effective ceiling from either side is uncertainty, not permission — default to
-    // `requires_approval` (CLAUDE.md §3 non-negotiable #1: money never auto-applies).
-    if (limit.maxUsd === undefined && floor.maxAutoUsd === undefined) {
-      return {
-        decision: "requires_approval",
-        category,
-        boundaryReasons: [
-          {
-            rule: `${category}.no_usd_ceiling`,
-            detail: `usd=${usd} but neither the merchant autoActLimit nor the palupFloor configures a maxUsd — an absent cap is never treated as unlimited`,
-          },
-        ],
-      };
-    }
-    const cap = Math.min(limit.maxUsd ?? Number.POSITIVE_INFINITY, floor.maxAutoUsd ?? Number.POSITIVE_INFINITY);
-    if (usd > cap) {
-      return {
-        decision: "requires_approval",
-        category,
-        boundaryReasons: [
-          {
+    if (!eligibleDimensions.includes("usd")) {
+      boundaryReasons.push({
+        rule: `${category}.unexpected_dimension`,
+        detail: `usd=${usd} present but "${category}" is not auto-eligible on the usd dimension (eligible: [${eligibleDimensions.join(", ")}]) — never checked against a possibly no-op dollar cap`,
+      });
+    } else {
+      // FAIL CLOSED: an absent USD ceiling on EITHER side must never widen autonomy. Unlike
+      // `maxAutoPct` (required on `PalupFloor`, so the pct check above always has a real number to
+      // cap against), both `limit.maxUsd` and `floor.maxAutoUsd` are optional — treating a missing
+      // one as `Infinity` (a prior bug) let ANY dollar amount auto-approve whenever neither side
+      // bothered to configure a cap. No effective ceiling from either side is uncertainty, not
+      // permission — default to `requires_approval` (CLAUDE.md §3 non-negotiable #1: money never
+      // auto-applies).
+      if (limit.maxUsd === undefined && floor.maxAutoUsd === undefined) {
+        boundaryReasons.push({
+          rule: `${category}.no_usd_ceiling`,
+          detail: `usd=${usd} but neither the merchant autoActLimit nor the palupFloor configures a maxUsd — an absent cap is never treated as unlimited`,
+        });
+      } else {
+        const cap = Math.min(limit.maxUsd ?? Number.POSITIVE_INFINITY, floor.maxAutoUsd ?? Number.POSITIVE_INFINITY);
+        if (usd > cap) {
+          boundaryReasons.push({
             rule: `${category}.usd_over_cap`,
             detail: `usd=${usd} exceeds cap=${cap} (merchant maxUsd=${limit.maxUsd ?? "n/a"}, palupFloor maxAutoUsd=${floor.maxAutoUsd ?? "n/a"})`,
-          },
-        ],
-      };
+          });
+        }
+      }
     }
-    return { decision: "auto", category, boundaryReasons: [] };
   }
 
-  // Invariant 4 — a known category with nothing measurable to check against a limit is uncertainty,
-  // not a free pass: default to requires_approval.
-  return {
-    decision: "requires_approval",
-    category,
-    boundaryReasons: [
-      {
-        rule: `${category}.unmeasured_action`,
-        detail: "no pct/usd param present to evaluate against the auto-act limit",
-      },
-    ],
-  };
+  if (boundaryReasons.length > 0) {
+    return { decision: "requires_approval", category, boundaryReasons };
+  }
+
+  return { decision: "auto", category, boundaryReasons: [] };
 }

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PalUp — Approval Center</title>
+    <!--
+      App Bridge v4 (F2's client-side counterpart). The CDN script installs the `shopify` global
+      that `@shopify/app-bridge-react`'s `useAppBridge()` (src/app/session.tsx) reads to mint
+      session tokens via `shopify.idToken()`. `shopify-api-key` is the app's OAuth CLIENT ID — public
+      by design, not a secret (same convention merchant-backend's SHOPIFY_APP_CLIENT_ID env var
+      follows). `%VITE_SHOPIFY_APP_CLIENT_ID%` is Vite's documented HTML env-replacement syntax for
+      a VITE_-prefixed variable; this app is not deployed anywhere yet (memory: nothing is deployed
+      to prod, control-plane/merchant-backend are staging-only), so this is unset in every run today
+      — vitest tests never load this file (they import the React modules directly).
+    -->
+    <meta name="shopify-api-key" content="%VITE_SHOPIFY_APP_CLIENT_ID%" />
+    <script src="https://cdn.shopify.com/shopifycloud/app-bridge.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
