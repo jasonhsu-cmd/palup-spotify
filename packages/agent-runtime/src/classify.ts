@@ -105,14 +105,37 @@ function numericParam(action: AgentAction, key: string): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+/** True when `hour` is inside the [start, end) quiet window, handling a window that wraps midnight
+ *  (start > end, e.g. 21→9 covers 21,22,23,0..8). Pure/deterministic — the caller supplies the
+ *  recipient-local hour; this module never reads a clock. */
+export function inQuietHours(hour: number, q: { startHour: number; endHour: number }): boolean {
+  return q.startHour <= q.endHour ? hour >= q.startHour && hour < q.endHour : hour >= q.startHour || hour < q.endHour;
+}
+
 /** True when this action carries a category-specific dimension the new gates below evaluate — so an
  *  action that is "measured" on a categorical dimension (e.g. a subscription pause with no pct/usd)
  *  is NOT rejected by invariant 4's pct/usd-only "unmeasured" default. Presence only — the gates
- *  themselves decide auto vs approval. */
-function categoricalDimensionPresent(action: AgentAction, category: ProposalCategory): boolean {
+ *  themselves decide auto vs approval.
+ *
+ *  W4-broaden fix (same bug class as the discount empty-stackWith regression): for `ad_spend` /
+ *  `campaign`, the roi/quiet-hours/frequency-cap gates below are each guarded by `limit.<field> !==
+ *  undefined` — when the merchant hasn't configured that field at all, the gate is a silent no-op
+ *  (never pushes a boundary reason either way). So "dimension present" must ALSO require the
+ *  matching `limit` field to be configured — otherwise an action carrying e.g. only `roi` (no usd,
+ *  no configured `roiFloor`) would be declared "measured" by presence alone, bypass invariant 4, hit
+ *  zero no-op gates, and silently auto-approve with NOTHING actually having been checked. Mirroring
+ *  the gates' own fire condition (dimension present AND the corresponding limit field configured)
+ *  keeps this fail-closed: unconfigured ⇒ still unmeasured ⇒ still requires_approval. */
+function categoricalDimensionPresent(action: AgentAction, category: ProposalCategory, limit: AutoActLimit): boolean {
   if (category === "discount") return action.params.stack === true || (Array.isArray(action.params.stackWith) && action.params.stackWith.length > 0);
   if (category === "refund") return action.params.priceMatch === true;
   if (category === "subscription") return typeof action.params.subAction === "string";
+  if (category === "ad_spend") return numericParam(action, "roi") !== undefined && limit.roiFloor !== undefined;
+  if (category === "campaign") {
+    const hourMeasured = numericParam(action, "sendLocalHour") !== undefined && limit.quietHours !== undefined;
+    const cadenceMeasured = numericParam(action, "priorSendsThisWeek") !== undefined && limit.frequencyCapPerWeek !== undefined;
+    return hourMeasured || cadenceMeasured;
+  }
   return false;
 }
 
@@ -167,7 +190,7 @@ export async function classifyAction(
 
   const pct = numericParam(action, "pct");
   const usd = numericParam(action, "usd");
-  const hasCategorical = categoricalDimensionPresent(action, category);
+  const hasCategorical = categoricalDimensionPresent(action, category, limit);
 
   // Invariant 4 (preserved, generalized): a known category with NOTHING measurable — no pct, no usd,
   // AND no category-specific dimension — is uncertainty, not a free pass.
@@ -271,6 +294,35 @@ export async function classifyAction(
     const allowed = limit.subscriptionSelfServe ?? [];
     if (sub === undefined || !allowed.includes(sub as (typeof allowed)[number])) {
       boundaryReasons.push({ rule: "subscription.action_requires_approval", detail: `subscription subAction="${sub ?? "n/a"}" is not in the merchant self-serve allow-list [${allowed.join(", ")}]` });
+    }
+  }
+
+  // --- Numeric/window gates (W4-broaden Task 4): ad-spend ROI floor + rolling-period budget, comms
+  // quiet-hours + per-recipient frequency cap. Each is guarded on `limit.<field> !== undefined` — an
+  // unconfigured field is a no-op HERE (not a violation), but `categoricalDimensionPresent` above
+  // ensures an action whose only measurable param maps to an unconfigured field never reaches "auto"
+  // via invariant 4 in the first place (it stays `unmeasured_action` ⇒ requires_approval).
+  if (category === "ad_spend") {
+    const roi = numericParam(action, "roi");
+    if (limit.roiFloor !== undefined && roi !== undefined && roi < limit.roiFloor) {
+      boundaryReasons.push({ rule: "ad_spend.roi_below_floor", detail: `projected roi=${roi} is below the merchant ROI floor=${limit.roiFloor}` });
+    }
+    // Rolling-period spend-sanity: (running total + this buy) must stay within the (clamped) period budget.
+    if (limit.periodBudgetUsd !== undefined && usd !== undefined) {
+      const priorPeriod = numericParam(action, "periodSpentUsd") ?? 0;
+      if (priorPeriod + usd > limit.periodBudgetUsd) {
+        boundaryReasons.push({ rule: "ad_spend.period_budget_exceeded", detail: `period spend ${priorPeriod}+${usd} exceeds the auto period budget=${limit.periodBudgetUsd}` });
+      }
+    }
+  }
+  if (category === "campaign") {
+    const hour = numericParam(action, "sendLocalHour");
+    if (limit.quietHours !== undefined && hour !== undefined && inQuietHours(hour, limit.quietHours)) {
+      boundaryReasons.push({ rule: "campaign.quiet_hours", detail: `sendLocalHour=${hour} falls in quiet hours [${limit.quietHours.startHour}, ${limit.quietHours.endHour})` });
+    }
+    const prior = numericParam(action, "priorSendsThisWeek");
+    if (limit.frequencyCapPerWeek !== undefined && prior !== undefined && prior >= limit.frequencyCapPerWeek) {
+      boundaryReasons.push({ rule: "campaign.frequency_cap", detail: `recipient already received ${prior} auto-sends this week (cap=${limit.frequencyCapPerWeek})` });
     }
   }
 
