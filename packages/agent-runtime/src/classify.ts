@@ -127,7 +127,17 @@ export function inQuietHours(hour: number, q: { startHour: number; endHour: numb
  *  the gates' own fire condition (dimension present AND the corresponding limit field configured)
  *  keeps this fail-closed: unconfigured ⇒ still unmeasured ⇒ still requires_approval. */
 function categoricalDimensionPresent(action: AgentAction, category: ProposalCategory, limit: AutoActLimit): boolean {
-  if (category === "discount") return action.params.stack === true || (Array.isArray(action.params.stackWith) && action.params.stackWith.length > 0);
+  // FINAL-REVIEW fix (§3 blocker, third instance of this bug class): discount is NOT given a
+  // "measured by stacking" path here. `AUTO_ELIGIBLE_DIMENSIONS.discount === ["pct", "usd"]` — a
+  // discount's money magnitude is ALWAYS expressed as a percentage or a flat dollar amount; stacking
+  // (`stack`/`stackWith`) is a MODIFIER on an already-measured discount, never a measurement of the
+  // discount by itself. Treating stacking presence as "measured" let `{stack:true}` (no pct, no usd)
+  // skip invariant 4's unmeasured-action default, hit zero pct/usd caps (both absent) and the
+  // stacking gate as a no-op (`stackable:true`), and auto-approve a discount of arbitrary size that
+  // was never checked against anything. The independent stacking gate below (~"discount.stacking_
+  // not_allowed") still fires correctly for any discount that DOES carry pct/usd — this only removes
+  // stacking as a false "measured" signal.
+  if (category === "discount") return false;
   if (category === "refund") return action.params.priceMatch === true;
   if (category === "subscription") return typeof action.params.subAction === "string";
   if (category === "ad_spend") return numericParam(action, "roi") !== undefined && limit.roiFloor !== undefined;
@@ -302,12 +312,24 @@ export async function classifyAction(
   // unconfigured field is a no-op HERE (not a violation), but `categoricalDimensionPresent` above
   // ensures an action whose only measurable param maps to an unconfigured field never reaches "auto"
   // via invariant 4 in the first place (it stays `unmeasured_action` ⇒ requires_approval).
+  //
+  // ACCURACY NOTE (FINAL-REVIEW, not a behavior change): every check below is a PER-ACTION cap —
+  // `classifyAction` is a pure function of its arguments (module header) and holds no state of its
+  // own across calls. The "rolling-period" ad-spend budget and the comms frequency-cap/quiet-hours
+  // checks read `periodSpentUsd` / `priorSendsThisWeek` / `sendLocalHour` straight off THIS action's
+  // params (`periodSpentUsd` defaults to 0 when absent; the other two simply no-op when absent) —
+  // they trust whatever window state the calling agent supplies. Real CUMULATIVE / rolling-window
+  // enforcement therefore depends on a stateful producer upstream that accurately tracks and
+  // supplies those running totals; that accumulator does not exist yet, and is a precondition before
+  // `ad_spend`/`campaign` auto-act should be enabled for real traffic — not something this function
+  // guarantees on its own.
   if (category === "ad_spend") {
     const roi = numericParam(action, "roi");
     if (limit.roiFloor !== undefined && roi !== undefined && roi < limit.roiFloor) {
       boundaryReasons.push({ rule: "ad_spend.roi_below_floor", detail: `projected roi=${roi} is below the merchant ROI floor=${limit.roiFloor}` });
     }
-    // Rolling-period spend-sanity: (running total + this buy) must stay within the (clamped) period budget.
+    // Rolling-period spend-sanity: (agent-reported running total + this buy) must stay within the
+    // (clamped) period budget — see the ACCURACY NOTE above re: trusting the supplied running total.
     if (limit.periodBudgetUsd !== undefined && usd !== undefined) {
       const priorPeriod = numericParam(action, "periodSpentUsd") ?? 0;
       if (priorPeriod + usd > limit.periodBudgetUsd) {

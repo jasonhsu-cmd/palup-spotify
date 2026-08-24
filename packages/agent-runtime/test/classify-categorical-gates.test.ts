@@ -39,6 +39,37 @@ describe("discount stacking gate", () => {
     const r = await classifyAction(a, ctx, rules({ allowedAuto: true, maxPct: 20, stackable: false }));
     expect(r.decision).toBe("requires_approval");
   });
+
+  // REGRESSION (FINAL-REVIEW blocker, third instance of the bypass class): `stack`/`stackWith`
+  // presence must NEVER count as "measured" for a discount — a discount's money magnitude is ALWAYS
+  // pct/usd (stacking is a modifier on top, not a measurement of the discount itself). Before this
+  // fix, `categoricalDimensionPresent` treated `stack:true` (or a non-empty `stackWith`) alone as
+  // "measured", so a discount with NO pct/usd bypassed invariant 4's unmeasured-action default, hit
+  // zero pct/usd caps (absent) and the stacking gate stayed a no-op (`stackable:true`), and
+  // auto-approved an arbitrarily-sized discount that was never actually measured against any cap.
+  it("requires_approval: stack:true with NO pct/usd is unmeasured, never auto, even when stacking is allowed", async () => {
+    const a: AgentAction = { type: "issue_discount", params: { stack: true } };
+    const r = await classifyAction(a, ctx, rules({ allowedAuto: true, maxPct: 20, stackable: true }));
+    expect(r.decision).toBe("requires_approval");
+    expect(r.boundaryReasons.some((b) => b.rule === "discount.unmeasured_action")).toBe(true);
+  });
+  it("requires_approval: a non-empty stackWith with NO pct/usd is unmeasured, never auto, even when stacking is allowed", async () => {
+    const a: AgentAction = { type: "issue_discount", params: { stackWith: ["SUMMER"] } };
+    const r = await classifyAction(a, ctx, rules({ allowedAuto: true, maxPct: 20, stackable: true }));
+    expect(r.decision).toBe("requires_approval");
+    expect(r.boundaryReasons.some((b) => b.rule === "discount.unmeasured_action")).toBe(true);
+  });
+  it("auto: a measured (pct) discount with stacking allowed stays auto (positive control)", async () => {
+    const a: AgentAction = { type: "issue_discount", params: { pct: 10 } };
+    const r = await classifyAction(a, ctx, rules({ allowedAuto: true, maxPct: 20, stackable: true }));
+    expect(r.decision).toBe("auto");
+  });
+  it("requires_approval: a measured (pct) discount that stacks without permission still gates via discount.stacking_not_allowed (positive control)", async () => {
+    const a: AgentAction = { type: "issue_discount", params: { pct: 10, stack: true } };
+    const r = await classifyAction(a, ctx, rules({ allowedAuto: true, maxPct: 20, stackable: false }));
+    expect(r.decision).toBe("requires_approval");
+    expect(r.boundaryReasons.some((b) => b.rule === "discount.stacking_not_allowed")).toBe(true);
+  });
 });
 
 describe("refund price-match gate", () => {

@@ -120,10 +120,16 @@ export interface PalupFloor {
    * `classify.ts`'s invariant 1. This is the one number `classifyAction` itself enforces no matter what
    * any `RulesProvider` returns. */
   massSendRecipientFloor: number;
-  /** Platform-wide, inviolable rolling-period (e.g. weekly) spend ceiling in USD — the spend-sanity
-   * floor. Applies EVEN when the merchant sets no period budget at all (fail-closed, not opt-in); see
-   * `clampToFloor`. Only `ad_spend` defines this today — every other category's period budget clamps
-   * to 0 (absent platform ceiling is never "unlimited"). */
+  /** Platform-wide rolling-period (e.g. weekly) spend ceiling in USD — the spend-sanity floor. The
+   * NUMBER itself is fail-closed: `clampToFloor` always produces a ceiling even when the merchant
+   * sets no period budget at all (never "unlimited"). Only `ad_spend` defines this today — every
+   * other category's period budget clamps to 0. CAVEAT: this only bounds the ceiling `classify.ts`
+   * checks against; `classifyAction` is stateless per call and trusts the `periodSpentUsd` action
+   * param the calling agent supplies (defaulting to 0 when absent) as "spend so far this period" —
+   * so accurate CUMULATIVE enforcement across many auto-approved actions depends on a stateful
+   * producer tracking that running total correctly. That accumulator does not exist yet; it is a
+   * precondition before `ad_spend` auto-act should be enabled for real traffic, not something this
+   * ceiling number provides on its own. */
   maxAutoPeriodUsd?: number;
 }
 
@@ -159,9 +165,13 @@ export const PALUP_FLOORS: Readonly<Record<ProposalCategory, PalupFloor>> = {
   // blast radius of one automated buy while a human still owns the campaign-level budget.
   // maxAutoPeriodUsd (5000): a rolling-period (e.g. weekly) spend-sanity ceiling — the per-action
   // $500 cap above bounds any ONE auto-approved buy, but a chain of many small auto-approved buys
-  // could still bleed the account dry over days; $5000/period is a second, independent inviolable
-  // ceiling on TOTAL auto-spend over that window, applied even when the merchant sets no period
-  // budget at all (see `clampToFloor`'s spend-sanity clamp).
+  // could still bleed the account dry over days; $5000/period is meant as a second, independent
+  // ceiling on TOTAL auto-spend over that window, and the NUMBER is fail-closed even when the
+  // merchant sets no period budget at all (see `clampToFloor`'s spend-sanity clamp). But the
+  // per-action check in `classify.ts` is stateless and trusts the agent-supplied `periodSpentUsd`
+  // param (defaults to 0 if omitted) — so this ceiling only does real cumulative-spend work once a
+  // stateful accumulator actually feeds it an accurate running total; that accumulator is a
+  // precondition for enabling `ad_spend` auto-act, not something this number guarantees by itself.
   ad_spend: { maxAutoPct: 100, maxAutoUsd: 500, maxAutoPeriodUsd: 5000, massSendRecipientFloor: 500 },
   // A refund is the single easiest abuse vector for a chat agent (a shopper can talk an agent into
   // "just refund me") — $200/action is an explicit anti-abuse ceiling: enough to resolve routine
