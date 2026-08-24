@@ -99,32 +99,11 @@ function seedCatalogProduct(store: CatalogProductPort, tenantId: string, title: 
   ]);
 }
 
-const ENV_KEYS = ["CATALOG_UNIFIED", "CATALOG_LOCAL_SERVING", "ADMIN_TOKEN_CUSTODY_ENABLED"];
-const saved: Record<string, string | undefined> = {};
-for (const k of ENV_KEYS) saved[k] = process.env[k];
-afterEach(() => {
-  for (const k of ENV_KEYS) {
-    if (saved[k] === undefined) delete process.env[k];
-    else process.env[k] = saved[k];
-  }
-});
-
 describe("Task 9 durability — ≤1000-SKU getContext, driven through the REAL composition (buildServer + /chat)", () => {
-  // PASS-ON-ARRIVAL: Task 7 already wired `createGroundingPort`'s CATALOG_UNIFIED routing (server.ts
-  // `catalogUnifiedStoreProfile` + `unifiedLocalShell`) and Task 8 already wired local-serving products —
-  // this test's own composition was proven, piece by piece, by server-catalog-unified-wiring.test.ts's
-  // first case. This file adds it as Task 9's own named durability regression pin (the acceptance
-  // criterion this task exists to encode), not as a red-then-green discovery. Non-vacuousness: deleting
-  // `CATALOG_UNIFIED=true` below (or, equivalently, the composition's `unifiedLocalShell`/local-serving
-  // gating) makes `shopifyFetchCalled` become `true` and `row!.ctx.brandName` revert to the "Auria" static
-  // fixture instead of "Durable Co" — verified manually this session by toggling the env var in a scratch
-  // run of this exact test and observing both assertions flip red, then reverting (not committed: a
-  // permanently-flag-off variant of this file would just be server-catalog-unified-wiring.test.ts's own
-  // "flag OFF" case, already covered there).
+  // unified-cutover-cleanup (2026-08-24): `createGroundingPort`'s local-serving routing and
+  // `local-catalog-grounding.ts`'s local `store_profile` read are now the ONLY behavior — this test pins
+  // that as Task 9's own named durability regression (the acceptance criterion this task exists to encode).
   it("a backfilled tenant's getContext returns full local products + brand/policy — shopifyFetch is NEVER called", async () => {
-    process.env.CATALOG_UNIFIED = "true";
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
-
     const store = new InMemoryRuntimeStore();
     const catalogProduct: CatalogProductPort = createInMemoryCatalogProductStore();
     await seedCatalogProduct(catalogProduct, TENANT, "Durable Serum");
@@ -139,7 +118,7 @@ describe("Task 9 durability — ≤1000-SKU getContext, driven through the REAL 
       adminTokens: fakeAdminTokenStore(),
       shopifyFetch: async () => {
         shopifyFetchCalled = true;
-        throw new Error("durability violation: Shopify must never be called for a backfilled tenant under CATALOG_UNIFIED");
+        throw new Error("durability violation: Shopify must never be called for a backfilled tenant");
       },
     });
     try {
@@ -211,24 +190,13 @@ describe("Task 9 durability — >1000-SKU retrieval-hydration path (getShell + g
     const storeProfile: StoreProfilePort = createInMemoryStoreProfileStore();
     await storeProfile.put(TENANT, { brandName: "Durable Co", policy: { returns: "45d durable", shipping: "free durable" } });
 
-    let shellSourceCalled = false;
-    const throwingShellSource = {
-      getShell: async () => {
-        shellSourceCalled = true;
-        throw new Error("durability violation: the Shopify/shellSource fallback must never be reached for a backfilled tenant");
-      },
-    };
-
-    // The REAL local grounding port `server.ts` composes under CATALOG_UNIFIED (`unifiedLocalShell: true`) —
-    // not a stand-in. No Shopify/fetch dependency exists anywhere in `LocalCatalogGroundingDeps` at all: the
-    // "zero Shopify calls" property is structural here, and `throwingShellSource` proves the one FALLBACK
-    // seam this port does carry (used only when `unifiedLocalShell` is false) is never consulted either.
+    // The REAL local grounding port `server.ts` composes — not a stand-in. No Shopify/fetch dependency
+    // exists anywhere in `LocalCatalogGroundingDeps` at all: the "zero Shopify calls" property is
+    // structural here, not merely behavioral.
     const local = createLocalCatalogGroundingPort({
       catalogProduct,
       productFacts,
-      shellSource: throwingShellSource,
       storeProfile,
-      unifiedLocalShell: true,
     });
 
     // A real pgvector-shaped corpus (in-memory adapter) built by the REAL `runCatalogIndex` — the same
@@ -263,29 +231,28 @@ describe("Task 9 durability — >1000-SKU retrieval-hydration path (getShell + g
       },
     });
 
-    return { local, retriever, corpusProducts, shellSourceCalled: () => shellSourceCalled };
+    return { local, retriever, corpusProducts };
   }
 
-  // PASS-ON-ARRIVAL: `local-catalog-grounding.ts`'s ceiling check (Task 8, unaffected by CATALOG_UNIFIED)
-  // and `catalog-retriever.ts`'s `localHydration` seam (Task 8b) both predate this task; this block pins
-  // them as part of Task 9's own durability invariant rather than re-deriving them. Non-vacuousness:
-  // seeding one FEWER record (MAX_CATALOG_PRODUCTS instead of +1) makes the first assertion below fail
-  // (getContext would resolve instead of throwing) — verified manually this session by editing the loop
-  // bound in a scratch run and observing the `rejects.toBeInstanceOf` assertion fail, then reverting.
+  // PASS-ON-ARRIVAL: `local-catalog-grounding.ts`'s ceiling check (Task 8) and `catalog-retriever.ts`'s
+  // `localHydration` seam (Task 8b) both predate this task; this block pins them as part of Task 9's own
+  // durability invariant rather than re-deriving them. Non-vacuousness: seeding one FEWER record
+  // (MAX_CATALOG_PRODUCTS instead of +1) makes the first assertion below fail (getContext would resolve
+  // instead of throwing) — verified manually this session by editing the loop bound in a scratch run and
+  // observing the `rejects.toBeInstanceOf` assertion fail, then reverting.
   it("getContext detects the >MAX_CATALOG_PRODUCTS ceiling (routes off the whole-catalog path)", async () => {
     const { local } = await setupOverCeilingTenant();
     await expect(local.getContext(TENANT)).rejects.toBeInstanceOf(LocalCatalogCeilingExceededError);
   });
 
-  it("getShell returns full local brand/policy for the over-ceiling tenant — the throwing shellSource fallback is NEVER consulted", async () => {
-    const { local, shellSourceCalled } = await setupOverCeilingTenant();
+  it("getShell returns full local brand/policy for the over-ceiling tenant — no Shopify/shellSource dependency exists to consult", async () => {
+    const { local } = await setupOverCeilingTenant();
     const shell = await local.getShell(TENANT);
     expect(shell).toEqual({ tenantId: TENANT, brandName: "Durable Co", policy: { returns: "45d durable", shipping: "free durable" } });
-    expect(shellSourceCalled()).toBe(false);
   });
 
   it("the retrieval-hydration path (getShell + getProductsByIds) returns full local descriptive data for the over-ceiling tenant, zero Shopify calls", async () => {
-    const { retriever, corpusProducts, shellSourceCalled } = await setupOverCeilingTenant();
+    const { retriever, corpusProducts } = await setupOverCeilingTenant();
 
     const { hits } = await retriever.retrieve({ tenantId: TENANT, query: "durable product", k: 10 });
     expect(hits.length).toBe(corpusProducts.length);
@@ -295,6 +262,5 @@ describe("Task 9 durability — >1000-SKU retrieval-hydration path (getShell + g
       expect(hit.metadata).toMatchObject({ description: expect.stringContaining("Descriptive text for durable product") });
       expect((hit.metadata as { tags?: string[] }).tags).toContain("durable");
     }
-    expect(shellSourceCalled()).toBe(false);
   });
 });

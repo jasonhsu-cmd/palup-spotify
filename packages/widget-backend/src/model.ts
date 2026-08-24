@@ -1,24 +1,16 @@
-import type { CatalogProductPort, CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, Product, ProductFactsPort, RuntimeStatePort, SecretsPort, StoreProfilePort } from "@palup/platform-ports";
-import { createRedactingModelPort, createCachingGroundingPort, createInMemoryStoreProfileStore } from "@palup/platform-ports";
+import type { CatalogProductPort, CommercePort, GroundingPort, ModelPort, ProductFactsPort, RuntimeStatePort, SecretsPort, StoreProfilePort } from "@palup/platform-ports";
+import {
+  createRedactingModelPort,
+  createCachingGroundingPort,
+  createInMemoryStoreProfileStore,
+  createInMemoryCatalogProductStore,
+  createInMemoryProductFactsStore,
+} from "@palup/platform-ports";
 import { MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
-import type { MerchantCredentialRead } from "@palup/state-postgres";
-import { resolveStorefrontCredential } from "./merchant-store.js";
-import { createShopifyGroundingAdapter, type StorefrontFetch, type StorefrontShellFetch } from "./shopify-grounding.js";
 import { createLocalCatalogGroundingPort } from "./local-catalog-grounding.js";
 import { createCustomerAccountCommerceAdapter } from "./shopify-customer-account-commerce.js";
 import type { CustomerGrantStore } from "./customer-grant-store.js";
-
-// D2: the router refuses rather than silently falling back to fixtures when a custodied credential
-// exists but cannot be read back (undecryptable / malformed) — never serve a merchant's shoppers the
-// wrong brand's catalog. The caching wrapper below degrades a cold throw to safe-empty defensively; a
-// graceful shopper-facing "unavailable" surface is a later task's pre-flight, not this router's job.
-export class GroundingCredentialUnreadableError extends Error {
-  constructor(public readonly reason: "undecryptable" | "malformed-record") {
-    super(`grounding credential unreadable: ${reason}`);
-    this.name = "GroundingCredentialUnreadableError";
-  }
-}
 
 /**
  * Task 8 (durable-catalog-sync) — the per-tenant "is this tenant backfilled / locally served" decision,
@@ -56,44 +48,36 @@ export function createModelPort(): { port: ModelPort; name: string } {
   return { port: createRedactingModelPort(port), name };
 }
 
-// Grounding source (ADR-0012). Per request tenant, route to the merchant's Shopify store when its
-// credentials resolve (via the SecretsPort), else fall back to the multi-tenant fixtures adapter —
-// mirrors isVertexConfigured() for the model port, but per-tenant. Wrapped in the caching + degradation
-// layer (per-tenant TTL cache, hard timeouts, stale-while-error, fail-closed safe-empty). The whole
-// thing stays behind GroundingPort. During rollout no tenant has Shopify creds ⇒ everyone gets fixtures.
+// Grounding source (ADR-0012, unified-cutover-cleanup 2026-08-24) — serving is ALWAYS local. Per request
+// tenant: a BACKFILLED tenant (a non-empty `catalog_product` corpus — Task 7's Bulk-Operations backfill)
+// is served entirely from `CatalogProductPort`/`ProductFactsPort`/`StoreProfilePort` (`model.ts`'s
+// `createLocalCatalogGroundingPort` composition, no Shopify call on that path); a tenant that has NOT been
+// backfilled falls back to the multi-tenant fixtures adapter. Wrapped in the caching + degradation layer
+// (per-tenant TTL cache, hard timeouts, stale-while-error, fail-closed safe-empty). The whole thing stays
+// behind GroundingPort.
 //
-// D1 — the SHOP DOMAIN now comes through the merchant resolver (`opts.shopDomainFor`), so a revoked
-// merchant's catalog can no longer be pulled into a prompt from a stale `SHOPIFY_STORES` entry. The TOKEN
-// is unchanged: still `SecretsPort` (see resolveShopifyStore's own doc comment for why, and for what that
-// means for a merchant who installs through C1).
+// This used to ALSO route a backfilled-or-not tenant to a live Shopify Storefront call when the tenant had
+// resolvable credentials (`resolveStorefrontCredential` + `createShopifyGroundingAdapter`, gated by the
+// `localServingEnabled`/`catalogUnified` flags). The credential-enrollment-unification cutover (ADR-0023
+// D1) made "serving is 100% local" the ONLY behavior; the owner then retired the flags entirely
+// (unified-cutover-cleanup, 2026-08-24) and this file's live-Storefront-serving branch — along with it —
+// became dead code and was deleted. `resolveStorefrontCredential`/`createShopifyGroundingAdapter` remain
+// live for OTHER callers unrelated to this router (the WS2 sample-storefront catalog-page routes in
+// server.ts, and `jobs/catalog-index.ts`'s sync-plane fetch) — see this task's own report for the full grep.
 export function createGroundingPort(
   store: RuntimeStatePort,
+  // Unused since the live-Storefront-serving branch was removed (unified-cutover-cleanup, 2026-08-24) —
+  // kept in the signature to avoid a wider call-site churn across this composition root and its tests; a
+  // future cleanup pass may drop it once every caller has been re-audited.
   secrets: SecretsPort,
   opts: {
-    shopifyFetch?: StorefrontFetch; // injectable for tests; defaults to the live Storefront call
-    /** S2 — the shell-only (brand+policy, no products) fetch. Injectable for tests; defaults to the live single-round-trip Storefront call, mirroring `shopifyFetch` above. */
-    shopifyShellFetch?: StorefrontShellFetch;
-    /** D1: registry-first shop-domain resolution. Absent ⇒ the pre-D1 `SHOPIFY_STORES`-only path. */
-    shopDomainFor?: (tenantId: string) => Promise<string | undefined>;
-    /** D2: the custodied delegate credential store's read(). Consulted only when `readbackEnabled`. */
-    credRead?: (tenantId: string) => Promise<MerchantCredentialRead>;
-    /** D2: gates the read-back path above; off ⇒ unchanged SecretsPort-only resolution. */
-    readbackEnabled?: boolean;
-    /**
-     * Task 8 (durable-catalog-sync, §3/§13.4) — the local-serving deps + gate. All three of
-     * `localServingEnabled`/`catalogProduct`/`productFacts` must be present for a tenant to ever be routed
-     * to `createLocalCatalogGroundingPort`; any one absent (the default) leaves this function byte-identical
-     * to before this task. See the per-tenant gate below `shopifyOrFixtures` for the routing rule itself.
-     */
-    localServingEnabled?: boolean;
     catalogProduct?: CatalogProductPort;
     productFacts?: ProductFactsPort;
     /**
-     * Task 4 (credential-enrollment-unification) — the local `store_profile` brand+policy source
-     * `createLocalCatalogGroundingPort`'s `getShell` now reads instead of `shellSource`. Absent (the
-     * default) falls back to an empty in-memory store below, so `getShell` degrades to the same neutral
-     * default it always has — wiring a real, persistent `StoreProfilePort` into this composition root is
-     * Task 7/9's job, not this task's (byte-identical to before this task until that lands).
+     * The local `store_profile` brand+policy source `createLocalCatalogGroundingPort`'s `getContext`/
+     * `getShell` always read. Absent ⇒ a fresh in-memory store (empty — degrades to the neutral default),
+     * mirroring `catalogProduct`/`productFacts`'s own in-memory fallback below. The composition root
+     * (server.ts) always wires a durable, migrated `PostgresStoreProfileStore` here in a real deployment.
      */
     storeProfile?: Pick<StoreProfilePort, "get">;
     /**
@@ -101,8 +85,8 @@ export function createGroundingPort(
      * `createCachingGroundingPort` only caches `getContext`, so without this a `listByTenant(limit:1)` read
      * would run on EVERY `getShell`/`getProductsByIds` call for EVERY tenant (a hot-path DB round-trip that
      * serves no purpose once a tenant's backfill status is known). Default 60s. A tenant that becomes
-     * backfilled mid-session may keep the storefront path for up to this long — acceptable: a tenant is
-     * never un-backfilled, so the only cost is a brief delay before it starts benefiting from local serving,
+     * backfilled mid-session may keep the fixtures path for up to this long — acceptable: a tenant is never
+     * un-backfilled, so the only cost is a brief delay before it starts benefiting from local serving,
      * never a correctness/isolation issue.
      */
     localServingCacheTtlMs?: number;
@@ -112,101 +96,41 @@ export function createGroundingPort(
      * Task 8b — an already-built `createLocalCatalogDecision` instance, reused instead of building a new
      * one here. The composition root (server.ts) supplies this so the SAME memoized decision drives both
      * this router AND the catalog retriever's local-hydration seam. Absent ⇒ this function builds its own
-     * internally (byte-identical to before this task) — every pre-existing caller that does not pass this
-     * is unaffected.
+     * internally.
      */
     hasLocalCatalog?: (tenantId: string) => Promise<boolean>;
-    /**
-     * Task 7 (CATALOG_UNIFIED, ADR-0023 D1) — threaded straight through to
-     * `createLocalCatalogGroundingPort`'s `unifiedLocalShell`: when true, a backfilled tenant's
-     * `getContext` ALSO reads brand+policy from `storeProfile` (never `shellSource`), closing the last
-     * residual Storefront call on the local-serving path. Absent/false (the default) ⇒ byte-identical to
-     * before this task.
-     */
-    catalogUnified?: boolean;
   } = {},
 ): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
-  // The PRE-Task-8 router, unchanged: per-tenant Shopify-or-fixtures, exactly as before. Kept as its own
-  // value (not inlined) for two reasons: it is the fallback for a tenant that has NOT been backfilled, and
-  // — Task 8's brand/policy gap (see local-catalog-grounding.ts's file banner) — it is also the `shellSource`
-  // a BACKFILLED tenant's local port reads brand+policy from, so both paths share one credential-resolution
-  // implementation rather than two that could drift.
-  const shopifyOrFixtures: GroundingPort = {
-    async getContext(tenantId: string): Promise<GroundingContext> {
-      // tenantId here is the SERVER-DERIVED request tenant (threaded from the verified widget token via
-      // the brain) — never client input, so one merchant can never resolve another's store creds.
-      const outcome = await resolveStorefrontCredential(tenantId, {
-        secrets,
-        credRead: opts.credRead,
-        readbackEnabled: opts.readbackEnabled,
-        shopDomainFor: opts.shopDomainFor,
-      });
-      if (outcome.status === "live")
-        return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch).getContext(tenantId);
-      if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
-      return fixtures.getContext(tenantId);
+  // In-memory fallbacks when the composition root does not inject its own durable handles — mirrors
+  // `server.ts`'s own `localProductFacts`/`localCatalogProduct` in-memory-when-no-pool pattern, so a caller
+  // that supplies nothing (most existing unit tests) gets a tenant that is simply never backfilled, i.e.
+  // byte-identical to "always fixtures" — never a crash from a missing dependency.
+  const catalogProduct = opts.catalogProduct ?? createInMemoryCatalogProductStore();
+  const productFacts = opts.productFacts ?? createInMemoryProductFactsStore();
+  const local = createLocalCatalogGroundingPort({
+    catalogProduct,
+    productFacts,
+    storeProfile: opts.storeProfile ?? createInMemoryStoreProfileStore(),
+  });
+  // MEMOIZED (coordinator review fix #2): `createCachingGroundingPort` below only caches `getContext`, so
+  // `getShell`/`getProductsByIds` would otherwise re-run this `listByTenant` read on every single call — an
+  // unnecessary DB round-trip on a hot path, for every tenant, backfilled or not. A tenant is never
+  // un-backfilled, so a short, process-local TTL cache is safe: the only observable effect of staleness is
+  // a newly-backfilled tenant keeping the fixtures path for up to `ttlMs` longer than strictly necessary.
+  const hasLocalCatalog =
+    opts.hasLocalCatalog ?? createLocalCatalogDecision(catalogProduct, { ttlMs: opts.localServingCacheTtlMs, now: opts.now });
+  const router: GroundingPort = {
+    async getContext(tenantId) {
+      return (await hasLocalCatalog(tenantId)) ? local.getContext(tenantId) : fixtures.getContext(tenantId);
     },
-    async getShell(tenantId: string): Promise<GroundingShell> {
-      const outcome = await resolveStorefrontCredential(tenantId, {
-        secrets,
-        credRead: opts.credRead,
-        readbackEnabled: opts.readbackEnabled,
-        shopDomainFor: opts.shopDomainFor,
-      });
-      if (outcome.status === "live")
-        return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch, opts.shopifyShellFetch).getShell(tenantId);
-      if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
-      return fixtures.getShell(tenantId);
+    async getShell(tenantId) {
+      return (await hasLocalCatalog(tenantId)) ? local.getShell(tenantId) : fixtures.getShell(tenantId);
     },
-    async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
-      const outcome = await resolveStorefrontCredential(tenantId, {
-        secrets,
-        credRead: opts.credRead,
-        readbackEnabled: opts.readbackEnabled,
-        shopDomainFor: opts.shopDomainFor,
-      });
-      if (outcome.status === "live")
-        return createShopifyGroundingAdapter(outcome.creds, opts.shopifyFetch, opts.shopifyShellFetch).getProductsByIds(tenantId, ids);
-      if (outcome.status === "refuse") throw new GroundingCredentialUnreadableError(outcome.reason);
-      return fixtures.getProductsByIds(tenantId, ids);
+    async getProductsByIds(tenantId, ids) {
+      return (await hasLocalCatalog(tenantId)) ? local.getProductsByIds(tenantId, ids) : fixtures.getProductsByIds(tenantId, ids);
     },
   };
-
-  let router: GroundingPort = shopifyOrFixtures;
-  if (opts.localServingEnabled && opts.catalogProduct && opts.productFacts) {
-    const catalogProduct = opts.catalogProduct;
-    const local = createLocalCatalogGroundingPort({
-      catalogProduct,
-      productFacts: opts.productFacts,
-      shellSource: shopifyOrFixtures,
-      storeProfile: opts.storeProfile ?? createInMemoryStoreProfileStore(),
-      unifiedLocalShell: opts.catalogUnified,
-    });
-    // Controller ruling (per-tenant gating, load-bearing) — local serving is active ONLY for a tenant that
-    // HAS a `catalog_product` corpus (backfilled), detected via a non-empty `listByTenant`. A tenant with
-    // none (not yet backfilled) keeps `shopifyOrFixtures` UNCHANGED, so flipping `CATALOG_LOCAL_SERVING` on
-    // globally never blanks a currently-working ≤1000-SKU tenant that has not gone through Task 7's backfill.
-    //
-    // MEMOIZED (coordinator review fix #2): `createCachingGroundingPort` below only caches `getContext`,
-    // so `getShell`/`getProductsByIds` would otherwise re-run this `listByTenant` read on every single call
-    // — an unnecessary DB round-trip on a hot path, for every tenant, backfilled or not. A tenant is never
-    // un-backfilled, so a short, process-local TTL cache is safe: the only observable effect of staleness is
-    // a newly-backfilled tenant keeping the storefront path for up to `ttlMs` longer than strictly necessary.
-    const hasLocalCatalog =
-      opts.hasLocalCatalog ?? createLocalCatalogDecision(catalogProduct, { ttlMs: opts.localServingCacheTtlMs, now: opts.now });
-    router = {
-      async getContext(tenantId) {
-        return (await hasLocalCatalog(tenantId)) ? local.getContext(tenantId) : shopifyOrFixtures.getContext(tenantId);
-      },
-      async getShell(tenantId) {
-        return (await hasLocalCatalog(tenantId)) ? local.getShell(tenantId) : shopifyOrFixtures.getShell(tenantId);
-      },
-      async getProductsByIds(tenantId, ids) {
-        return (await hasLocalCatalog(tenantId)) ? local.getProductsByIds(tenantId, ids) : shopifyOrFixtures.getProductsByIds(tenantId, ids);
-      },
-    };
-  }
   return createCachingGroundingPort(router, store);
 }
 

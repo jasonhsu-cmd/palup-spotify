@@ -6,19 +6,18 @@ import {
 } from "@palup/platform-ports";
 import { createGroundingPort } from "../src/model.js";
 
-// Task 8 — per-tenant local-serving routing (controller ruling, load-bearing requirement #1). A tenant
-// with a `catalog_product` corpus (backfilled — a non-empty `listByTenant`) is served ENTIRELY from local
-// stores; a tenant with none keeps the existing storefront/fixtures path unchanged, so flipping
-// CATALOG_LOCAL_SERVING on globally never blanks a currently-working tenant that has not been backfilled.
+// Task 8 (unified-cutover-cleanup, 2026-08-24) — per-tenant local-serving routing (controller ruling,
+// load-bearing requirement #1), now UNCONDITIONAL: a tenant with a `catalog_product` corpus (backfilled —
+// a non-empty `listByTenant`) is served ENTIRELY from local stores; a tenant with none falls back to the
+// fixtures adapter. The `localServingEnabled`/`catalogUnified` flags that used to gate this — and the live
+// Storefront-serving fallback for a non-backfilled-but-credentialed tenant — are gone (see model.ts's own
+// header comment); the non-local fallback is fixtures-only now.
 
 const store = () => new InMemoryRuntimeStore();
 const secrets = { get: async () => undefined } as any;
-const throwingShopifyFetch = async (): Promise<never> => {
-  throw new Error("Shopify is down — must not be called for a backfilled tenant's PRODUCTS path");
-};
 
 describe("createGroundingPort — per-tenant local-serving routing", () => {
-  it("a BACKFILLED tenant (non-empty catalogProduct) is served locally — no Shopify call for products", async () => {
+  it("a BACKFILLED tenant (non-empty catalogProduct) is served locally", async () => {
     const catalogProduct = createInMemoryCatalogProductStore();
     await catalogProduct.upsertMany("backfilled-tenant", [
       {
@@ -33,13 +32,7 @@ describe("createGroundingPort — per-tenant local-serving routing", () => {
     ]);
     const productFacts = createInMemoryProductFactsStore();
 
-    const g = createGroundingPort(store(), secrets, {
-      localServingEnabled: true,
-      catalogProduct,
-      productFacts,
-      shopifyFetch: throwingShopifyFetch, // proves the PRODUCTS path never reaches this
-      shopDomainFor: async () => "backfilled.myshopify.com",
-    });
+    const g = createGroundingPort(store(), secrets, { catalogProduct, productFacts });
 
     const ctx = await g.getContext("backfilled-tenant");
     expect(ctx.products.length).toBe(1);
@@ -49,37 +42,19 @@ describe("createGroundingPort — per-tenant local-serving routing", () => {
     expect(byIds.length).toBe(1);
   });
 
-  it("a NON-backfilled tenant (empty catalogProduct) keeps the existing storefront/fixtures path", async () => {
+  it("a NON-backfilled tenant (empty catalogProduct) falls back to fixtures", async () => {
     const catalogProduct = createInMemoryCatalogProductStore(); // empty — no backfill for this tenant
     const productFacts = createInMemoryProductFactsStore();
 
-    const g = createGroundingPort(store(), secrets, {
-      localServingEnabled: true,
-      catalogProduct,
-      productFacts,
-      shopifyFetch: async () => ({ shop: { name: "Acme" }, products: { nodes: [{ id: "1", title: "Widget" }] } }),
-      shopDomainFor: async () => undefined, // no registry row -> resolveStorefrontCredential falls to fixtures/SecretsPort
-    });
+    const g = createGroundingPort(store(), secrets, { catalogProduct, productFacts });
 
-    // "demo" resolves the built-in AURIA fixture in StaticGroundingAdapter — a non-backfilled tenant with
-    // no live creds must still resolve exactly as it did before this task (byte-identical fallback chain).
+    // "demo" resolves the built-in AURIA fixture in StaticGroundingAdapter.
     const ctx = await g.getContext("demo");
     expect(ctx.brandName).toBe("Auria");
   });
 
-  it("localServingEnabled OFF (or catalogProduct/productFacts absent) is byte-identical to before this task", async () => {
-    const g = createGroundingPort(store(), secrets, {
-      shopDomainFor: async () => undefined,
-    });
-    const ctx = await g.getContext("demo");
-    expect(ctx.brandName).toBe("Auria");
-  });
-
-  it("localServingEnabled true but catalogProduct/productFacts NOT supplied is a no-op (falls through unchanged)", async () => {
-    const g = createGroundingPort(store(), secrets, {
-      localServingEnabled: true,
-      shopDomainFor: async () => undefined,
-    });
+  it("no catalogProduct/productFacts supplied at all defaults to an empty (never-backfilled) local store — fixtures for every tenant", async () => {
+    const g = createGroundingPort(store(), secrets);
     const ctx = await g.getContext("demo");
     expect(ctx.brandName).toBe("Auria");
   });
@@ -112,11 +87,9 @@ describe("createGroundingPort — per-tenant local-serving routing", () => {
 
     let clock = 1_000_000;
     const g = createGroundingPort(store(), secrets, {
-      localServingEnabled: true,
       catalogProduct: countingCatalogProduct,
       productFacts,
       now: () => clock,
-      shopDomainFor: async () => "backfilled.myshopify.com",
     });
 
     await g.getShell("backfilled-tenant");
@@ -154,11 +127,9 @@ describe("createGroundingPort — per-tenant local-serving routing", () => {
     const alwaysNotLocal = async () => false;
 
     const g = createGroundingPort(store(), secrets, {
-      localServingEnabled: true,
       catalogProduct,
       productFacts,
       hasLocalCatalog: alwaysNotLocal,
-      shopDomainFor: async () => undefined, // no live creds -> falls to StaticGroundingAdapter fixtures
     });
 
     // "backfilled-tenant" is not a known fixture id, so the fixtures adapter returns EMPTY products. Had

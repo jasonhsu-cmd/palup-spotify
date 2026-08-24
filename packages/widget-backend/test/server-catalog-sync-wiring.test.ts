@@ -16,15 +16,18 @@ import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE } from "../src
 import { WEBHOOK_ROUTES } from "../src/routes/shopify-webhooks.js";
 import { tenantIdForShop } from "../src/routes/shopify-install.js";
 
-// Task 13 — proves buildServer's OWN composition-root wiring for the durable catalog-sync subsystem:
-//   (a) ADMIN_TOKEN_CUSTODY_ENABLED gates constructing/injecting an AdminTokenStore into the REAL install
-//       (put) and shop/redact webhook (delete) flows, honoring the `opts.adminTokens` test seam when given;
-//   (b) absent that seam AND with the flag on, the composition root builds its OWN AdminTokenStore under
-//       the DISTINCT `adminCredCrypto()` scope (ADR-0022 F2) — proven by provisioning ONLY the
-//       admin-cred-scoped secret name and independently reading the row back through the same scope;
+// Task 13 — proves buildServer's OWN composition-root wiring for the durable catalog-sync subsystem.
+// unified-cutover-cleanup (2026-08-24): ADMIN_TOKEN_CUSTODY_ENABLED and CATALOG_BACKFILL_ENABLED are gone
+// — the Admin-token store and the catalog_product write-plane are now ALWAYS constructed/wired. This file
+// now proves:
+//   (a) an AdminTokenStore is ALWAYS constructed/injected into the REAL install (put) and shop/redact
+//       webhook (delete) flows, honoring the `opts.adminTokens` test seam when given;
+//   (b) absent that seam, the composition root builds its OWN AdminTokenStore under the DISTINCT
+//       `adminCredCrypto()` scope (ADR-0022 F2) — proven by provisioning ONLY the admin-cred-scoped secret
+//       name and independently reading the row back through the same scope;
 //   (c) `localCatalogProduct` (Task 8) is threaded into shop/redact's teardown UNCONDITIONALLY (a
-//       compliance action, not gated on CATALOG_BACKFILL_ENABLED/CATALOG_LOCAL_SERVING);
-//   (d) CATALOG_BACKFILL_ENABLED does not break composition either way (on/off).
+//       compliance action, always wired regardless of any write-plane posture);
+//   (d) the paired `catalogProduct`/`catalogProductAdminSource` write-plane composition boots cleanly.
 //
 // This file deliberately does NOT re-prove the deep behavioral properties already covered elsewhere:
 // admin-token custody mechanics + F7 shop-binding (shopify-install-admin-token.test.ts), the two-step
@@ -49,15 +52,7 @@ const DELEGATE_TOKEN = "shpca_DELEGATE_TOKEN_NEVER_LOGGED";
 const AUTH_CODE = "authorization-code-never-logged";
 const GRANTED_SCOPES = "unauthenticated_read_product_listings";
 
-const ENV_KEYS = [
-  "SHOPIFY_APP_CLIENT_ID",
-  "SHOPIFY_INSTALL_REDIRECT_URI",
-  "SHOPIFY_INSTALL_REGION",
-  "PALUP_SECRETS",
-  "ADMIN_TOKEN_CUSTODY_ENABLED",
-  "CATALOG_BACKFILL_ENABLED",
-  "CATALOG_LOCAL_SERVING",
-];
+const ENV_KEYS = ["SHOPIFY_APP_CLIENT_ID", "SHOPIFY_INSTALL_REDIRECT_URI", "SHOPIFY_INSTALL_REGION", "PALUP_SECRETS"];
 const saved: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) saved[k] = process.env[k];
 afterEach(() => {
@@ -166,47 +161,11 @@ async function postWebhook(app: Awaited<ReturnType<typeof buildServer>>, path: s
 const shopRedactBody = (): string => JSON.stringify({ shop_id: 954889, shop_domain: SHOP });
 
 describe("server.ts composition — durable catalog-sync (Task 13)", () => {
-  it("ADMIN_TOKEN_CUSTODY_ENABLED unset (default): an injected opts.adminTokens is never touched, install still succeeds", async () => {
+  it("adminTokens is ALWAYS wired: the injected opts.adminTokens is used for BOTH the install (put) and shop/redact (delete) flows", async () => {
     process.env.SHOPIFY_APP_CLIENT_ID = CLIENT_ID;
     process.env.SHOPIFY_INSTALL_REDIRECT_URI = REDIRECT_URI;
     process.env.SHOPIFY_INSTALL_REGION = "us";
     process.env.PALUP_SECRETS = baseSecrets();
-
-    const put = vi.fn(async () => {});
-    const del = vi.fn(async () => {});
-    const fakeAdminTokens: AdminTokenStore = {
-      put,
-      delete: del,
-      async read() {
-        return { status: "missing" };
-      },
-      async refresh() {},
-    };
-
-    const app = await buildServer({
-      store: new InMemoryRuntimeStore(),
-      merchantRegistry: createInMemoryMerchantRegistry(),
-      installFetch: installFetchImpl(),
-      // A fake sink for the DELEGATE credential — this test is about the admin-token seam, not merchant-
-      // cred custody, so avoid needing a real merchant-cred key provisioned just to reach a 200.
-      merchantCredentials: { async put() {} },
-      adminTokens: fakeAdminTokens,
-    });
-    try {
-      const { statusCode } = await runInstall(app);
-      expect(statusCode).toBe(200);
-      expect(put).not.toHaveBeenCalled();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("ADMIN_TOKEN_CUSTODY_ENABLED=true wires the injected opts.adminTokens into BOTH the install (put) and shop/redact (delete) flows", async () => {
-    process.env.SHOPIFY_APP_CLIENT_ID = CLIENT_ID;
-    process.env.SHOPIFY_INSTALL_REDIRECT_URI = REDIRECT_URI;
-    process.env.SHOPIFY_INSTALL_REGION = "us";
-    process.env.PALUP_SECRETS = baseSecrets();
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
 
     const put = vi.fn(async () => {});
     const del = vi.fn(async () => {});
@@ -242,11 +201,10 @@ describe("server.ts composition — durable catalog-sync (Task 13)", () => {
     }
   });
 
-  it("ADMIN_TOKEN_CUSTODY_ENABLED=true with NO opts.adminTokens override: the composition root builds its own AdminTokenStore under the DISTINCT admin-cred crypto scope (ADR-0022 F2)", async () => {
+  it("with NO opts.adminTokens override: the composition root builds its own AdminTokenStore under the DISTINCT admin-cred crypto scope (ADR-0022 F2)", async () => {
     process.env.SHOPIFY_APP_CLIENT_ID = CLIENT_ID;
     process.env.SHOPIFY_INSTALL_REDIRECT_URI = REDIRECT_URI;
     process.env.SHOPIFY_INSTALL_REGION = "us";
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
     // Provision ONLY the two scope-specific secret names — never the bare, unscoped default — so a
     // successful round-trip through EACH scope is proof that scope is genuinely load-bearing (not a
     // coincidental fallback to a shared/default key).
@@ -283,9 +241,8 @@ describe("server.ts composition — durable catalog-sync (Task 13)", () => {
     }
   });
 
-  it("shop/redact tombstones/hard-deletes catalog_product UNCONDITIONALLY (not gated on CATALOG_BACKFILL_ENABLED)", async () => {
+  it("shop/redact tombstones/hard-deletes catalog_product UNCONDITIONALLY", async () => {
     process.env.PALUP_SECRETS = baseSecrets();
-    process.env.CATALOG_BACKFILL_ENABLED = "false";
 
     const registry = createInMemoryMerchantRegistry();
     await registry.create({ tenantId: TENANT, shopDomain: SHOP, embedKey: "pk_test", region: "us" });
@@ -302,20 +259,9 @@ describe("server.ts composition — durable catalog-sync (Task 13)", () => {
     try {
       const { statusCode } = await postWebhook(app, WEBHOOK_ROUTES.shopRedact, "shop/redact", shopRedactBody());
       expect(statusCode).toBe(200);
-      // Hard-deleted (deleteTenant), not merely tombstoned — even with the WRITE-plane flag off, since
-      // teardown is a compliance action wired unconditionally.
+      // Hard-deleted (deleteTenant), not merely tombstoned — teardown is a compliance action wired
+      // unconditionally, independent of the write-plane's own posture.
       expect(await catalogProduct.listByTenant(TENANT, { includeDeleted: true })).toEqual([]);
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("boots successfully with CATALOG_BACKFILL_ENABLED off, regardless of admin-token custody", async () => {
-    process.env.CATALOG_BACKFILL_ENABLED = "false";
-    const app = await buildServer({ store: new InMemoryRuntimeStore() });
-    try {
-      const res = await app.inject({ method: "GET", url: "/health" });
-      expect(res.statusCode).toBe(200);
     } finally {
       await app.close();
     }
@@ -323,20 +269,12 @@ describe("server.ts composition — durable catalog-sync (Task 13)", () => {
 
   // Final-review fix (whole-branch review, 2026-08-23) — Task 13 wired `reconcileDeps.catalogProduct`
   // (the durable delta WRITE plane) into composition but never wired the paired clobber-fix field
-  // `catalogProductAdminSource`. Left alone, turning CATALOG_BACKFILL_ENABLED on by itself (exactly what
-  // the OLD version of this test proved "boots fine either way") would silently reintroduce the Task 6/7
-  // clobber the moment a real Bulk-Ops backfill populated a rich row. The fix makes the two fields
-  // STRUCTURALLY paired: `buildServer` now refuses to boot when the rich write-plane is wired without its
-  // admin-shape read source.
-  it("FAILS FAST at composition when CATALOG_BACKFILL_ENABLED=true but the admin-shape source cannot be built (ADMIN_TOKEN_CUSTODY_ENABLED off) — the trap can no longer boot silently", async () => {
-    process.env.CATALOG_BACKFILL_ENABLED = "true";
-    delete process.env.ADMIN_TOKEN_CUSTODY_ENABLED;
-    await expect(buildServer({ store: new InMemoryRuntimeStore() })).rejects.toThrow(/catalogProductAdminSource/i);
-  });
-
-  it("boots and wires the paired admin-shape source when BOTH CATALOG_BACKFILL_ENABLED and ADMIN_TOKEN_CUSTODY_ENABLED are on (the safe, paired posture)", async () => {
-    process.env.CATALOG_BACKFILL_ENABLED = "true";
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
+  // `catalogProductAdminSource`. The two fields are STRUCTURALLY paired: `buildServer` refuses to boot when
+  // the rich write-plane is wired without its admin-shape read source. unified-cutover-cleanup (2026-08-24):
+  // both `catalogProduct` and `catalogProductAdminSource` are now unconditional (adminTokens is always
+  // constructed), so the FAILS-FAST branch this guard exists for should be unreachable through normal boot
+  // — this test now just pins the successful, always-paired composition.
+  it("boots and wires the paired admin-shape source (the safe, always-paired posture)", async () => {
     const fakeAdminTokens: AdminTokenStore = {
       put: vi.fn(async () => {}),
       delete: vi.fn(async () => {}),

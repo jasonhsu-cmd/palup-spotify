@@ -6,16 +6,13 @@ import {
 } from "@palup/platform-ports";
 import { createLocalCatalogGroundingPort } from "../src/local-catalog-grounding.js";
 
-// Task 4 (credential-enrollment-unification, spec §Task 4): `getShell` can be served entirely from the
-// local `store_profile` store — no `shellSource`/Shopify call on this path — when `unifiedLocalShell` is
-// set (Task 7/CATALOG_UNIFIED). Final-review Critical fix (2026-08-24): `getShell` initially read
-// store_profile UNCONDITIONALLY, ignoring the flag (a gap from before `unifiedLocalShell` existed); it is
-// now gated exactly like `getContext`, so every case below constructs the port WITH the flag set. The
-// flag-OFF (`shellSource`) case is covered by local-catalog-grounding.test.ts's own getShell coverage and
-// server-catalog-unified-wiring.test.ts's flag-OFF regression test.
+// unified-cutover-cleanup (2026-08-24): `getShell` ALWAYS serves from the local `store_profile` store — no
+// Shopify/`shellSource` call on this path at all. This used to be gated on a `unifiedLocalShell` flag
+// (credential-enrollment-unification's CATALOG_UNIFIED cutover); the owner made that cutover the ONLY
+// behavior and the flag (and the `shellSource` fallback it gated) were deleted as dead code.
 
-describe("createLocalCatalogGroundingPort — getShell from local store_profile (Task 4/7, unifiedLocalShell)", () => {
-  it("returns the tenant's brand/policy from store_profile, with no shellSource call", async () => {
+describe("createLocalCatalogGroundingPort — getShell from local store_profile", () => {
+  it("returns the tenant's brand/policy from store_profile", async () => {
     const catalogProduct = createInMemoryCatalogProductStore();
     const productFacts = createInMemoryProductFactsStore();
     const storeProfile = createInMemoryStoreProfileStore();
@@ -24,15 +21,7 @@ describe("createLocalCatalogGroundingPort — getShell from local store_profile 
       policy: { returns: "30d", shipping: "free", allergens: "contains nuts" },
     });
 
-    let shellSourceCalled = false;
-    const shellSource = {
-      getShell: async () => {
-        shellSourceCalled = true;
-        throw new Error("shellSource must never be called from getShell");
-      },
-    };
-
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource, storeProfile, unifiedLocalShell: true });
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, storeProfile });
     const shell = await grounding.getShell("t1");
 
     expect(shell).toEqual({
@@ -40,7 +29,6 @@ describe("createLocalCatalogGroundingPort — getShell from local store_profile 
       brandName: "Acme",
       policy: { returns: "30d", shipping: "free", allergens: "contains nuts" },
     });
-    expect(shellSourceCalled).toBe(false);
   });
 
   it("degrades to the neutral default (never throws) when no profile has been set for the tenant", async () => {
@@ -48,13 +36,7 @@ describe("createLocalCatalogGroundingPort — getShell from local store_profile 
     const productFacts = createInMemoryProductFactsStore();
     const storeProfile = createInMemoryStoreProfileStore();
 
-    const shellSource = {
-      getShell: async () => {
-        throw new Error("shellSource must never be called from getShell");
-      },
-    };
-
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource, storeProfile, unifiedLocalShell: true });
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, storeProfile });
     const shell = await grounding.getShell("missing-tenant");
 
     expect(shell).toEqual({
@@ -72,13 +54,8 @@ describe("createLocalCatalogGroundingPort — getShell from local store_profile 
         throw new Error("db is down");
       },
     };
-    const shellSource = {
-      getShell: async () => {
-        throw new Error("shellSource must never be called from getShell");
-      },
-    };
 
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource, storeProfile, unifiedLocalShell: true });
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, storeProfile });
     const shell = await grounding.getShell("t1");
 
     expect(shell).toEqual({

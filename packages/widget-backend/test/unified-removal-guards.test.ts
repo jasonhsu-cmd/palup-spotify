@@ -14,15 +14,15 @@ import { ADMIN_SYNC_SCOPES } from "../src/shopify-webhook-identity.js";
 
 // Task 8 (credential-enrollment-unification) — REMOVAL GUARDS.
 //
-// ADR-0023 D1 retires two mechanisms for the UNIFIED (CATALOG_UNIFIED=true) path: the delegate/Storefront
-// credential (`resolveShopifyStore`/`resolveStorefrontCredential`, backed by the `PALUP_SECRETS` Storefront
-// token map) for SERVING a backfilled tenant, and `SHOPIFY_STORES`-env tenant enumeration for the
-// catalog-sync SCHEDULER (replaced by the registry's `listActive`, Task 5). Per the rollback guard
-// (dormant-for-one-release), the OLD code (`resolveShopifyStore` in merchant-store.ts, `parseStoreDomains`,
-// `jobs/catalog-index.ts`'s SHOPIFY_STORES-driven fleet enumeration) is INTENTIONALLY left in place — this
-// file does not delete anything. It only PINS the invariant that the unified path itself never reaches
-// back into either retired mechanism, so a future change (or the eventual dormant-code deletion PR) cannot
-// silently reintroduce them without a test going red.
+// ADR-0023 D1 retires two mechanisms for the unified (now the ONLY, unconditional — unified-cutover-cleanup
+// 2026-08-24 dropped `CATALOG_UNIFIED`) serving path: the delegate/Storefront credential
+// (`resolveShopifyStore`/`resolveStorefrontCredential`, backed by the `PALUP_SECRETS` Storefront token map)
+// for SERVING a backfilled tenant — DELETED outright from model.ts's `createGroundingPort` — and
+// `SHOPIFY_STORES`-env tenant enumeration for the catalog-sync SCHEDULER (replaced by the registry's
+// `listActive`, Task 5), which is still a live, in-place mechanism used elsewhere (install/webhooks,
+// `jobs/catalog-index.ts`'s fleet enumeration) so this file continues to guard that the scheduler never
+// falls back to it. This file PINS the invariant that the serving/scheduler paths never reach back into
+// either retired mechanism, so a future change cannot silently reintroduce them without a test going red.
 //
 // Assertions are BEHAVIORAL (via the same DI seams server-catalog-unified-wiring.test.ts already exercises)
 // wherever the codebase gives a seam to observe "was the retired call ever made" — grep-style static
@@ -57,28 +57,14 @@ function seedCatalogProduct(store: CatalogProductPort, tenantId: string, title: 
   ]);
 }
 
-const SERVING_ENV_KEYS = ["CATALOG_UNIFIED", "ADMIN_TOKEN_CUSTODY_ENABLED"];
-const savedServingEnv: Record<string, string | undefined> = {};
-for (const k of SERVING_ENV_KEYS) savedServingEnv[k] = process.env[k];
-afterEach(() => {
-  for (const k of SERVING_ENV_KEYS) {
-    if (savedServingEnv[k] === undefined) delete process.env[k];
-    else process.env[k] = savedServingEnv[k];
-  }
-});
-
 describe("Removal guard — unified SERVING never resolves a Storefront credential (resolveShopifyStore / PALUP_SECRETS token)", () => {
-  it("a backfilled tenant under CATALOG_UNIFIED never calls the injected Storefront fetch seam", async () => {
-    // Everything that could lead to `resolveShopifyStore`'s Storefront token being consulted flows through
-    // `createShopifyGroundingAdapter`, which never does anything except eventually call `shopifyFetch`
-    // (model.ts's `shopifyOrFixtures`). Local-catalog-grounding.ts's `unifiedLocalShell` branch (gated by
-    // this same `CATALOG_UNIFIED` flag) is documented to skip `shellSource` — and therefore
-    // `resolveStorefrontCredential`/`resolveShopifyStore`/the PALUP_SECRETS token — ENTIRELY for a
-    // backfilled tenant. `shopifyFetch` throwing is the only externally-observable proof available through
-    // this composition root that the retired credential path was never reached.
-    process.env.CATALOG_UNIFIED = "true";
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
-
+  it("a backfilled tenant never calls the injected Storefront fetch seam", async () => {
+    // unified-cutover-cleanup (2026-08-24): the live Storefront-serving branch
+    // (`resolveStorefrontCredential`/`resolveShopifyStore`/`createShopifyGroundingAdapter`/the
+    // PALUP_SECRETS Storefront token) was DELETED from model.ts's `createGroundingPort` — a backfilled
+    // tenant's serving path has no Shopify/fetch dependency left to consult at all (structural, not just
+    // behavioral). `shopifyFetch` throwing is the externally-observable proof, through the full composition
+    // root, that no such call is ever reached.
     const store = new InMemoryRuntimeStore();
     const catalogProduct: CatalogProductPort = createInMemoryCatalogProductStore();
     await seedCatalogProduct(catalogProduct, TENANT, "Removal Guard Serum");
@@ -93,7 +79,7 @@ describe("Removal guard — unified SERVING never resolves a Storefront credenti
       adminTokens: fakeAdminTokenStore(),
       shopifyFetch: async () => {
         shopifyFetchCalled = true;
-        throw new Error("removal guard: resolveShopifyStore/Storefront must never be reached under CATALOG_UNIFIED for a backfilled tenant");
+        throw new Error("removal guard: resolveShopifyStore/Storefront must never be reached for a backfilled tenant");
       },
     });
     try {
@@ -118,8 +104,6 @@ describe("Removal guard — unified catalog-sync SCHEDULER enumerates via listAc
   });
 
   it("a tenant present ONLY in SHOPIFY_STORES (not the registry) is never synced; the registry's listActive is the sole source of truth", async () => {
-    process.env.CATALOG_UNIFIED = "true";
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
     // A ghost tenant that exists ONLY in the retired SHOPIFY_STORES env map, never in the registry — if the
     // scheduler's tenant discovery fell back to (or merged in) `parseStoreDomains`/SHOPIFY_STORES, this
     // tenant would appear in the run; it must not.
