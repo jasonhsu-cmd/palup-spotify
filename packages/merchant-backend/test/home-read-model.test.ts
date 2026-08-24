@@ -18,14 +18,16 @@ import {
 // (outcome ledger / arm tallies / telemetry rollup) — this suite proves each HONEST state the
 // spec demands: still-measuring, not-yet-metered, unpriced-lower-bound, and net-negative.
 //
-// REVIEW-MANDATED ADJUSTMENT (applied here): the attributed "still measuring" state (the
-// `attributed.underpowered` flag) is driven by `attributed.totalUsd === 0` (OR all live plays
-// underpowered when there ARE live plays) — NOT by `periodEntries.length === 0` alone. This
-// closes a latent honesty edge: without it, a powered live play with zero ledger entries would
-// report `underpowered: false`, which a console could read as "measured" and render a bare
-// "$0.00" next to a play the measurement table calls "Measured" — a dollar amount that looks
-// real but isn't backed by any billed ledger entry yet. See the "still measuring" test below,
-// which is the corrected version of the brief's original (self-contradictory) assertion.
+// FINAL-REVIEW honesty fix (applied here): the attributed "still measuring" state (the
+// `attributed.underpowered` flag) is driven by `periodEntries.length === 0` alone — the
+// reconciled ledger, and ONLY the ledger, gates it (D2). An earlier version of this gate ALSO
+// tripped on "every live play is underpowered", which let the informational live per-play lift
+// override a real reconciled ledger sum — a period with real ledger revenue but only
+// underpowered live plays would falsely show "Still measuring" and hide proven revenue. That
+// version also treated `totalUsd === 0` as "still measuring" even when ledger entries existed
+// (a genuinely measured $0/negative period), which suppressed an honest net-negative (spec §10).
+// `periodEntries.length === 0` still closes the original honesty edge: a powered live play with
+// zero ledger entries has zero entries, so it reads "still measuring", never a bare "$0.00".
 
 const T = "t1";
 const PERIOD = "2026-08";
@@ -100,6 +102,23 @@ describe("readHomeSummary", () => {
     expect(s.attributed.plays[0]!.incrementalLiftUsd).toBe(0); // clamped, never a number the data can't support
     expect(s.attributed.underpowered).toBe(true);
     expect(s.net).toEqual({ value: null, reason: "attribution_underpowered" });
+  });
+
+  it("HONESTY (FINAL-REVIEW fix): a real reconciled ledger sum is shown even when every live play is underpowered — informational lift must never gate the headline (D2)", async () => {
+    const store = new InMemoryRuntimeStore();
+    await appendOutcomeLedgerEntry(store, { merchantId: T, period: PERIOD, play: "win_back", attributedIncrementalRevenue: 150, controlRef: "holdout-2026-08", method: "m", confidence: 0.9 });
+    // Below MIN_EXPOSURES_PER_ARM=200 — the only live play this period is underpowered.
+    await accumulateArmTally(store, { tenantId: T, play: "win_back", period: PERIOD, arm: "treated", exposures: 10, orders: 5, revenue: 500 });
+    const s = await readHomeSummary(store, new InMemoryPrimaryGoalStore(store), T, { period: PERIOD, prices: PLACEHOLDER_MODEL_PRICES });
+    expect(s.attributed.plays).toHaveLength(1);
+    expect(s.attributed.plays[0]!.underpowered).toBe(true); // the live play IS underpowered...
+    // ...but the ledger has a real reconciled entry, so the headline must show the true total, not
+    // "still measuring". Gating this on `allPlaysUnderpowered` (the pre-fix logic) would have hidden
+    // this $150 of proven revenue behind a false "Still measuring" state.
+    expect(s.attributed.totalUsd).toBe(150);
+    expect(s.attributed.entryCount).toBe(1);
+    expect(s.attributed.underpowered).toBe(false);
+    expect(s.net.reason).not.toBe("attribution_underpowered");
   });
 
   it("ignores tallies from other periods", async () => {

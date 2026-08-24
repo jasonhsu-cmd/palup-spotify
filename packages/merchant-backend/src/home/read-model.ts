@@ -61,13 +61,14 @@ export interface HomeSummary {
     entryCount: number;
     /** Live, per-play measurement state — shown as "measuring", never summed into totalUsd (D2). */
     plays: PlayMeasurement[];
-    /** True whenever the headline number can't be trusted as a real "measured" figure yet: the
-     * canonical ledger sum is $0 (no billed entry this period — regardless of whether a live play
-     * happens to be powered), OR every live play that DOES exist is underpowered. Review-mandated
-     * fix: gating this on "zero ledger entries" alone let a POWERED live play with no ledger entry
-     * report `underpowered: false` — a console could then pair a bare "$0.00" headline with that
-     * play's row showing "Measured", which is exactly the honesty gap this flag exists to prevent.
-     * The console's "still measuring" state. */
+    /** True whenever there are zero reconciled ledger entries this period (`entryCount === 0`) —
+     * the precise meaning of "no measured data yet." D2: the ledger sum is the ONLY thing that may
+     * back the headline/net gate; live per-play lift (informational) must NEVER contribute to this
+     * flag — a period with real ledger revenue but only underpowered live plays still shows its true
+     * total. This still closes the original honesty edge: a powered live play with zero ledger
+     * entries has `entryCount === 0`, so it reads "still measuring", never a bare "$0.00" headline.
+     * A genuinely measured $0 or negative period (entries exist, sum happens to be ≤ 0) is NOT
+     * underpowered — it is shown honestly (spec §10). The console's "still measuring" state. */
     underpowered: boolean;
   };
   cost: {
@@ -135,15 +136,13 @@ export async function readHomeSummary(
       method: lift.method,
     };
   });
-  // Review-mandated honesty fix: the headline "still measuring" state is driven by whether the
-  // CANONICAL number (totalUsd) is actually $0, not merely by "no ledger rows exist" ANDed with
-  // "every live play is underpowered". A powered live play with zero ledger entries must still read
-  // as "still measuring" — its lift is informational (D2) and is NEVER what backs the headline $.
-  // `plays.length > 0 &&` guards the vacuous-truth case: `[].every(...)` is `true` for an EMPTY plays
-  // array, which must NOT by itself declare "still measuring" when the ledger already has real money
-  // (see the D2 sums-only-the-ledger test, where plays is empty and totalUsd is nonzero).
-  const allPlaysUnderpowered = plays.length > 0 && plays.every((p) => p.underpowered);
-  const underpowered = totalUsd === 0 || allPlaysUnderpowered;
+  // FINAL-REVIEW honesty fix (D2): the headline "still measuring" state is `entryCount === 0` — the
+  // reconciled ledger, and ONLY the ledger, gates it. Live per-play lift is informational and must
+  // NEVER back this flag: a period with real ledger revenue but only underpowered live plays still
+  // shows its true total, and a genuinely measured $0/negative period (entries exist) is not mislabeled
+  // "still measuring" either. This still closes the original edge — a powered live play with zero
+  // ledger entries has `periodEntries.length === 0`, so it never renders a bare "$0.00" headline.
+  const underpowered = periodEntries.length === 0;
 
   // --- cost: period-filtered rollup (D1) ---
   const events = await store.readStream<TelemetryEvent>(ctx, TELEMETRY_STREAM, { limit: TELEMETRY_READ_LIMIT });
@@ -159,9 +158,8 @@ export async function readHomeSummary(
   };
 
   // --- net (D3): withheld unless both sides are honest; precedence attribution → metered → priced ---
-  // Gated on the SAME `underpowered` flag as the headline (not the narrower `periodEntries.length ===
-  // 0`) so net is never computed against an attributed number the console itself would call "still
-  // measuring" — the same honesty fix applied consistently to both surfaces.
+  // Gated on the SAME `underpowered` flag as the headline so net is never computed against an
+  // attributed number the console itself would call "still measuring".
   let net: HomeSummary["net"];
   if (underpowered) net = { value: null, reason: "attribution_underpowered" };
   else if (!cost.metered) net = { value: null, reason: "cost_not_metered" };

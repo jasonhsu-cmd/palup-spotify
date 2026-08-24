@@ -121,7 +121,7 @@ export function RevenueHome({ api }: RevenueHomeProps) {
         <StatTile label="Revenue PalUp brought in" value={attributedValue} mono={!summary.attributed.underpowered} footnote={attributedFootnote} />
         <StatTile label="Model cost" value={costValue} mono={summary.cost.metered} footnote={costFootnote} />
         <StatTile label="Net position" value={netValue} mono={summary.net.value !== null} footnote={netFootnote} />
-        <StatTile label="Agent actions (recent)" value={String(activity.length)} footnote="From the audit log — every action, no silent ones" />
+        <StatTile label="Agent actions (recent)" value={String(activity.length)} footnote="From the audit log — recent agent actions" />
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
