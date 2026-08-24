@@ -132,6 +132,35 @@ export class ApiError extends Error {
   }
 }
 
+// W3 (Learned/Memory & Voice) — mirrors of merchant-backend's `/learned` wire contract
+// (src/routes/learned.ts's `SafeLearnedInsight`/`TeachBody`/`PinBody`). `LearnedCategory` mirrors
+// @palup/platform-ports' own type (a plain string union, safe to duplicate rather than import,
+// same call as AuditEntry above: routes/learned.ts is behind a Fastify service, not a types
+// barrel this frontend package should depend on).
+
+export type LearnedCategory = "customers" | "products" | "voice" | "policies";
+
+export interface LearnedInsight {
+  id: string;
+  category: LearnedCategory;
+  tier: "private" | "aggregate";
+  origin: "synthesized" | "merchant_taught";
+  text: string;
+  source: string;
+  sampleSize: number;
+  confidence: "medium" | "high";
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TeachRequest {
+  category: LearnedCategory;
+  text: string;
+  guardrailKey?: string;
+  stance?: "tighten" | "loosen";
+}
+
 export interface ApiClient {
   listApprovals(q: {
     status?: ProposalStatus | string;
@@ -148,6 +177,10 @@ export interface ApiClient {
   getHomeSummary(): Promise<HomeSummary>;
   getActivity(cursor?: string): Promise<{ items: ActivityEntry[] }>;
   setPrimaryGoal(kind: PrimaryGoalKind, note?: string): Promise<{ goal: PrimaryGoal }>;
+  listLearned(q: { category?: LearnedCategory }): Promise<{ items: LearnedInsight[] }>;
+  teachLearned(req: TeachRequest): Promise<{ insight: LearnedInsight }>;
+  pinLearned(id: string, pinned: boolean): Promise<LearnedInsight>;
+  deleteLearned(id: string): Promise<{ removed: boolean }>;
   /** Subscribes to the tenant's SSE `/events` stream; returns an unsubscribe function. Best-effort
    *  live nudge only (events.ts's own contract) — a dropped/never-opened stream never loses data,
    *  because the store (`listApprovals`/`getKill`) stays the source of truth (see
@@ -270,6 +303,21 @@ export function makeApiClient(args: MakeApiClientArgs): ApiClient {
         method: "PUT",
         body: JSON.stringify(note === undefined ? { kind } : { kind, note }),
       });
+    },
+    async listLearned(q) {
+      return request<{ items: LearnedInsight[] }>(`/learned${toQuery({ category: q.category })}`);
+    },
+    async teachLearned(req) {
+      return request<{ insight: LearnedInsight }>(`/learned`, { method: "POST", body: JSON.stringify(req) });
+    },
+    async pinLearned(id, pinned) {
+      return request<LearnedInsight>(`/learned/${encodeURIComponent(id)}/pin`, {
+        method: "POST",
+        body: JSON.stringify({ pinned }),
+      });
+    },
+    async deleteLearned(id) {
+      return request<{ removed: boolean }>(`/learned/${encodeURIComponent(id)}`, { method: "DELETE" });
     },
     openEvents(onEvent, onStreamError) {
       let closed = false;
