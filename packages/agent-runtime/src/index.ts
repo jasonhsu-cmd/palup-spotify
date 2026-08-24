@@ -41,6 +41,14 @@ export {
   type SynthesisInput,
   type SynthesisResult,
 } from "./insight-synthesizer.js";
+// W3 Task 6: agent-proposes / merchant-owns voice — named exports (not `export *`), same reason as
+// win-back/insight-synthesizer above.
+export {
+  proposeVoiceChange,
+  voiceChangeExecutor,
+  VOICE_AGENT_TYPE,
+  type ProposeVoiceChangeInput,
+} from "./voice.js";
 // W4-min: `MerchantRulesStore`/`CONSERVATIVE_DEFAULTS`/`PALUP_FLOORS`/etc. are DEFINED in
 // `@palup/platform-ports` (moved there, task 5 — see `rules.ts`'s header) and re-exported by
 // `rules.ts`; `createRulesProvider` stays defined here. `export *` surfaces both together so a

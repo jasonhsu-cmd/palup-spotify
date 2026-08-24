@@ -27,6 +27,7 @@ import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIden
 import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
 import { registerInternalInsightsRoutes } from "./routes/internal-insights.js";
+import { registerInternalVoiceRoutes } from "./routes/internal-voice.js";
 import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
@@ -291,7 +292,8 @@ export async function buildServer(opts?: {
     registerMeRoutes(merchantPlane);
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
     registerInternalInsightsRoutes(merchantPlane, { learnedStore });
-    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus });
+    registerInternalVoiceRoutes(merchantPlane, { state: store, proposalStore, rulesStore, learnedStore });
+    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus, learnedStore });
     registerKillRoutes(merchantPlane, { state: store, bus });
     registerAuditRoutes(merchantPlane, { state: store });
     registerEventsRoutes(merchantPlane, { bus });
