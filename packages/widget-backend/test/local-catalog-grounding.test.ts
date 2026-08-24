@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   createInMemoryCatalogProductStore,
   createInMemoryProductFactsStore,
+  createInMemoryStoreProfileStore,
   type CatalogProductRecord,
 } from "@palup/platform-ports";
 import {
@@ -23,7 +24,7 @@ const record = (overrides: Partial<CatalogProductRecord> = {}): CatalogProductRe
 });
 
 describe("createLocalCatalogGroundingPort — durability invariant (§3)", () => {
-  it("serves the full catalog from local stores even when the shell/Shopify source THROWS", async () => {
+  it("serves the full catalog from local stores even when store_profile THROWS", async () => {
     const catalogProduct = createInMemoryCatalogProductStore();
     await catalogProduct.upsertMany("t1", [
       record({ productId: "gid://shopify/Product/1", handle: "widget-1", title: "Widget One" }),
@@ -37,16 +38,20 @@ describe("createLocalCatalogGroundingPort — durability invariant (§3)", () =>
     const productFacts = createInMemoryProductFactsStore();
     await productFacts.upsertMany("t1", [{ productId: "gid://shopify/Product/1", price: "$10", availableForSale: true }]);
 
-    const throwingShellSource = {
-      getShell: async () => {
-        throw new Error("Shopify is down");
+    const throwingStoreProfile = {
+      get: async () => {
+        throw new Error("store_profile is down");
       },
     };
 
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource: throwingShellSource });
+    const grounding = createLocalCatalogGroundingPort({
+      catalogProduct,
+      productFacts,
+      storeProfile: throwingStoreProfile,
+    });
     const ctx = await grounding.getContext("t1");
 
-    // PRODUCTS survive the Shopify outage in full — the durability invariant.
+    // PRODUCTS survive the store_profile outage in full — the durability invariant.
     expect(ctx.products.length).toBe(2);
     const one = ctx.products.find((p) => p.id === "gid://shopify/Product/1")!;
     expect(one.price).toBe("$10"); // fresh product_facts price, not the $9 variant copy
@@ -58,11 +63,15 @@ describe("createLocalCatalogGroundingPort — durability invariant (§3)", () =>
     expect(ctx.policy).toEqual({ returns: "", shipping: "" });
   });
 
-  it("getShell delegates to the shell source untouched (no catalog/product dependency)", async () => {
+  // unified-cutover-cleanup (2026-08-24): getShell ALWAYS reads the local `store_profile` store — the
+  // `unifiedLocalShell` flag and the `shellSource` fallback it used to gate are gone. Full coverage of the
+  // happy path / missing profile / store_profile error cases lives in local-catalog-grounding-shell.test.ts.
+  it("getShell reads store_profile", async () => {
     const catalogProduct = createInMemoryCatalogProductStore();
     const productFacts = createInMemoryProductFactsStore();
-    const shellSource = { getShell: async () => ({ tenantId: "t1", brandName: "Acme", policy: { returns: "30d", shipping: "free" } }) };
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource });
+    const storeProfile = createInMemoryStoreProfileStore();
+    await storeProfile.put("t1", { brandName: "Acme", policy: { returns: "30d", shipping: "free" } });
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, storeProfile });
     const shell = await grounding.getShell("t1");
     expect(shell).toEqual({ tenantId: "t1", brandName: "Acme", policy: { returns: "30d", shipping: "free" } });
   });
@@ -70,15 +79,11 @@ describe("createLocalCatalogGroundingPort — durability invariant (§3)", () =>
   // Coordinator review fix #1: getShell must degrade symmetrically with getContext, not throw. Called
   // DIRECTLY on the local port here (not through createCachingGroundingPort's own getShell try/catch), so
   // this proves the local port itself is fail-closed, independent of any caller-side safety net.
-  it("getShell degrades to the SAME neutral default as getContext when the shellSource throws (called directly)", async () => {
+  it("getShell degrades to the SAME neutral default as getContext when store_profile has no record (called directly)", async () => {
     const catalogProduct = createInMemoryCatalogProductStore();
     const productFacts = createInMemoryProductFactsStore();
-    const shellSource = {
-      getShell: async () => {
-        throw new Error("Shopify is down");
-      },
-    };
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource });
+    const storeProfile = createInMemoryStoreProfileStore();
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, storeProfile });
     const shell = await grounding.getShell("t1");
     expect(shell).toEqual({ tenantId: "t1", brandName: "this store", policy: { returns: "", shipping: "" } });
   });
@@ -91,8 +96,8 @@ describe("createLocalCatalogGroundingPort — durability invariant (§3)", () =>
     }
     await catalogProduct.upsertMany("big", many);
     const productFacts = createInMemoryProductFactsStore();
-    const shellSource = { getShell: async () => ({ tenantId: "big", brandName: "Big Store", policy: { returns: "", shipping: "" } }) };
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource });
+    const storeProfile = createInMemoryStoreProfileStore();
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, storeProfile });
     await expect(grounding.getContext("big")).rejects.toBeInstanceOf(LocalCatalogCeilingExceededError);
   });
 });
@@ -142,8 +147,8 @@ describe("createLocalCatalogGroundingPort — getProductsByIds (bounded by-id fe
     await catalogProduct.upsertMany("t1", [record({ productId: "gid://shopify/Product/1" })]);
     const productFacts = createInMemoryProductFactsStore();
     await productFacts.upsertMany("t1", [{ productId: "gid://shopify/Product/1", price: "$11" }]);
-    const shellSource = { getShell: async () => ({ tenantId: "t1", brandName: "x", policy: { returns: "", shipping: "" } }) };
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource });
+    const storeProfile = createInMemoryStoreProfileStore();
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, storeProfile });
 
     const products = await grounding.getProductsByIds("t1", ["gid://shopify/Product/1", "gid://shopify/Product/missing"]);
     expect(products.length).toBe(1);
@@ -153,8 +158,8 @@ describe("createLocalCatalogGroundingPort — getProductsByIds (bounded by-id fe
   it("an empty id list short-circuits to [] with no store calls", async () => {
     const catalogProduct = createInMemoryCatalogProductStore();
     const productFacts = createInMemoryProductFactsStore();
-    const shellSource = { getShell: async () => ({ tenantId: "t1", brandName: "x", policy: { returns: "", shipping: "" } }) };
-    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, shellSource });
+    const storeProfile = createInMemoryStoreProfileStore();
+    const grounding = createLocalCatalogGroundingPort({ catalogProduct, productFacts, storeProfile });
     expect(await grounding.getProductsByIds("t1", [])).toEqual([]);
   });
 });

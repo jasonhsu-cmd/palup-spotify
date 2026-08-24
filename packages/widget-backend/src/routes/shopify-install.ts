@@ -6,7 +6,6 @@ import { randomToken } from "../shopify-customer-account-identity.js";
 import { clientIpKey } from "../rate-limit.js";
 import {
   buildInstallAuthorizeUrl,
-  createDelegateAccessToken,
   exchangeInstallCode,
   grantedScopesCover,
   isValidShopDomain,
@@ -17,8 +16,9 @@ import {
   type WebhookSubscriptionSpec,
 } from "../shopify-install-identity.js";
 
-// C1 — `GET /shopify/install` → `GET /shopify/callback` → `delegateAccessTokenCreate`. The first real
-// caller of the MerchantRegistryPort (B1/#184) and of the encrypted merchant-credential custody (B2/#186).
+// C1 — `GET /shopify/install` → `GET /shopify/callback` → Admin-token custody. The first real caller of
+// the MerchantRegistryPort (B1/#184); its credential custody is now Task 4's encrypted `AdminTokenStore`
+// (unified-cutover-cleanup, 2026-08-24 — see below), not B2's delegate-token store.
 // The Shopify wire format lives entirely in ../shopify-install-identity.ts (with its primary-source
 // citations); this file is the FLOW and its governance: CSRF state, kill switch, audit, fail-closed
 // ordering.
@@ -56,14 +56,18 @@ import {
 // flow would land on tenant `palup-skincare-jason` — a DIFFERENT tenant, which is why the collision case
 // below fails loudly instead of merging.
 //
-// WHAT IT DOES DO, AND IT IS REAL. `deps.credentials` is REQUIRED, and it is B2's
-// `createMerchantCredentialStore` (#186), wired in server.ts: the delegate token is encrypted at rest under
-// a per-(tenant, `merchant-cred` scope) key and its write is audited atomically inside B2's own
-// transaction. Requiring custody rather than treating it as optional is deliberate — an install that
-// obtained a delegate token and then had nowhere to put it would have created a live Shopify credential
-// with no custody, no audit and no revocation path. So: no custody ⇒ the routes are not registered at all.
-// The routes go live in a deployment the moment its five preconditions are set (see server.ts); they are
-// absent, not half-working, until then.
+// WHAT IT DOES DO, AND IT IS REAL — UPDATED for unified-cutover-cleanup (2026-08-24). The Admin offline
+// token is now the SOLE Shopify credential this flow produces, custodied via `deps.adminTokens` (Task 4's
+// `AdminTokenStore`, wired in server.ts): encrypted at rest under a per-(tenant, `admin-cred` scope) key,
+// its write audited atomically inside that store's own transaction. `deps.credentials` (B2's
+// `createMerchantCredentialStore`, #186) is STILL REQUIRED on this file's own type and still gates whether
+// server.ts registers these routes at all (see `SHOPIFY_INSTALL_ENABLED` there) — but this flow no longer
+// calls `.put` on it: the delegate (Storefront) token it exists to custody is never minted. Requiring
+// Admin-token custody rather than treating it as optional is deliberate, for the identical reason the old
+// delegate custody was: an install that obtained an Admin token and then had nowhere to put it would have
+// created a live Shopify credential with no custody, no audit and no revocation path. So: no custody ⇒ the
+// routes are not registered at all. The routes go live in a deployment the moment its preconditions are
+// set (see server.ts); they are absent, not half-working, until then.
 // ****************************************************************************************************
 //
 // WHERE PENDING INSTALLS LIVE. An APP-SCOPED RuntimeState collection, the same mechanism and the same
@@ -100,12 +104,15 @@ const PENDING_TTL_SECONDS_DEFAULT = 600;
 const APP_CTX = { tenantId: INSTALL_APP_SCOPE } as const;
 
 /**
- * What C1 needs from credential custody, expressed as the NARROWEST possible interface rather than by
- * importing B2's `MerchantCredentialStore` type: this flow needs only `put`. It never reads a credential
- * back, so a dependency that could read every merchant's token would be more privilege than the install
- * flow requires (least privilege, NN#6) — and a narrower type means a future change that starts reading
- * credentials here has to widen this interface deliberately rather than inheriting the capability.
- * B2's store satisfies this STRUCTURALLY, so the composition-root wiring is an assignment, no adapter.
+ * What C1's `credentials` field needs, expressed as the NARROWEST possible interface rather than by
+ * importing B2's `MerchantCredentialStore` type: `put` only, never a read (least privilege, NN#6) — and a
+ * narrower type means a future change that starts reading credentials here has to widen this interface
+ * deliberately rather than inheriting the capability. B2's store satisfies this STRUCTURALLY, so the
+ * composition-root wiring is an assignment, no adapter. UNUSED BY THIS FLOW since unified-cutover-cleanup
+ * (2026-08-24) — the delegate (Storefront) token this sink exists to custody is never minted — but the
+ * `credentials` field below stays REQUIRED because server.ts's `SHOPIFY_INSTALL_ENABLED` gate still depends
+ * on a working credential sink having been constructed (see the header); removing it is a
+ * composition-root change, out of this task's scope.
  */
 export interface MerchantCredentialSink {
   put(tenantId: string, token: string, opts: { actor: string }): Promise<void>;
@@ -114,21 +121,22 @@ export interface MerchantCredentialSink {
 export interface ShopifyInstallDeps {
   store: RuntimeStatePort;
   registry: MerchantRegistryPort;
-  /** REQUIRED. See the header: no custody ⇒ the routes are not registered at all. */
+  /** REQUIRED. See the header: no custody ⇒ the routes are not registered at all. NOT called by this flow
+   *  any more (see `MerchantCredentialSink`'s own doc) — kept for the composition-root gate. */
   credentials: MerchantCredentialSink;
   /**
-   * Task 5 (ADR-0022 F2/F7) — OPTIONAL custody for the PARENT Admin offline token (`grant.accessToken`),
-   * narrowed to `put` ONLY, for the identical least-privilege reason `MerchantCredentialSink` is narrowed
-   * above: this flow never reads an Admin token back, so a dependency that could read every merchant's
-   * token would be more privilege than install requires. OPTIONAL (not required, unlike `credentials`):
-   * the Admin token is a NEW custody surface (Task 4) layered onto an already-shipped flow, and its absence
-   * must be byte-identical to today's behaviour (no custody attempted, no test broken) rather than a second
-   * gate that disables installs. When present, it is only ever called AFTER the shop-binding check that
-   * `completeInstallInner` already performs against the signed `state`'s pending record (F7 — see the call
-   * site), so a state minted for shop A can never result in shop B's Admin token — or any Admin token —
-   * being custodied under the wrong tenant.
+   * unified-cutover-cleanup (2026-08-24) — REQUIRED, not optional: the Admin offline token
+   * (`grant.accessToken`) is now the SOLE credential this install produces (ADR-0023 D1's cutover is the
+   * only behaviour left; the delegate fallback this used to have is gone — see the header), so a
+   * deployment with no working Admin-token custody has no credential to give a newly installed merchant at
+   * all. Narrowed to `put` ONLY, for the identical least-privilege reason `MerchantCredentialSink` is
+   * narrowed above: this flow never reads an Admin token back, so a dependency that could read every
+   * merchant's token would be more privilege than install requires. Called only AFTER the shop-binding
+   * check that `completeInstallInner` already performs against the signed `state`'s pending record (F7 —
+   * see the call site), so a state minted for shop A can never result in shop B's Admin token — or any
+   * Admin token — being custodied under the wrong tenant.
    */
-  adminTokens?: Pick<AdminTokenStore, "put">;
+  adminTokens: Pick<AdminTokenStore, "put">;
   /** Resolves the APP-scoped OAuth client secret. Called per request so a rotation takes effect without a
    *  redeploy, and so the secret is never captured in a closure at boot. */
   clientSecret: () => Promise<string | undefined>;
@@ -137,7 +145,13 @@ export interface ShopifyInstallDeps {
   redirectUri: string;
   /** Comma-separated Admin OAuth `scope`. */
   requestedScopes: string;
-  /** Scopes for the delegate token. Must be covered by what the merchant actually granted. */
+  /**
+   * Historically "scopes for the delegate token"; the delegate token is gone (unified-cutover-cleanup,
+   * 2026-08-24), but this still names the scopes `grantedScopesCover` checks the Admin OAuth grant against
+   * (the merchant must not have granted fewer than declared here, the URL-edit attack). Left named
+   * `delegateScopes` rather than renamed, since server.ts still derives it from `SHOPIFY_DELEGATE_SCOPES`
+   * and renaming either is a composition-root change, out of this task's scope.
+   */
   delegateScopes: readonly string[];
   /**
    * Data-residency for a NEWLY registered merchant. Explicit and REQUIRED, because `NewMerchant.region` is
@@ -196,7 +210,11 @@ type Refusal =
   | "no_app_secret";
 
 /** An upstream/internal failure: the request was legitimate, we could not complete it. */
-type Failure = "exchange_failed" | "scopes_not_granted" | "delegate_failed" | "custody_failed" | "registry_failed";
+type Failure =
+  | "exchange_failed"
+  | "scopes_not_granted"
+  | "registry_failed"
+  | "admin_token_custody_failed";
 
 export type InstallStart = { ok: true; authorizeUrl: string; state: string; ttlSeconds: number } | { ok: false; refused: Refusal };
 export type InstallComplete = { ok: true; shopDomain: string } | { ok: false; refused: Refusal } | { ok: false; failed: Failure };
@@ -330,8 +348,10 @@ async function startInstallInner(deps: ShopifyInstallDeps, rawQuery: Record<stri
 }
 
 /**
- * Steps 3-4 of [S1] plus [S2] — validate the callback, exchange the code, mint a delegate token, custody
- * it, and register the merchant.
+ * Steps 3-4 of [S1] plus [S2] — validate the callback, exchange the code, custody the Admin offline token,
+ * and register the merchant. Unified-cutover-cleanup (2026-08-24): this used to mint AND custody a delegate
+ * (Storefront) token first, ahead of the Admin token; that path is deleted (see the header) — the Admin
+ * token is now the only credential.
  *
  * THE ORDER IS THE SECURITY PROPERTY, so it is spelled out:
  *   1-3. HMAC → shop allowlist → timestamp. No parameter is trusted before its signature is.
@@ -339,14 +359,12 @@ async function startInstallInner(deps: ShopifyInstallDeps, rawQuery: Record<stri
  *   5.   Consume the pending record (DELETE BEFORE ANY NETWORK CALL, so a failure later cannot be replayed)
  *        and require that it names THIS shop — a state minted for shop A cannot complete for shop B.
  *   6.   NN#4 kill re-check: a halt armed between install and callback must still stop custody.
- *   7-8. Exchange the code; verify the merchant actually granted the scopes the delegate token needs
- *        ([S1] "Confirm the requested scopes") BEFORE spending the mutation.
- *   9.   Mint the delegate token.
- *   10.  CUSTODY BEFORE SERVABILITY: store the credential first, then create/reactivate the row. A merchant
- *        must never be `active` with no readable credential — that state serves fixtures while looking
- *        configured. The reverse failure (a stored credential with no row) is inert and self-healing: the
- *        next install overwrites it, and nothing reads a credential for a tenant with no row.
- *   11.  Audit, then the registry write (see the header for why this cannot be one transaction).
+ *   7-8. Exchange the code; verify the merchant actually granted the requested scopes ([S1] "Confirm the
+ *        requested scopes") before anything is custodied.
+ *   9.   CUSTODY BEFORE SERVABILITY: store the Admin offline token first, then create/reactivate the row. A
+ *        merchant must never be `active` with no readable credential — that state serves fixtures while
+ *        looking configured. A custody failure here is FATAL — there is no delegate fallback left.
+ *   10.  Audit, then the registry write (see the header for why this cannot be one transaction).
  */
 export async function completeInstall(
   deps: ShopifyInstallDeps,
@@ -410,90 +428,94 @@ async function completeInstallInner(
 
   if (await deps.killCheck(tenantId)) return { ok: false, refused: "halted" };
 
+  // Task 6 (ADR-0023) — request the EXPIRING offline token (`expiring: true`): verified spike (spec §10.1,
+  // 2026-08-24) says public apps must move off the non-expiring offline token (being retired for public
+  // apps), and the expiring token comes paired with a `refresh_token` this flow now custodies below.
   const grant = await exchangeInstallCode(
-    { shopDomain, clientId: deps.clientId, clientSecret: secret, code },
+    { shopDomain, clientId: deps.clientId, clientSecret: secret, code, expiring: true, now: () => deps.now() * 1000 },
     deps.fetchFn,
   );
   if (!grant) return { ok: false, failed: "exchange_failed" };
   if (!grantedScopesCover(deps.delegateScopes, grant.grantedScopes)) return { ok: false, failed: "scopes_not_granted" };
 
-  const delegate = await createDelegateAccessToken(
-    { shopDomain, parentAccessToken: grant.accessToken, delegateScopes: deps.delegateScopes },
-    deps.fetchFn,
-  );
-  if (!delegate) return { ok: false, failed: "delegate_failed" };
+  // unified-cutover-cleanup (2026-08-24) — the delegate (Storefront) token this install used to mint from
+  // `grant.accessToken` (`createDelegateAccessToken`, then `deps.credentials.put`) is DELETED, not merely
+  // gated: ADR-0023 D1's cutover is now the only behaviour, so there is nothing left to gate on. The Admin
+  // offline token below is the SOLE credential this install produces. The audit record still carries a
+  // `delegateScopes` key below — always empty now — rather than a second input shape, so the
+  // EXACT-key-allowlist audit test does not need to distinguish "could never mint a delegate" from "chose
+  // not to".
+  const delegateScopesGranted: readonly string[] = [];
 
-  // Custody first (see the ordering note). B2's `put` audits itself, atomically with its own write.
-  try {
-    await deps.credentials.put(tenantId, delegate.accessToken, { actor: "system:shopify-install" });
-  } catch {
-    // The error is swallowed on purpose: it is raised by a component holding the token, and this function's
-    // result is rendered to an attacker-reachable response.
-    return { ok: false, failed: "custody_failed" };
-  }
-
-  // Task 5 (ADR-0022 F2/F6/F7) — capture the PARENT Admin offline token too, once one's caller has opted
-  // in. THE F7 PROPERTY: this line is reached only after `pending.shopDomain !== shopDomain` was already
-  // checked and found EQUAL, above — `pending.shopDomain` came from the SERVER-SIDE record keyed by the
-  // signed, single-use `state` nonce, and `shopDomain` is the callback's own (HMAC-verified) `shop`. So a
-  // callback whose shop disagrees with the shop `state` was minted for is refused (`shop_mismatch`) long
-  // before this point, and `deps.adminTokens.put` — like `deps.credentials.put` above it — is simply never
-  // reached for it. There is no SEPARATE "grant shop" to re-check: Shopify's token-exchange response
-  // carries no shop field ([S1]/`exchangeInstallCode`), and the exchange itself was made against the
-  // already-verified `shopDomain`, not an attacker-suppliable one. OPTIONAL and ADDITIVE: absent
-  // `adminTokens` ⇒ zero behaviour change from before this task (the surrounding `try` for the delegate
-  // token above deliberately does NOT also cover this — an Admin-token custody failure must not undo a
-  // delegate token that is already safely stored).
+  // Task 5 (ADR-0022 F2/F6/F7) — capture the PARENT Admin offline token. THE F7 PROPERTY: this line is
+  // reached only after `pending.shopDomain !== shopDomain` was already checked and found EQUAL, above —
+  // `pending.shopDomain` came from the SERVER-SIDE record keyed by the signed, single-use `state` nonce, and
+  // `shopDomain` is the callback's own (HMAC-verified) `shop`. So a callback whose shop disagrees with the
+  // shop `state` was minted for is refused (`shop_mismatch`) long before this point, and
+  // `deps.adminTokens.put` is simply never reached for it. There is no SEPARATE "grant shop" to re-check:
+  // Shopify's token-exchange response carries no shop field ([S1]/`exchangeInstallCode`), and the exchange
+  // itself was made against the already-verified `shopDomain`, not an attacker-suppliable one.
   // Task 12 (ADR-0022 F3) — this call custodies whatever Admin scopes the SAME OAuth grant above already
-  // obtained (a delegate-token exchange); it does not itself request Admin scopes, so there is nothing here
-  // yet to pin against `ADMIN_SYNC_SCOPES` (shopify-webhook-identity.ts) — the least-privilege
-  // (`read_products`,`read_inventory`) scope set a PRODUCTION catalog-sync admin-token request should use.
-  // Noted here as the landing spot: whichever task wires a real production Admin-token scope request
-  // (Task 13) requests exactly `ADMIN_SYNC_SCOPES`, never a write scope (F3's own pin,
-  // order-attribution-scope-pinning.test.ts).
+  // obtained; it does not itself request Admin scopes, so there is nothing here yet to pin against
+  // `ADMIN_SYNC_SCOPES` (shopify-webhook-identity.ts) — the least-privilege (`read_products`,
+  // `read_inventory`) scope set a PRODUCTION catalog-sync admin-token request should use. Noted here as the
+  // landing spot: whichever task wires a real production Admin-token scope request requests exactly
+  // `ADMIN_SYNC_SCOPES`, never a write scope (F3's own pin, order-attribution-scope-pinning.test.ts).
   //
-  // Task 13 (forward-carry from Task 5's own review note): a custody failure here is NON-FATAL to the
-  // install. The Admin token is SYNC-PLANE-ONLY (it feeds the catalog-backfill/reconcile jobs); the
-  // DELEGATE token custodied above is what SERVING needs, and it is already safely stored by this point.
-  // Refusing the whole install over a degraded sync-plane capability would strand a merchant with a
-  // perfectly good, servable delegate credential behind a failed install page — worse than landing them
-  // with serving working and sync degraded until a re-install/re-auth re-attempts custody. So: catch, log,
-  // audit `admin_token.custody_failed` (best-effort — a secondary audit-write failure must not abort an
-  // otherwise-successful install either, mirroring every other best-effort audit in this file/package,
-  // e.g. shopify-webhooks.ts's `admin_token.delete_failed`), and fall through to the rest of this function
-  // exactly as if `adminTokens` had been absent.
-  if (deps.adminTokens) {
+  // unified-cutover-cleanup (2026-08-24) — a custody failure here is now UNCONDITIONALLY FATAL. Task 7
+  // review (Critical, ADR-0023 D1) already established why, and that reasoning is now the ONLY case: since
+  // no delegate is ever minted or custodied, the Admin token IS the sole credential this install produces.
+  // If `adminTokens.put` throws, there is nothing else custodied, and falling through would register the
+  // merchant `active` with zero Shopify credentials, landing them on the OK page while stranded. So: still
+  // log + best-effort-audit exactly as below (never surface the token), then FAIL the install
+  // (`admin_token_custody_failed`) rather than falling through to `registry.create`/`setStatus`. There is no
+  // more non-fatal/degraded-sync-plane branch — that story only applied while a delegate token could still
+  // serve the merchant, and that path is gone.
+  try {
+    // Task 6 (ADR-0023) — custody the paired refresh_token + both expiries alongside the access token,
+    // under the SAME `adminTokens.put` call (F-A: same key scope + AAD as the access token — enforced by
+    // `AdminTokenStore` itself, not repeated here). `grant.refreshToken`/`grant.refreshTokenExpiresAt` are
+    // `undefined` unless the exchange above actually returned them (e.g. a caller/test that never passed
+    // `expiring: true`, or a Shopify response that omitted them) — `put` already treats an absent
+    // refreshToken as "none custodied" (F-H-safe).
+    await deps.adminTokens.put(tenantId, grant.accessToken, {
+      actor: "system:shopify-install",
+      expiresAt: grant.expiresAt,
+      refreshToken: grant.refreshToken,
+      refreshTokenExpiresAt: grant.refreshTokenExpiresAt,
+    });
+  } catch (e) {
+    // Never let an Admin-token custody failure surface the parent token in a response/log; same leak
+    // boundary as every other catch in this function.
+    const message = (e as Error).message;
+    console.error(`[shopify-install] admin token custody failed tenant=${tenantId}: ${message}`);
+    const reason =
+      `adminTokens.put threw: ${message}; the Admin token is the SOLE credential for this install (no ` +
+      "delegate exists to mint or custody) — the install does NOT complete and no merchant row is " +
+      "registered/reactivated";
+    const reversalPath =
+      "re-run the install/OAuth flow to re-attempt Admin-token custody from scratch — no merchant row was " +
+      "registered, so a fresh install attempt is the correct recovery";
     try {
-      await deps.adminTokens.put(tenantId, grant.accessToken, { actor: "system:shopify-install", expiresAt: grant.expiresAt });
-    } catch (e) {
-      // Never let an Admin-token custody failure surface the parent token in a response/log; same leak
-      // boundary as every other catch in this function.
-      const message = (e as Error).message;
-      console.error(`[shopify-install] admin token custody failed tenant=${tenantId}: ${message}`);
-      try {
-        await deps.store.audit(
-          { tenantId },
-          {
-            actor: "system:shopify-install",
-            action: "admin_token.custody_failed",
-            input: { tenantId, shopDomain },
-            decision: {
-              complete: false,
-              reason: `adminTokens.put threw: ${message}; the delegate token is already custodied and the ` +
-                "install continues — sync-plane capability (catalog backfill/reconcile) is degraded until " +
-                "re-custody, but serving is unaffected",
-            },
-            reversalPath:
-              "re-run the install/OAuth flow to re-attempt Admin-token custody (idempotent — re-custody simply " +
-              "overwrites); the delegate token and servability are unaffected in the meantime",
-          },
-        );
-      } catch {
-        // Same tradeoff as every other best-effort audit in this file/package: a secondary audit-write
-        // failure must not abort or fail an otherwise-successful install. `console.error` above is the
-        // residual trace.
-      }
+      await deps.store.audit(
+        { tenantId },
+        {
+          actor: "system:shopify-install",
+          action: "admin_token.custody_failed",
+          input: { tenantId, shopDomain },
+          decision: { complete: false, reason },
+          reversalPath,
+        },
+      );
+    } catch {
+      // Same tradeoff as every other best-effort audit in this file/package: a secondary audit-write
+      // failure must not swallow the fatal return below — that return is unconditional on `put` having
+      // thrown, independent of whether this audit write itself succeeded. `console.error` above is the
+      // residual trace either way.
     }
+    // Never let this fall through to `registry.create`/`setStatus` and strand a credential-less merchant on
+    // the OK page.
+    return { ok: false, failed: "admin_token_custody_failed" };
   }
 
   // Shop-specific webhook registration — BEST-EFFORT / NON-FATAL, and only when the composition root
@@ -516,7 +538,7 @@ async function completeInstallInner(
   // later "just record the code / the token / the hmac for debugging" change fails a test rather than
   // shipping. `delegateScopes` is recorded because WHAT privilege was granted is the governance-relevant
   // fact; the credential itself is not, and neither is anything derived from it.
-  const auditInput = { tenantId, shopDomain, region: existing?.region ?? deps.region, delegateScopes: [...deps.delegateScopes] };
+  const auditInput = { tenantId, shopDomain, region: existing?.region ?? deps.region, delegateScopes: [...delegateScopesGranted] };
   // #179 — a reversalPath must name something that EXISTS and that an operator can run. It names the CLI
   // (jobs/merchant.ts) FIRST, exactly as armKill does (runtime-kill-registry.ts:66-70) and for the same
   // reason: deploy-staging.yml deploys `palup-widget-staging` only, and the control plane is deployed

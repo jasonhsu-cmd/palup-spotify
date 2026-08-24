@@ -277,6 +277,51 @@ describe("shopify-install-identity — token exchange", () => {
     expect(res).toEqual({ accessToken: OK_BODY.access_token, grantedScopes: ["read_products", "read_content"] });
   });
 
+  // ---- Task 6 (ADR-0023) — the EXPIRING offline token + refresh_token, opt-in via `expiring: true` ------
+
+  it("with expiring:true, sends expiring=1 and parses expiresAt/refreshToken/refreshTokenExpiresAt", async () => {
+    let seenBody = "";
+    const nowMs = Date.parse("2026-08-24T00:00:00.000Z");
+    const res = await exchangeInstallCode(
+      { shopDomain: SHOP, clientId: "client-123", clientSecret: SECRET, code: "code-abc", expiring: true, now: () => nowMs },
+      fetchStub((_url, init) => {
+        seenBody = String(init?.body);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            access_token: "shpat_EXPIRING_PARENT_TOKEN",
+            scope: "read_products,read_content",
+            expires_in: 3600,
+            refresh_token: "shrt_REFRESH_TOKEN_NEVER_LOGGED",
+            refresh_token_expires_in: 7776000,
+          }),
+        };
+      }),
+    );
+    const body = new URLSearchParams(seenBody);
+    expect(body.get("expiring")).toBe("1");
+    expect(res).toEqual({
+      accessToken: "shpat_EXPIRING_PARENT_TOKEN",
+      grantedScopes: ["read_products", "read_content"],
+      expiresAt: new Date(nowMs + 3600 * 1000).toISOString(),
+      refreshToken: "shrt_REFRESH_TOKEN_NEVER_LOGGED",
+      refreshTokenExpiresAt: new Date(nowMs + 7776000 * 1000).toISOString(),
+    });
+  });
+
+  it("without expiring:true, behaviour is byte-identical to before even if the response HAPPENS to carry expiry fields", async () => {
+    const res = await exchangeInstallCode(
+      { shopDomain: SHOP, clientId: "client-123", clientSecret: SECRET, code: "code-abc" },
+      fetchStub(() => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ access_token: "shpat_PARENT", scope: "read_products", expires_in: 3600, refresh_token: "shrt_x", refresh_token_expires_in: 7776000 }),
+      })),
+    );
+    expect(res).toEqual({ accessToken: "shpat_PARENT", grantedScopes: ["read_products"] });
+  });
+
   it("refuses a non-myshopify shop before any network call is made", async () => {
     let called = false;
     const res = await exchangeInstallCode(

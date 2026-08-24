@@ -1,5 +1,6 @@
-import type { RuntimeStatePort } from "@palup/platform-ports";
+import type { MerchantRegistryPort, RuntimeStatePort } from "@palup/platform-ports";
 import { CATALOG_SYNC_AGENT_TYPE, catalogRetrievalEnabledFor, matchedKill } from "@palup/state-postgres";
+import { listActiveTenantIds } from "../merchant-store.js";
 import type { BackfillReport } from "./catalog-backfill.js";
 import type { TenantIndexReport } from "./catalog-index.js";
 
@@ -41,6 +42,17 @@ import type { TenantIndexReport } from "./catalog-index.js";
 // NOT WIRED INTO ANY LIVE CRON/SERVER HERE — per the Task 11 brief, that composition (a Cloud Run Job /
 // CronJob invoking this, the same shape `retention-sweep.ts`/`catalog-index.ts` already use) is
 // operator/Task-13 territory. This file exports a plain, dependency-injected function only.
+//
+// TASK 5 (credential-enrollment-unification, ADR-0023 F-E) — TENANT DISCOVERY. `opts.tenantIds` used to
+// be the ONLY way to tell this scheduler which tenants to run: a caller assembled the list itself, today
+// from `SHOPIFY_STORES` (see `merchant-store.ts`'s `parseStoreDomains`), tomorrow from wherever Task 13's
+// composition gets it. `opts.tenantIds` is now OPTIONAL: when omitted, the scheduler discovers every
+// ACTIVE tenant itself via `deps.registry.listActive`'s keyset cursor (`listActiveTenantIds`,
+// merchant-store.ts) — the same registry-enumeration capability `retention-sweep.ts` now uses. An
+// explicit `opts.tenantIds` still WINS when supplied (mirrors `catalog-index.ts`'s
+// `cmd.tenantId ? [cmd.tenantId] : tenantsToIndex()` override pattern), so a single-tenant CLI/backfill
+// invocation never needs a registry at all. `listActive` is INTERNAL sync-plane only (ADR-0023 F-E) —
+// this scheduler is one of its two sanctioned callers, the other being `retention-sweep.ts`.
 
 const DEFAULT_MAX_CONCURRENT = 3;
 
@@ -71,7 +83,12 @@ export interface CatalogSyncSchedulerReport {
 }
 
 export interface CatalogSyncSchedulerOpts {
-  tenantIds: string[];
+  /**
+   * Explicit tenant list — an override. When omitted, the scheduler discovers every ACTIVE tenant itself
+   * via `deps.registry.listActive` (Task 5); `deps.registry` is then required (an omitted `tenantIds`
+   * with no `registry` is a caller error, not a silent no-op — see `runCatalogSyncScheduler`).
+   */
+  tenantIds?: string[];
   /** Max tenants synced concurrently. Defaults to `DEFAULT_MAX_CONCURRENT` (3) — a deliberately small
    *  fixed pool; this is a background fleet job, not a latency-sensitive path. */
   maxConcurrent?: number;
@@ -94,6 +111,13 @@ export interface CatalogSyncSchedulerDeps {
    * `(tenantId) => runCatalogIndex(indexDeps, [tenantId]).then((rs) => rs[0]!)`.
    */
   index: (tenantId: string) => Promise<TenantIndexReport>;
+  /**
+   * Task 5 — tenant-discovery dep, consulted ONLY when `opts.tenantIds` is omitted. `Pick`ed to
+   * `listActive` alone (not the full `MerchantRegistryPort`) so this scheduler cannot accidentally reach
+   * a mutating registry method — the narrowest capability that does the job (least privilege, CLAUDE.md
+   * §3 NN#6). ADR-0023 F-E: `listActive` is INTERNAL sync-plane only.
+   */
+  registry?: Pick<MerchantRegistryPort, "listActive">;
 }
 
 /**
@@ -153,12 +177,25 @@ async function syncTenant(deps: CatalogSyncSchedulerDeps, tenantId: string): Pro
  */
 export async function runCatalogSyncScheduler(
   deps: CatalogSyncSchedulerDeps,
-  opts: CatalogSyncSchedulerOpts,
+  opts: CatalogSyncSchedulerOpts = {},
 ): Promise<CatalogSyncSchedulerReport> {
+  const tenantIds = opts.tenantIds ?? (await discoverTenantIds(deps));
   const maxConcurrent = Math.max(1, Math.floor(opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT));
-  const results = await mapWithConcurrency(opts.tenantIds, maxConcurrent, (tenantId) => syncTenant(deps, tenantId));
+  const results = await mapWithConcurrency(tenantIds, maxConcurrent, (tenantId) => syncTenant(deps, tenantId));
   return {
     skipped: results.filter((r) => r.outcome === "skipped").map((r) => r.tenantId),
     results,
   };
+}
+
+/** Task 5 — resolves the fleet when `opts.tenantIds` was omitted. Fails loudly rather than silently
+ *  syncing nothing: an omitted `tenantIds` with no `registry` supplied is a caller wiring mistake, not a
+ *  legitimate "sync zero tenants" request. */
+async function discoverTenantIds(deps: CatalogSyncSchedulerDeps): Promise<string[]> {
+  if (!deps.registry) {
+    throw new Error(
+      "runCatalogSyncScheduler: opts.tenantIds was omitted and deps.registry was not supplied — nothing to enumerate",
+    );
+  }
+  return listActiveTenantIds(deps.registry);
 }

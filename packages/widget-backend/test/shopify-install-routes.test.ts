@@ -6,11 +6,12 @@ import type { AuditRecord, MerchantRegistryPort, RuntimeStatePort } from "@palup
 import {
   armKill,
   disarmKill,
-  createMerchantCredentialStore,
-  MERCHANT_CRED_COLLECTION,
-  MERCHANT_CRED_KEY_SCOPE,
-  MERCHANT_CRED_RECORD_KEY,
+  createAdminTokenStore,
+  ADMIN_CRED_COLLECTION,
+  ADMIN_CRED_RECORD_KEY,
+  ADMIN_CRED_KEY_SCOPE,
 } from "@palup/state-postgres";
+import type { AdminTokenStore } from "@palup/state-postgres";
 import { buildServer } from "../src/server.js";
 import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE } from "../src/shopify-install-identity.js";
 import { WEBHOOK_ROUTES } from "../src/routes/shopify-webhooks.js";
@@ -22,11 +23,12 @@ import {
   type MerchantCredentialSink,
 } from "../src/routes/shopify-install.js";
 
-// C1 — GET /shopify/install → GET /shopify/callback → delegateAccessTokenCreate, exercised END TO END
-// through the real Fastify app, because the callback is ATTACKER-REACHABLE: every parameter (`shop`,
-// `code`, `state`, `hmac`, `host`, `timestamp`) arrives from an external redirect. Driving it through
-// `app.inject` is the point — a unit test on the flow function would not prove the ROUTE validates before
-// it trusts.
+// C1 — GET /shopify/install → GET /shopify/callback → Admin-token custody (unified-cutover-cleanup,
+// 2026-08-24: the Admin offline token is the SOLE credential; the delegate/`delegateAccessTokenCreate` mint
+// this file used to exercise is deleted from the route entirely), exercised END TO END through the real
+// Fastify app, because the callback is ATTACKER-REACHABLE: every parameter (`shop`, `code`, `state`,
+// `hmac`, `host`, `timestamp`) arrives from an external redirect. Driving it through `app.inject` is the
+// point — a unit test on the flow function would not prove the ROUTE validates before it trusts.
 //
 // The properties this file exists to hold, in priority order:
 //   1. NOTHING IS TRUSTED BEFORE THE HMAC. A callback without a valid app-secret HMAC writes no merchant
@@ -78,7 +80,10 @@ function qs(query: Record<string, string>, opts: { secret?: string; hmac?: strin
   return sp.toString();
 }
 
-/** In-memory stand-in for B2's `MerchantCredentialStore` (#186, not merged): records what was custodied. */
+/** In-memory stand-in for B2's `MerchantCredentialStore` (#186, not merged): records what was custodied.
+ *  UNUSED by the install flow since unified-cutover-cleanup (2026-08-24) — the delegate token it exists to
+ *  custody is never minted — but the composition root still requires a working sink to REGISTER the routes
+ *  at all (`SHOPIFY_INSTALL_ENABLED` in server.ts), so `harness()` still wires one in. */
 function recordingSink(): MerchantCredentialSink & { puts: Array<{ tenantId: string; token: string; actor: string }>; failNext?: boolean } {
   const puts: Array<{ tenantId: string; token: string; actor: string }> = [];
   const sink = {
@@ -92,11 +97,52 @@ function recordingSink(): MerchantCredentialSink & { puts: Array<{ tenantId: str
   return sink;
 }
 
+/** In-memory stand-in for Task 4's `AdminTokenStore` (put-only, mirroring `recordingSink` above): records
+ *  what was custodied. This is now the SOLE credential the install flow produces, so this is the seam most
+ *  tests below assert against. `read`/`refresh`/`delete` are never called by the install route under test
+ *  and throw if they ever are, rather than silently returning something wrong. */
+function recordingAdminSink(): AdminTokenStore & {
+  puts: Array<{ tenantId: string; token: string; actor: string; expiresAt?: string; refreshToken?: string; refreshTokenExpiresAt?: string }>;
+  failNext?: boolean;
+} {
+  const puts: Array<{ tenantId: string; token: string; actor: string; expiresAt?: string; refreshToken?: string; refreshTokenExpiresAt?: string }> = [];
+  const sink = {
+    puts,
+    failNext: false,
+    async put(
+      tenantId: string,
+      token: string,
+      opts: { actor: string; expiresAt?: string; refreshToken?: string; refreshTokenExpiresAt?: string },
+    ) {
+      if (sink.failNext) throw new Error("admin token store unavailable");
+      puts.push({
+        tenantId,
+        token,
+        actor: opts.actor,
+        expiresAt: opts.expiresAt,
+        refreshToken: opts.refreshToken,
+        refreshTokenExpiresAt: opts.refreshTokenExpiresAt,
+      });
+    },
+    async read(): Promise<never> {
+      throw new Error("recordingAdminSink: read() not implemented — the install route under test never reads it back");
+    },
+    async refresh(): Promise<never> {
+      throw new Error("recordingAdminSink: refresh() not implemented — out of scope for these install-route tests");
+    },
+    async delete(): Promise<never> {
+      throw new Error("recordingAdminSink: delete() not implemented — out of scope for these install-route tests");
+    },
+  };
+  return sink;
+}
+
 interface Harness {
   app: Awaited<ReturnType<typeof buildServer>>;
   store: RuntimeStatePort;
   registry: MerchantRegistryPort;
   sink: ReturnType<typeof recordingSink>;
+  adminSink: ReturnType<typeof recordingAdminSink>;
   fetchCalls: string[];
   setFetch: (fn: (url: string, init?: RequestInit) => unknown) => void;
 }
@@ -107,7 +153,12 @@ interface Harness {
  */
 async function harness(
   over: Record<string, string | undefined> = {},
-  seams: { registry?: MerchantRegistryPort | null; sink?: MerchantCredentialSink | null; store?: RuntimeStatePort } = {},
+  seams: {
+    registry?: MerchantRegistryPort | null;
+    sink?: MerchantCredentialSink | null;
+    adminTokens?: AdminTokenStore | null;
+    store?: RuntimeStatePort;
+  } = {},
 ): Promise<Harness> {
   process.env.SHOPIFY_APP_CLIENT_ID = CLIENT_ID;
   process.env.SHOPIFY_INSTALL_REDIRECT_URI = REDIRECT_URI;
@@ -118,6 +169,7 @@ async function harness(
   const store = seams.store ?? new InMemoryRuntimeStore();
   const registry = seams.registry === null ? undefined : (seams.registry ?? createInMemoryMerchantRegistry());
   const sink = recordingSink();
+  const adminSink = recordingAdminSink();
   const fetchCalls: string[] = [];
   let impl: (url: string, init?: RequestInit) => unknown = (url, init) => {
     if (url.endsWith("/admin/oauth/access_token")) {
@@ -161,8 +213,11 @@ async function harness(
     merchantRegistry: registry,
     // `null` ⇒ do NOT inject, so the composition root's REAL B2 store is used (see the "real custody" tests).
     merchantCredentials: seams.sink === null ? undefined : (seams.sink ?? sink),
+    // `null` ⇒ do NOT inject, so the composition root's REAL, encrypted `AdminTokenStore` is used (see the
+    // "real custody" tests) — mirrors `merchantCredentials`'s own `null` convention immediately above.
+    adminTokens: seams.adminTokens === null ? undefined : (seams.adminTokens ?? adminSink),
   });
-  return { app, store, registry: registry as MerchantRegistryPort, sink, fetchCalls, setFetch: (fn) => (impl = fn) };
+  return { app, store, registry: registry as MerchantRegistryPort, sink, adminSink, fetchCalls, setFetch: (fn) => (impl = fn) };
 }
 
 function cookieFrom(res: { headers: Record<string, unknown> }): string {
@@ -411,7 +466,7 @@ describe("C1 GET /shopify/callback — nothing is trusted before the HMAC", () =
     const replay = await callback(h, { state, cookie });
     expect(replay.statusCode).toBe(400); // …and the second is refused
     // Never registered twice, and only ONE credential put happened.
-    expect(h.sink.puts).toHaveLength(1);
+    expect(h.adminSink.puts).toHaveLength(1);
 
     const fresh = await harness();
     const begun = await begin(fresh);
@@ -482,8 +537,8 @@ describe("C1 GET /shopify/callback — nothing is trusted before the HMAC", () =
 });
 
 // ---------------------------------------------------------------------------------------------------
-describe("C1 the happy path — install → callback → delegateAccessTokenCreate", () => {
-  it("exchanges the code, mints a DELEGATE token, custodies it, and registers the merchant", async () => {
+describe("C1 the happy path — install → callback → Admin-token custody", () => {
+  it("exchanges the code, custodies the ADMIN token, and registers the merchant", async () => {
     const h = await harness();
     const { state, cookie } = await begin(h);
     const res = await callback(h, { state, cookie });
@@ -495,10 +550,11 @@ describe("C1 the happy path — install → callback → delegateAccessTokenCrea
     expect(h.fetchCalls[1]).toContain(`https://${SHOP}/admin/api/`);
     expect(h.fetchCalls[1]).toContain("/graphql.json");
 
-    // The DELEGATE token is what gets custodied — never the parent token.
-    expect(h.sink.puts).toHaveLength(1);
-    expect(h.sink.puts[0]?.token).toBe(DELEGATE_TOKEN);
-    expect(h.sink.puts[0]?.actor).toMatch(/install/);
+    // The ADMIN (parent) token is what gets custodied — no delegate token is ever minted or custodied.
+    expect(h.sink.puts).toEqual([]);
+    expect(h.adminSink.puts).toHaveLength(1);
+    expect(h.adminSink.puts[0]?.token).toBe(PARENT_TOKEN);
+    expect(h.adminSink.puts[0]?.actor).toMatch(/install/);
 
     const rec = await h.registry.lookupByShopDomain(SHOP);
     expect(rec).toBeTruthy();
@@ -507,7 +563,7 @@ describe("C1 the happy path — install → callback → delegateAccessTokenCrea
     expect(rec?.region).toBe("us");
     expect(rec?.embedKey).toBeTruthy();
     expect(rec?.tenantId).not.toBe("demo"); // #169 — never the fallback tenant
-    expect(h.sink.puts[0]?.tenantId).toBe(rec?.tenantId);
+    expect(h.adminSink.puts[0]?.tenantId).toBe(rec?.tenantId);
   });
 
   it("the merchant row and the credential are keyed by the SAME tenant, resolvable by embed key", async () => {
@@ -546,7 +602,7 @@ describe("C1 the happy path — install → callback → delegateAccessTokenCrea
     // documents the CURRENT status (merchant-registry-port.ts:81-82), so it is REPLACED, not cleared.
     expect(again.statusReason).not.toBe("test uninstall");
     expect(again.statusReason).toMatch(/install/i);
-    expect(h.sink.puts).toHaveLength(2); // a fresh delegate credential each time
+    expect(h.adminSink.puts).toHaveLength(2); // a fresh Admin token custodied each time
   });
 
   it("a repeat install of an ALREADY-ACTIVE shop refreshes the credential without duplicating the row", async () => {
@@ -559,7 +615,7 @@ describe("C1 the happy path — install → callback → delegateAccessTokenCrea
     const after = (await h.registry.lookupByShopDomain(SHOP))!;
     expect(after.tenantId).toBe(rec.tenantId);
     expect(after.createdAt).toBe(rec.createdAt);
-    expect(h.sink.puts).toHaveLength(2);
+    expect(h.adminSink.puts).toHaveLength(2);
   });
 
   it("two DIFFERENT shops get two different tenants and two different embed keys", async () => {
@@ -574,27 +630,6 @@ describe("C1 the happy path — install → callback → delegateAccessTokenCrea
     expect(ra.embedKey).not.toBe(rb.embedKey);
   });
 
-  it("requests only the delegate scopes this product actually reads (least privilege)", async () => {
-    const h = await harness();
-    let delegateInput: { delegateAccessScope?: string[]; expiresIn?: number } | undefined;
-    h.setFetch((url, init) => {
-      if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
-      const body = JSON.parse(String(init?.body)) as { query?: string; variables?: { input?: { delegateAccessScope?: string[]; expiresIn?: number } } };
-      // The graphql endpoint now also serves webhookSubscriptionCreate — only capture the DELEGATE input.
-      if ((body.query ?? "").includes("webhookSubscriptionCreate")) {
-        return { ok: true, status: 200, json: async () => ({ data: { webhookSubscriptionCreate: { webhookSubscription: { id: "gid" }, userErrors: [] } } }) };
-      }
-      delegateInput = body.variables?.input;
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: { accessToken: DELEGATE_TOKEN, accessScopes: [GRANTED_SCOPES] }, userErrors: [] } } }),
-      };
-    });
-    const { state, cookie } = await begin(h);
-    await callback(h, { state, cookie });
-    expect(delegateInput?.delegateAccessScope).toEqual([GRANTED_SCOPES]);
-  });
 });
 
 // ---------------------------------------------------------------------------------------------------
@@ -611,7 +646,7 @@ describe("C1 fail-closed on every partial failure", () => {
     expectNoSecrets(res.body, "the failure body");
   });
 
-  it("REFUSES when the merchant granted FEWER scopes than the delegate token needs (the URL-edit attack)", async () => {
+  it("REFUSES when the merchant granted FEWER scopes than were requested (the URL-edit attack)", async () => {
     const h = await harness();
     h.setFetch((url) => {
       if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: "read_products" }) };
@@ -624,21 +659,9 @@ describe("C1 fail-closed on every partial failure", () => {
     expect(await h.registry.lookupByShopDomain(SHOP, { includeInactive: true })).toBeNull();
   });
 
-  it("a failed delegate mutation leaves NO merchant row and NO credential", async () => {
+  it("a failed Admin-token CUSTODY write never leaves an ACTIVE merchant behind (custody precedes servability)", async () => {
     const h = await harness();
-    h.setFetch((url) => {
-      if (url.endsWith("/admin/oauth/access_token")) return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
-      return { ok: true, status: 200, json: async () => ({ data: { delegateAccessTokenCreate: { delegateAccessToken: null, userErrors: [{ field: ["input"], message: "scope not granted" }] } } }) };
-    });
-    const { state, cookie } = await begin(h);
-    expect((await callback(h, { state, cookie })).statusCode).toBe(502);
-    expect(h.sink.puts).toEqual([]);
-    expect(await h.registry.lookupByShopDomain(SHOP, { includeInactive: true })).toBeNull();
-  });
-
-  it("a failed CREDENTIAL write never leaves an ACTIVE merchant behind (custody precedes servability)", async () => {
-    const h = await harness();
-    h.sink.failNext = true;
+    h.adminSink.failNext = true;
     const { state, cookie } = await begin(h);
     const res = await callback(h, { state, cookie });
     expect(res.statusCode).toBe(502);
@@ -828,54 +851,64 @@ describe("C1 the public routes are rate-limited like every sibling", () => {
   });
 });
 
-describe("C1 real custody — the composition root wires B2's ENCRYPTED store, not a stub", () => {
-  /** The per-tenant key B2 needs for the `merchant-cred` scope, provisioned for the installing tenant. */
-  function secretsWithCredKey(): string {
+describe("C1 real custody — the composition root wires Task 4's ENCRYPTED AdminTokenStore, not a stub", () => {
+  // Converted from testing B2's delegate-token store (unified-cutover-cleanup, 2026-08-24): the delegate
+  // token this describe used to exercise is never minted any more (see shopify-install.ts's header) — the
+  // Admin offline token is the SOLE credential this install produces, so this is now the real-crypto
+  // coverage that matters for THIS route.
+
+  /** The per-tenant key the AdminTokenStore needs for the `admin-cred` scope, provisioned for the
+   *  installing tenant. */
+  function secretsWithAdminCredKey(): string {
     return JSON.stringify({
       [SHOPIFY_APP_SECRET_SCOPE]: { [SHOPIFY_APP_CLIENT_SECRET_NAME]: APP_SECRET },
-      "acme-store": { [keyScopeSecretName("MEMORY_ENCRYPTION_KEY", MERCHANT_CRED_KEY_SCOPE)]: "acme-credential-key-material" },
+      "acme-store": { [keyScopeSecretName("MEMORY_ENCRYPTION_KEY", ADMIN_CRED_KEY_SCOPE)]: "acme-admin-cred-key-material" },
     });
   }
 
-  it("stores the delegate token ENCRYPTED under the merchant-cred scope, and it reads back", async () => {
-    const h = await harness({ PALUP_SECRETS: secretsWithCredKey() }, { sink: null });
+  it("stores the ADMIN token ENCRYPTED under the admin-cred scope, and it reads back", async () => {
+    const h = await harness({ PALUP_SECRETS: secretsWithAdminCredKey() }, { adminTokens: null });
     const { state, cookie } = await begin(h);
     expect((await callback(h, { state, cookie })).statusCode).toBe(200);
 
-    // The raw KV row holds no plaintext token, and carries B2's v2 SCOPED envelope.
-    const row = await h.store.get<{ c: string }>({ tenantId: "acme-store" }, MERCHANT_CRED_COLLECTION, MERCHANT_CRED_RECORD_KEY);
+    // The raw KV row holds no plaintext token, and carries the store's v2 SCOPED envelope.
+    const row = await h.store.get<{ c: string }>({ tenantId: "acme-store" }, ADMIN_CRED_COLLECTION, ADMIN_CRED_RECORD_KEY);
     expect(row).toBeTruthy();
-    expect(JSON.stringify(row)).not.toContain(DELEGATE_TOKEN);
-    expect(row!.c.startsWith(`v2:${MERCHANT_CRED_KEY_SCOPE}:`)).toBe(true);
+    expect(JSON.stringify(row)).not.toContain(PARENT_TOKEN);
+    expect(row!.c.startsWith(`v2:${ADMIN_CRED_KEY_SCOPE}:`)).toBe(true);
 
     // …and the real store reads the real token back for the tenant that owns it, only.
-    const readable = createMerchantCredentialStore(h.store, createAesGcmCrypto(createEnvSecrets(secretsWithCredKey())));
-    expect(await readable.read("acme-store")).toEqual({ status: "found", token: DELEGATE_TOKEN });
+    const readable = createAdminTokenStore(h.store, createAesGcmCrypto(createEnvSecrets(secretsWithAdminCredKey())));
+    expect(await readable.read("acme-store")).toMatchObject({ status: "found", token: PARENT_TOKEN });
     expect(await readable.read("beta-store")).toEqual({ status: "missing" }); // tenant-scoped
   });
 
-  it("B2's own credential.store audit record lands on the same tenant chain, and carries no token", async () => {
-    const h = await harness({ PALUP_SECRETS: secretsWithCredKey() }, { sink: null });
+  it("the AdminTokenStore's own admin_token.store audit record lands on the same tenant chain, and carries no token", async () => {
+    const h = await harness({ PALUP_SECRETS: secretsWithAdminCredKey() }, { adminTokens: null });
     const { state, cookie } = await begin(h);
     await callback(h, { state, cookie });
     const log = await auditFor(h.store, "acme-store");
-    expect(log.find((r) => r.action === "credential.store"), "B2 must have audited the credential write").toBeTruthy();
+    expect(log.find((r) => r.action === "admin_token.store"), "AdminTokenStore must have audited the credential write").toBeTruthy();
     expect(log.find((r) => r.action === "merchant.registered")).toBeTruthy();
     expectNoSecrets(JSON.stringify(log), "the audit log");
     expect((await h.store.verifyAudit({ tenantId: "acme-store" })).ok).toBe(true);
   });
 
-  it("a merchant with NO encryption key provisioned is REFUSED — no row, no plaintext, no half-install", async () => {
+  it("a merchant with NO admin-cred encryption key provisioned is REFUSED — no row, no plaintext, no half-install", async () => {
     // The per-tenant key cannot be checked at boot (the tenant is unknown until install), so this is where
-    // the failure must surface. B2 encrypts BEFORE opening its transaction, so nothing at all is written.
-    const h = await harness({}, { sink: null }); // app secret only; no merchant-cred key
+    // the failure must surface. The store encrypts BEFORE opening its transaction, so nothing at all is
+    // written to the credential row — but the FATAL custody failure IS best-effort audited (see
+    // shopify-install.ts), so the audit chain carries exactly that one record, not silence.
+    const h = await harness({}, { adminTokens: null }); // app secret only; no admin-cred key
     const { state, cookie } = await begin(h);
     const res = await callback(h, { state, cookie });
     expect(res.statusCode).toBe(502);
     expectNoSecrets(res.body, "the failure body");
     expect(await h.registry.lookupByShopDomain(SHOP, { includeInactive: true })).toBeNull();
-    expect(await h.store.get({ tenantId: "acme-store" }, MERCHANT_CRED_COLLECTION, MERCHANT_CRED_RECORD_KEY)).toBeNull();
-    expect(await auditFor(h.store, "acme-store")).toEqual([]); // nothing audited either
+    expect(await h.store.get({ tenantId: "acme-store" }, ADMIN_CRED_COLLECTION, ADMIN_CRED_RECORD_KEY)).toBeNull();
+    const log = await auditFor(h.store, "acme-store");
+    expect(log.map((r) => r.action)).toEqual(["admin_token.custody_failed"]);
+    expectNoSecrets(JSON.stringify(log), "the audit log");
   });
 });
 
@@ -986,8 +1019,8 @@ describe("Track B — install registers shop-specific webhooks with the PARENT t
     expect(res.statusCode).toBe(200); // install still succeeds
 
     // Custody happened once, the registry row is live — the webhook failure changed neither.
-    expect(h.sink.puts).toHaveLength(1);
-    expect(h.sink.puts[0]?.token).toBe(DELEGATE_TOKEN);
+    expect(h.adminSink.puts).toHaveLength(1);
+    expect(h.adminSink.puts[0]?.token).toBe(PARENT_TOKEN);
     const rec = (await h.registry.lookupByShopDomain(SHOP))!;
     expect(rec.status).toBe("active");
 
@@ -1102,6 +1135,7 @@ describe("Track B — the webhookSubscriptions dep is additive (absent ⇒ zero 
     const store = new InMemoryRuntimeStore();
     const registry = createInMemoryMerchantRegistry();
     const sink = recordingSink();
+    const adminSink = recordingAdminSink();
     const graphqlBodies: Array<{ query?: string }> = [];
     const fetchFn = (async (url: unknown, init?: unknown) => {
       const u = String(url);
@@ -1120,6 +1154,7 @@ describe("Track B — the webhookSubscriptions dep is additive (absent ⇒ zero 
       store,
       registry,
       credentials: sink,
+      adminTokens: adminSink,
       clientSecret: async () => APP_SECRET,
       fetchFn,
       clientId: CLIENT_ID,
@@ -1131,7 +1166,7 @@ describe("Track B — the webhookSubscriptions dep is additive (absent ⇒ zero 
       now: () => Math.floor(Date.now() / 1000),
       webhookSubscriptions,
     });
-    return { app, store, registry, sink, graphqlBodies };
+    return { app, store, registry, sink, adminSink, graphqlBodies };
   }
 
   it("(d) with NO webhookSubscriptions dep, install succeeds and makes ZERO webhook fetches — behaviour unchanged", async () => {
@@ -1150,11 +1185,12 @@ describe("Track B — the webhookSubscriptions dep is additive (absent ⇒ zero 
     });
     expect(cb.statusCode).toBe(200); // install still succeeds
 
-    // The delegate mutation ran; NO webhookSubscriptionCreate mutation was ever sent.
-    expect(ctx.graphqlBodies.some((b) => (b.query ?? "").includes("delegateAccessTokenCreate"))).toBe(true);
-    expect(ctx.graphqlBodies.filter((b) => (b.query ?? "").includes("webhookSubscriptionCreate"))).toEqual([]);
-    // Custody + registry write unchanged.
-    expect(ctx.sink.puts).toHaveLength(1);
+    // No delegate mutation ran (it is never minted any more) and NO webhookSubscriptionCreate mutation was
+    // ever sent either (no webhookSubscriptions dep) — the graphql endpoint sees zero calls total.
+    expect(ctx.graphqlBodies).toEqual([]);
+    // Custody is the ADMIN token now; the registry write is unchanged.
+    expect(ctx.sink.puts).toEqual([]);
+    expect(ctx.adminSink.puts).toHaveLength(1);
     expect(await ctx.registry.lookupByShopDomain(SHOP)).toBeTruthy();
   });
 });

@@ -4,6 +4,7 @@ import {
   InMemoryRuntimeStore,
   createInMemoryCatalogProductStore,
   createInMemoryProductFactsStore,
+  createInMemoryStoreProfileStore,
   type CatalogProductRecord,
   type ModelPort,
 } from "@palup/platform-ports";
@@ -71,7 +72,7 @@ async function setup(opts: {
   const local = createLocalCatalogGroundingPort({
     catalogProduct,
     productFacts,
-    shellSource: { getShell: async () => ({ tenantId: TENANT, brandName: "Acme", policy: { returns: "r", shipping: "s" } }) },
+    storeProfile: createInMemoryStoreProfileStore(),
   });
 
   let getProductsByIdsCalls = 0;

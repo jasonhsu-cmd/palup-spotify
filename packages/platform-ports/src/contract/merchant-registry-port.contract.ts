@@ -329,6 +329,42 @@ export function runMerchantRegistryPortContract(
       }
     });
 
+    // --- listActive: the governed cross-tenant enumeration (ADR-0023) ---
+
+    it("listActive paginates active-only merchants by cursor, secret-free, in tenantId order", async () => {
+      const r = await makeAdapter();
+      await r.create({ tenantId: "t-a", shopDomain: "a.myshopify.com", embedKey: "pk-a", region: "us" });
+      await r.create({ tenantId: "t-b", shopDomain: "b.myshopify.com", embedKey: "pk-b", region: "us" });
+      await r.setStatus("t-b", "uninstalled");
+      await r.create({ tenantId: "t-c", shopDomain: "c.myshopify.com", embedKey: "pk-c", region: "us" });
+      await r.create({ tenantId: "t-d", shopDomain: "d.myshopify.com", embedKey: "pk-d", region: "us" });
+
+      const page1 = await r.listActive({ limit: 2 });
+      expect(page1.items).toEqual([
+        { tenantId: "t-a", shopDomain: "a.myshopify.com", status: "active" },
+        { tenantId: "t-c", shopDomain: "c.myshopify.com", status: "active" },
+      ]);
+      expect(page1.nextCursor).toBe("t-c");
+
+      const page2 = await r.listActive({ cursor: page1.nextCursor, limit: 2 });
+      expect(page2.items).toEqual([{ tenantId: "t-d", shopDomain: "d.myshopify.com", status: "active" }]);
+      expect(page2.nextCursor).toBeUndefined();
+
+      // never the uninstalled tenant, and never a field beyond the {tenantId, shopDomain, status} allowlist
+      for (const item of [...page1.items, ...page2.items]) {
+        expect(item.tenantId).not.toBe("t-b");
+        expect(Object.keys(item).sort()).toEqual(["shopDomain", "status", "tenantId"]);
+      }
+    });
+
+    it("listActive on an empty/all-inactive registry returns an empty page with no nextCursor", async () => {
+      const r = await makeAdapter();
+      expect(await r.listActive()).toEqual({ items: [] });
+      await r.create(ACME);
+      await r.setStatus("acme", "uninstalled");
+      expect(await r.listActive()).toEqual({ items: [] });
+    });
+
     // --- callers cannot mutate stored state by reference (mirrors VectorPort's clone discipline) ---
 
     it("returned records are copies — mutating one does not change the registry", async () => {

@@ -8,6 +8,7 @@ import type {
   ProductFact,
   ProductFactsPort,
   StorePolicy,
+  StoreProfilePort,
 } from "@palup/platform-ports";
 import { MAX_CATALOG_PRODUCTS } from "./shopify-grounding.js";
 
@@ -17,26 +18,37 @@ import { MAX_CATALOG_PRODUCTS } from "./shopify-grounding.js";
 // Storefront API being reachable at serve time (Task 7's Bulk-Operations backfill is what populates the
 // stores this port reads).
 //
-// BRAND + POLICY GAP — recorded, not silently assumed away. The plan for this task assumed Task 7 would
-// write a per-tenant profile KV (brandName + policy) this port could read purely locally. VERIFIED against
-// Task 7's actual scope (task-7-report.md, `packages/widget-backend/src/jobs/catalog-backfill.ts`): it
-// writes ONLY a `BackfillManifest` (productId -> contentHash) under the `catalog_backfill` collection — no
-// brand/policy KV exists anywhere in the codebase (grepped `packages/widget-backend/src` for
-// "profile"/"brandName" writes; none found besides `GroundingContext`/`GroundingShell` themselves). So
-// brand+policy here fall back to `shellSource.getShell` — the EXISTING, cheap, single-round-trip storefront
-// shell fetch that `createCachingGroundingPort` already caches upstream — for those two fields ONLY. This
-// is a deliberate, narrow exception to "no Shopify on this port": the catalog PRODUCTS path (`getContext`'s
-// `products`, `getProductsByIds`) never touches `shellSource`, and even `getContext`'s own products are
-// unaffected when the shell fetch fails (see below) — the durability invariant holds for the part that
-// actually matters (§8a invariant 11 / money accuracy is about products, not the brand string). Populating
-// a real local profile KV at backfill time is a follow-up, not invented here.
+// BRAND + POLICY — unified-cutover-cleanup (2026-08-24): `getContext` AND `getShell` now ALWAYS read
+// brand+policy from the local `store_profile` store (`StoreProfilePort`), via the shared `readLocalShell`
+// helper below. This used to be conditional on a `unifiedLocalShell` flag (credential-enrollment-
+// unification's CATALOG_UNIFIED cutover); the owner made that cutover the ONLY behavior and the flag/OFF
+// path (falling back to a `shellSource` — the Storefront-or-fixtures shell) was deleted as dead code. A
+// `store_profile` miss or lookup failure degrades to the SAME neutral default it always has — never a
+// throw — and `getContext`'s products remain entirely unaffected by any such failure, which is the
+// durability invariant that matters for §8a invariant 11.
 
 export interface LocalCatalogGroundingDeps {
   catalogProduct: CatalogProductPort;
   productFacts: ProductFactsPort;
-  /** Brand + policy source (see file banner). Only `getShell` is ever called on it — never the
-   *  whole-catalog `getContext`/`getProductsByIds`, which would defeat the durability invariant. */
-  shellSource: Pick<GroundingPort, "getShell">;
+  /** The local, tenant-scoped brand + policy record `getContext`/`getShell` ALWAYS serve from — no
+   *  Shopify call on that path. A missing row or a lookup failure degrades to the neutral default via
+   *  `readLocalShell` (never a throw). */
+  storeProfile: Pick<StoreProfilePort, "get">;
+}
+
+/**
+ * Read brand+policy from the local `storeProfile` store, degrading to the SAME neutral default on a
+ * missing profile OR a lookup failure (never a throw). Shared by `getShell` and `getContext` so the two
+ * paths can never drift into two different "local shell" implementations.
+ */
+async function readLocalShell(deps: Pick<LocalCatalogGroundingDeps, "storeProfile">, tenantId: string): Promise<GroundingShell> {
+  try {
+    const profile = await deps.storeProfile.get(tenantId);
+    if (!profile) return { tenantId, brandName: FALLBACK_BRAND, policy: FALLBACK_POLICY };
+    return { tenantId, brandName: profile.brandName, policy: profile.policy };
+  } catch {
+    return { tenantId, brandName: FALLBACK_BRAND, policy: FALLBACK_POLICY };
+  }
 }
 
 /** Mirrors `mapStorefrontToContext`'s own fallback brand string (shopify-grounding.ts) so a shell-source
@@ -89,11 +101,11 @@ async function hydrate(deps: LocalCatalogGroundingDeps, tenantId: string, record
 }
 
 /**
- * The LOCAL `GroundingPort` — no Shopify dependency for catalog PRODUCTS. `getContext`/`getProductsByIds`
- * read ONLY `CatalogProductPort` + `ProductFactsPort`. Brand+policy (both `getContext` and `getShell`)
- * fall back to `shellSource` (see file banner), and a shell-source failure degrades EITHER method to the
- * SAME neutral default (never a throw) — `getContext`'s degrade additionally protects the already-resolved
- * products, which is the durability invariant this whole file exists for.
+ * The LOCAL `GroundingPort` — no Shopify dependency for catalog PRODUCTS or for brand/policy.
+ * `getContext`/`getProductsByIds` read ONLY `CatalogProductPort` + `ProductFactsPort` for products.
+ * `getContext` and `getShell` both ALWAYS read brand+policy from the local `storeProfile` store. Either
+ * way a failure degrades to the SAME neutral default (never a throw) — `getContext`'s degrade additionally
+ * protects the already-resolved products, which is the durability invariant this whole file exists for.
  */
 export function createLocalCatalogGroundingPort(deps: LocalCatalogGroundingDeps): GroundingPort {
   return {
@@ -104,30 +116,23 @@ export function createLocalCatalogGroundingPort(deps: LocalCatalogGroundingDeps)
       if (records.length > MAX_CATALOG_PRODUCTS) throw new LocalCatalogCeilingExceededError(tenantId);
       const products = await hydrate(deps, tenantId, records);
 
-      // Durability invariant: PRODUCTS never depend on this call succeeding. A shell-source failure
-      // (Shopify down, credential revoked, …) degrades brand/policy to a neutral default; the products
-      // above are already resolved and are returned regardless.
+      // Durability invariant: PRODUCTS never depend on this call succeeding. A store_profile failure
+      // (missing profile row, DB error, …) degrades brand/policy to a neutral default; the products above
+      // are already resolved and are returned regardless. `readLocalShell` never throws internally — this
+      // try/catch is defense-in-depth so a future change to that invariant still can't take products down.
       let brandName = FALLBACK_BRAND;
       let policy = FALLBACK_POLICY;
       try {
-        const shell = await deps.shellSource.getShell(tenantId);
+        const shell = await readLocalShell(deps, tenantId);
         brandName = shell.brandName;
         policy = shell.policy;
       } catch {
-        /* brand/policy degrade to the neutral default above; products are unaffected */
+        /* brand/policy degrade to the neutral default above; products are unaffected. */
       }
       return { tenantId, brandName, products, policy };
     },
     async getShell(tenantId: string): Promise<GroundingShell> {
-      // Symmetric with getContext's own degrade: a shell-source failure (Shopify down, credential
-      // revoked, …) fails CLOSED to the same neutral default rather than throwing. `getShell` has no
-      // products to protect, but this port should never surface a raw upstream failure any differently
-      // than `getContext` does for the identical dependency (coordinator review fix #1).
-      try {
-        return await deps.shellSource.getShell(tenantId);
-      } catch {
-        return { tenantId, brandName: FALLBACK_BRAND, policy: FALLBACK_POLICY };
-      }
+      return readLocalShell(deps, tenantId);
     },
     async getProductsByIds(tenantId: string, ids: string[]): Promise<Product[]> {
       if (ids.length === 0) return [];

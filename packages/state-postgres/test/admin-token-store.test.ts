@@ -124,11 +124,11 @@ describe("admin-token-store", () => {
     expect(JSON.stringify(entry)).not.toContain(TOKEN);
   });
 
-  it("refresh replaces the token and writes an admin_token.refresh audit", async () => {
+  it("refresh replaces the token and writes an admin_token.refresh audit (new object shape)", async () => {
     const { store, crypto } = harness();
     const s = createAdminTokenStore(store, crypto);
     await s.put("t1", "atk", { actor: "system:test" });
-    await s.refresh("t1", "atk2", { actor: "system:refresh", expiresAt: "2026-10-01T00:00:00.000Z" });
+    await s.refresh("t1", { token: "atk2", expiresAt: "2026-10-01T00:00:00.000Z" }, { actor: "system:refresh" });
     expect(await s.read("t1")).toMatchObject({ token: "atk2" });
     const log = await readAudits(store, "t1");
     expect(log.some((a) => a.action === "admin_token.refresh")).toBe(true);
@@ -138,7 +138,7 @@ describe("admin-token-store", () => {
     const { store, crypto } = harness();
     const s = createAdminTokenStore(store, crypto);
     await s.put("t1", "atk", { actor: "system:test" });
-    await expect(s.refresh("t1", "atk2", {} as never)).rejects.toThrow(/actor/);
+    await expect(s.refresh("t1", { token: "atk2" }, {} as never)).rejects.toThrow(/actor/);
   });
 
   it("refuses a blank tenantId on every operation", async () => {
@@ -147,7 +147,96 @@ describe("admin-token-store", () => {
     await expect(s.put("  ", "atk", { actor: "system:test" })).rejects.toThrow(/non-blank tenantId/);
     await expect(s.read("")).rejects.toThrow(/non-blank tenantId/);
     await expect(s.delete("", { actor: "system:test" })).rejects.toThrow(/non-blank tenantId/);
-    await expect(s.refresh("", "atk", { actor: "system:test" })).rejects.toThrow(/non-blank tenantId/);
+    await expect(s.refresh("", { token: "atk" }, { actor: "system:test" })).rejects.toThrow(/non-blank tenantId/);
+  });
+
+  // ---- Task 6 (ADR-0023): refresh_token custody -----------------------------------------------------
+
+  it("put with a refreshToken + refreshTokenExpiresAt round-trips both on read (F-A/F-B groundwork)", async () => {
+    const { store, crypto } = harness();
+    const s = createAdminTokenStore(store, crypto);
+    await s.put("t1", "atk", {
+      actor: "system:test",
+      expiresAt: "2026-09-01T00:00:00.000Z",
+      refreshToken: "shrt_REFRESH_TOKEN_NEVER_LOGGED",
+      refreshTokenExpiresAt: "2026-11-22T00:00:00.000Z",
+    });
+    expect(await s.read("t1")).toEqual({
+      status: "found",
+      token: "atk",
+      expiresAt: "2026-09-01T00:00:00.000Z",
+      refreshToken: "shrt_REFRESH_TOKEN_NEVER_LOGGED",
+      refreshTokenExpiresAt: "2026-11-22T00:00:00.000Z",
+    });
+  });
+
+  it("put without a refreshToken omits it on read (back-compat with pre-schema rows)", async () => {
+    const { store, crypto } = harness();
+    const s = createAdminTokenStore(store, crypto);
+    await s.put("t1", "atk", { actor: "system:test" });
+    expect(await s.read("t1")).toEqual({ status: "found", token: "atk" });
+  });
+
+  it("the refresh_token ciphertext is tagged with the SAME admin-cred key scope as the access token (F-A)", async () => {
+    const { store, crypto } = harness();
+    const s = createAdminTokenStore(store, crypto);
+    await s.put("t1", "atk", { actor: "system:test", refreshToken: "shrt_abc" });
+    const row = (await store.get<{ c: string; rc?: string }>({ tenantId: "t1" }, ADMIN_CRED_COLLECTION, ADMIN_CRED_RECORD_KEY))!;
+    expect(row.rc).toBeDefined();
+    expect(row.rc!.startsWith(`v2:${ADMIN_CRED_KEY_SCOPE}:`)).toBe(true);
+  });
+
+  it("refresh(tenantId, {token, expiresAt, refreshToken, refreshTokenExpiresAt}, {actor}) replaces BOTH tokens atomically (F-B)", async () => {
+    const { store, crypto } = harness();
+    const s = createAdminTokenStore(store, crypto);
+    await s.put("t1", "atk", {
+      actor: "system:test",
+      expiresAt: "2026-09-01T00:00:00.000Z",
+      refreshToken: "shrt_OLD",
+      refreshTokenExpiresAt: "2026-11-01T00:00:00.000Z",
+    });
+    await s.refresh(
+      "t1",
+      { token: "atk2", expiresAt: "2026-09-01T01:00:00.000Z", refreshToken: "shrt_NEW", refreshTokenExpiresAt: "2026-11-30T00:00:00.000Z" },
+      { actor: "system:refresh" },
+    );
+    expect(await s.read("t1")).toEqual({
+      status: "found",
+      token: "atk2",
+      expiresAt: "2026-09-01T01:00:00.000Z",
+      refreshToken: "shrt_NEW",
+      refreshTokenExpiresAt: "2026-11-30T00:00:00.000Z",
+    });
+  });
+
+  it("refresh NEVER puts the refresh_token in the audit input (F-A)", async () => {
+    const { store, crypto } = harness();
+    const s = createAdminTokenStore(store, crypto);
+    await s.put("t1", "atk", { actor: "system:test" });
+    const REFRESH_TOKEN = "shrt_MUST_NOT_APPEAR_IN_AUDIT";
+    await s.refresh("t1", { token: "atk2", refreshToken: REFRESH_TOKEN }, { actor: "system:refresh" });
+    const log = await readAudits(store, "t1");
+    expect(JSON.stringify(log)).not.toContain(REFRESH_TOKEN);
+    expect(JSON.stringify(log)).not.toContain("atk2");
+  });
+
+  it("refresh: an audit failure inside the tx leaves the PRIOR token AND refresh_token intact (F-B atomicity)", async () => {
+    const state = new InMemoryRuntimeStore();
+    const crypto = standardCrypto();
+    const store = createAdminTokenStore(state, crypto);
+    await store.put("t1", "atk", { actor: "system:test", refreshToken: "shrt_OLD", refreshTokenExpiresAt: "2026-11-01T00:00:00.000Z" });
+
+    const failing = createAdminTokenStore(auditFailingStore(state), crypto);
+    await expect(
+      failing.refresh("t1", { token: "atk2", refreshToken: "shrt_NEW", refreshTokenExpiresAt: "2026-11-30T00:00:00.000Z" }, { actor: "system:refresh" }),
+    ).rejects.toThrow(/audit sink/);
+
+    expect(await store.read("t1")).toEqual({
+      status: "found",
+      token: "atk", // NOT "atk2"
+      refreshToken: "shrt_OLD", // NOT "shrt_NEW"
+      refreshTokenExpiresAt: "2026-11-01T00:00:00.000Z",
+    });
   });
 
   it("encrypts BEFORE opening the tx: an unconfigured key throws with nothing written or audited", async () => {
@@ -183,7 +272,7 @@ describe("admin-token-store", () => {
     await store.put("t1", "atk", { actor: "system:test" });
 
     const failing = createAdminTokenStore(auditFailingStore(state), crypto);
-    await expect(failing.refresh("t1", "atk2", { actor: "system:refresh" })).rejects.toThrow(/audit sink/);
+    await expect(failing.refresh("t1", { token: "atk2" }, { actor: "system:refresh" })).rejects.toThrow(/audit sink/);
 
     expect(await store.read("t1")).toEqual({ status: "found", token: "atk" }); // NOT "atk2"
   });
