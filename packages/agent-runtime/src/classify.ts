@@ -105,6 +105,17 @@ function numericParam(action: AgentAction, key: string): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+/** True when this action carries a category-specific dimension the new gates below evaluate — so an
+ *  action that is "measured" on a categorical dimension (e.g. a subscription pause with no pct/usd)
+ *  is NOT rejected by invariant 4's pct/usd-only "unmeasured" default. Presence only — the gates
+ *  themselves decide auto vs approval. */
+function categoricalDimensionPresent(action: AgentAction, category: ProposalCategory): boolean {
+  if (category === "discount") return action.params.stack === true || Array.isArray(action.params.stackWith);
+  if (category === "refund") return action.params.priceMatch === true;
+  if (category === "subscription") return typeof action.params.subAction === "string";
+  return false;
+}
+
 /**
  * Classify one `AgentAction` for HITL purposes. See the module header for the fail-closed
  * invariants this enforces. Pure given its inputs (no `Date.now()`), but reads `rules` (a seam) so
@@ -156,17 +167,18 @@ export async function classifyAction(
 
   const pct = numericParam(action, "pct");
   const usd = numericParam(action, "usd");
+  const hasCategorical = categoricalDimensionPresent(action, category);
 
-  // Invariant 4 — a known category with nothing measurable to check against a limit is uncertainty,
-  // not a free pass: default to requires_approval.
-  if (pct === undefined && usd === undefined) {
+  // Invariant 4 (preserved, generalized): a known category with NOTHING measurable — no pct, no usd,
+  // AND no category-specific dimension — is uncertainty, not a free pass.
+  if (pct === undefined && usd === undefined && !hasCategorical) {
     return {
       decision: "requires_approval",
       category,
       boundaryReasons: [
         {
           rule: `${category}.unmeasured_action`,
-          detail: "no pct/usd param present to evaluate against the auto-act limit",
+          detail: "no pct/usd/categorical param present to evaluate against the auto-act limit",
         },
       ],
     };
@@ -238,6 +250,27 @@ export async function classifyAction(
           });
         }
       }
+    }
+  }
+
+  // --- Categorical gates (W4-broaden): each fails CLOSED — an absent/empty policy ⇒ requires_approval.
+  if (category === "discount") {
+    const stacking = action.params.stack === true || (Array.isArray(action.params.stackWith) && action.params.stackWith.length > 0);
+    if (stacking && !limit.stackable) {
+      boundaryReasons.push({ rule: "discount.stacking_not_allowed", detail: "the agent tried to stack this discount but merchant rules do not allow auto-stacking" });
+    }
+  }
+  if (category === "refund" && action.params.priceMatch === true) {
+    const cap = limit.priceMatchMaxUsd ?? 0; // absent ⇒ 0, fail-closed
+    if (usd === undefined || usd > cap) {
+      boundaryReasons.push({ rule: "refund.price_match_over_cap", detail: `price-match credit usd=${usd ?? "n/a"} exceeds the auto price-match cap=${cap}` });
+    }
+  }
+  if (category === "subscription") {
+    const sub = typeof action.params.subAction === "string" ? action.params.subAction : undefined;
+    const allowed = limit.subscriptionSelfServe ?? [];
+    if (sub === undefined || !allowed.includes(sub as (typeof allowed)[number])) {
+      boundaryReasons.push({ rule: "subscription.action_requires_approval", detail: `subscription subAction="${sub ?? "n/a"}" is not in the merchant self-serve allow-list [${allowed.join(", ")}]` });
     }
   }
 
