@@ -1,7 +1,7 @@
-import type { RuntimeStatePort, VectorPort } from "@palup/platform-ports";
-import { createRuntimeStore, createVectorStore, matchedKill, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
+import type { MerchantRegistryPort, RuntimeStatePort, VectorPort } from "@palup/platform-ports";
+import { createRuntimeStore, createVectorStore, matchedKill, PostgresMerchantRegistry, RUNTIME_AGENT_TYPE } from "@palup/state-postgres";
 import { sweepAllSubjects, type SweepAllResult } from "@palup/widget-memory";
-import { parseStoreDomains } from "../merchant-store.js";
+import { listActiveTenantIds, parseStoreDomains } from "../merchant-store.js";
 
 // B4 — the SCHEDULED half of ADR-0015 Inv 4 ("expiry is enforced, not aspirational").
 //
@@ -86,7 +86,12 @@ export async function runRetentionSweep(
  * the same env the server resolves storefronts from), plus any explicitly listed in `SWEEP_TENANTS` for
  * a deployment that serves tenants not present in that map. Deduped, order-stable. Deliberately NOT
  * "every tenant with data" — there is no tenant registry to enumerate, and inventing one so a deletion
- * job can discover targets for itself is the wrong direction. */
+ * job can discover targets for itself is the wrong direction.
+ *
+ * TASK 5 (credential-enrollment-unification): superseded by `tenantsToSweepViaRegistry` below now that
+ * `MerchantRegistryPort.listActive` (Task 1) closes the "no registry to enumerate" gap this comment used
+ * to name. `main()` no longer calls this — kept EXPORTED AND UNUSED, dormant, purely so a one-release
+ * rollback (reverting `main()` to this function) is a revert, not a rewrite. Do not delete. */
 export function tenantsToSweep(env: NodeJS.ProcessEnv = process.env): string[] {
   const fromStores = Object.keys(parseStoreDomains(env.SHOPIFY_STORES));
   const explicit = (env.SWEEP_TENANTS ?? "")
@@ -96,15 +101,47 @@ export function tenantsToSweep(env: NodeJS.ProcessEnv = process.env): string[] {
   return [...new Set([...fromStores, ...explicit])];
 }
 
+/**
+ * Tenants to sweep (Task 5): every ACTIVE merchant discovered via `MerchantRegistryPort.listActive`'s
+ * keyset cursor (`listActiveTenantIds`, merchant-store.ts) UNIONED with any tenant explicitly listed in
+ * `SWEEP_TENANTS` — preserved alongside the registry walk for a deployment that must sweep a tenant the
+ * registry does not (yet) have a row for. Deduped; registry tenants first, then any additional explicit
+ * ones. `SHOPIFY_STORES` is no longer consulted here (see `tenantsToSweep` above). ADR-0023 F-E:
+ * `listActive` is INTERNAL sync-plane only — this job is one of its two sanctioned callers, the other
+ * being the catalog-sync scheduler (`catalog-sync-scheduler.ts`).
+ */
+export async function tenantsToSweepViaRegistry(
+  registry: Pick<MerchantRegistryPort, "listActive">,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<string[]> {
+  const fromRegistry = await listActiveTenantIds(registry);
+  const explicit = (env.SWEEP_TENANTS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return [...new Set([...fromRegistry, ...explicit])];
+}
+
 async function main(): Promise<void> {
-  const tenantIds = tenantsToSweep();
+  const runtime = await createRuntimeStore();
+  // Task 5: a durable registry (DATABASE_URL) is required to enumerate — mirrors `createRuntimeStore`'s
+  // own "production must set DATABASE_URL" posture rather than silently falling back to the dormant
+  // `tenantsToSweep()` env parse, which would make the live enumeration source ambiguous depending on
+  // config nobody can see from this job's output.
+  if (!runtime.sql) {
+    console.error("[sweep] no durable registry available (DATABASE_URL not set) — nothing to do");
+    process.exitCode = 1;
+    return;
+  }
+  const registry = new PostgresMerchantRegistry(runtime.sql);
+  await registry.migrate();
+  const tenantIds = await tenantsToSweepViaRegistry(registry);
   if (tenantIds.length === 0) {
-    console.error("[sweep] no tenants configured (set SHOPIFY_STORES and/or SWEEP_TENANTS) — nothing to do");
+    console.error("[sweep] no active tenants in the registry and no SWEEP_TENANTS set — nothing to do");
     process.exitCode = 1;
     return;
   }
 
-  const runtime = await createRuntimeStore();
   const vector = await createVectorStore(runtime.sql);
   console.log(`[sweep] store=${runtime.kind} vector=${vector.kind} tenants=${tenantIds.length}`);
 

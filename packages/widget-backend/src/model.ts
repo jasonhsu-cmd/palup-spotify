@@ -1,5 +1,5 @@
-import type { CatalogProductPort, CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, Product, ProductFactsPort, RuntimeStatePort, SecretsPort } from "@palup/platform-ports";
-import { createRedactingModelPort, createCachingGroundingPort } from "@palup/platform-ports";
+import type { CatalogProductPort, CommercePort, GroundingContext, GroundingPort, GroundingShell, ModelPort, Product, ProductFactsPort, RuntimeStatePort, SecretsPort, StoreProfilePort } from "@palup/platform-ports";
+import { createRedactingModelPort, createCachingGroundingPort, createInMemoryStoreProfileStore } from "@palup/platform-ports";
 import { MockModelAdapter, StaticGroundingAdapter, MockCommerceAdapter } from "@palup/widget-brain";
 import { createVertexAdapter, isVertexConfigured } from "@palup/model-vertex";
 import type { MerchantCredentialRead } from "@palup/state-postgres";
@@ -89,6 +89,14 @@ export function createGroundingPort(
     catalogProduct?: CatalogProductPort;
     productFacts?: ProductFactsPort;
     /**
+     * Task 4 (credential-enrollment-unification) — the local `store_profile` brand+policy source
+     * `createLocalCatalogGroundingPort`'s `getShell` now reads instead of `shellSource`. Absent (the
+     * default) falls back to an empty in-memory store below, so `getShell` degrades to the same neutral
+     * default it always has — wiring a real, persistent `StoreProfilePort` into this composition root is
+     * Task 7/9's job, not this task's (byte-identical to before this task until that lands).
+     */
+    storeProfile?: Pick<StoreProfilePort, "get">;
+    /**
      * Coordinator review fix #2 — TTL (ms) for memoizing the per-tenant `hasLocalCatalog` decision below.
      * `createCachingGroundingPort` only caches `getContext`, so without this a `listByTenant(limit:1)` read
      * would run on EVERY `getShell`/`getProductsByIds` call for EVERY tenant (a hot-path DB round-trip that
@@ -108,6 +116,14 @@ export function createGroundingPort(
      * is unaffected.
      */
     hasLocalCatalog?: (tenantId: string) => Promise<boolean>;
+    /**
+     * Task 7 (CATALOG_UNIFIED, ADR-0023 D1) — threaded straight through to
+     * `createLocalCatalogGroundingPort`'s `unifiedLocalShell`: when true, a backfilled tenant's
+     * `getContext` ALSO reads brand+policy from `storeProfile` (never `shellSource`), closing the last
+     * residual Storefront call on the local-serving path. Absent/false (the default) ⇒ byte-identical to
+     * before this task.
+     */
+    catalogUnified?: boolean;
   } = {},
 ): GroundingPort {
   const fixtures = new StaticGroundingAdapter();
@@ -160,7 +176,13 @@ export function createGroundingPort(
   let router: GroundingPort = shopifyOrFixtures;
   if (opts.localServingEnabled && opts.catalogProduct && opts.productFacts) {
     const catalogProduct = opts.catalogProduct;
-    const local = createLocalCatalogGroundingPort({ catalogProduct, productFacts: opts.productFacts, shellSource: shopifyOrFixtures });
+    const local = createLocalCatalogGroundingPort({
+      catalogProduct,
+      productFacts: opts.productFacts,
+      shellSource: shopifyOrFixtures,
+      storeProfile: opts.storeProfile ?? createInMemoryStoreProfileStore(),
+      unifiedLocalShell: opts.catalogUnified,
+    });
     // Controller ruling (per-tenant gating, load-bearing) — local serving is active ONLY for a tenant that
     // HAS a `catalog_product` corpus (backfilled), detected via a non-empty `listByTenant`. A tenant with
     // none (not yet backfilled) keeps `shopifyOrFixtures` UNCHANGED, so flipping `CATALOG_LOCAL_SERVING` on

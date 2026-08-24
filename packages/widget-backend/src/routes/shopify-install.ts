@@ -170,6 +170,16 @@ export interface ShopifyInstallDeps {
   pendingTtlSeconds?: number;
   /** Injectable only so a test can pin the generated embed key; production uses the CSPRNG default. */
   newEmbedKey?: () => string;
+  /**
+   * Task 7 (CATALOG_UNIFIED cutover, ADR-0023 D1) — when true, the Admin offline token (`grant.accessToken`,
+   * custodied via `adminTokens` below) is the SOLE credential this install produces: the delegate
+   * (Storefront) token is never minted (`createDelegateAccessToken` is not called) and never custodied
+   * (`credentials.put` is not called). Absent/false (the default) ⇒ byte-identical to before this task — the
+   * delegate is minted and custodied exactly as always. Does NOT relax `credentials` being required for the
+   * routes to register at all (see the header) — a deployment still wires a custody sink even when this flag
+   * is on; that sink is simply never called on this path while the flag is set.
+   */
+  catalogUnified?: boolean;
 }
 
 interface PendingInstall {
@@ -196,7 +206,13 @@ type Refusal =
   | "no_app_secret";
 
 /** An upstream/internal failure: the request was legitimate, we could not complete it. */
-type Failure = "exchange_failed" | "scopes_not_granted" | "delegate_failed" | "custody_failed" | "registry_failed";
+type Failure =
+  | "exchange_failed"
+  | "scopes_not_granted"
+  | "delegate_failed"
+  | "custody_failed"
+  | "registry_failed"
+  | "admin_token_custody_failed";
 
 export type InstallStart = { ok: true; authorizeUrl: string; state: string; ttlSeconds: number } | { ok: false; refused: Refusal };
 export type InstallComplete = { ok: true; shopDomain: string } | { ok: false; refused: Refusal } | { ok: false; failed: Failure };
@@ -410,26 +426,43 @@ async function completeInstallInner(
 
   if (await deps.killCheck(tenantId)) return { ok: false, refused: "halted" };
 
+  // Task 6 (ADR-0023) — request the EXPIRING offline token (`expiring: true`): verified spike (spec §10.1,
+  // 2026-08-24) says public apps must move off the non-expiring offline token (being retired for public
+  // apps), and the expiring token comes paired with a `refresh_token` this flow now custodies below. The
+  // DELEGATE token minted a few lines down from `grant.accessToken` is unaffected by the parent's now-1h
+  // lifetime — that mint happens synchronously, in this same request, using the freshly obtained parent.
   const grant = await exchangeInstallCode(
-    { shopDomain, clientId: deps.clientId, clientSecret: secret, code },
+    { shopDomain, clientId: deps.clientId, clientSecret: secret, code, expiring: true, now: () => deps.now() * 1000 },
     deps.fetchFn,
   );
   if (!grant) return { ok: false, failed: "exchange_failed" };
   if (!grantedScopesCover(deps.delegateScopes, grant.grantedScopes)) return { ok: false, failed: "scopes_not_granted" };
 
-  const delegate = await createDelegateAccessToken(
-    { shopDomain, parentAccessToken: grant.accessToken, delegateScopes: deps.delegateScopes },
-    deps.fetchFn,
-  );
-  if (!delegate) return { ok: false, failed: "delegate_failed" };
+  // Task 7 (CATALOG_UNIFIED, ADR-0023 D1) — under the unified cutover the Admin offline token (custodied
+  // below via `deps.adminTokens`) is the SOLE credential; the delegate (Storefront) token is never minted
+  // and never custodied. NOT REMOVED — gated (Task 8 handles removal-guards once one release has passed
+  // with the flag proven on staging). Flag absent/false ⇒ this whole block runs exactly as before this task.
+  let delegateScopesGranted: readonly string[] = deps.delegateScopes;
+  if (!deps.catalogUnified) {
+    const delegate = await createDelegateAccessToken(
+      { shopDomain, parentAccessToken: grant.accessToken, delegateScopes: deps.delegateScopes },
+      deps.fetchFn,
+    );
+    if (!delegate) return { ok: false, failed: "delegate_failed" };
 
-  // Custody first (see the ordering note). B2's `put` audits itself, atomically with its own write.
-  try {
-    await deps.credentials.put(tenantId, delegate.accessToken, { actor: "system:shopify-install" });
-  } catch {
-    // The error is swallowed on purpose: it is raised by a component holding the token, and this function's
-    // result is rendered to an attacker-reachable response.
-    return { ok: false, failed: "custody_failed" };
+    // Custody first (see the ordering note). B2's `put` audits itself, atomically with its own write.
+    try {
+      await deps.credentials.put(tenantId, delegate.accessToken, { actor: "system:shopify-install" });
+    } catch {
+      // The error is swallowed on purpose: it is raised by a component holding the token, and this function's
+      // result is rendered to an attacker-reachable response.
+      return { ok: false, failed: "custody_failed" };
+    }
+  } else {
+    // No delegate was requested or granted this install — the audit record below must say so honestly
+    // rather than implying delegate scopes were minted (kept as the SAME key, `delegateScopes`, so the
+    // audit `input`'s EXACT-key-allowlist test does not need a second shape to assert).
+    delegateScopesGranted = [];
   }
 
   // Task 5 (ADR-0022 F2/F6/F7) — capture the PARENT Admin offline token too, once one's caller has opted
@@ -452,24 +485,53 @@ async function completeInstallInner(
   // (Task 13) requests exactly `ADMIN_SYNC_SCOPES`, never a write scope (F3's own pin,
   // order-attribution-scope-pinning.test.ts).
   //
-  // Task 13 (forward-carry from Task 5's own review note): a custody failure here is NON-FATAL to the
-  // install. The Admin token is SYNC-PLANE-ONLY (it feeds the catalog-backfill/reconcile jobs); the
-  // DELEGATE token custodied above is what SERVING needs, and it is already safely stored by this point.
-  // Refusing the whole install over a degraded sync-plane capability would strand a merchant with a
-  // perfectly good, servable delegate credential behind a failed install page — worse than landing them
-  // with serving working and sync degraded until a re-install/re-auth re-attempts custody. So: catch, log,
-  // audit `admin_token.custody_failed` (best-effort — a secondary audit-write failure must not abort an
-  // otherwise-successful install either, mirroring every other best-effort audit in this file/package,
-  // e.g. shopify-webhooks.ts's `admin_token.delete_failed`), and fall through to the rest of this function
-  // exactly as if `adminTokens` had been absent.
+  // Task 13 (forward-carry from Task 5's own review note), REVISED by Task 7 review (Critical): a custody
+  // failure here is NON-FATAL to the install ONLY when a delegate token exists — i.e. `deps.catalogUnified`
+  // is false/absent. In that case the Admin token is SYNC-PLANE-ONLY (it feeds the catalog-backfill/
+  // reconcile jobs); the DELEGATE token custodied above is what SERVING needs, and it is already safely
+  // stored by this point, so refusing the whole install over a degraded sync-plane capability would strand
+  // a merchant with a perfectly good, servable delegate credential behind a failed install page.
+  //
+  // UNDER `deps.catalogUnified` THIS IS FALSE: per ADR-0023 D1, no delegate was minted or custodied above
+  // (see the `if (!deps.catalogUnified)` block) — the Admin token IS the sole credential this install
+  // produces. If `adminTokens.put` throws there, "serving is unaffected" is not true: there is nothing else
+  // custodied, and falling through would register the merchant `active` with zero Shopify credentials,
+  // landing them on the OK page while stranded. So under `catalogUnified` this failure is FATAL: still log
+  // + best-effort-audit exactly as below (never surface the token), but then FAIL the install
+  // (`admin_token_custody_failed`) rather than falling through to `registry.create`/`setStatus`.
   if (deps.adminTokens) {
     try {
-      await deps.adminTokens.put(tenantId, grant.accessToken, { actor: "system:shopify-install", expiresAt: grant.expiresAt });
+      // Task 6 (ADR-0023) — custody the paired refresh_token + both expiries alongside the access token,
+      // under the SAME `adminTokens.put` call (F-A: same key scope + AAD as the access token — enforced by
+      // `AdminTokenStore` itself, not repeated here). `grant.refreshToken`/`grant.refreshTokenExpiresAt` are
+      // `undefined` unless the exchange above actually returned them (e.g. a caller/test that never passed
+      // `expiring: true`, or a Shopify response that omitted them) — `put` already treats an absent
+      // refreshToken as "none custodied", the same F-H-safe posture as before this task.
+      await deps.adminTokens.put(tenantId, grant.accessToken, {
+        actor: "system:shopify-install",
+        expiresAt: grant.expiresAt,
+        refreshToken: grant.refreshToken,
+        refreshTokenExpiresAt: grant.refreshTokenExpiresAt,
+      });
     } catch (e) {
       // Never let an Admin-token custody failure surface the parent token in a response/log; same leak
       // boundary as every other catch in this function.
       const message = (e as Error).message;
       console.error(`[shopify-install] admin token custody failed tenant=${tenantId}: ${message}`);
+      // Task 7 review (Critical, ADR-0023 D1): under `catalogUnified` there is no delegate — the Admin token
+      // is the SOLE credential — so this failure is FATAL, not the degraded-sync-plane story below.
+      const reason = deps.catalogUnified
+        ? `adminTokens.put threw: ${message}; under CATALOG_UNIFIED the Admin token is the SOLE credential ` +
+          "for this install (no delegate was minted/custodied) — the install does NOT complete and no " +
+          "merchant row is registered/reactivated"
+        : `adminTokens.put threw: ${message}; the delegate token is already custodied and the ` +
+          "install continues — sync-plane capability (catalog backfill/reconcile) is degraded until " +
+          "re-custody, but serving is unaffected";
+      const reversalPath = deps.catalogUnified
+        ? "re-run the install/OAuth flow to re-attempt Admin-token custody from scratch — no merchant row was " +
+          "registered, so a fresh install attempt is the correct recovery"
+        : "re-run the install/OAuth flow to re-attempt Admin-token custody (idempotent — re-custody simply " +
+          "overwrites); the delegate token and servability are unaffected in the meantime";
       try {
         await deps.store.audit(
           { tenantId },
@@ -477,21 +539,21 @@ async function completeInstallInner(
             actor: "system:shopify-install",
             action: "admin_token.custody_failed",
             input: { tenantId, shopDomain },
-            decision: {
-              complete: false,
-              reason: `adminTokens.put threw: ${message}; the delegate token is already custodied and the ` +
-                "install continues — sync-plane capability (catalog backfill/reconcile) is degraded until " +
-                "re-custody, but serving is unaffected",
-            },
-            reversalPath:
-              "re-run the install/OAuth flow to re-attempt Admin-token custody (idempotent — re-custody simply " +
-              "overwrites); the delegate token and servability are unaffected in the meantime",
+            decision: { complete: false, reason },
+            reversalPath,
           },
         );
       } catch {
         // Same tradeoff as every other best-effort audit in this file/package: a secondary audit-write
-        // failure must not abort or fail an otherwise-successful install. `console.error` above is the
-        // residual trace.
+        // failure must not swallow the CATALOG_UNIFIED fatal return below — that return is unconditional on
+        // `put` having thrown, independent of whether this audit write itself succeeded. `console.error`
+        // above is the residual trace either way.
+      }
+      // Guaranteed once `adminTokens.put` threw, regardless of the inner audit's own outcome (see above) —
+      // never let this fall through to `registry.create`/`setStatus` and strand a credential-less merchant
+      // on the OK page.
+      if (deps.catalogUnified) {
+        return { ok: false, failed: "admin_token_custody_failed" };
       }
     }
   }
@@ -516,7 +578,7 @@ async function completeInstallInner(
   // later "just record the code / the token / the hmac for debugging" change fails a test rather than
   // shipping. `delegateScopes` is recorded because WHAT privilege was granted is the governance-relevant
   // fact; the credential itself is not, and neither is anything derived from it.
-  const auditInput = { tenantId, shopDomain, region: existing?.region ?? deps.region, delegateScopes: [...deps.delegateScopes] };
+  const auditInput = { tenantId, shopDomain, region: existing?.region ?? deps.region, delegateScopes: [...delegateScopesGranted] };
   // #179 — a reversalPath must name something that EXISTS and that an operator can run. It names the CLI
   // (jobs/merchant.ts) FIRST, exactly as armKill does (runtime-kill-registry.ts:66-70) and for the same
   // reason: deploy-staging.yml deploys `palup-widget-staging` only, and the control plane is deployed

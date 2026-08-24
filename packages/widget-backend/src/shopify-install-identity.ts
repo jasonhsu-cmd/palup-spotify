@@ -261,15 +261,23 @@ export interface InstallGrant {
   /** The scopes the merchant actually granted, split from the response's comma-separated `scope`. */
   grantedScopes: string[];
   /**
-   * Task 5 (F6) — non-secret expiry for the parent Admin token, so a refresh helper built above this
-   * module can tell a stale token from a fresh one without a schema change (mirrors the `expiresAt` field
-   * `AdminTokenStore` already carries verbatim — admin-token-store.ts). ALWAYS `undefined` today:
-   * `exchangeInstallCode` requests the default (`expiring` unset, i.e. `0`), and [S1] documents that
-   * response as `{ access_token, scope }` with no `expires_in` for a non-expiring OFFLINE token — so there
-   * is nothing to parse yet. Left here, typed and unpopulated, as the seam a future online/expiring grant
-   * path would fill; NOT fabricated from a field the current response does not send.
+   * Task 5 (F6) / Task 6 (ADR-0023) — non-secret expiry for the parent Admin token, so a refresh helper
+   * built above this module can tell a stale token from a fresh one without a schema change (mirrors the
+   * `expiresAt` field `AdminTokenStore` already carries verbatim — admin-token-store.ts). `undefined` unless
+   * the caller opted into `expiring: true` (Task 6, ADR-0023 — verified spike 2026-08-24, spec §10.1):
+   * public apps now request the EXPIRING offline token (`expires_in=3600`) rather than the (being-retired-
+   * for-public-apps) non-expiring one, and this is computed from that response's `expires_in` seconds.
+   * Absent `expiring: true`, this stays `undefined` exactly as before — byte-identical for every existing
+   * caller that never opted in.
    */
   expiresAt?: string;
+  /** Task 6 (ADR-0023) — the paired `refresh_token`, present only when `expiring: true` was requested and
+   *  the response returned one. SECRET; the caller custodies it exactly as it custodies `accessToken` (same
+   *  key scope + AAD, F-A) — this module never logs or echoes it. */
+  refreshToken?: string;
+  /** Task 6 (ADR-0023) — non-secret; when the paired `refresh_token` itself lapses (90 days), computed from
+   *  the response's `refresh_token_expires_in` seconds. Present only alongside `refreshToken`. */
+  refreshTokenExpiresAt?: string;
 }
 
 export interface ExchangeArgs {
@@ -277,11 +285,24 @@ export interface ExchangeArgs {
   clientId: string;
   clientSecret: string;
   code: string;
+  /**
+   * Task 6 (ADR-0023) — request the EXPIRING offline token (+ its paired `refresh_token`) instead of the
+   * legacy non-expiring one. OPTIONAL and default-`false`/absent so every EXISTING caller of
+   * `exchangeInstallCode` — and the delegate-token mint that immediately follows in the SAME request, which
+   * does not need the parent to outlive that one call — sees byte-identical behaviour unless it opts in.
+   */
+  expiring?: boolean;
+  /** Injectable clock (epoch ms), so a caller/test can pin the computed `expiresAt`/`refreshTokenExpiresAt`
+   *  rather than asserting against a moving `Date.now()`. Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 /**
- * Exchange the authorization code for a non-expiring OFFLINE access token ([S1] Step 4). `expiring` is not
- * sent, so the default (`0`, "an offline token that does not have an expiry") applies.
+ * Exchange the authorization code for an Admin offline access token ([S1] Step 4). By default `expiring` is
+ * not sent, so Shopify's documented default (`0`, "an offline token that does not have an expiry") applies
+ * — BYTE-IDENTICAL to this function's behaviour before Task 6. Pass `expiring: true` (Task 6, ADR-0023) to
+ * request the EXPIRING public-app offline token instead and parse its paired `refresh_token` + both
+ * expiries from the response.
  *
  * NEVER THROWS and NEVER returns a partial value: any refusal is `null`. That is not laziness, it is the
  * leak boundary — `code`, `clientSecret` and `access_token` are all arguments or results of this call, and
@@ -296,14 +317,18 @@ export async function exchangeInstallCode(args: ExchangeArgs, fetchFn: typeof gl
     // Storefront token).
     if (!isValidShopDomain(args.shopDomain)) return null;
     if (!args.clientId || !args.clientSecret || !args.code) return null;
-    const body = new URLSearchParams({ client_id: args.clientId, client_secret: args.clientSecret, code: args.code });
+    const bodyParams: Record<string, string> = { client_id: args.clientId, client_secret: args.clientSecret, code: args.code };
+    if (args.expiring) bodyParams.expiring = "1";
+    const body = new URLSearchParams(bodyParams);
     const res = await fetchFn(`https://${args.shopDomain}/admin/oauth/access_token`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
       body: body.toString(),
     });
     if (!res.ok) return null;
-    const json = (await res.json()) as { access_token?: unknown; scope?: unknown } | null;
+    const json = (await res.json()) as
+      | { access_token?: unknown; scope?: unknown; expires_in?: unknown; refresh_token?: unknown; refresh_token_expires_in?: unknown }
+      | null;
     const accessToken = typeof json?.access_token === "string" ? json.access_token : "";
     if (!accessToken) return null;
     const grantedScopes =
@@ -313,7 +338,24 @@ export async function exchangeInstallCode(args: ExchangeArgs, fetchFn: typeof gl
             .map((s) => s.trim())
             .filter(Boolean)
         : [];
-    return { accessToken, grantedScopes };
+    const grant: InstallGrant = { accessToken, grantedScopes };
+    // Only parsed/attached when THIS CALL opted into `expiring` — an existing caller that never asked for
+    // an expiring token gets a grant shaped exactly as before, even if a test double's response happens to
+    // carry these fields (defence against a stray extra field silently changing behaviour for callers that
+    // never asked for it).
+    if (args.expiring) {
+      const nowMs = (args.now ?? Date.now)();
+      if (typeof json?.expires_in === "number" && Number.isFinite(json.expires_in)) {
+        grant.expiresAt = new Date(nowMs + json.expires_in * 1000).toISOString();
+      }
+      if (typeof json?.refresh_token === "string" && json.refresh_token) {
+        grant.refreshToken = json.refresh_token;
+      }
+      if (typeof json?.refresh_token_expires_in === "number" && Number.isFinite(json.refresh_token_expires_in)) {
+        grant.refreshTokenExpiresAt = new Date(nowMs + json.refresh_token_expires_in * 1000).toISOString();
+      }
+    }
+    return grant;
   } catch {
     return null; // a transport fault is a refusal, never an exception carrying the code/secret upward
   }

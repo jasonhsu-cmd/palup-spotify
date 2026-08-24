@@ -21,6 +21,7 @@
     "./contract/proposal-store": "./src/contract/proposal-store.contract.ts",
     "./contract/catalog-product": "./src/contract/catalog-product-port.contract.ts",
     "./contract/merchant-rules": "./src/contract/merchant-rules.contract.ts",
+    "./contract/store-profile": "./src/contract/store-profile-port.contract.ts",
     "./contract/primary-goal": "./src/contract/primary-goal.contract.ts",
     "./contract/learned-store": "./src/contract/learned-store.contract.ts"
   }

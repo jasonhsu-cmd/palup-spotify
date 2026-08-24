@@ -3,7 +3,15 @@ import { createHmac } from "node:crypto";
 import Fastify from "fastify";
 import { InMemoryRuntimeStore, createInMemoryMerchantRegistry } from "@palup/platform-ports";
 import type { RuntimeStatePort } from "@palup/platform-ports";
-import { registerShopifyInstallRoutes, tenantIdForShop, type ShopifyInstallDeps, type MerchantCredentialSink } from "../src/routes/shopify-install.js";
+import {
+  registerShopifyInstallRoutes,
+  startInstall,
+  completeInstall,
+  tenantIdForShop,
+  INSTALL_STATE_COOKIE,
+  type ShopifyInstallDeps,
+  type MerchantCredentialSink,
+} from "../src/routes/shopify-install.js";
 
 // Task 5 (ADR-0022 F6/F7) — capturing and custodying the parent Admin offline token at install, under the
 // Task-4 AdminTokenStore, WITHOUT weakening the existing confused-deputy defence: custody must only happen
@@ -21,6 +29,7 @@ const PARENT_TOKEN = "shpat_ADMIN_PARENT_TOKEN_NEVER_LOGGED";
 const DELEGATE_TOKEN = "shpca_DELEGATE_TOKEN_NEVER_LOGGED";
 const AUTH_CODE = "authorization-code-never-logged";
 const GRANTED_SCOPES = "unauthenticated_read_product_listings";
+const REFRESH_TOKEN = "shrt_REFRESH_TOKEN_NEVER_LOGGED";
 
 function sign(query: Record<string, string>, secret = APP_SECRET): string {
   const sp = new URLSearchParams();
@@ -43,11 +52,22 @@ function credentialSink(): MerchantCredentialSink {
 
 /** A minimal, directly-constructed dep set (no server composition root, no env vars) so this file owns the
  *  `adminTokens` seam explicitly, per the brief. */
-function makeDeps(overrides: Partial<ShopifyInstallDeps> = {}): ShopifyInstallDeps {
+function makeDeps(overrides: Partial<ShopifyInstallDeps> = {}, capture?: { accessTokenBody?: string }): ShopifyInstallDeps {
   const fetchImpl = (async (url: unknown, init?: unknown) => {
     const u = String(url);
     if (u.endsWith("/admin/oauth/access_token")) {
-      return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+      if (capture) capture.accessTokenBody = String((init as { body?: unknown } | undefined)?.body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: PARENT_TOKEN,
+          scope: GRANTED_SCOPES,
+          expires_in: 3600,
+          refresh_token: REFRESH_TOKEN,
+          refresh_token_expires_in: 7776000,
+        }),
+      };
     }
     if (u.includes("/graphql.json")) {
       return {
@@ -121,6 +141,44 @@ describe("Task 5 — install captures + custodies the parent Admin token (F6/F7)
     expect(put).toHaveBeenCalledWith(expect.any(String), PARENT_TOKEN, expect.objectContaining({ actor: "system:shopify-install" }));
     // The DELEGATE token must never reach the admin-token sink — only the parent.
     expect(put.mock.calls[0]?.[1]).not.toBe(DELEGATE_TOKEN);
+  });
+
+  it("Task 6 (ADR-0023): requests the EXPIRING offline token (expiring=1) and custodies refresh_token + both expiries", async () => {
+    const put = vi.fn(async () => {});
+    const capture: { accessTokenBody?: string } = {};
+    const deps = makeDeps({ adminTokens: { put } }, capture);
+    const app = await buildApp(deps);
+    const { state, cookie } = await begin(app);
+    const res = await callback(app, { state, cookie });
+    expect(res.statusCode).toBe(200);
+
+    // The token exchange itself requested the expiring offline token.
+    const body = new URLSearchParams(capture.accessTokenBody);
+    expect(body.get("expiring")).toBe("1");
+
+    expect(put).toHaveBeenCalledTimes(1);
+    const [, token, opts] = put.mock.calls[0]! as [string, string, { actor: string; expiresAt?: string; refreshToken?: string; refreshTokenExpiresAt?: string }];
+    expect(token).toBe(PARENT_TOKEN);
+    expect(opts.refreshToken).toBe(REFRESH_TOKEN);
+    expect(typeof opts.expiresAt).toBe("string");
+    expect(typeof opts.refreshTokenExpiresAt).toBe("string");
+  });
+
+  it("Task 6: never logs the refresh_token, even on a successful custody", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const put = vi.fn(async () => {});
+      const deps = makeDeps({ adminTokens: { put } });
+      const app = await buildApp(deps);
+      const { state, cookie } = await begin(app);
+      await callback(app, { state, cookie });
+      const seen = [...warn.mock.calls, ...log.mock.calls].flat().map(String).join("\n");
+      expect(seen).not.toContain(REFRESH_TOKEN);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
   });
 
   it("does NOT custody when the grant's shop != the state shop (confused-deputy, F7)", async () => {
@@ -205,5 +263,69 @@ describe("Task 13 (forward-carry from Task 5) — admin-token custody failure is
 
     const audits = await store.readAudit({ tenantId: tenantIdForShop(SHOP) });
     expect(audits.some((a) => a.action === "admin_token.custody_failed")).toBe(false);
+  });
+});
+
+describe("Task 7 review (Critical, ADR-0023 D1) — admin-token custody failure under CATALOG_UNIFIED FAILS the install", () => {
+  /** Drive startInstall/completeInstall directly (no Fastify/app.inject) so the assertions can be made
+   *  against the exact `InstallComplete` value, not just the rendered HTTP status. */
+  async function driveInstall(deps: ShopifyInstallDeps, shop = SHOP) {
+    const startQuery = { shop, timestamp: String(Math.floor(Date.now() / 1000)) };
+    const start = await startInstall(deps, { ...startQuery, hmac: sign(startQuery) });
+    if (!start.ok) throw new Error(`startInstall unexpectedly refused: ${JSON.stringify(start)}`);
+    const query = { code: AUTH_CODE, host: "aG9zdA", shop, state: start.state, timestamp: String(Math.floor(Date.now() / 1000)) };
+    const signedQuery = { ...query, hmac: sign(query) };
+    const cookieHeader = `${INSTALL_STATE_COOKIE}=${start.state}`;
+    return completeInstall(deps, signedQuery, cookieHeader);
+  }
+
+  it("catalogUnified=true + adminTokens.put rejecting: the install FAILS with admin_token_custody_failed and no merchant row is created", async () => {
+    const registry = createInMemoryMerchantRegistry();
+    const createSpy = vi.spyOn(registry, "create");
+    const put = vi.fn(async () => {
+      throw new Error("KMS unavailable");
+    });
+    const deps = makeDeps({ registry, catalogUnified: true, adminTokens: { put } });
+
+    const result = await driveInstall(deps);
+
+    expect(result).toEqual({ ok: false, failed: "admin_token_custody_failed" });
+    expect(put).toHaveBeenCalledTimes(1);
+    // The merchant must NOT be left registered/active with zero Shopify credentials.
+    expect(createSpy).not.toHaveBeenCalled();
+    const rec = await registry.lookupByShopDomain(SHOP, { includeInactive: true });
+    expect(rec).toBeNull();
+  });
+
+  it("catalogUnified=true: the failure still logs + best-effort-audits admin_token.custody_failed before returning fatal", async () => {
+    const store: RuntimeStatePort = new InMemoryRuntimeStore();
+    const put = vi.fn(async () => {
+      throw new Error("KMS unavailable");
+    });
+    const deps = makeDeps({ store, catalogUnified: true, adminTokens: { put } });
+
+    const result = await driveInstall(deps);
+    expect(result).toEqual({ ok: false, failed: "admin_token_custody_failed" });
+
+    const audits = await store.readAudit({ tenantId: tenantIdForShop(SHOP) });
+    const failure = audits.find((a) => a.action === "admin_token.custody_failed");
+    expect(failure).toBeTruthy();
+    expect(failure!.decision).toMatchObject({ complete: false });
+    expect(JSON.stringify(failure)).not.toContain(PARENT_TOKEN);
+  });
+
+  it("regression pin — catalogUnified=false (default): the SAME adminTokens.put rejection stays non-fatal, install still succeeds", async () => {
+    const registry = createInMemoryMerchantRegistry();
+    const createSpy = vi.spyOn(registry, "create");
+    const put = vi.fn(async () => {
+      throw new Error("KMS unavailable");
+    });
+    const deps = makeDeps({ registry, catalogUnified: false, adminTokens: { put } });
+
+    const result = await driveInstall(deps);
+
+    expect(result).toEqual({ ok: true, shopDomain: SHOP });
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(createSpy).toHaveBeenCalledTimes(1);
   });
 });

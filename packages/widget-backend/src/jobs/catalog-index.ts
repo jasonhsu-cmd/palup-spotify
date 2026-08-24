@@ -986,8 +986,12 @@ async function indexOneTenant(
  * commit — one that only touched a DIFFERENT id — permanently shield an untouched, genuinely-deleted product
  * from the next full reconcile's stale-set, since its `writtenAt` kept getting reset to "now" by commits that
  * never actually changed it.
+ *
+ * EXPORTED (Task 3 fix-round, credential-enrollment-unification) so `catalog-backfill.ts`'s
+ * `syncEmbeddingCorpus` computes its own commit's per-id `writtenAt` the SAME way this job does, rather
+ * than re-implementing the changed/unchanged split a second time.
  */
-function nextWrittenAt(
+export function nextWrittenAt(
   newHashes: Map<string, string>,
   priorHash: Map<string, string>,
   priorWrittenAt: Map<string, number>,
@@ -1008,13 +1012,23 @@ function nextWrittenAt(
  * workflow deploys the control plane, which is exactly the defect #179 (and #166 before it) had to fix
  * when a reversal path named an unreachable HTTP route. A test feeds this string back through
  * `parseCatalogArgv` so it cannot rot into a command that does not exist.
+ *
+ * EXPORTED (Task 3, credential-enrollment-unification) so `catalog-backfill.ts` can commit its OWN
+ * embedding-corpus writes into this SAME manifest/ledger location (`MANIFEST_COLLECTION`/`MANIFEST_KEY`)
+ * — the one `catalog-retriever.ts` reads — rather than inventing a second, parallel manifest writer that
+ * could drift from this one. `deps` is narrowed to `Pick<CatalogIndexDeps, "store">` (the only field this
+ * function ever touches) so a caller with no `vector`/`model`/`catalog` composed does not have to fake
+ * them just to call this. The optional 6th param lets a DIFFERENT job (the backfill) audit under its OWN
+ * actor/action rather than being misattributed to `catalog-index-job`; omitted, behavior is byte-identical
+ * to before this export (both default to the values this function always used).
  */
-async function writeManifestAndAudit(
-  deps: CatalogIndexDeps,
+export async function writeManifestAndAudit(
+  deps: Pick<CatalogIndexDeps, "store">,
   tenantId: string,
   manifest: CatalogManifest,
   counts: { products: number; embedded: number; written: number; removed: number; reindex: boolean; repaired: boolean },
   ledger: { entries: Map<string, string>; priorChunkKeys: string[]; writtenAt: Map<string, number> },
+  audit: { actor?: string; action?: string } = {},
 ): Promise<void> {
   const at = manifest.at;
   await deps.store.tx({ tenantId }, async (t) => {
@@ -1027,8 +1041,8 @@ async function writeManifestAndAudit(
     await writeLedgerInTx(t, chunkLedgerEntries(ledger.entries, at, ledger.writtenAt), ledger.priorChunkKeys);
     await t.audit(
       {
-        actor: CATALOG_INDEX_ACTOR,
-        action: "catalog.index",
+        actor: audit.actor ?? CATALOG_INDEX_ACTOR,
+        action: audit.action ?? "catalog.index",
         input: {
           tenantId,
           products: counts.products,

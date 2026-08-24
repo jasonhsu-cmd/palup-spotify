@@ -44,25 +44,49 @@ export const ADMIN_CRED_RECORD_KEY = "admin_offline";
  * read must never look like a valid one.
  */
 export type AdminTokenRead =
-  | { status: "found"; token: string; expiresAt?: string }
+  | { status: "found"; token: string; expiresAt?: string; refreshToken?: string; refreshTokenExpiresAt?: string }
   | { status: "missing" }
   | { status: "unreadable"; reason: "undecryptable" | "malformed-record" };
 
+/**
+ * Task 6 (ADR-0023) — the fields a caller supplies for a full replace of what this row custodies:
+ * the access token plus, where the caller has one, the paired `refresh_token` and its own (90d) expiry.
+ * `refreshToken`/`refreshTokenExpiresAt` are OPTIONAL on the type (a `put` at install-time may legitimately
+ * have neither yet — a pre-schema/legacy row, F-H), but `refresh()` in practice always supplies both
+ * together, because Shopify mints a fresh pair on every refresh and retires the prior one.
+ */
+export interface AdminTokenWrite {
+  token: string;
+  expiresAt?: string;
+  /** Encrypted under the SAME `ADMIN_CRED_KEY_SCOPE` + AAD as `token` (F-A) — never logged, never audited. */
+  refreshToken?: string;
+  /** Non-secret; when the `refresh_token` (90d) lapses. */
+  refreshTokenExpiresAt?: string;
+}
+
 export interface AdminTokenStore {
   /**
-   * Store (or replace) this shop's Admin offline token. Encrypts FIRST — an unconfigured key throws with
+   * Store (or replace) this shop's Admin offline token, and — Task 6 — its paired `refresh_token` +
+   * `refreshTokenExpiresAt` when the caller has them. Encrypts FIRST — an unconfigured key throws with
    * nothing written or audited, exactly like `MerchantCredentialStore.put`. `actor` is REQUIRED (NN#5).
    */
-  put(tenantId: string, token: string, opts: { actor: string; expiresAt?: string }): Promise<void>;
+  put(
+    tenantId: string,
+    token: string,
+    opts: { actor: string; expiresAt?: string; refreshToken?: string; refreshTokenExpiresAt?: string },
+  ): Promise<void>;
   /** This shop's Admin token, or an honest, distinguishable refusal. Never audited, never logged. */
   read(tenantId: string): Promise<AdminTokenRead>;
   /**
-   * Replace an existing Admin token (rotation). Same encrypt-before-tx / write+audit-together discipline
-   * as `put`, but audited as `admin_token.refresh` so a rotation is distinguishable from an initial
-   * install in the immutable log. Single-flight (only one refresh in progress per tenant) is enforced by
-   * the CALLER, not here (file header) — this function performs one audited replace.
+   * Replace an existing Admin token AND its refresh_token (rotation) — Task 6 (F-B): `next` is the FULL
+   * replacement state for this row; whatever this row held before (both the access token and any prior
+   * refresh_token) is retained NOWHERE once this call returns — there is no partial/merge update. Same
+   * encrypt-before-tx / write+audit-together discipline as `put`, but audited as `admin_token.refresh` so
+   * a rotation is distinguishable from an initial install in the immutable log. Single-flight (only one
+   * refresh in progress per tenant) is enforced by the CALLER, not here (file header) — this function
+   * performs one audited replace.
    */
-  refresh(tenantId: string, token: string, opts: { actor: string; expiresAt?: string }): Promise<void>;
+  refresh(tenantId: string, next: AdminTokenWrite, opts: { actor: string }): Promise<void>;
   /** Remove this shop's Admin token (uninstall / revocation). Idempotent, and audited the same way. */
   delete(tenantId: string, opts: { actor: string }): Promise<void>;
 }
@@ -73,13 +97,18 @@ export interface AdminTokenStoreOpts {
 }
 
 /**
- * What is stored. `c` is the `CryptoPort` envelope — the ONLY place the token appears, encrypted.
- * `expiresAt` is non-secret and caller-supplied (see file header). `updatedAt` is non-secret operator
- * forensics, exactly like `MerchantCredentialStore`'s.
+ * What is stored. `c` is the `CryptoPort` envelope for the access token — the ONLY place it appears,
+ * encrypted. `rc` (Task 6, F-A) is the SAME kind of envelope for the `refresh_token`, encrypted under the
+ * SAME `ADMIN_CRED_KEY_SCOPE` + AAD as `c` (see `adminCredentialAad`) — a distinct field name only so the
+ * two ciphertexts (and their absence/presence) are independently inspectable, not because they use
+ * different key material. `expiresAt`/`refreshTokenExpiresAt` are non-secret and caller-supplied (see file
+ * header). `updatedAt` is non-secret operator forensics, exactly like `MerchantCredentialStore`'s.
  */
 interface StoredAdminToken {
   c: string;
+  rc?: string;
   expiresAt?: string;
+  refreshTokenExpiresAt?: string;
   updatedAt: string;
 }
 
@@ -97,6 +126,19 @@ function requireToken(token: string): string {
     throw new Error(
       "AdminTokenStore: refusing to store a blank credential — a stored blank looks configured but " +
         "cannot authenticate anything (fail closed)",
+    );
+  return token;
+}
+
+/** Same fail-closed posture as `requireToken`, for the OPTIONAL `refresh_token` field: `undefined` is a
+ *  legitimate "no refresh_token supplied" (F-H — a pre-schema/legacy row, or a caller with none yet), but a
+ *  present-and-blank value is not, for the identical reason a blank access token is refused. */
+function requireOptionalToken(token: string | undefined, label: string): string | undefined {
+  if (token === undefined) return undefined;
+  if (typeof token !== "string" || !token.trim())
+    throw new Error(
+      `AdminTokenStore: refusing to store a blank ${label} — a stored blank looks configured but cannot ` +
+        "authenticate anything (fail closed)",
     );
   return token;
 }
@@ -134,21 +176,32 @@ export function createAdminTokenStore(
 
   async function writeAndAudit(
     tenantId: string,
-    token: string,
-    writeOpts: { actor: string; expiresAt?: string } | undefined,
+    next: AdminTokenWrite,
+    actorOpts: { actor: string } | undefined,
     action: "admin_token.store" | "admin_token.refresh",
     decision: string,
   ): Promise<void> {
     const tenant = requireTenantId(tenantId);
-    requireToken(token);
-    const actor = requireActor(writeOpts);
+    requireToken(next.token);
+    const refreshToken = requireOptionalToken(next.refreshToken, "refresh_token");
+    const actor = requireActor(actorOpts);
     // Encrypt BEFORE opening the transaction: an unconfigured key must refuse the whole operation with
     // nothing written, and the throw comes from the port with only the tenant, the secret name and the
     // scope in its message — never the token or the key material (crypto-port.ts). This function adds no
-    // context of its own to that error for exactly that reason.
-    const c = await crypto.encrypt(tenant, token, adminCredentialAad(tenant), ADMIN_CRED_KEY_SCOPE);
+    // context of its own to that error for exactly that reason. Both ciphertexts are produced here, before
+    // ANY write, so a key failure on EITHER value leaves nothing written or audited (F-B: no partial state).
+    const c = await crypto.encrypt(tenant, next.token, adminCredentialAad(tenant), ADMIN_CRED_KEY_SCOPE);
+    const rc =
+      refreshToken !== undefined
+        ? await crypto.encrypt(tenant, refreshToken, adminCredentialAad(tenant), ADMIN_CRED_KEY_SCOPE)
+        : undefined;
+    // A FRESH object every write, not a merge of the prior row — F-B's "retain neither prior value": a
+    // `refresh` that supplies no `refreshToken` (or no `expiresAt`) does not inherit the PREVIOUS row's,
+    // it simply has none, because `state.tx`'s `t.put` below replaces the whole row.
     const record: StoredAdminToken = { c, updatedAt: now() };
-    if (writeOpts?.expiresAt !== undefined) record.expiresAt = writeOpts.expiresAt;
+    if (next.expiresAt !== undefined) record.expiresAt = next.expiresAt;
+    if (rc !== undefined) record.rc = rc;
+    if (next.refreshTokenExpiresAt !== undefined) record.refreshTokenExpiresAt = next.refreshTokenExpiresAt;
 
     await state.tx({ tenantId: tenant }, async (t) => {
       const prior = await t.get<StoredAdminToken>(ADMIN_CRED_COLLECTION, ADMIN_CRED_RECORD_KEY);
@@ -172,11 +225,22 @@ export function createAdminTokenStore(
 
   return {
     async put(tenantId, token, writeOpts) {
-      await writeAndAudit(tenantId, token, writeOpts, "admin_token.store", "stored");
+      await writeAndAudit(
+        tenantId,
+        {
+          token,
+          expiresAt: writeOpts?.expiresAt,
+          refreshToken: writeOpts?.refreshToken,
+          refreshTokenExpiresAt: writeOpts?.refreshTokenExpiresAt,
+        },
+        writeOpts,
+        "admin_token.store",
+        "stored",
+      );
     },
 
-    async refresh(tenantId, token, writeOpts) {
-      await writeAndAudit(tenantId, token, writeOpts, "admin_token.refresh", "refreshed");
+    async refresh(tenantId, next, writeOpts) {
+      await writeAndAudit(tenantId, next, writeOpts, "admin_token.refresh", "refreshed");
     },
 
     async read(tenantId) {
@@ -188,7 +252,22 @@ export function createAdminTokenStore(
       const token = await crypto.decrypt(tenant, row.c, adminCredentialAad(tenant), ADMIN_CRED_KEY_SCOPE);
       // `undefined` here is "a row exists and I cannot read it" — reported AS THAT, never as `missing`.
       if (token === undefined) return { status: "unreadable", reason: "undecryptable" };
-      return row.expiresAt !== undefined ? { status: "found", token, expiresAt: row.expiresAt } : { status: "found", token };
+      let refreshToken: string | undefined;
+      if (row.rc !== undefined) {
+        refreshToken = await crypto.decrypt(tenant, row.rc, adminCredentialAad(tenant), ADMIN_CRED_KEY_SCOPE);
+        // A row with an undecryptable refresh_token but a readable access token is still corrupt — fail
+        // closed the same way an undecryptable access token does, rather than silently dropping the
+        // refresh_token and letting the caller treat this as F-H's ordinary "no refresh_token" case.
+        if (refreshToken === undefined) return { status: "unreadable", reason: "undecryptable" };
+      }
+      const found: { status: "found"; token: string; expiresAt?: string; refreshToken?: string; refreshTokenExpiresAt?: string } = {
+        status: "found",
+        token,
+      };
+      if (row.expiresAt !== undefined) found.expiresAt = row.expiresAt;
+      if (refreshToken !== undefined) found.refreshToken = refreshToken;
+      if (row.refreshTokenExpiresAt !== undefined) found.refreshTokenExpiresAt = row.refreshTokenExpiresAt;
+      return found;
     },
 
     async delete(tenantId, writeOpts) {

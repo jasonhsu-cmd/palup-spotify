@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { InMemoryRuntimeStore, createInMemoryVectorStore } from "@palup/platform-ports";
+import type { MerchantSummary } from "@palup/platform-ports";
 import { armKill } from "@palup/state-postgres";
 import { recordSubject, listSubjects, subjectNamespace } from "@palup/widget-memory";
-import { runRetentionSweep, tenantsToSweep } from "../src/jobs/retention-sweep.js";
+import { runRetentionSweep, tenantsToSweep, tenantsToSweepViaRegistry } from "../src/jobs/retention-sweep.js";
 
 // B4 — the scheduled retention sweep job. The behaviour that matters here is not "does it delete"
 // (widget-memory/test/subject-index-sweep.test.ts covers that) but the SAFETY WRAPPER around a bulk
@@ -145,5 +146,60 @@ describe("B4 job — tenant selection", () => {
 
   it("malformed SHOPIFY_STORES yields no tenants rather than a partial or wrong list", () => {
     expect(tenantsToSweep({ SHOPIFY_STORES: "not json" } as NodeJS.ProcessEnv)).toEqual([]);
+  });
+});
+
+// Task 5 (credential-enrollment-unification) — retention-sweep discovers tenants via
+// `MerchantRegistryPort.listActive`'s keyset cursor instead of `SHOPIFY_STORES`. `SWEEP_TENANTS` (an
+// explicit list for a tenant the registry does not yet know about) is preserved, unioned with the
+// registry walk. `tenantsToSweep` (above) stays exported but is no longer the live enumeration path —
+// kept dormant for a one-release rollback.
+describe("B4 job — tenant selection via registry (Task 5)", () => {
+  function summary(tenantId: string): MerchantSummary {
+    return { tenantId, shopDomain: `${tenantId}.myshopify.com`, status: "active" };
+  }
+
+  it("given a fake registry with 3 active tenants across 2 listActive pages, returns all 3 — no SHOPIFY_STORES needed", async () => {
+    const listActive = vi
+      .fn()
+      .mockResolvedValueOnce({ items: [summary("alpha-co"), summary("beta-co")], nextCursor: "beta-co" })
+      .mockResolvedValueOnce({ items: [summary("gamma-co")] });
+    const registry = { listActive };
+
+    const tenantIds = await tenantsToSweepViaRegistry(registry, {} as NodeJS.ProcessEnv);
+
+    expect(tenantIds.sort()).toEqual(["alpha-co", "beta-co", "gamma-co"]);
+    expect(listActive).toHaveBeenCalledTimes(2);
+  });
+
+  it("the nextCursor loop terminates on the first page without a nextCursor", async () => {
+    const listActive = vi
+      .fn()
+      .mockResolvedValueOnce({ items: [summary("t1")], nextCursor: "t1" })
+      .mockResolvedValueOnce({ items: [] }); // empty, no nextCursor => last page
+    const registry = { listActive };
+
+    const tenantIds = await tenantsToSweepViaRegistry(registry, {} as NodeJS.ProcessEnv);
+
+    expect(tenantIds).toEqual(["t1"]);
+    expect(listActive).toHaveBeenCalledTimes(2);
+    expect(listActive).toHaveBeenNthCalledWith(1, {});
+    expect(listActive).toHaveBeenNthCalledWith(2, { cursor: "t1" });
+  });
+
+  it("SWEEP_TENANTS is preserved: unioned with the registry walk and deduped", async () => {
+    const listActive = vi.fn(async () => ({ items: [summary("alpha-co")] }));
+    const registry = { listActive };
+
+    const tenantIds = await tenantsToSweepViaRegistry(registry, { SWEEP_TENANTS: "gamma-co, alpha-co" } as NodeJS.ProcessEnv);
+
+    expect(tenantIds.sort()).toEqual(["alpha-co", "gamma-co"]);
+  });
+
+  it("an empty registry with no SWEEP_TENANTS yields nothing — the job still refuses to guess", async () => {
+    const listActive = vi.fn(async () => ({ items: [] }));
+    const registry = { listActive };
+
+    expect(await tenantsToSweepViaRegistry(registry, {} as NodeJS.ProcessEnv)).toEqual([]);
   });
 });

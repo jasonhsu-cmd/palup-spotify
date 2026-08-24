@@ -1,5 +1,5 @@
 import { normalizePrimaryDomain } from "@palup/platform-ports";
-import type { SecretsPort } from "@palup/platform-ports";
+import type { MerchantRegistryPort, SecretsPort } from "@palup/platform-ports";
 import type { MerchantCredentialRead } from "@palup/state-postgres";
 
 // Tenant → Shopify store resolution (M2). Splits into a NON-SECRET part (the shop domain, which merely
@@ -113,6 +113,28 @@ async function resolveShopDomain(
 ): Promise<string | undefined> {
   if (shopDomainFor) return shopDomainFor(tenantId);
   return Object.hasOwn(domains, tenantId) ? domains[tenantId] : undefined;
+}
+
+/**
+ * Walk EVERY active merchant via `MerchantRegistryPort.listActive`'s keyset cursor (Task 1,
+ * merchant-registry-port.ts), following `nextCursor` until a page comes back without one — a short
+ * (including empty) page already proves there is nothing after it, per that method's own contract, so
+ * this never issues one extra round-trip "to be sure". Returns tenantIds in page order.
+ *
+ * ADR-0023 F-E: `listActive` is an INTERNAL, sync-plane-only capability — this helper exists so the two
+ * sanctioned callers (the catalog-sync scheduler and the retention sweep, both `packages/widget-backend/
+ * src/jobs/*`) enumerate identically rather than each hand-rolling its own cursor loop. It must never be
+ * reached from the public/merchant or runtime-agent surfaces.
+ */
+export async function listActiveTenantIds(registry: Pick<MerchantRegistryPort, "listActive">): Promise<string[]> {
+  const tenantIds: string[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await registry.listActive(cursor === undefined ? {} : { cursor });
+    for (const item of page.items) tenantIds.push(item.tenantId);
+    if (page.nextCursor === undefined) return tenantIds;
+    cursor = page.nextCursor;
+  }
 }
 
 export type CredentialOutcome =

@@ -2,10 +2,17 @@ import type {
   CatalogProductPort,
   CatalogProductRecord,
   CatalogProductVariant,
+  ModelPort,
+  Product,
   ProductFact,
   ProductFactsPort,
   RuntimeStatePort,
+  StoreProfilePort,
+  StoreProfileRecord,
+  VectorPort,
+  VectorRecord,
 } from "@palup/platform-ports";
+import { canEmbed, requireEmbedAlignment } from "@palup/platform-ports";
 import { matchedCostCap, matchedKill, RUNTIME_AGENT_TYPE, type AdminTokenStore } from "@palup/state-postgres";
 import {
   createShopifyAdminClient,
@@ -14,7 +21,22 @@ import {
   type ShopifyAdminClient,
   type ShopifyAdminCreds,
 } from "../shopify-client.js";
-import { contentHash, MAX_INDEXED_PRODUCTS, type CatalogProductByIdSource } from "./catalog-index.js";
+import {
+  CATALOG_CORPUS_PURPOSE,
+  DEFAULT_EMBED_BATCH,
+  MANIFEST_COLLECTION,
+  MANIFEST_KEY,
+  MAX_INDEXED_PRODUCTS,
+  catalogNamespace,
+  catalogRecordId,
+  contentHash,
+  nextWrittenAt,
+  productEmbedText,
+  writeManifestAndAudit,
+  type CatalogManifest,
+  type CatalogProductByIdSource,
+} from "./catalog-index.js";
+import { listLedgerChunkKeys, readCorpusLedger, readCorpusLedgerTimestamps } from "./catalog-ledger.js";
 
 // Task 7 (durable-catalog-sync, spec §13.3) — the Shopify Bulk-Operations CATALOG BACKFILL driver: a
 // one-shot (operator-run or scheduled) job that pulls a merchant's WHOLE catalog through Shopify's Bulk
@@ -443,9 +465,263 @@ export interface CatalogBackfillDeps {
   /** Injectable sleep for the poll loop (tests pass `async () => {}`). Defaults to a real timer. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
+  /**
+   * Task 3 (credential-enrollment-unification) — OPTIONAL, paired with `vector` below. When BOTH are
+   * present, this backfill ALSO builds the pgvector embedding corpus (title+tags+description embed text,
+   * `productEmbedText` — same function `catalog-index.ts` uses) under `catalogNamespace(tenantId)`, with
+   * its manifest/ledger committed to the SAME `MANIFEST_COLLECTION`/`MANIFEST_KEY` location
+   * `catalog-index.ts`'s poll/reconcile job and `catalog-retriever.ts`'s reader already use — one corpus,
+   * one manifest, regardless of which job built it. Absent (the default) ⇒ byte-identical to #439: no
+   * vector writes, no Admin round-trip beyond the bulk operation.
+   */
+  model?: ModelPort;
+  /** Paired with `model` above — see its doc comment. */
+  vector?: VectorPort;
+  /**
+   * Task 3 — OPTIONAL. When present, a one-shot Admin `shop { name shopPolicies { type body } } ` query
+   * (verified field shape — see `fetchStoreProfile`'s doc comment) is mapped to a `StoreProfileRecord` and
+   * persisted via `storeProfile.put`. Absent (the default) ⇒ byte-identical to #439: no Admin shop-profile
+   * call, no `store_profile` write.
+   */
+  storeProfile?: StoreProfilePort;
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Bounds mirroring shopify-grounding.ts's `MAX_TITLE`/`MAX_POLICY` discipline (module-private there, so
+ *  restated here rather than imported) — a merchant-supplied brand name or policy body is untrusted text
+ *  that eventually reaches a prompt; length-bounding it here is the same data-minimization/anti-injection
+ *  posture as the rest of this file's Bulk JSONL mapping. */
+const STORE_PROFILE_MAX_TITLE = 200;
+const STORE_PROFILE_MAX_POLICY = 2000;
+function boundText(s: string | undefined, max: number): string {
+  return (s ?? "").slice(0, max);
+}
+
+/**
+ * The one-shot Admin GraphQL query for shop brand + policies (spec §10.2). The Bulk-Operations product
+ * query (`PRODUCTS_BULK_QUERY`, above) carries NO shop-level fields at all — Bulk Operations is scoped to
+ * a single top-level connection (`products`) and cannot also return `shop` — so brand/policy cannot be
+ * read off the bulk response; this is a SEPARATE, ordinary (non-bulk) Admin GraphQL call over the same
+ * rate-limited client (`shopify-client.ts`).
+ *
+ * FIELD SHAPE — VERIFIED against shopify.dev's Admin GraphQL reference (fetched 2026-08-24, `latest`
+ * version), not fabricated:
+ *   • `Shop.name: String!` — https://shopify.dev/docs/api/admin-graphql/latest/objects/Shop
+ *   • `Shop.shopPolicies: [ShopPolicy!]!` — same page
+ *   • `ShopPolicy.type: ShopPolicyType!`, `ShopPolicy.body: HTML!` —
+ *     https://shopify.dev/docs/api/admin-graphql/latest/objects/ShopPolicy
+ *   • `ShopPolicyType` enum includes `REFUND_POLICY` ("The refund policy") and `SHIPPING_POLICY` ("The
+ *     shipping policy") — https://shopify.dev/docs/api/admin-graphql/latest/enums/ShopPolicyType
+ * This is the ADMIN-API equivalent of the STOREFRONT-API shell query `shopify-grounding.ts` already uses
+ * (`shop { name refundPolicy { body } shippingPolicy { body } }`) — the Storefront API exposes refund/
+ * shipping policy as two direct fields, the Admin API exposes them as typed entries in one `shopPolicies`
+ * list; the two are not interchangeable shapes, which is why this file adds its own query rather than
+ * reusing that one (this job never holds a Storefront token, only an Admin one).
+ */
+const SHOP_PROFILE_QUERY = `query PalUpShopProfile {
+  shop {
+    name
+    shopPolicies { type body }
+  }
+}`;
+
+interface ShopProfileQueryResult {
+  shop?: {
+    name?: string;
+    shopPolicies?: { type?: string; body?: string }[];
+  };
+}
+
+/**
+ * Fetch + map the shop's brand/policy via `SHOP_PROFILE_QUERY`. FAIL-SAFE, mirroring this file's other
+ * optional-dep patterns (`productFacts`/`catalogProduct` writes above): a GraphQL error never fails the
+ * whole backfill — it falls back to a CLEARLY-a-fallback profile (brand derived from the shop domain,
+ * empty policy) rather than inventing merchant content. The caller (`runCatalogBackfill`) still persists
+ * whatever this returns, so a transient Admin failure produces an honest placeholder, not a skipped write.
+ */
+async function fetchStoreProfile(client: ShopifyAdminClient, shopDomain: string): Promise<StoreProfileRecord> {
+  const fallbackBrand = shopDomain.replace(/\.myshopify\.com$/i, "") || shopDomain;
+  try {
+    const res = await client.graphql<ShopProfileQueryResult>(SHOP_PROFILE_QUERY);
+    const shop = res.data?.shop;
+    const policies = shop?.shopPolicies ?? [];
+    const bodyFor = (type: string): string | undefined => policies.find((p) => p?.type === type)?.body;
+    const brandName = boundText(shop?.name, STORE_PROFILE_MAX_TITLE) || fallbackBrand;
+    return {
+      brandName,
+      policy: {
+        returns: boundText(bodyFor("REFUND_POLICY"), STORE_PROFILE_MAX_POLICY),
+        shipping: boundText(bodyFor("SHIPPING_POLICY"), STORE_PROFILE_MAX_POLICY),
+      },
+    };
+  } catch {
+    return { brandName: fallbackBrand, policy: { returns: "", shipping: "" } };
+  }
+}
+
+/** The embed text for one rich record — reuses `productEmbedText` (catalog-index.ts) verbatim by
+ *  projecting the fields it reads (`title`/`tags`/`description`) into a throwaway `Product`-shaped value.
+ *  `price`/`id` are never used by `productEmbedText` and this value is never persisted — it exists only to
+ *  share the ONE embed-text builder rather than re-implement its title+tags+description join here. */
+function embedTextFor(r: CatalogProductRecord): string {
+  const pseudo: Product = { id: r.productId, title: r.title, description: r.descriptionText ?? "", price: "", tags: r.tags };
+  return productEmbedText(pseudo);
+}
+
+/**
+ * Task 3 — build/refresh the pgvector embedding corpus for the rich records this backfill just wrote,
+ * sharing `catalog-index.ts`'s manifest/ledger location so a later `runCatalogIndex`/`reconcileProducts`
+ * run sees this corpus as ITS OWN prior state (one corpus, one source of truth — never a second, competing
+ * writer). Content-hash gated exactly like the full-crawl job's `indexOneTenant`: an unchanged product
+ * (same embed text as last run) contributes NOTHING to `toEmbed`, so a re-run against an unchanged catalog
+ * embeds zero.
+ *
+ * S4 §F CONCURRENCY GUARD (fix-round, credential-enrollment-unification review) — mirrors
+ * `indexOneTenant`'s guard VERBATIM rather than inventing a new one: `fetchStartedAtMs`, supplied by the
+ * caller, is a snapshot taken BEFORE the (potentially minutes-long) Bulk Operation started, exactly like
+ * `indexOneTenant`'s own `fetchStartedAt`. A ledger id that is missing from this run's `wanted` set is only
+ * treated as genuinely stale (and deleted) when its recorded `writtenAt` is AT OR BEFORE that snapshot; an
+ * id written AFTER it — by a webhook-driven `reconcileProducts` that committed while this bulk backfill was
+ * still running — is a `protectedId`: excluded from deletion and carried forward into the new ledger with
+ * its existing hash, so a concurrent write can never be clobbered as a false "stale" the moment this run's
+ * (necessarily stale-by-the-time-it-downloads) snapshot catches up. Without this, a webhook committing
+ * between this function's ledger READ and its manifest/ledger WRITE could have its brand-new product
+ * deleted from the corpus as "stale", or have its ledger entry overwritten back to a pre-webhook state.
+ *
+ * KNOWN SIMPLIFICATIONS versus `indexOneTenant`/`reconcileProducts` (documented, not silently narrower):
+ *   • Pin-mismatch is checked once (on the first embed batch) and, on mismatch, this function skips the
+ *     whole embed+write step for this run (loud ALERT log) rather than the full job's richer per-report
+ *     `pin-mismatch` outcome — this function reports counts back to its caller instead of a discriminated
+ *     outcome union.
+ *   • `canEmbed(model) === false` is treated as "nothing to embed" (loud ALERT log), mirroring
+ *     `indexOneTenant`'s `no-embed-capability` outcome in spirit but not as a typed report value.
+ */
+async function syncEmbeddingCorpus(
+  store: RuntimeStatePort,
+  model: ModelPort,
+  vector: VectorPort,
+  tenantId: string,
+  records: CatalogProductRecord[],
+  at: Date,
+  ceiling: number,
+  fetchStartedAtMs: number,
+): Promise<{ embedded: number; written: number; removed: number }> {
+  if (!canEmbed(model)) {
+    console.error(`[catalog-backfill] ALERT no_embed_capability tenant=${tenantId} — skipping corpus build`);
+    return { embedded: 0, written: 0, removed: 0 };
+  }
+
+  const ns = catalogNamespace(tenantId);
+  const plan = records
+    .map((r) => {
+      const text = embedTextFor(r);
+      return text ? { productId: r.productId, recordId: catalogRecordId(r.productId), text, hash: contentHash(text) } : undefined;
+    })
+    .filter((p): p is { productId: string; recordId: string; text: string; hash: string } => p !== undefined);
+
+  const priorChunkKeys = await listLedgerChunkKeys(store, tenantId);
+  const ledger = await readCorpusLedger(store, tenantId);
+  const ledgerWrittenAt = await readCorpusLedgerTimestamps(store, tenantId);
+  const manifest = await store.get<CatalogManifest>({ tenantId }, MANIFEST_COLLECTION, MANIFEST_KEY);
+
+  const wanted = new Set(plan.map((p) => p.recordId));
+  const toEmbed = plan.filter((p) => ledger.get(p.recordId) !== p.hash);
+  // S4 §F — split the candidates NOT in this run's plan into genuinely stale (safe to delete) vs.
+  // concurrency-protected (written after this run's fetch snapshot — a webhook race, not a real deletion).
+  const staleCandidates = ledger.size === 0 ? [] : [...ledger.keys()].filter((id) => !wanted.has(id));
+  const protectedIds = staleCandidates.filter((id) => (ledgerWrittenAt.get(id) ?? 0) > fetchStartedAtMs);
+  const stale = staleCandidates.filter((id) => (ledgerWrittenAt.get(id) ?? 0) <= fetchStartedAtMs);
+
+  if (toEmbed.length === 0 && stale.length === 0) {
+    return { embedded: 0, written: 0, removed: 0 };
+  }
+
+  const vectors = new Map<string, number[]>();
+  let pin: { model: string; dimension: number; purpose: string } | undefined;
+  let pinMismatch = false;
+  for (let i = 0; i < toEmbed.length && !pinMismatch; i += Math.max(1, DEFAULT_EMBED_BATCH)) {
+    const batch = toEmbed.slice(i, i + Math.max(1, DEFAULT_EMBED_BATCH));
+    const req = { texts: batch.map((p) => p.text), purpose: CATALOG_CORPUS_PURPOSE, tenantId };
+    const res = await model.embed!(req);
+    requireEmbedAlignment(req, res);
+    if (!pin) {
+      if (manifest && ledger.size > 0 && (manifest.model !== res.model || manifest.dimension !== res.dimension || manifest.purpose !== res.purpose)) {
+        pinMismatch = true;
+        break;
+      }
+      pin = { model: res.model, dimension: res.dimension, purpose: res.purpose };
+    }
+    batch.forEach((p, j) => vectors.set(p.recordId, res.vectors[j]!));
+  }
+
+  if (pinMismatch) {
+    console.error(
+      `[catalog-backfill] ALERT embed_pin_mismatch tenant=${tenantId} corpus=${manifest?.model}/${manifest?.dimension}d/${manifest?.purpose} — skipping corpus write this run`,
+    );
+    return { embedded: 0, written: 0, removed: 0 };
+  }
+
+  const byId = new Map(records.map((r) => [r.productId, r]));
+  const vectorRecords: VectorRecord[] = toEmbed.map((p) => {
+    const src = byId.get(p.productId);
+    const firstVariantId = src?.variants[0]?.variantId;
+    return {
+      id: p.recordId,
+      vector: vectors.get(p.recordId)!,
+      metadata: {
+        kind: "product",
+        productId: p.productId,
+        contentHash: p.hash,
+        title: src?.title ?? "",
+        ...(firstVariantId ? { variantId: firstVariantId } : {}),
+        ...(src?.featuredImageUrl ? { imageUrl: src.featuredImageUrl } : {}),
+      },
+    };
+  });
+
+  if (vectorRecords.length > 0) await vector.upsert(ns, vectorRecords);
+  // S4 §F — ONLY the genuinely-stale set is deleted; `protectedIds` (a concurrent webhook's fresh write)
+  // is never touched here.
+  if (stale.length > 0) await vector.deleteById(ns, stale);
+
+  const newLedger = new Map(plan.map((p) => [p.recordId, p.hash]));
+  // S4 §F — carry each protected id forward with its EXISTING hash (whatever the concurrent write already
+  // committed), so this run's manifest/ledger write can never regress it back to a pre-webhook state.
+  for (const id of protectedIds) newLedger.set(id, ledger.get(id)!);
+
+  const effectivePin =
+    pin ?? (manifest && manifest.purpose ? { model: manifest.model, dimension: manifest.dimension, purpose: manifest.purpose } : undefined);
+  if (!effectivePin) {
+    // Nothing embedded (delete-only run) and no prior pin to carry forward — refuse to invent one
+    // (mirrors indexOneTenant's identical refusal), simply leaving the manifest as it was.
+    return { embedded: 0, written: vectorRecords.length, removed: stale.length };
+  }
+
+  // S4 §F — reuse `catalog-index.ts`'s own per-id `writtenAt` rule verbatim: new/changed ids get this
+  // commit's time, every other id (including a carried-forward protected id, whose hash did not change
+  // relative to `ledger`) preserves its prior `writtenAt`.
+  const newWrittenAt = nextWrittenAt(newLedger, ledger, ledgerWrittenAt, at.getTime());
+
+  const manifestOut: CatalogManifest = {
+    model: effectivePin.model,
+    dimension: effectivePin.dimension,
+    purpose: effectivePin.purpose as CatalogManifest["purpose"],
+    products: newLedger.size,
+    at: at.toISOString(),
+    ceiling,
+  };
+  await writeManifestAndAudit(
+    { store },
+    tenantId,
+    manifestOut,
+    { products: plan.length, embedded: toEmbed.length, written: vectorRecords.length, removed: stale.length, reindex: false, repaired: false },
+    { entries: newLedger, priorChunkKeys, writtenAt: newWrittenAt },
+    { actor: CATALOG_BACKFILL_ACTOR, action: "catalog_backfill.embed" },
+  );
+
+  return { embedded: toEmbed.length, written: vectorRecords.length, removed: stale.length };
+}
 
 /**
  * Task 11 (F5) — a private sentinel thrown when `shouldAbort()` reports true. Caught only inside
@@ -508,6 +784,11 @@ export async function runCatalogBackfill(
   const now = deps.now ?? (() => new Date());
   const sleep = deps.sleep ?? defaultSleep;
   const maxProducts = Math.max(1, Math.floor(opts.maxProducts ?? MAX_INDEXED_PRODUCTS));
+  // S4 §F concurrency-guard snapshot for `syncEmbeddingCorpus` (mirrors `indexOneTenant`'s
+  // `fetchStartedAt`) — taken BEFORE the (potentially minutes-long) Bulk Operation starts, so any ledger
+  // write a webhook-driven `reconcileProducts` commits DURING or AFTER this run is provably later than
+  // what this run's stale-set computation is entitled to act on.
+  const fetchStartedAtMs = now().getTime();
 
   if (await matchedKill(deps.store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) {
     return { tenantId, productCount: 0, truncated: false, outcome: "halted" };
@@ -528,6 +809,31 @@ export async function runCatalogBackfill(
   const client = deps.createClient
     ? deps.createClient(creds)
     : createShopifyAdminClient({ creds, fetchFn: deps.fetchFn, sleep });
+
+  // Task 3 (credential-enrollment-unification) — the store_profile half of the unified pipeline. A
+  // separate, ordinary Admin call (see `fetchStoreProfile`'s doc comment for why this cannot come off the
+  // Bulk Operations response), gated on `deps.storeProfile` being wired at all: absent, this makes NO
+  // extra Admin round-trip (byte-identical to #439). Fail-safe — never aborts the catalog write below.
+  if (deps.storeProfile) {
+    const profile = await fetchStoreProfile(client, shopDomain);
+    try {
+      await deps.storeProfile.put(tenantId, profile);
+      await deps.store.audit(
+        { tenantId },
+        {
+          actor: CATALOG_BACKFILL_ACTOR,
+          action: "store_profile.write",
+          input: { tenantId, brandName: profile.brandName },
+          decision: "upserted",
+          reversalPath: `StoreProfilePort.deleteTenant erases tenant ${tenantId}'s profile; a future backfill run overwrites it`,
+        },
+      );
+    } catch (e) {
+      console.error(
+        `[catalog-backfill] ALERT store_profile_upsert_failed tenant=${tenantId} error=${e instanceof Error ? e.constructor.name : typeof e} msg=${(e as Error).message}`,
+      );
+    }
+  }
 
   const { id } = await client.runBulkQuery(PRODUCTS_BULK_QUERY);
   let status: BulkStatus;
@@ -595,6 +901,20 @@ export async function runCatalogBackfill(
         .filter((f): f is ProductFact => f !== undefined);
       if (facts.length > 0) await deps.productFacts.upsertMany(tenantId, facts);
     }
+  }
+
+  // Task 3 (credential-enrollment-unification) — the pgvector embedding-corpus half of the unified
+  // pipeline. Gated on BOTH `model` and `vector` being wired (absent ⇒ byte-identical to #439). Runs over
+  // the FULL `records` set (not `toWrite`) because the embedding-corpus change detector is its OWN
+  // content hash over embed text (title+tags+description, `embedTextFor`/`productEmbedText`) — a
+  // different signal from `toWrite`'s rich-record hash (which also changes on a price/variant edit that
+  // never touches the embedded text) — so a re-run against an unchanged catalog embeds zero regardless of
+  // whether `records` is empty or not.
+  if (deps.model && deps.vector && records.length > 0) {
+    if (opts.shouldAbort && (await opts.shouldAbort())) {
+      return { tenantId, productCount: 0, truncated: false, outcome: "halted" };
+    }
+    await syncEmbeddingCorpus(deps.store, deps.model, deps.vector, tenantId, records, at, maxProducts, fetchStartedAtMs);
   }
 
   const newHashes: Record<string, string> = { ...priorHashes };

@@ -79,6 +79,7 @@ export { createAesGcmCrypto, keyScopeSecretName, requireKeyScope, DEFAULT_KEY_SC
 export type {
   MerchantRegistryPort,
   MerchantRecord,
+  MerchantSummary,
   MerchantStatus,
   MerchantRegion,
   MerchantGroundingMode,
@@ -87,7 +88,13 @@ export type {
   MerchantLookupOpts,
   InMemoryMerchantRegistryOpts,
 } from "./merchant-registry-port.js";
-export { createInMemoryMerchantRegistry, normalizePrimaryDomain } from "./merchant-registry-port.js";
+export {
+  createInMemoryMerchantRegistry,
+  normalizePrimaryDomain,
+  clampListActiveLimit,
+  LIST_ACTIVE_DEFAULT_LIMIT,
+  LIST_ACTIVE_MAX_LIMIT,
+} from "./merchant-registry-port.js";
 export type {
   Proposal,
   ProposalCategory,
@@ -132,6 +139,8 @@ export type { VectorPort, VectorRecord, VectorQuery, VectorMatch, VectorListItem
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type { ProductFactsPort, ProductFact } from "./product-facts-port.js";
 export { createInMemoryProductFactsStore, requireProductFactsTenant } from "./product-facts-port.js";
+export type { StoreProfilePort, StoreProfileRecord } from "./store-profile-port.js";
+export { createInMemoryStoreProfileStore, requireStoreProfileTenant } from "./store-profile-port.js";
 export type { CatalogProductPort, CatalogProductRecord, CatalogProductVariant } from "./catalog-product-port.js";
 export { createInMemoryCatalogProductStore, requireCatalogTenant } from "./catalog-product-port.js";
 export type { PresentmentPricePort, PresentmentPrice } from "./presentment-price-port.js";
