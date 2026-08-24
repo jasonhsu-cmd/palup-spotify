@@ -6,6 +6,7 @@ export { PostgresVectorStore } from "./postgres-vector-store.js";
 // under `VECTOR_ANN`, just reachable directly for a test that needs to name the adapter.
 export { PgVectorStore, PgVectorTextQueryUnsupported } from "./pgvector-store.js";
 export { PostgresProductFactsStore } from "./postgres-product-facts-store.js";
+export { PostgresStoreProfileStore } from "./postgres-store-profile-store.js";
 export { PostgresCatalogProductStore } from "./postgres-catalog-product-store.js";
 export { PostgresPresentmentPriceStore } from "./postgres-presentment-price-store.js";
 // E1 Task 8 adapter (`ProposalStore`, `@palup/platform-ports`). Exported so a later caller can wire it

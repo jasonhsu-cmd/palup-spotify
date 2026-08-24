@@ -132,6 +132,8 @@ export type { VectorPort, VectorRecord, VectorQuery, VectorMatch, VectorListItem
 export { createInMemoryVectorStore, scoreRecord, requireCleanText } from "./vector-port.js";
 export type { ProductFactsPort, ProductFact } from "./product-facts-port.js";
 export { createInMemoryProductFactsStore, requireProductFactsTenant } from "./product-facts-port.js";
+export type { StoreProfilePort, StoreProfileRecord } from "./store-profile-port.js";
+export { createInMemoryStoreProfileStore, requireStoreProfileTenant } from "./store-profile-port.js";
 export type { CatalogProductPort, CatalogProductRecord, CatalogProductVariant } from "./catalog-product-port.js";
 export { createInMemoryCatalogProductStore, requireCatalogTenant } from "./catalog-product-port.js";
 export type { PresentmentPricePort, PresentmentPrice } from "./presentment-price-port.js";
