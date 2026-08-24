@@ -4,6 +4,7 @@ import {
   createInMemoryCatalogProductStore,
   createInMemoryProductFactsStore,
 } from "@palup/platform-ports";
+import type { MerchantSummary } from "@palup/platform-ports";
 import {
   armKill,
   CATALOG_SYNC_AGENT_TYPE,
@@ -212,5 +213,73 @@ describe("runCatalogSyncScheduler — F5 sync-plane kill scope", () => {
     expect(bad.outcome).toBe("failed");
     expect(bad.errorClass).toBe("Error");
     expect(good.outcome).toBe("synced");
+  });
+});
+
+// Task 5 (credential-enrollment-unification) — the scheduler discovers tenants via
+// `MerchantRegistryPort.listActive`'s keyset cursor instead of a caller-assembled `SHOPIFY_STORES` list.
+// ADR-0023 F-E: `listActive` is INTERNAL sync-plane only; this scheduler is one of its two sanctioned
+// callers (retention-sweep is the other — see retention-sweep-job.test.ts).
+describe("runCatalogSyncScheduler — registry-based tenant discovery (Task 5)", () => {
+  function summary(tenantId: string): MerchantSummary {
+    return { tenantId, shopDomain: `${tenantId}.myshopify.com`, status: "active" };
+  }
+
+  it("given a fake registry with 3 active tenants across 2 listActive pages, processes all 3 — no tenantIds/SHOPIFY_STORES needed", async () => {
+    const store = new InMemoryRuntimeStore();
+    const listActive = vi
+      .fn()
+      .mockResolvedValueOnce({ items: [summary("t1"), summary("t2")], nextCursor: "t2" })
+      .mockResolvedValueOnce({ items: [summary("t3")] });
+    const registry = { listActive };
+    const backfill = vi.fn(async (tenantId: string): Promise<BackfillReport> => ({ tenantId, productCount: 1, truncated: false, outcome: "backfilled" }));
+    const index = vi.fn(async (tenantId: string) => makeIndexReport(tenantId));
+    const deps: CatalogSyncSchedulerDeps = { store, backfill, index, registry };
+
+    const report = await runCatalogSyncScheduler(deps, {});
+
+    expect(report.results).toHaveLength(3);
+    expect(backfill).toHaveBeenCalledWith("t1", expect.anything());
+    expect(backfill).toHaveBeenCalledWith("t2", expect.anything());
+    expect(backfill).toHaveBeenCalledWith("t3", expect.anything());
+    expect(report.results.every((r) => r.outcome === "synced")).toBe(true);
+  });
+
+  it("the nextCursor loop terminates: listActive is called exactly once per page, following the returned cursor", async () => {
+    const store = new InMemoryRuntimeStore();
+    const listActive = vi
+      .fn()
+      .mockResolvedValueOnce({ items: [summary("t1"), summary("t2")], nextCursor: "t2" })
+      .mockResolvedValueOnce({ items: [summary("t3")] }); // no nextCursor => last page
+    const registry = { listActive };
+    const backfill = vi.fn(async (tenantId: string): Promise<BackfillReport> => ({ tenantId, productCount: 0, truncated: false, outcome: "unchanged" }));
+    const index = vi.fn(async (tenantId: string) => makeIndexReport(tenantId));
+
+    await runCatalogSyncScheduler({ store, backfill, index, registry }, {});
+
+    expect(listActive).toHaveBeenCalledTimes(2);
+    expect(listActive).toHaveBeenNthCalledWith(1, {});
+    expect(listActive).toHaveBeenNthCalledWith(2, { cursor: "t2" });
+  });
+
+  it("an explicit opts.tenantIds still wins over registry discovery (single-tenant override)", async () => {
+    const store = new InMemoryRuntimeStore();
+    const listActive = vi.fn(async () => ({ items: [summary("t1"), summary("t2")] }));
+    const registry = { listActive };
+    const backfill = vi.fn(async (tenantId: string): Promise<BackfillReport> => ({ tenantId, productCount: 0, truncated: false, outcome: "unchanged" }));
+    const index = vi.fn(async (tenantId: string) => makeIndexReport(tenantId));
+
+    const report = await runCatalogSyncScheduler({ store, backfill, index, registry }, { tenantIds: ["only-this-one"] });
+
+    expect(listActive).not.toHaveBeenCalled();
+    expect(report.results).toEqual([expect.objectContaining({ tenantId: "only-this-one" })]);
+  });
+
+  it("throws a clear error when both opts.tenantIds and deps.registry are absent — never silently syncs nothing", async () => {
+    const store = new InMemoryRuntimeStore();
+    const backfill = vi.fn();
+    const index = vi.fn();
+
+    await expect(runCatalogSyncScheduler({ store, backfill, index }, {})).rejects.toThrow(/registry/i);
   });
 });
