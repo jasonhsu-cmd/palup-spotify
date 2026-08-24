@@ -986,8 +986,12 @@ async function indexOneTenant(
  * commit — one that only touched a DIFFERENT id — permanently shield an untouched, genuinely-deleted product
  * from the next full reconcile's stale-set, since its `writtenAt` kept getting reset to "now" by commits that
  * never actually changed it.
+ *
+ * EXPORTED (Task 3 fix-round, credential-enrollment-unification) so `catalog-backfill.ts`'s
+ * `syncEmbeddingCorpus` computes its own commit's per-id `writtenAt` the SAME way this job does, rather
+ * than re-implementing the changed/unchanged split a second time.
  */
-function nextWrittenAt(
+export function nextWrittenAt(
   newHashes: Map<string, string>,
   priorHash: Map<string, string>,
   priorWrittenAt: Map<string, number>,

@@ -30,6 +30,7 @@ import {
   catalogNamespace,
   catalogRecordId,
   contentHash,
+  nextWrittenAt,
   productEmbedText,
   writeManifestAndAudit,
   type CatalogManifest,
@@ -576,11 +577,19 @@ function embedTextFor(r: CatalogProductRecord): string {
  * (same embed text as last run) contributes NOTHING to `toEmbed`, so a re-run against an unchanged catalog
  * embeds zero.
  *
+ * S4 §F CONCURRENCY GUARD (fix-round, credential-enrollment-unification review) — mirrors
+ * `indexOneTenant`'s guard VERBATIM rather than inventing a new one: `fetchStartedAtMs`, supplied by the
+ * caller, is a snapshot taken BEFORE the (potentially minutes-long) Bulk Operation started, exactly like
+ * `indexOneTenant`'s own `fetchStartedAt`. A ledger id that is missing from this run's `wanted` set is only
+ * treated as genuinely stale (and deleted) when its recorded `writtenAt` is AT OR BEFORE that snapshot; an
+ * id written AFTER it — by a webhook-driven `reconcileProducts` that committed while this bulk backfill was
+ * still running — is a `protectedId`: excluded from deletion and carried forward into the new ledger with
+ * its existing hash, so a concurrent write can never be clobbered as a false "stale" the moment this run's
+ * (necessarily stale-by-the-time-it-downloads) snapshot catches up. Without this, a webhook committing
+ * between this function's ledger READ and its manifest/ledger WRITE could have its brand-new product
+ * deleted from the corpus as "stale", or have its ledger entry overwritten back to a pre-webhook state.
+ *
  * KNOWN SIMPLIFICATIONS versus `indexOneTenant`/`reconcileProducts` (documented, not silently narrower):
- *   • No S4 §F concurrency guard (`writtenAt`/`protectedIds`) — a webhook-driven reconcile racing THIS
- *     one-shot bulk backfill mid-run could have its just-written product treated as stale here. Acceptable
- *     for a one-shot operator-run backfill (not the continuous poll loop that guard was built for), but
- *     flagged rather than assumed away.
  *   • Pin-mismatch is checked once (on the first embed batch) and, on mismatch, this function skips the
  *     whole embed+write step for this run (loud ALERT log) rather than the full job's richer per-report
  *     `pin-mismatch` outcome — this function reports counts back to its caller instead of a discriminated
@@ -596,6 +605,7 @@ async function syncEmbeddingCorpus(
   records: CatalogProductRecord[],
   at: Date,
   ceiling: number,
+  fetchStartedAtMs: number,
 ): Promise<{ embedded: number; written: number; removed: number }> {
   if (!canEmbed(model)) {
     console.error(`[catalog-backfill] ALERT no_embed_capability tenant=${tenantId} — skipping corpus build`);
@@ -617,7 +627,11 @@ async function syncEmbeddingCorpus(
 
   const wanted = new Set(plan.map((p) => p.recordId));
   const toEmbed = plan.filter((p) => ledger.get(p.recordId) !== p.hash);
-  const stale = [...ledger.keys()].filter((id) => !wanted.has(id));
+  // S4 §F — split the candidates NOT in this run's plan into genuinely stale (safe to delete) vs.
+  // concurrency-protected (written after this run's fetch snapshot — a webhook race, not a real deletion).
+  const staleCandidates = ledger.size === 0 ? [] : [...ledger.keys()].filter((id) => !wanted.has(id));
+  const protectedIds = staleCandidates.filter((id) => (ledgerWrittenAt.get(id) ?? 0) > fetchStartedAtMs);
+  const stale = staleCandidates.filter((id) => (ledgerWrittenAt.get(id) ?? 0) <= fetchStartedAtMs);
 
   if (toEmbed.length === 0 && stale.length === 0) {
     return { embedded: 0, written: 0, removed: 0 };
@@ -667,9 +681,15 @@ async function syncEmbeddingCorpus(
   });
 
   if (vectorRecords.length > 0) await vector.upsert(ns, vectorRecords);
+  // S4 §F — ONLY the genuinely-stale set is deleted; `protectedIds` (a concurrent webhook's fresh write)
+  // is never touched here.
   if (stale.length > 0) await vector.deleteById(ns, stale);
 
   const newLedger = new Map(plan.map((p) => [p.recordId, p.hash]));
+  // S4 §F — carry each protected id forward with its EXISTING hash (whatever the concurrent write already
+  // committed), so this run's manifest/ledger write can never regress it back to a pre-webhook state.
+  for (const id of protectedIds) newLedger.set(id, ledger.get(id)!);
+
   const effectivePin =
     pin ?? (manifest && manifest.purpose ? { model: manifest.model, dimension: manifest.dimension, purpose: manifest.purpose } : undefined);
   if (!effectivePin) {
@@ -678,12 +698,10 @@ async function syncEmbeddingCorpus(
     return { embedded: 0, written: vectorRecords.length, removed: stale.length };
   }
 
-  const atMs = at.getTime();
-  const newWrittenAt = new Map<string, number>();
-  for (const [id, hash] of newLedger) {
-    const changed = ledger.get(id) !== hash;
-    newWrittenAt.set(id, changed ? atMs : ledgerWrittenAt.get(id) ?? 0);
-  }
+  // S4 §F — reuse `catalog-index.ts`'s own per-id `writtenAt` rule verbatim: new/changed ids get this
+  // commit's time, every other id (including a carried-forward protected id, whose hash did not change
+  // relative to `ledger`) preserves its prior `writtenAt`.
+  const newWrittenAt = nextWrittenAt(newLedger, ledger, ledgerWrittenAt, at.getTime());
 
   const manifestOut: CatalogManifest = {
     model: effectivePin.model,
@@ -766,6 +784,11 @@ export async function runCatalogBackfill(
   const now = deps.now ?? (() => new Date());
   const sleep = deps.sleep ?? defaultSleep;
   const maxProducts = Math.max(1, Math.floor(opts.maxProducts ?? MAX_INDEXED_PRODUCTS));
+  // S4 §F concurrency-guard snapshot for `syncEmbeddingCorpus` (mirrors `indexOneTenant`'s
+  // `fetchStartedAt`) — taken BEFORE the (potentially minutes-long) Bulk Operation starts, so any ledger
+  // write a webhook-driven `reconcileProducts` commits DURING or AFTER this run is provably later than
+  // what this run's stale-set computation is entitled to act on.
+  const fetchStartedAtMs = now().getTime();
 
   if (await matchedKill(deps.store, { tenantId, agentType: RUNTIME_AGENT_TYPE })) {
     return { tenantId, productCount: 0, truncated: false, outcome: "halted" };
@@ -891,7 +914,7 @@ export async function runCatalogBackfill(
     if (opts.shouldAbort && (await opts.shouldAbort())) {
       return { tenantId, productCount: 0, truncated: false, outcome: "halted" };
     }
-    await syncEmbeddingCorpus(deps.store, deps.model, deps.vector, tenantId, records, at, maxProducts);
+    await syncEmbeddingCorpus(deps.store, deps.model, deps.vector, tenantId, records, at, maxProducts, fetchStartedAtMs);
   }
 
   const newHashes: Record<string, string> = { ...priorHashes };
