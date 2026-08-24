@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ApiClient } from "../../app/api";
+import { KilledError } from "../../app/api";
 import { RulesEditor } from "./RulesEditor";
 
 const floors = {
@@ -100,5 +101,102 @@ describe("RulesEditor", () => {
     await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
 
     expect(await screen.findByText(/network down/i)).toBeInTheDocument();
+  });
+
+  // Task 10 — the big-jump CONFIRM dialog (spec's big-jump-confirm requirement): a merchant making
+  // a large rules change must see the EFFECTIVE "up to X" values before it applies, and putRules
+  // must never fire until they explicitly confirm.
+  it("a big-jump save opens the confirm dialog with EFFECTIVE values and does not call putRules until confirmed", async () => {
+    const putRules = vi.fn(async () => ({
+      envelope: { discount: { allowedAuto: true, maxPct: 20, stackable: false } },
+      bigJump: true,
+    }));
+    const previewRules = vi.fn(async () => ({
+      before: {},
+      after: { discount: { allowedAuto: true, maxPct: 90, stackable: false } }, // above the 30% floor
+      bigJump: true,
+      effective: {},
+      capped: {},
+    }));
+    const api = fakeApi({ putRules, previewRules });
+    render(<RulesEditor api={api} />);
+    await screen.findByRole("heading", { name: /discounts/i });
+
+    await userEvent.clear(screen.getByLabelText(/max % off/i));
+    await userEvent.type(screen.getByLabelText(/max % off/i), "20");
+    await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    expect(await screen.findByText(/giving your agent more room/i)).toBeInTheDocument();
+    expect(putRules).not.toHaveBeenCalled();
+    // the dialog states the EFFECTIVE, floor-clamped value (30%) — never the raw 90% previewed value
+    expect(screen.getByText(/up to 30%/i)).toBeInTheDocument();
+    expect(screen.queryByText(/up to 90%/i)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() =>
+      expect(putRules).toHaveBeenCalledWith({ discount: expect.objectContaining({ maxPct: 20 }) }),
+    );
+    await waitFor(() => expect(screen.queryByText(/giving your agent more room/i)).not.toBeInTheDocument());
+    expect(screen.getByLabelText(/max % off/i)).toHaveValue(20); // dirty cleared — shows the saved value
+  });
+
+  it("cancelling the big-jump confirm never calls putRules and leaves the edit dirty", async () => {
+    const putRules = vi.fn(async () => ({ envelope: {}, bigJump: false }));
+    const previewRules = vi.fn(async () => ({
+      before: {},
+      after: { discount: { allowedAuto: true, maxPct: 90, stackable: false } },
+      bigJump: true,
+      effective: {},
+      capped: {},
+    }));
+    const api = fakeApi({ putRules, previewRules });
+    render(<RulesEditor api={api} />);
+    await screen.findByRole("heading", { name: /discounts/i });
+
+    await userEvent.clear(screen.getByLabelText(/max % off/i));
+    await userEvent.type(screen.getByLabelText(/max % off/i), "20");
+    await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await screen.findByText(/giving your agent more room/i);
+
+    await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
+
+    expect(putRules).not.toHaveBeenCalled();
+    expect(screen.queryByText(/giving your agent more room/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/max % off/i)).toHaveValue(20); // the typed edit is still there
+  });
+
+  it("a non-big-jump save calls putRules directly — sovereign + instant, no dialog", async () => {
+    const putRules = vi.fn(async () => ({
+      envelope: { discount: { allowedAuto: true, maxPct: 20, stackable: false } },
+      bigJump: false,
+    }));
+    const previewRules = vi.fn(async () => ({ before: {}, after: {}, bigJump: false, effective: {}, capped: {} }));
+    const api = fakeApi({ putRules, previewRules });
+    render(<RulesEditor api={api} />);
+    await screen.findByRole("heading", { name: /discounts/i });
+
+    await userEvent.clear(screen.getByLabelText(/max % off/i));
+    await userEvent.type(screen.getByLabelText(/max % off/i), "20");
+    await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(putRules).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/giving your agent more room/i)).not.toBeInTheDocument();
+  });
+
+  it("putRules throwing KilledError shows the halt message, not a success note", async () => {
+    const putRules = vi.fn(async () => {
+      throw new KilledError("safety pause");
+    });
+    const api = fakeApi({ putRules });
+    render(<RulesEditor api={api} />);
+    await screen.findByRole("heading", { name: /discounts/i });
+
+    await userEvent.clear(screen.getByLabelText(/max % off/i));
+    await userEvent.type(screen.getByLabelText(/max % off/i), "20");
+    await userEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    expect(await screen.findByText(/agents are halted \(kill switch armed\) — rules were not changed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^saved\./i)).not.toBeInTheDocument();
   });
 });
