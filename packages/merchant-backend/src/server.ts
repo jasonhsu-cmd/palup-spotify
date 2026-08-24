@@ -23,6 +23,8 @@ import {
   SandboxCommsAdapter,
   SandboxCustomerDirectory,
   SandboxOrderDirectory,
+  type PayoutsPort,
+  SandboxPayoutsPort,
 } from "@palup/platform-ports";
 import { createRuntimeStore, PostgresMerchantRegistry, PostgresMerchantRulesStore, PostgresPrimaryGoalStore, PostgresLearnedStore } from "@palup/state-postgres";
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
@@ -35,6 +37,7 @@ import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
 import { registerActivityRoutes } from "./routes/activity.js";
 import { registerOrdersRoutes } from "./routes/orders.js";
+import { registerPaymentsRoutes } from "./routes/payments.js";
 import { registerEventsRoutes } from "./routes/events.js";
 import { registerRulesRoutes } from "./routes/rules.js";
 import { registerHomeRoutes } from "./routes/home.js";
@@ -72,6 +75,12 @@ export async function buildServer(opts?: {
   // scope (read_orders) + seed. Absent → an empty sandbox directory (dark) until a live Admin-API
   // adapter is human-enabled.
   orderCommerce?: OrderListingCommerce;
+  // W5 Task 6 (Payments & Payouts): read-through of Shopify's payouts (system of record) — PalUp
+  // never touches this money, it only reads it. Absent -> `SandboxPayoutsPort({})`, an unseeded
+  // in-memory sandbox that returns an empty list per tenant (honest-empty, never a fabricated
+  // payout), same convention as `orderCommerce`/`commerce` above until a live Shopify-Payments
+  // adapter is human-enabled.
+  payouts?: PayoutsPort;
   comms?: CampaignCommsPort;
   proposalStore?: ProposalStore;
   rulesStore?: MerchantRulesStore;
@@ -93,6 +102,7 @@ export async function buildServer(opts?: {
   const store: RuntimeStatePort = opts?.store ?? runtimeResult!.store;
   const commerce: CustomerListingCommerce = opts?.commerce ?? new SandboxCustomerDirectory({});
   const orderCommerce: OrderListingCommerce = opts?.orderCommerce ?? new SandboxOrderDirectory({});
+  const payouts: PayoutsPort = opts?.payouts ?? new SandboxPayoutsPort({});
   // SandboxCommsAdapter records every send and NEVER delivers — the only comms adapter this service
   // may default to until a real (still consent/DLP-gated) provider adapter is wired + prod-enabled.
   const comms: CampaignCommsPort = opts?.comms ?? new SandboxCommsAdapter();
@@ -310,6 +320,7 @@ export async function buildServer(opts?: {
     registerHomeRoutes(merchantPlane, { state: store, goalStore });
     registerActivityRoutes(merchantPlane, { state: store });
     registerOrdersRoutes(merchantPlane, { orderCommerce, state: store });
+    registerPaymentsRoutes(merchantPlane, { payouts, state: store });
   });
 
   return app;
