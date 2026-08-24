@@ -4,6 +4,8 @@ import {
   InMemoryMerchantRulesStore,
   InMemoryRuntimeStore,
   mergeOverDefaults,
+  PALUP_FLOORS,
+  listPresets,
   type MerchantIdentityPort,
   type MerchantPrincipal,
 } from "@palup/platform-ports";
@@ -204,6 +206,85 @@ describe("PUT /rules", () => {
     });
     const res = await app.inject({ method: "PUT", url: "/rules", payload: { discount: { allowedAuto: true } } });
     expect(res.statusCode).toBe(401);
+    await app.close();
+  });
+});
+
+describe("GET /rules/floors", () => {
+  it("returns the inviolable PalUp floors (console.view floor)", async () => {
+    const state = new InMemoryRuntimeStore();
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const app = await buildServer({ store: state, rulesStore, identity: identityFor(viewer) });
+    const res = await app.inject({ method: "GET", url: "/rules/floors", headers: { authorization: "Bearer good" } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().floors.ad_spend.maxAutoPeriodUsd).toBe(PALUP_FLOORS.ad_spend.maxAutoPeriodUsd);
+    await app.close();
+  });
+});
+
+describe("GET /rules/presets", () => {
+  it("lists Day-1 + vertical presets", async () => {
+    const state = new InMemoryRuntimeStore();
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const app = await buildServer({ store: state, rulesStore, identity: identityFor(viewer) });
+    const res = await app.inject({ method: "GET", url: "/rules/presets", headers: { authorization: "Bearer good" } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().presets.map((p: { id: string }) => p.id)).toEqual(listPresets().map((p) => p.id));
+    await app.close();
+  });
+});
+
+describe("PUT /rules — broadened fields", () => {
+  it("accepts the full discount/ad_spend/refund/subscription/campaign policy", async () => {
+    const state = new InMemoryRuntimeStore();
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const app = await buildServer({ store: state, rulesStore, identity: identityFor(owner) });
+    const res = await app.inject({
+      method: "PUT", url: "/rules", headers: { authorization: "Bearer good" },
+      payload: {
+        discount: { allowedAuto: true, maxPct: 15, stackable: true },
+        ad_spend: { allowedAuto: true, maxUsd: 300, roiFloor: 3, periodBudgetUsd: 1000 },
+        refund: { allowedAuto: true, maxUsd: 50, priceMatchMaxUsd: 25 },
+        subscription: { allowedAuto: true, subscriptionSelfServe: ["pause", "skip"] },
+        campaign: { allowedAuto: false, frequencyCapPerWeek: 2, quietHours: { startHour: 21, endHour: 9 } },
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().envelope.discount.stackable).toBe(true);
+    expect(res.json().envelope.ad_spend.roiFloor).toBe(3);
+    await app.close();
+  });
+  it("400s a field on the wrong category (stackable on refund)", async () => {
+    const state = new InMemoryRuntimeStore();
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const app = await buildServer({ store: state, rulesStore, identity: identityFor(owner) });
+    const res = await app.inject({
+      method: "PUT", url: "/rules", headers: { authorization: "Bearer good" },
+      payload: { refund: { allowedAuto: true, stackable: true } },
+    });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+  it("400s a malformed quietHours (hour out of 0–23)", async () => {
+    const state = new InMemoryRuntimeStore();
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const app = await buildServer({ store: state, rulesStore, identity: identityFor(owner) });
+    const res = await app.inject({
+      method: "PUT", url: "/rules", headers: { authorization: "Bearer good" },
+      payload: { campaign: { allowedAuto: false, quietHours: { startHour: 30, endHour: 9 } } },
+    });
+    expect(res.statusCode).toBe(400);
+    await app.close();
+  });
+  it("400s an unknown subscriptionSelfServe value", async () => {
+    const state = new InMemoryRuntimeStore();
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const app = await buildServer({ store: state, rulesStore, identity: identityFor(owner) });
+    const res = await app.inject({
+      method: "PUT", url: "/rules", headers: { authorization: "Bearer good" },
+      payload: { subscription: { allowedAuto: true, subscriptionSelfServe: ["explode"] } },
+    });
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 });
