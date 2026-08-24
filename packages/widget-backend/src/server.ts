@@ -1499,10 +1499,10 @@ export async function buildServer(opts?: {
       now: nowSec,
       webhookSubscriptions,
       // ADR-0023 D1 — unified-cutover-cleanup (2026-08-24): the Admin-only credential-and-enrollment
-      // cutover is now the ONLY behavior (the `CATALOG_UNIFIED` flag is gone). The install flow never
+      // cutover is now the ONLY behavior — Task 2 deleted the `catalogUnified` flag from
+      // `ShopifyInstallDeps` entirely (there is no other behavior left to gate). The install flow never
       // mints/custodies a Storefront delegate token; the boot guard above already refused to start unless
       // `adminTokens` is wired, so the Admin token is guaranteed to be the sole credential custodied here.
-      catalogUnified: true,
     });
   }
 
