@@ -29,8 +29,11 @@ export function categoryLabel(c: ProposalCategory): string { return LABELS[c]; }
  *  above for why this can't be a runtime import) — which dimensions a category's numeric caps
  *  actually mean something for, independent of which floors happen to be non-zero. Keep this in
  *  sync with `PALUP_FLOORS`/`AUTO_ELIGIBLE_DIMENSIONS` (packages/platform-ports/src/index.ts) by
- *  hand if either ever changes; there is no compiler check tying the two together. */
-const AUTO_ELIGIBLE_DIMENSIONS: Record<ProposalCategory, ReadonlyArray<"pct" | "usd">> = {
+ *  hand if either ever changes; there is no compiler check tying the two together in the type
+ *  system, but `format.pinning.test.ts` deep-equals this against the real, imported
+ *  `AUTO_ELIGIBLE_DIMENSIONS` (in vitest's node env, never bundled into the browser build) — a
+ *  future change to the real map that isn't mirrored here fails that test, not silently drifts. */
+export const AUTO_ELIGIBLE_DIMENSIONS: Record<ProposalCategory, ReadonlyArray<"pct" | "usd">> = {
   discount: ["pct", "usd"],
   ad_spend: ["usd"],
   refund: ["usd"],
@@ -39,31 +42,75 @@ const AUTO_ELIGIBLE_DIMENSIONS: Record<ProposalCategory, ReadonlyArray<"pct" | "
   autonomy_scope: [],
 };
 
+/** The floor-clamped shape this module derives — structurally the same fields `@palup/
+ *  platform-ports`' real `AutoActLimit`/`clampToFloor` return, so `localClampToFloor`'s output can
+ *  be compared directly against the real one in the pinning test. */
+export type EffectiveAutoLimit = {
+  allowedAuto: boolean;
+  maxPct: number;
+  maxUsd: number;
+  priceMatchMaxUsd: number;
+  periodBudgetUsd?: number;
+} & Pick<CategoryRuleEnvelope, "stackable" | "roiFloor" | "subscriptionSelfServe" | "frequencyCapPerWeek" | "quietHours">;
+
+/** True when this category's floor leaves any room at all for auto-act — mirrors `@palup/
+ *  platform-ports`' internal (unexported) `withinFloor` helper used by the real `clampToFloor`. */
+function withinFloor(floor: PalupFloor): boolean {
+  return floor.maxAutoPct > 0 && (floor.maxAutoUsd === undefined || floor.maxAutoUsd > 0);
+}
+
+/**
+ * Local mirror of `@palup/platform-ports`' `clampToFloor` — see the build-safety note above for why
+ * this can't be a runtime import. This is the SINGLE computation every effective-value display in
+ * this screen goes through (`describeAutoGrant`, `cappedWarnings`) — not a parallel, independently-
+ * derived copy — so the honesty display and the pinning test below exercise the exact same logic.
+ *
+ * Fidelity to the real `clampToFloor` is pinned by `format.pinning.test.ts`, which imports the real
+ * function (safe in vitest's node/jsdom test environment — a test file is never part of the browser
+ * bundle) and cross-checks this function's output against it for a spread of merchant values across
+ * every editable category. If this ever drifts from the real clamp, that test fails.
+ */
+export function localClampToFloor(env: CategoryRuleEnvelope, floor: PalupFloor): EffectiveAutoLimit {
+  const maxPct = Math.min(env.maxPct ?? floor.maxAutoPct, floor.maxAutoPct);
+  const maxUsd = floor.maxAutoUsd !== undefined ? Math.min(env.maxUsd ?? floor.maxAutoUsd, floor.maxAutoUsd) : 0;
+  const periodBudgetUsd = floor.maxAutoPeriodUsd !== undefined
+    ? Math.min(env.periodBudgetUsd ?? floor.maxAutoPeriodUsd, floor.maxAutoPeriodUsd)
+    : (env.periodBudgetUsd !== undefined ? 0 : undefined);
+  const priceMatchMaxUsd = floor.maxAutoUsd !== undefined ? Math.min(env.priceMatchMaxUsd ?? 0, floor.maxAutoUsd) : 0;
+  return {
+    maxPct, maxUsd, allowedAuto: env.allowedAuto && withinFloor(floor),
+    ...(periodBudgetUsd !== undefined ? { periodBudgetUsd } : {}),
+    priceMatchMaxUsd,
+    ...(env.stackable !== undefined ? { stackable: env.stackable } : {}),
+    ...(env.roiFloor !== undefined ? { roiFloor: env.roiFloor } : {}),
+    ...(env.subscriptionSelfServe !== undefined ? { subscriptionSelfServe: env.subscriptionSelfServe } : {}),
+    ...(env.frequencyCapPerWeek !== undefined ? { frequencyCapPerWeek: env.frequencyCapPerWeek } : {}),
+    ...(env.quietHours !== undefined ? { quietHours: env.quietHours } : {}),
+  };
+}
+
 /** One plain-language sentence for the "your agent may auto-act up to X" line — always reflecting the
- *  EFFECTIVE cap (merchant value clamped to the PalUp floor), never claiming more than the floor. */
+ *  EFFECTIVE cap (merchant value clamped to the PalUp floor, via `localClampToFloor`), never
+ *  claiming more than the floor. */
 export function describeAutoGrant(category: ProposalCategory, env: CategoryRuleEnvelope, floor: PalupFloor): string {
   if (!env.allowedAuto) return "Everything in this category comes to you for approval.";
+  const eff = localClampToFloor(env, floor);
   if (category === "discount") {
-    const pct = Math.min(env.maxPct ?? floor.maxAutoPct, floor.maxAutoPct);
-    return `Your agent can apply discounts up to ${pct}%${env.stackable ? ", stacking allowed" : ", never stacking"} automatically. Anything deeper needs your approval.`;
+    return `Your agent can apply discounts up to ${eff.maxPct}%${eff.stackable ? ", stacking allowed" : ", never stacking"} automatically. Anything deeper needs your approval.`;
   }
   if (category === "refund") {
-    const usd = Math.min(env.maxUsd ?? floor.maxAutoUsd ?? 0, floor.maxAutoUsd ?? 0);
-    const pm = Math.min(env.priceMatchMaxUsd ?? 0, floor.maxAutoUsd ?? 0);
-    return `Your agent can auto-refund up to $${usd} and price-match up to $${pm}. Larger amounts need your approval.`;
+    return `Your agent can auto-refund up to $${eff.maxUsd} and price-match up to $${eff.priceMatchMaxUsd}. Larger amounts need your approval.`;
   }
   if (category === "ad_spend") {
-    const perAction = Math.min(env.maxUsd ?? floor.maxAutoUsd ?? 0, floor.maxAutoUsd ?? 0);
-    const period = Math.min(env.periodBudgetUsd ?? floor.maxAutoPeriodUsd ?? 0, floor.maxAutoPeriodUsd ?? 0);
-    return `Your agent can auto-buy ads up to $${perAction} per action and $${period} per period, only at ${env.roiFloor ?? "—"}× ROI or better.`;
+    return `Your agent can auto-buy ads up to $${eff.maxUsd} per action and $${eff.periodBudgetUsd ?? 0} per period, only at ${eff.roiFloor ?? "—"}× ROI or better.`;
   }
   if (category === "subscription") {
-    const acts = env.subscriptionSelfServe ?? [];
+    const acts = eff.subscriptionSelfServe ?? [];
     return acts.length ? `Your agent can auto-handle: ${acts.join(", ")}. Anything else escalates to you.` : "All subscription changes escalate to you.";
   }
   if (category === "campaign") {
-    const q = env.quietHours;
-    return `Auto-sends respect a ${env.frequencyCapPerWeek ?? "—"}/week cap per person${q ? ` and quiet hours ${q.startHour}:00–${q.endHour}:00` : ""}. Bulk sends still need your approval.`;
+    const q = eff.quietHours;
+    return `Auto-sends respect a ${eff.frequencyCapPerWeek ?? "—"}/week cap per person${q ? ` and quiet hours ${q.startHour}:00–${q.endHour}:00` : ""}. Bulk sends still need your approval.`;
   }
   return "This category always requires your approval.";
 }
@@ -101,24 +148,25 @@ export function floorCeilingText(category: ProposalCategory, floor: PalupFloor):
 export function cappedWarnings(category: ProposalCategory, env: CategoryRuleEnvelope, floor: PalupFloor): string[] {
   const warnings: string[] = [];
   const dims = AUTO_ELIGIBLE_DIMENSIONS[category];
+  const eff = localClampToFloor(env, floor);
   if (dims.includes("pct") && env.maxPct !== undefined && env.maxPct > floor.maxAutoPct) {
     warnings.push(
-      `Capped at ${floor.maxAutoPct}% by PalUp's floor — your setting of ${env.maxPct}% won't take effect for auto-actions.`,
+      `Capped at ${eff.maxPct}% by PalUp's floor — your setting of ${env.maxPct}% won't take effect for auto-actions.`,
     );
   }
   if (dims.includes("usd") && floor.maxAutoUsd !== undefined && env.maxUsd !== undefined && env.maxUsd > floor.maxAutoUsd) {
     warnings.push(
-      `Capped at $${floor.maxAutoUsd} by PalUp's floor — your setting of $${env.maxUsd} won't take effect for auto-actions.`,
+      `Capped at $${eff.maxUsd} by PalUp's floor — your setting of $${env.maxUsd} won't take effect for auto-actions.`,
     );
   }
   if (floor.maxAutoPeriodUsd !== undefined && env.periodBudgetUsd !== undefined && env.periodBudgetUsd > floor.maxAutoPeriodUsd) {
     warnings.push(
-      `Capped at $${floor.maxAutoPeriodUsd} per period by PalUp's floor — your setting of $${env.periodBudgetUsd} won't take effect for auto-actions.`,
+      `Capped at $${eff.periodBudgetUsd} per period by PalUp's floor — your setting of $${env.periodBudgetUsd} won't take effect for auto-actions.`,
     );
   }
   if (floor.maxAutoUsd !== undefined && env.priceMatchMaxUsd !== undefined && env.priceMatchMaxUsd > floor.maxAutoUsd) {
     warnings.push(
-      `Price-match capped at $${floor.maxAutoUsd} by PalUp's floor — your setting of $${env.priceMatchMaxUsd} won't take effect for auto-actions.`,
+      `Price-match capped at $${eff.priceMatchMaxUsd} by PalUp's floor — your setting of $${env.priceMatchMaxUsd} won't take effect for auto-actions.`,
     );
   }
   return warnings;
