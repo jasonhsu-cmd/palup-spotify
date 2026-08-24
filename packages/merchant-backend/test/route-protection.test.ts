@@ -45,14 +45,23 @@ const PUBLIC_WILDCARD_ROUTES = ["/assets/*"];
 // a future mistake that adds one of these to AUTH_EXEMPT_PATHS (making a real data route public) fails
 // THIS list, not just the generic loop, which would otherwise pass vacuously once the route is (wrongly)
 // exempted.
+// `/approvals/:id`-shaped routes need a CONCRETE id (not the literal ":id" pattern) so `app.inject`
+// actually routes to the real handler and gets the 401 from `requireMerchant`'s preHandler — not a
+// 404 from some other mismatch. The exact id value doesn't matter: `requireMerchant` runs and rejects
+// before any handler ever looks it up.
 const KNOWN_DATA_ROUTES: { method: string; url: string }[] = [
   { method: "GET", url: "/approvals" },
+  { method: "GET", url: "/approvals/p1" },
+  { method: "POST", url: "/approvals/p1/approve" },
+  { method: "POST", url: "/approvals/p1/reject" },
   { method: "GET", url: "/rules" },
   { method: "GET", url: "/kill" },
   { method: "POST", url: "/unkill" },
   { method: "GET", url: "/audit" },
   { method: "GET", url: "/events" },
   { method: "GET", url: "/me" },
+  { method: "GET", url: "/_probe/money" },
+  { method: "POST", url: "/_internal/run-winback" },
 ];
 
 describe("every registered route is protected by construction", () => {
