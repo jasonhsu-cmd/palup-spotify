@@ -198,3 +198,46 @@ describe("makeApiClient", () => {
     expect(result.items).toEqual([entry]);
   });
 });
+
+describe("Revenue Home methods (W2 T6)", () => {
+  const emptySummary = {
+    period: "2026-08",
+    goal: null,
+    attributed: { totalUsd: 0, entryCount: 0, plays: [], underpowered: true },
+    cost: { metered: false, totalUsd: 0, fullyPriced: true, unpricedModels: [], events: 0 },
+    net: { value: null, reason: "attribution_underpowered" },
+    handoff: null,
+  };
+
+  it("getHomeSummary GETs /home/summary with the bearer", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify(emptySummary), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "sess-1", fetch: fetchSpy });
+    const summary = await api.getHomeSummary();
+    expect(fetchSpy.mock.calls[0]![0]).toBe("/api/home/summary");
+    expect(headersOf(fetchSpy.mock.calls[0]![1]).Authorization).toBe("Bearer sess-1");
+    expect(summary.net.reason).toBe("attribution_underpowered");
+  });
+
+  it("getActivity GETs /activity, forwarding an optional cursor", async () => {
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ items: [] }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    await api.getActivity();
+    expect(fetchSpy.mock.calls[0]![0]).toBe("/api/activity");
+    await api.getActivity("c1");
+    expect(fetchSpy.mock.calls[1]![0]).toBe("/api/activity?cursor=c1");
+  });
+
+  it("setPrimaryGoal PUTs /home/goal with kind (and note only when given)", async () => {
+    const goal = { kind: "recover_carts", setBy: "u1", setAt: "2026-08-24T00:00:00.000Z" };
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify({ goal }), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+
+    await api.setPrimaryGoal("recover_carts");
+    expect(fetchSpy.mock.calls[0]![0]).toBe("/api/home/goal");
+    expect(fetchSpy.mock.calls[0]![1]!.method).toBe("PUT");
+    expect(JSON.parse(String(fetchSpy.mock.calls[0]![1]!.body))).toEqual({ kind: "recover_carts" });
+
+    await api.setPrimaryGoal("increase_aov", "Q3 push");
+    expect(JSON.parse(String(fetchSpy.mock.calls[1]![1]!.body))).toEqual({ kind: "increase_aov", note: "Q3 push" });
+  });
+});
