@@ -46,6 +46,10 @@ export {
 // W2 Task 2 adapter (`PrimaryGoalStore`, `@palup/platform-ports`). Exported so a later composition
 // root (W2 Task 4) can wire it; the in-memory adapter stays the default until then.
 export { PostgresPrimaryGoalStore, type PostgresPrimaryGoalStoreOpts } from "./primary-goal-store.js";
+// W3 Task 3 adapter (`LearnedStore`, `@palup/platform-ports`, Task 1). Exported so a later caller can
+// wire it; the in-memory adapter (`InMemoryLearnedStore`) stays the default until then. Build DARK
+// per CLAUDE.md §3 — nothing imports this yet.
+export { PostgresLearnedStore, type PostgresLearnedStoreOpts } from "./learned-store.js";
 export { PgPoolSql, pgPoolSqlFromUrl, type Sql } from "./sql.js";
 export { createRuntimeStore } from "./factory.js";
 export { createVectorStore } from "./vector-factory.js";
