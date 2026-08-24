@@ -142,17 +142,21 @@
 
 ## Phase 2 — Refresh + cutover (consume Phase 0; gated on Task 0a/0b)
 
-### Task 6: Admin-token refresh (finalized from the spike) + custody-at-install ON
+### Task 6: Admin-token refresh (refresh_token grant) + custody-at-install ON
 
-**Files:** Modify `packages/widget-backend/src/admin-token-refresh.ts`, `packages/widget-backend/src/routes/shopify-install.ts`; Test: extend `admin-token-refresh.test.ts`.
+**Files:** Modify `packages/state-postgres/src/admin-token-store.ts` (schema: add `refresh_token` + expiries), `packages/widget-backend/src/admin-token-refresh.ts`, `packages/widget-backend/src/routes/shopify-install.ts`; Test: `admin-token-store.test.ts` (extend), `admin-token-refresh.test.ts` (extend).
 
-**Do not start until Task 0a is committed.** Implement the refresh `exchange(tenantId, shopDomain)` per the VERIFIED mechanics recorded in the spec §10 by Task 0a.
+**Verified mechanics (spec §10.1, spike 2026-08-24):** public-app offline token is **expiring** (`expires_in=3600`) with a **`refresh_token`** (`refresh_token_expires_in=7776000` = 90d). Refresh server-side via the stored `refresh_token` (no user); each refresh mints a fresh token+refresh_token (old retired). On `refresh_token` lapse / `401` with no valid refresh_token → **halt sync + re-auth signal** (never a hot-path fetch). `401`=expired, `403`=insufficient.
 
-- [ ] **Step 1: Write failing tests (injected exchange fn — endpoint-independent)** — two concurrent `getFreshAdminToken` → exactly one `exchange` (single-flight); refresh persists via `tokens.refresh` + audits `admin_token.refresh`; an `unreadable` token throws (never a hot-path fallback); if Task 0a found tokens non-expiring, assert `getFreshAdminToken` returns the stored token without calling `exchange`.
-- [ ] **Step 2: Run → FAIL.**
-- [ ] **Step 3: Implement** the verified refresh in `exchange`; ensure `ADMIN_TOKEN_CUSTODY_ENABLED` custody path is on (install already calls `adminTokens.put` — confirm wired in server composition).
-- [ ] **Step 4: Run → PASS** + `pnpm typecheck`.
-- [ ] **Step 5: Commit** — `feat(widget-backend): admin-token refresh per verified mechanics + custody-at-install`.
+- [ ] **Step 1: Extend `admin-token-store` schema + API (failing test first).** Store `{ token, expiresAt, refreshToken?, refreshTokenExpiresAt? }` (refreshToken encrypted like the access token; expiries non-secret). `read` returns them; add `refresh(tenantId, { token, expiresAt, refreshToken, refreshTokenExpiresAt }, {actor})` audited `admin_token.refresh`. Test: round-trip incl. refreshToken; refresh replaces both; atomicity (audit-fail rolls back) as in #439.
+- [ ] **Step 2: Run → FAIL; implement the store change; PASS.**
+- [ ] **Step 3: Refresh loop (failing test, injected exchange fn — endpoint-independent).** `getFreshAdminToken(tenantId)`: if the access token is within a skew window of `expiresAt`, refresh via `exchange` using the stored `refreshToken`; single-flight per tenant; persist via `tokens.refresh`; if `refreshToken` is absent/expired (90d) OR read is `unreadable` → **throw a re-auth-required error** (halt sync, never fall back). Tests: two concurrent calls → one `exchange`; refresh persists + audits; lapsed refresh_token → re-auth error, no `exchange`; valid token in-window → returned without `exchange`.
+- [ ] **Step 4: Run → FAIL; implement; PASS.**
+- [ ] **Step 5: Install requests the expiring offline token + stores the refresh_token.** In `shopify-install.ts`, request `expiring=1` at token exchange and custody `{ token, expiresAt, refreshToken, refreshTokenExpiresAt }` via `adminTokens.put`; confirm `ADMIN_TOKEN_CUSTODY_ENABLED` wired in server composition. Test: install custodies the refresh_token + expiries (extend the install-admin-token test).
+- [ ] **Step 6: Run → PASS + `pnpm typecheck`.**
+- [ ] **Step 7: Commit** — `feat: admin-token refresh_token grant lifecycle (store+refresh+install) per verified Shopify mechanics`.
+
+> Note: the exact token-exchange HTTP request/response shape (`grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `requested_token_type=...offline-access-token`, `expiring=1`, and the refresh_token grant) is quoted in spec §10.1 — implement `exchange` to that shape; tests inject a fake `exchange` so they don't depend on hitting live Shopify.
 
 ### Task 7: `CATALOG_UNIFIED` cutover wiring
 

@@ -100,7 +100,13 @@ Single cutover, but not reckless:
 
 ## 10. Open items to verify at implementation (not asserted from memory)
 
-1. **Managed-install token-exchange refresh** mechanics (endpoint, expiry, refresh trigger) — shopify.dev + a live dev-store exchange. **Gates the cutover.**
+1. ~~Managed-install token-exchange refresh mechanics — gates the cutover.~~ **VERIFIED (spike, shopify.dev 2026-08-24, `.../authentication-authorization/access-tokens`):**
+   - Public apps must use the **expiring** offline Admin token: `expires_in=3600` (1h). Non-expiring offline tokens are being retired for public apps — **migrate by January 2027**.
+   - The expiring offline token comes with a **`refresh_token`** (`refresh_token_expires_in=7776000` → **90 days**). Refresh is **server-side, no user**: "When no merchant session is active, such as for background jobs and webhooks, use the stored `refresh_token` to renew an expiring offline token server-side, without user interaction." Each refresh mints a fresh token+refresh_token; older ones are retired immediately (one refreshable offline token per app+store).
+   - Fallback when the 90-day `refresh_token` has lapsed (plane idle >90 days) OR during an active embedded session: **re-run token exchange** with a fresh session ID token (needs a merchant session).
+   - Errors: `401 Unauthorized` = token expired; `403 Forbidden` = valid token, insufficient access.
+   - **Decisive: Admin-token-only (no Storefront fallback) is VIABLE — QUALIFIED.** Design must therefore: (a) request `expiring=1` at install and **store the `refresh_token` + both expiries** (a schema addition to `admin-token-store`, which today holds only the access token + `expiresAt`); (b) run a **mandatory refresh loop** (refresh before `expires_in`, single-flight per tenant, audited); (c) on `refresh_token` lapse / a `401` with no valid refresh_token, **halt sync + raise a re-auth signal** (never a hot-path fetch); (d) not depend on any non-expiring/static token.
+   - Live dev-store confirmation deferred to staging-enable time (per the pre-flight ruling — needs the DB-custodied token + deploy access).
 2. Whether the Admin **Bulk/GraphQL** response can supply **brand name + shop policies** for `store_profile` (else a small separate Admin query at sync time). Confirm on shopify.dev.
 3. `bulkOperationRunQuery` lifecycle + `nodes(ids:)` shape (carried from #439 — still not live-verified).
 4. Keyset-pagination shape for `listActive` against the real `pl_merchant` table at scale (index on `(status, tenant_id)`).
