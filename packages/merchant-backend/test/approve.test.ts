@@ -3,13 +3,24 @@ import {
   InMemoryRuntimeStore,
   InMemoryProposalStore,
   InMemoryMerchantRulesStore,
+  InMemoryLearnedStore,
   SandboxCommsAdapter,
   SandboxCustomerDirectory,
   type MerchantIdentityPort,
   type MerchantPrincipal,
   type ProposalStore,
 } from "@palup/platform-ports";
-import { killMerchant, findLapsedSegment, draftWinBack, proposeWinBack, createRulesProvider, campaignExecutor } from "@palup/agent-runtime";
+import {
+  killMerchant,
+  findLapsedSegment,
+  draftWinBack,
+  proposeWinBack,
+  createRulesProvider,
+  campaignExecutor,
+  proposeOrExecute,
+  buildRuleChangeAction,
+  proposeVoiceChange,
+} from "@palup/agent-runtime";
 import { buildServer } from "../src/server.js";
 
 // Task 3 (W1-API): POST /approvals/:id/approve. Seeds a real pending `campaign` proposal via
@@ -43,6 +54,43 @@ async function seedPendingCampaign(state: InMemoryRuntimeStore, proposalStore: I
       state,
       rules: createRulesProvider(rulesStore),
       executor: campaignExecutor(comms),
+      validate: async () => ({ valid: true }),
+    },
+  );
+  if (!result.proposal) throw new Error("test setup: expected a pending proposal");
+  return result.proposal;
+}
+
+// W4-broaden Task 7: an agent-proposed rule change — mirrors `seedPendingCampaign` above, but there
+// is no domain-specific `proposeXChange` wrapper for rule changes (unlike win-back/voice), so this
+// calls `proposeOrExecute` directly with `buildRuleChangeAction`'s action, exactly as a future
+// rule-broadening agent would. `category: "autonomy_scope"` is what the caller believes; the real
+// governance guarantee is that `classifyAction` (invariant 2 — `change_rules` is unmapped in
+// `ACTION_TYPE_CATEGORY`) independently re-derives `autonomy_scope` regardless, so this always lands
+// PENDING, never executed at propose time. The `executor` passed here is a poison stub — proving the
+// propose path itself never calls it (a `requires_approval` classification never reaches `executor`).
+async function seedPendingRuleChange(state: InMemoryRuntimeStore, proposalStore: InMemoryProposalStore, rulesStore: InMemoryMerchantRulesStore) {
+  const ctx = { tenantId: "t1" };
+  const now = "2026-08-23T00:00:00Z";
+  const action = buildRuleChangeAction({ discount: { allowedAuto: true, maxPct: 25 } });
+  const result = await proposeOrExecute(
+    {
+      ctx,
+      agentId: "win_back_agent",
+      agentType: "win_back",
+      category: "autonomy_scope",
+      rationale: "agent proposes widening the discount auto-act envelope",
+      reversalPlan: { reversible: true, plan: "MerchantRulesStore.set restores the prior envelope for tenant t1" },
+      now,
+      action,
+    },
+    {
+      store: proposalStore,
+      state,
+      rules: createRulesProvider(rulesStore),
+      executor: async () => {
+        throw new Error("test setup: propose path must never call the executor");
+      },
       validate: async () => ({ valid: true }),
     },
   );
@@ -312,5 +360,200 @@ describe("POST /approvals/:id/approve", () => {
     expect(body.message).toBeUndefined();
     expect(JSON.stringify(body)).not.toMatch(/db connection lost/);
     await app.close();
+  });
+
+  // W4-broaden Task 7 (governance keystone): an agent-proposed rule change never applies until a
+  // human approves it via THIS SAME route, and applying it does not disturb the existing
+  // send_campaign/change_voice executors registered alongside it in engine-wiring.ts.
+  describe("agent-proposed rule change (change_rules / autonomy_scope)", () => {
+    it("stays PENDING and leaves the rule envelope untouched until approved", async () => {
+      const state = new InMemoryRuntimeStore();
+      const proposalStore = new InMemoryProposalStore(state);
+      const rulesStore = new InMemoryMerchantRulesStore(state);
+      const proposal = await seedPendingRuleChange(state, proposalStore, rulesStore);
+
+      expect(proposal.status).toBe("pending");
+      expect(proposal.category).toBe("autonomy_scope");
+      expect(proposal.action.type).toBe("change_rules");
+      const ctx = { tenantId: "t1" };
+      const before = await rulesStore.get(ctx);
+      expect(before.discount?.allowedAuto).toBe(false); // CONSERVATIVE_DEFAULTS — unchanged
+    });
+
+    it("owner approves: applies the patch exactly once, with agent_proposed provenance + audit", async () => {
+      const state = new InMemoryRuntimeStore();
+      const proposalStore = new InMemoryProposalStore(state);
+      const rulesStore = new InMemoryMerchantRulesStore(state);
+      const comms = new SandboxCommsAdapter();
+      const proposal = await seedPendingRuleChange(state, proposalStore, rulesStore);
+
+      const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore, rulesStore, comms });
+      const res = await app.inject({
+        method: "POST",
+        url: `/approvals/${proposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: proposal.version },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().status).toBe("executed");
+
+      const ctx = { tenantId: "t1" };
+      const envelope = await rulesStore.get(ctx);
+      expect(envelope.discount).toEqual({ allowedAuto: true, maxPct: 25 });
+
+      const audit = await state.readAudit(ctx);
+      const changed = audit.filter((r) => r.action === "rules.changed");
+      expect(changed).toHaveLength(1); // applied exactly once
+      expect((changed[0]!.input as { provenance: string }).provenance).toBe("agent_proposed");
+
+      await app.close();
+    });
+
+    it("approving a second time (already executed, stale version) does not double-apply", async () => {
+      const state = new InMemoryRuntimeStore();
+      const proposalStore = new InMemoryProposalStore(state);
+      const rulesStore = new InMemoryMerchantRulesStore(state);
+      const comms = new SandboxCommsAdapter();
+      const proposal = await seedPendingRuleChange(state, proposalStore, rulesStore);
+
+      const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore, rulesStore, comms });
+      const first = await app.inject({
+        method: "POST",
+        url: `/approvals/${proposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: proposal.version },
+      });
+      expect(first.statusCode).toBe(200);
+
+      const second = await app.inject({
+        method: "POST",
+        url: `/approvals/${proposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: proposal.version }, // stale — the stored row moved on
+      });
+      expect(second.statusCode).toBe(409);
+
+      const ctx = { tenantId: "t1" };
+      const audit = await state.readAudit(ctx);
+      expect(audit.filter((r) => r.action === "rules.changed")).toHaveLength(1); // still exactly once
+
+      await app.close();
+    });
+
+    it("a killed merchant gets 423 on approve — the rule change is never applied", async () => {
+      const state = new InMemoryRuntimeStore();
+      const proposalStore = new InMemoryProposalStore(state);
+      const rulesStore = new InMemoryMerchantRulesStore(state);
+      const comms = new SandboxCommsAdapter();
+      const proposal = await seedPendingRuleChange(state, proposalStore, rulesStore);
+
+      await killMerchant(state, { tenantId: "t1" }, "test halt");
+
+      const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore, rulesStore, comms });
+      const res = await app.inject({
+        method: "POST",
+        url: `/approvals/${proposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: proposal.version },
+      });
+      expect(res.statusCode).toBe(423);
+
+      const ctx = { tenantId: "t1" };
+      const envelope = await rulesStore.get(ctx);
+      expect(envelope.discount?.allowedAuto).toBe(false); // never applied
+
+      await app.close();
+    });
+
+    it("a rejected rule-change proposal cannot later be approved — never applied", async () => {
+      const state = new InMemoryRuntimeStore();
+      const proposalStore = new InMemoryProposalStore(state);
+      const rulesStore = new InMemoryMerchantRulesStore(state);
+      const comms = new SandboxCommsAdapter();
+      const proposal = await seedPendingRuleChange(state, proposalStore, rulesStore);
+
+      const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore, rulesStore, comms });
+      const rejectRes = await app.inject({
+        method: "POST",
+        url: `/approvals/${proposal.id}/reject`,
+        headers: { authorization: "Bearer good" },
+        payload: { reason: "not now" },
+      });
+      expect(rejectRes.statusCode).toBe(200);
+
+      const approveRes = await app.inject({
+        method: "POST",
+        url: `/approvals/${proposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: proposal.version + 1 }, // reject bumped the version
+      });
+      expect(approveRes.statusCode).toBe(409);
+
+      const ctx = { tenantId: "t1" };
+      const envelope = await rulesStore.get(ctx);
+      expect(envelope.discount?.allowedAuto).toBe(false); // never applied
+
+      await app.close();
+    });
+
+    it("registering change_rules alongside it does not disturb send_campaign or change_voice: both still execute in the same session", async () => {
+      const state = new InMemoryRuntimeStore();
+      const proposalStore = new InMemoryProposalStore(state);
+      const rulesStore = new InMemoryMerchantRulesStore(state);
+      const comms = new SandboxCommsAdapter();
+      const learnedStore = new InMemoryLearnedStore(state);
+
+      const ruleProposal = await seedPendingRuleChange(state, proposalStore, rulesStore);
+      const campaignProposal = await seedPendingCampaign(state, proposalStore, rulesStore, comms);
+      const voiceResult = await proposeVoiceChange(
+        { ctx: { tenantId: "t1" }, now: "2026-08-23T00:00:00Z", proposedVoiceText: "be extra warm", rationale: "learned from transcripts" },
+        {
+          store: proposalStore,
+          state,
+          rules: createRulesProvider(rulesStore),
+          executor: async () => {
+            throw new Error("test setup: propose path must never call the executor");
+          },
+          validate: async () => ({ valid: true }),
+        },
+      );
+      if (!voiceResult.proposal) throw new Error("test setup: expected a pending voice proposal");
+
+      const app = await buildServer({ store: state, identity: identityFor(owner), proposalStore, rulesStore, comms, learnedStore });
+
+      const ruleRes = await app.inject({
+        method: "POST",
+        url: `/approvals/${ruleProposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: ruleProposal.version },
+      });
+      expect(ruleRes.statusCode).toBe(200);
+      expect(ruleRes.json().status).toBe("executed");
+
+      const campaignRes = await app.inject({
+        method: "POST",
+        url: `/approvals/${campaignProposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: campaignProposal.version },
+      });
+      expect(campaignRes.statusCode).toBe(200);
+      expect(campaignRes.json().status).toBe("executed");
+      expect(comms.recorded).toHaveLength(1);
+
+      const voiceRes = await app.inject({
+        method: "POST",
+        url: `/approvals/${voiceResult.proposal.id}/approve`,
+        headers: { authorization: "Bearer good" },
+        payload: { version: voiceResult.proposal.version },
+      });
+      expect(voiceRes.statusCode).toBe(200);
+      expect(voiceRes.json().status).toBe("executed");
+
+      const ctx = { tenantId: "t1" };
+      const envelope = await rulesStore.get(ctx);
+      expect(envelope.discount).toEqual({ allowedAuto: true, maxPct: 25 });
+
+      await app.close();
+    });
   });
 });
