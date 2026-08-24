@@ -9,6 +9,7 @@ import {
   type MerchantRegistryPort,
   type CampaignCommsPort,
   type CustomerListingCommerce,
+  type OrderListingCommerce,
   type MerchantRulesStore,
   type PrimaryGoalStore,
   type ProposalStore,
@@ -21,6 +22,7 @@ import {
   InMemoryLearnedStore,
   SandboxCommsAdapter,
   SandboxCustomerDirectory,
+  SandboxOrderDirectory,
 } from "@palup/platform-ports";
 import { createRuntimeStore, PostgresMerchantRegistry, PostgresMerchantRulesStore, PostgresPrimaryGoalStore, PostgresLearnedStore } from "@palup/state-postgres";
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
@@ -32,6 +34,7 @@ import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
 import { registerActivityRoutes } from "./routes/activity.js";
+import { registerOrdersRoutes } from "./routes/orders.js";
 import { registerEventsRoutes } from "./routes/events.js";
 import { registerRulesRoutes } from "./routes/rules.js";
 import { registerHomeRoutes } from "./routes/home.js";
@@ -65,6 +68,10 @@ export async function buildServer(opts?: {
   // for real deploys until a governed live adapter is wired" convention `identity`/`registry` above
   // already follow.
   commerce?: CustomerListingCommerce;
+  // W5 (Orders read-through): SEPARATE from `commerce` (customer listing) above — different Shopify
+  // scope (read_orders) + seed. Absent → an empty sandbox directory (dark) until a live Admin-API
+  // adapter is human-enabled.
+  orderCommerce?: OrderListingCommerce;
   comms?: CampaignCommsPort;
   proposalStore?: ProposalStore;
   rulesStore?: MerchantRulesStore;
@@ -85,6 +92,7 @@ export async function buildServer(opts?: {
   const runtimeResult = opts?.store ? undefined : await createRuntimeStore();
   const store: RuntimeStatePort = opts?.store ?? runtimeResult!.store;
   const commerce: CustomerListingCommerce = opts?.commerce ?? new SandboxCustomerDirectory({});
+  const orderCommerce: OrderListingCommerce = opts?.orderCommerce ?? new SandboxOrderDirectory({});
   // SandboxCommsAdapter records every send and NEVER delivers — the only comms adapter this service
   // may default to until a real (still consent/DLP-gated) provider adapter is wired + prod-enabled.
   const comms: CampaignCommsPort = opts?.comms ?? new SandboxCommsAdapter();
@@ -301,6 +309,7 @@ export async function buildServer(opts?: {
     registerLearnedRoutes(merchantPlane, { learnedStore });
     registerHomeRoutes(merchantPlane, { state: store, goalStore });
     registerActivityRoutes(merchantPlane, { state: store });
+    registerOrdersRoutes(merchantPlane, { orderCommerce, state: store });
   });
 
   return app;
