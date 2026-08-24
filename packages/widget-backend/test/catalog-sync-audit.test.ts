@@ -97,7 +97,7 @@ describe("Task 12 (NN#5) — catalog-sync audit completeness", () => {
     const tokens = createAdminTokenStore(store, crypto);
 
     await tokens.put("acme", "shpat_first", { actor: "system:test" });
-    await tokens.refresh("acme", "shpat_second", { actor: "system:test" });
+    await tokens.refresh("acme", { token: "shpat_second" }, { actor: "system:test" });
     await tokens.delete("acme", { actor: "system:test" });
 
     const log = await store.readAudit({ tenantId: "acme" });

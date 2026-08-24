@@ -21,6 +21,7 @@ const PARENT_TOKEN = "shpat_ADMIN_PARENT_TOKEN_NEVER_LOGGED";
 const DELEGATE_TOKEN = "shpca_DELEGATE_TOKEN_NEVER_LOGGED";
 const AUTH_CODE = "authorization-code-never-logged";
 const GRANTED_SCOPES = "unauthenticated_read_product_listings";
+const REFRESH_TOKEN = "shrt_REFRESH_TOKEN_NEVER_LOGGED";
 
 function sign(query: Record<string, string>, secret = APP_SECRET): string {
   const sp = new URLSearchParams();
@@ -43,11 +44,22 @@ function credentialSink(): MerchantCredentialSink {
 
 /** A minimal, directly-constructed dep set (no server composition root, no env vars) so this file owns the
  *  `adminTokens` seam explicitly, per the brief. */
-function makeDeps(overrides: Partial<ShopifyInstallDeps> = {}): ShopifyInstallDeps {
+function makeDeps(overrides: Partial<ShopifyInstallDeps> = {}, capture?: { accessTokenBody?: string }): ShopifyInstallDeps {
   const fetchImpl = (async (url: unknown, init?: unknown) => {
     const u = String(url);
     if (u.endsWith("/admin/oauth/access_token")) {
-      return { ok: true, status: 200, json: async () => ({ access_token: PARENT_TOKEN, scope: GRANTED_SCOPES }) };
+      if (capture) capture.accessTokenBody = String((init as { body?: unknown } | undefined)?.body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: PARENT_TOKEN,
+          scope: GRANTED_SCOPES,
+          expires_in: 3600,
+          refresh_token: REFRESH_TOKEN,
+          refresh_token_expires_in: 7776000,
+        }),
+      };
     }
     if (u.includes("/graphql.json")) {
       return {
@@ -121,6 +133,44 @@ describe("Task 5 — install captures + custodies the parent Admin token (F6/F7)
     expect(put).toHaveBeenCalledWith(expect.any(String), PARENT_TOKEN, expect.objectContaining({ actor: "system:shopify-install" }));
     // The DELEGATE token must never reach the admin-token sink — only the parent.
     expect(put.mock.calls[0]?.[1]).not.toBe(DELEGATE_TOKEN);
+  });
+
+  it("Task 6 (ADR-0023): requests the EXPIRING offline token (expiring=1) and custodies refresh_token + both expiries", async () => {
+    const put = vi.fn(async () => {});
+    const capture: { accessTokenBody?: string } = {};
+    const deps = makeDeps({ adminTokens: { put } }, capture);
+    const app = await buildApp(deps);
+    const { state, cookie } = await begin(app);
+    const res = await callback(app, { state, cookie });
+    expect(res.statusCode).toBe(200);
+
+    // The token exchange itself requested the expiring offline token.
+    const body = new URLSearchParams(capture.accessTokenBody);
+    expect(body.get("expiring")).toBe("1");
+
+    expect(put).toHaveBeenCalledTimes(1);
+    const [, token, opts] = put.mock.calls[0]! as [string, string, { actor: string; expiresAt?: string; refreshToken?: string; refreshTokenExpiresAt?: string }];
+    expect(token).toBe(PARENT_TOKEN);
+    expect(opts.refreshToken).toBe(REFRESH_TOKEN);
+    expect(typeof opts.expiresAt).toBe("string");
+    expect(typeof opts.refreshTokenExpiresAt).toBe("string");
+  });
+
+  it("Task 6: never logs the refresh_token, even on a successful custody", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const put = vi.fn(async () => {});
+      const deps = makeDeps({ adminTokens: { put } });
+      const app = await buildApp(deps);
+      const { state, cookie } = await begin(app);
+      await callback(app, { state, cookie });
+      const seen = [...warn.mock.calls, ...log.mock.calls].flat().map(String).join("\n");
+      expect(seen).not.toContain(REFRESH_TOKEN);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
   });
 
   it("does NOT custody when the grant's shop != the state shop (confused-deputy, F7)", async () => {

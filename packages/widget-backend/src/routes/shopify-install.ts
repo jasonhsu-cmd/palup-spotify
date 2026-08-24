@@ -410,8 +410,13 @@ async function completeInstallInner(
 
   if (await deps.killCheck(tenantId)) return { ok: false, refused: "halted" };
 
+  // Task 6 (ADR-0023) — request the EXPIRING offline token (`expiring: true`): verified spike (spec §10.1,
+  // 2026-08-24) says public apps must move off the non-expiring offline token (being retired for public
+  // apps), and the expiring token comes paired with a `refresh_token` this flow now custodies below. The
+  // DELEGATE token minted a few lines down from `grant.accessToken` is unaffected by the parent's now-1h
+  // lifetime — that mint happens synchronously, in this same request, using the freshly obtained parent.
   const grant = await exchangeInstallCode(
-    { shopDomain, clientId: deps.clientId, clientSecret: secret, code },
+    { shopDomain, clientId: deps.clientId, clientSecret: secret, code, expiring: true, now: () => deps.now() * 1000 },
     deps.fetchFn,
   );
   if (!grant) return { ok: false, failed: "exchange_failed" };
@@ -464,7 +469,18 @@ async function completeInstallInner(
   // exactly as if `adminTokens` had been absent.
   if (deps.adminTokens) {
     try {
-      await deps.adminTokens.put(tenantId, grant.accessToken, { actor: "system:shopify-install", expiresAt: grant.expiresAt });
+      // Task 6 (ADR-0023) — custody the paired refresh_token + both expiries alongside the access token,
+      // under the SAME `adminTokens.put` call (F-A: same key scope + AAD as the access token — enforced by
+      // `AdminTokenStore` itself, not repeated here). `grant.refreshToken`/`grant.refreshTokenExpiresAt` are
+      // `undefined` unless the exchange above actually returned them (e.g. a caller/test that never passed
+      // `expiring: true`, or a Shopify response that omitted them) — `put` already treats an absent
+      // refreshToken as "none custodied", the same F-H-safe posture as before this task.
+      await deps.adminTokens.put(tenantId, grant.accessToken, {
+        actor: "system:shopify-install",
+        expiresAt: grant.expiresAt,
+        refreshToken: grant.refreshToken,
+        refreshTokenExpiresAt: grant.refreshTokenExpiresAt,
+      });
     } catch (e) {
       // Never let an Admin-token custody failure surface the parent token in a response/log; same leak
       // boundary as every other catch in this function.

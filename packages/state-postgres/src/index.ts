@@ -37,6 +37,7 @@ export {
   type AdminTokenStore,
   type AdminTokenStoreOpts,
   type AdminTokenRead,
+  type AdminTokenWrite,
 } from "./admin-token-store.js";
 // W4-min task 5 adapter (`MerchantRulesStore`, `@palup/platform-ports`). Exported so `merchant-backend`'s
 // `GET/PUT /rules` (task 4, not yet built) can wire it; the in-memory adapter stays the default until then.
