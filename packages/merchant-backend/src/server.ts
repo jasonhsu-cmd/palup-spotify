@@ -9,6 +9,7 @@ import {
   type MerchantRegistryPort,
   type CampaignCommsPort,
   type CustomerListingCommerce,
+  type OrderListingCommerce,
   type MerchantRulesStore,
   type PrimaryGoalStore,
   type ProposalStore,
@@ -21,6 +22,11 @@ import {
   InMemoryLearnedStore,
   SandboxCommsAdapter,
   SandboxCustomerDirectory,
+  SandboxOrderDirectory,
+  type PayoutsPort,
+  SandboxPayoutsPort,
+  type RefundPort,
+  SandboxRefundAdapter,
 } from "@palup/platform-ports";
 import { createRuntimeStore, PostgresMerchantRegistry, PostgresMerchantRulesStore, PostgresPrimaryGoalStore, PostgresLearnedStore } from "@palup/state-postgres";
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
@@ -28,10 +34,13 @@ import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
 import { registerInternalInsightsRoutes } from "./routes/internal-insights.js";
 import { registerInternalVoiceRoutes } from "./routes/internal-voice.js";
+import { registerInternalRefundRoutes } from "./routes/internal-refund.js";
 import { registerApprovalsRoutes } from "./routes/approvals.js";
 import { registerKillRoutes } from "./routes/kill.js";
 import { registerAuditRoutes } from "./routes/audit.js";
 import { registerActivityRoutes } from "./routes/activity.js";
+import { registerOrdersRoutes } from "./routes/orders.js";
+import { registerPaymentsRoutes } from "./routes/payments.js";
 import { registerEventsRoutes } from "./routes/events.js";
 import { registerRulesRoutes } from "./routes/rules.js";
 import { registerHomeRoutes } from "./routes/home.js";
@@ -65,6 +74,20 @@ export async function buildServer(opts?: {
   // for real deploys until a governed live adapter is wired" convention `identity`/`registry` above
   // already follow.
   commerce?: CustomerListingCommerce;
+  // W5 (Orders read-through): SEPARATE from `commerce` (customer listing) above — different Shopify
+  // scope (read_orders) + seed. Absent → an empty sandbox directory (dark) until a live Admin-API
+  // adapter is human-enabled.
+  orderCommerce?: OrderListingCommerce;
+  // W5 Task 6 (Payments & Payouts): read-through of Shopify's payouts (system of record) — PalUp
+  // never touches this money, it only reads it. Absent -> `SandboxPayoutsPort({})`, an unseeded
+  // in-memory sandbox that returns an empty list per tenant (honest-empty, never a fabricated
+  // payout), same convention as `orderCommerce`/`commerce` above until a live Shopify-Payments
+  // adapter is human-enabled.
+  payouts?: PayoutsPort;
+  // W5 Task 8 (issue_refund executor wiring): injectable for tests, same "sandbox default until a
+  // live adapter is human-enabled" convention as `payouts`/`orderCommerce` above. Absent ->
+  // `SandboxRefundAdapter` — records the refund intent, never issues real money.
+  refundPort?: RefundPort;
   comms?: CampaignCommsPort;
   proposalStore?: ProposalStore;
   rulesStore?: MerchantRulesStore;
@@ -85,6 +108,9 @@ export async function buildServer(opts?: {
   const runtimeResult = opts?.store ? undefined : await createRuntimeStore();
   const store: RuntimeStatePort = opts?.store ?? runtimeResult!.store;
   const commerce: CustomerListingCommerce = opts?.commerce ?? new SandboxCustomerDirectory({});
+  const orderCommerce: OrderListingCommerce = opts?.orderCommerce ?? new SandboxOrderDirectory({});
+  const payouts: PayoutsPort = opts?.payouts ?? new SandboxPayoutsPort({});
+  const refundPort: RefundPort = opts?.refundPort ?? new SandboxRefundAdapter();
   // SandboxCommsAdapter records every send and NEVER delivers — the only comms adapter this service
   // may default to until a real (still consent/DLP-gated) provider adapter is wired + prod-enabled.
   const comms: CampaignCommsPort = opts?.comms ?? new SandboxCommsAdapter();
@@ -293,7 +319,8 @@ export async function buildServer(opts?: {
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
     registerInternalInsightsRoutes(merchantPlane, { learnedStore });
     registerInternalVoiceRoutes(merchantPlane, { state: store, proposalStore, rulesStore, learnedStore });
-    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus, learnedStore });
+    registerInternalRefundRoutes(merchantPlane, { state: store, proposalStore, rulesStore, refundPort });
+    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus, learnedStore, refundPort });
     registerKillRoutes(merchantPlane, { state: store, bus });
     registerAuditRoutes(merchantPlane, { state: store });
     registerEventsRoutes(merchantPlane, { bus });
@@ -301,6 +328,8 @@ export async function buildServer(opts?: {
     registerLearnedRoutes(merchantPlane, { learnedStore });
     registerHomeRoutes(merchantPlane, { state: store, goalStore });
     registerActivityRoutes(merchantPlane, { state: store });
+    registerOrdersRoutes(merchantPlane, { orderCommerce, state: store });
+    registerPaymentsRoutes(merchantPlane, { payouts, state: store });
   });
 
   return app;

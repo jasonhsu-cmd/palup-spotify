@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { requirePermission } from "@palup/identity-shopify";
-import type { CampaignCommsPort, LearnedStore, MerchantRulesStore, ProposalCategory, ProposalStatus, ProposalStore, RuntimeStatePort } from "@palup/platform-ports";
+import type { CampaignCommsPort, LearnedStore, MerchantRulesStore, ProposalCategory, ProposalStatus, ProposalStore, RefundPort, RuntimeStatePort } from "@palup/platform-ports";
 import {
   KillSwitchError,
   ProposalNotFoundError,
@@ -67,6 +67,10 @@ export interface ApprovalsRoutesDeps {
    *  voice change is ever written, and only reachable here (on approval), never on proposal
    *  creation (`internal-voice.ts`'s route never touches this store). */
   learnedStore: LearnedStore;
+  /** W5 Task 8: needed by approve for an `issue_refund`/`refund` proposal — `buildEngineDeps`
+   *  resolves it to `refundExecutor(refundPort)`, the ONLY place a refund side-effect is ever
+   *  issued, and only reachable here (on approval), never on proposal creation. */
+  refundPort: RefundPort;
   /** T7: published to on a successful approve/reject so an open `GET /events` connection for this
    *  tenant live-updates. Best-effort — see `events.ts`'s module header; never affects the response
    *  or the store's own transition, which has already committed by the time we publish. */
@@ -231,6 +235,8 @@ export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRou
           // agent-proposed rule-envelope change via `applyRuleChangeFromProposal`. Already a route
           // dep (`deps.rulesStore` feeds `createRulesProvider` above too), just threaded through here.
           rulesStore: deps.rulesStore,
+          // W5 Task 8: needed to resolve `issue_refund` -> `refundExecutor(refundPort)`.
+          refundPort: deps.refundPort,
         });
 
         try {

@@ -62,3 +62,7 @@ export {
 // future `@palup/agent-runtime` consumer (e.g. `merchant-backend`'s `GET/PUT /rules`, task 4) can
 // import everything from one place, exactly like `ProposalStore`'s re-export via this same file.
 export * from "./rules.js";
+// W5 Task 7: the refund executor — agent-proposed/human-approved refunds route through W1 — named
+// exports (not `export *`), same reason as win-back/insight-synthesizer/voice above. Dark: nothing
+// wires this into the live registry yet (Task 8).
+export { refundExecutor, REFUND_ACTION_TYPE, REFUND_AGENT_TYPE } from "./refund.js";

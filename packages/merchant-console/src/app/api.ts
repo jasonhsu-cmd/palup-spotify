@@ -1,4 +1,14 @@
-import type { MerchantRuleSet, PalupFloor, Proposal, ProposalCategory, ProposalStatus, RulePreset } from "@palup/platform-ports";
+import type {
+  FeeLine,
+  MerchantOrderSummary,
+  MerchantRuleSet,
+  PalupFloor,
+  Payout,
+  Proposal,
+  ProposalCategory,
+  ProposalStatus,
+  RulePreset,
+} from "@palup/platform-ports";
 
 // The Approval Center's typed API client (W1-UI Task 1). Mirrors W1-API's wire contract exactly
 // (packages/merchant-backend/src/routes/{approvals,kill,audit,events}.ts) — `Proposal` is
@@ -185,6 +195,33 @@ export interface LearnedExport {
 // also sends — see rules.ts's `POST /rules/preview` handler) so the console can render what a
 // PalUp floor would actually clamp before the merchant commits via `putRules`.
 
+// W5 (Orders + Payments & Payouts) — mirrors merchant-backend's wire contract
+// (routes/orders.ts's OrderView + orders/touchpoints.ts's OrderTouchpoint; payments/read-model.ts's
+// PaymentsView). MerchantOrderSummary/Payout/FeeLine are imported as TYPES from @palup/platform-ports
+// (already a dependency); the backend-only composite DTOs are mirrored locally, same as HomeSummary.
+
+export interface OrderTouchpoint {
+  orderRef: string;
+  seq: number;
+  at: string;
+  actor: string;
+  action: string;
+}
+
+export interface OrderView extends MerchantOrderSummary {
+  touchpoints: OrderTouchpoint[];
+  adminPath: string;
+}
+
+export interface PaymentsView {
+  period: string;
+  payouts: Payout[];
+  payoutTotalUsd: number;
+  fee: FeeLine;
+  payoutsAdminPath: string;
+  trustNote: string;
+}
+
 export interface ApiClient {
   listApprovals(q: {
     status?: ProposalStatus | string;
@@ -218,6 +255,8 @@ export interface ApiClient {
     capped: Partial<Record<ProposalCategory, string[]>>;
   }>;
   applyRulePreset(presetId: string): Promise<{ envelope: MerchantRuleSet; bigJump: boolean }>;
+  getOrders(): Promise<{ items: OrderView[]; source: "live" | "unavailable"; sourceNote: string }>;
+  getPayments(): Promise<PaymentsView>;
   /** Subscribes to the tenant's SSE `/events` stream; returns an unsubscribe function. Best-effort
    *  live nudge only (events.ts's own contract) — a dropped/never-opened stream never loses data,
    *  because the store (`listApprovals`/`getKill`) stays the source of truth (see
@@ -388,6 +427,12 @@ export function makeApiClient(args: MakeApiClientArgs): ApiClient {
         method: "POST",
         body: JSON.stringify({ presetId }),
       });
+    },
+    async getOrders() {
+      return request<{ items: OrderView[]; source: "live" | "unavailable"; sourceNote: string }>("/orders");
+    },
+    async getPayments() {
+      return request<PaymentsView>("/payments");
     },
     openEvents(onEvent, onStreamError) {
       let closed = false;

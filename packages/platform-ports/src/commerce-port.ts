@@ -139,6 +139,12 @@ export interface CommercePort {
    * for the dev/test/staging stand-in.
    */
   listCustomersWithLastOrder?(ctx: { tenantId: string }): Promise<CustomerLastOrder[]>;
+  /**
+   * W5 Orders screen — enumerates THIS TENANT's recent orders for read-through display. OPTIONAL for
+   * the same reason as `listCustomersWithLastOrder`: tenant-wide enumeration only an Admin-API-scoped
+   * adapter can implement. A per-shopper Customer Account API adapter cannot, so it is not required.
+   */
+  listOrders?(ctx: { tenantId: string }, opts?: { limit?: number }): Promise<MerchantOrderSummary[]>;
 }
 
 /** One tenant customer + their most recent order timestamp — the minimal shape the win-back agent's
@@ -174,5 +180,52 @@ export class SandboxCustomerDirectory implements CustomerListingCommerce {
 
   async listCustomersWithLastOrder(ctx: { tenantId: string }): Promise<CustomerLastOrder[]> {
     return (this.customersByTenant[ctx.tenantId] ?? []).map((c) => ({ ...c }));
+  }
+}
+
+/**
+ * A tenant-facing order SUMMARY for the merchant Orders screen (W5). Deliberately NARROW and
+ * display-oriented — NOT the per-shopper support `Order` above (which carries a `shopperId` and
+ * line items for account-scoped support answers). `customerLabel` is a display string only
+ * ("Jamie R." / "Guest"), never a raw email/PII field. `id` is also the Shopify admin deep-link key.
+ */
+export interface MerchantOrderSummary {
+  id: string;
+  /** Human order number, e.g. "#1001". */
+  orderNumber: string;
+  /** ISO-8601 placement timestamp. */
+  placedAt: string;
+  totalUsd: number;
+  currency: string;
+  /** Shopify financial status: "paid" | "refunded" | "partially_refunded" | "pending" | ... */
+  financialStatus: string;
+  /** Shopify fulfilment status: "fulfilled" | "unfulfilled" | "partial" | "restocked". */
+  fulfillmentStatus: string;
+  /** Display-only customer label (no raw PII). */
+  customerLabel: string;
+}
+
+/**
+ * The narrow capability the W5 Orders screen depends on — deliberately NOT the full `CommercePort`
+ * (most per-shopper adapters cannot enumerate a whole tenant's orders; same reasoning as
+ * `CustomerListingCommerce`). A real Shopify Admin-API adapter (`read_orders` scope) is a later,
+ * human-gated staging-enablement concern.
+ */
+export interface OrderListingCommerce {
+  listOrders(ctx: { tenantId: string }, opts?: { limit?: number }): Promise<MerchantOrderSummary[]>;
+}
+
+/**
+ * In-memory sandbox adapter for `listOrders` — seeded fixture data, never calls a real commerce
+ * system. The Orders screen's dev/test/staging seam until a real Shopify Admin-API adapter is wired
+ * (human-gated). Keyed by `tenantId`, so an unseeded tenant gets an empty list, never another
+ * tenant's orders — the same tenant-isolation discipline `SandboxCustomerDirectory` follows.
+ */
+export class SandboxOrderDirectory implements OrderListingCommerce {
+  constructor(private readonly ordersByTenant: Readonly<Record<string, MerchantOrderSummary[]>> = {}) {}
+
+  async listOrders(ctx: { tenantId: string }, opts?: { limit?: number }): Promise<MerchantOrderSummary[]> {
+    const all = (this.ordersByTenant[ctx.tenantId] ?? []).map((o) => ({ ...o }));
+    return typeof opts?.limit === "number" ? all.slice(0, opts.limit) : all;
   }
 }

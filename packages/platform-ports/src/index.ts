@@ -35,8 +35,15 @@ export type {
   SubscriptionActionResult,
   CustomerLastOrder,
   CustomerListingCommerce,
+  MerchantOrderSummary,
+  OrderListingCommerce,
 } from "./commerce-port.js";
-export { SUBSCRIPTION_SKIP_CAP, CommerceGuardRefusalError, SandboxCustomerDirectory } from "./commerce-port.js";
+export {
+  SUBSCRIPTION_SKIP_CAP,
+  CommerceGuardRefusalError,
+  SandboxCustomerDirectory,
+  SandboxOrderDirectory,
+} from "./commerce-port.js";
 export type { StorePort } from "./store-port.js";
 export type {
   RuntimeStatePort,
@@ -194,5 +201,12 @@ export {
   AGGREGATE_LEARNING_ADR_ACCEPTED, isAggregateLearningEnabled, MIN_CONTRIBUTING_MERCHANTS,
   anonymizePrivateInsight, InMemoryAggregatePriorStore,
 } from "./aggregate-priors.js";
+export type { Payout, PayoutsPort, FeeLine } from "./payouts-port.js";
+export { SandboxPayoutsPort, requirePayoutsTenant, PALUP_ILLUSTRATIVE_TAKE_RATE, computeFeeLine } from "./payouts-port.js";
+// W5 Task 7 — the ONE money-moving port in W5: dark by construction (default adapter records,
+// never issues real money). Explicit named exports (not `export *`), same reason as the barrel's
+// other value/type splits above.
+export type { RefundRequest, RefundResult, RefundPort } from "./refund-port.js";
+export { SandboxRefundAdapter } from "./refund-port.js";
 // NB: the contract suite imports `vitest`, so it is NOT re-exported here (that would drag a devDep
 // into every prod consumer of the index). Import it via the "./contract/runtime-state" subpath in tests.
