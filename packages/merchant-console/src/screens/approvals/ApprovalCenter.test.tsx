@@ -100,6 +100,12 @@ function fakeApi(initialItems: Proposal[]): ApiClient & { emit: (e: ConsoleEvent
     applyRulePreset: vi.fn(async () => {
       throw new Error("not used by ApprovalCenter");
     }),
+    getOrders: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    getPayments: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
     openEvents: vi.fn((onEvent: (e: ConsoleEvent) => void) => {
       listener = onEvent;
       return () => {
