@@ -1,4 +1,4 @@
-import type { Proposal, ProposalCategory, ProposalStatus } from "@palup/platform-ports";
+import type { MerchantRuleSet, PalupFloor, Proposal, ProposalCategory, ProposalStatus, RulePreset } from "@palup/platform-ports";
 
 // The Approval Center's typed API client (W1-UI Task 1). Mirrors W1-API's wire contract exactly
 // (packages/merchant-backend/src/routes/{approvals,kill,audit,events}.ts) — `Proposal` is
@@ -173,6 +173,18 @@ export interface LearnedExport {
   portabilityNote: string;
 }
 
+// W4-broaden (Task 8) — mirrors merchant-backend's `/rules*` wire contract
+// (src/routes/rules.ts's `GET/PUT /rules`, `GET /rules/floors`, `GET /rules/presets`,
+// `POST /rules/preview`, `POST /rules/apply-preset`). Unlike `AuditEntry`/`ConsoleEvent` above,
+// the payload types here (`MerchantRuleSet`, `PalupFloor`, `RulePreset`) are imported directly
+// from `@palup/platform-ports` rather than hand-mirrored: merchant-console already depends on
+// that package (it is a pure, dependency-free port package — the same package `Proposal`/
+// `ProposalCategory` already come from above), and these three shapes are large/evolving enough
+// that a local copy would drift. `previewRules`'s response type mirrors the route's actual return
+// (`{ before, after, bigJump }` plus the floor-clamp preview fields `effective`/`capped` the route
+// also sends — see rules.ts's `POST /rules/preview` handler) so the console can render what a
+// PalUp floor would actually clamp before the merchant commits via `putRules`.
+
 export interface ApiClient {
   listApprovals(q: {
     status?: ProposalStatus | string;
@@ -194,6 +206,18 @@ export interface ApiClient {
   pinLearned(id: string, pinned: boolean): Promise<LearnedInsight>;
   deleteLearned(id: string): Promise<{ removed: boolean }>;
   exportLearned(): Promise<LearnedExport>;
+  getRules(): Promise<{ envelope: MerchantRuleSet }>;
+  getFloors(): Promise<{ floors: Record<ProposalCategory, PalupFloor> }>;
+  listRulePresets(): Promise<{ presets: RulePreset[] }>;
+  putRules(patch: MerchantRuleSet): Promise<{ envelope: MerchantRuleSet; bigJump: boolean }>;
+  previewRules(patch: MerchantRuleSet): Promise<{
+    before: MerchantRuleSet;
+    after: MerchantRuleSet;
+    bigJump: boolean;
+    effective: MerchantRuleSet;
+    capped: Partial<Record<ProposalCategory, string[]>>;
+  }>;
+  applyRulePreset(presetId: string): Promise<{ envelope: MerchantRuleSet; bigJump: boolean }>;
   /** Subscribes to the tenant's SSE `/events` stream; returns an unsubscribe function. Best-effort
    *  live nudge only (events.ts's own contract) — a dropped/never-opened stream never loses data,
    *  because the store (`listApprovals`/`getKill`) stays the source of truth (see
@@ -334,6 +358,36 @@ export function makeApiClient(args: MakeApiClientArgs): ApiClient {
     },
     async exportLearned() {
       return request<LearnedExport>(`/learned/export`);
+    },
+    async getRules() {
+      return request<{ envelope: MerchantRuleSet }>("/rules");
+    },
+    async getFloors() {
+      return request<{ floors: Record<ProposalCategory, PalupFloor> }>("/rules/floors");
+    },
+    async listRulePresets() {
+      return request<{ presets: RulePreset[] }>("/rules/presets");
+    },
+    async putRules(patch) {
+      return request<{ envelope: MerchantRuleSet; bigJump: boolean }>("/rules", {
+        method: "PUT",
+        body: JSON.stringify(patch),
+      });
+    },
+    async previewRules(patch) {
+      return request<{
+        before: MerchantRuleSet;
+        after: MerchantRuleSet;
+        bigJump: boolean;
+        effective: MerchantRuleSet;
+        capped: Partial<Record<ProposalCategory, string[]>>;
+      }>("/rules/preview", { method: "POST", body: JSON.stringify(patch) });
+    },
+    async applyRulePreset(presetId) {
+      return request<{ envelope: MerchantRuleSet; bigJump: boolean }>("/rules/apply-preset", {
+        method: "POST",
+        body: JSON.stringify({ presetId }),
+      });
     },
     openEvents(onEvent, onStreamError) {
       let closed = false;

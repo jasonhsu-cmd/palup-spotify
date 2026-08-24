@@ -82,6 +82,24 @@ function fakeApi(initialItems: Proposal[]): ApiClient & { emit: (e: ConsoleEvent
     exportLearned: vi.fn(async () => {
       throw new Error("not used by ApprovalCenter");
     }),
+    getRules: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    getFloors: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    listRulePresets: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    putRules: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    previewRules: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
+    applyRulePreset: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
     openEvents: vi.fn((onEvent: (e: ConsoleEvent) => void) => {
       listener = onEvent;
       return () => {
