@@ -79,6 +79,7 @@ export { createAesGcmCrypto, keyScopeSecretName, requireKeyScope, DEFAULT_KEY_SC
 export type {
   MerchantRegistryPort,
   MerchantRecord,
+  MerchantSummary,
   MerchantStatus,
   MerchantRegion,
   MerchantGroundingMode,
@@ -87,7 +88,13 @@ export type {
   MerchantLookupOpts,
   InMemoryMerchantRegistryOpts,
 } from "./merchant-registry-port.js";
-export { createInMemoryMerchantRegistry, normalizePrimaryDomain } from "./merchant-registry-port.js";
+export {
+  createInMemoryMerchantRegistry,
+  normalizePrimaryDomain,
+  clampListActiveLimit,
+  LIST_ACTIVE_DEFAULT_LIMIT,
+  LIST_ACTIVE_MAX_LIMIT,
+} from "./merchant-registry-port.js";
 export type {
   Proposal,
   ProposalCategory,

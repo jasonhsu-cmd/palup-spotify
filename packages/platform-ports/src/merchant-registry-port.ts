@@ -126,6 +126,17 @@ export interface MerchantUpdate {
   primaryDomain?: string;
 }
 
+/**
+ * The row shape `listActive` returns — a deliberately narrow, secret-free ALLOWLIST (ADR-0023), not a
+ * projection of `MerchantRecord` that happens to omit fields. `status` is always `"active"` (the whole
+ * point of the method), included anyway so a consumer never has to assume it from the method name alone.
+ */
+export interface MerchantSummary {
+  tenantId: string;
+  shopDomain: string;
+  status: "active";
+}
+
 export interface MerchantLookupOpts {
   /**
    * Default FALSE: a `suspended`/`uninstalled` merchant resolves to `null`. This is the fail-closed
@@ -159,11 +170,40 @@ export interface MerchantRegistryPort {
   setStatus(tenantId: string, status: MerchantStatus, opts?: { reason?: string }): Promise<MerchantRecord>;
   /** Patch configuration (region/groundingMode/plan). Throws for an unknown tenant or invalid value. */
   update(tenantId: string, patch: MerchantUpdate): Promise<MerchantRecord>;
+  /**
+   * The GOVERNED cross-tenant scan (ADR-0023) — every other method here is a point lookup by an
+   * already-known key; this is the one that walks every `active` merchant. Deliberately narrow so it
+   * cannot become a second, unaudited way to leak a credential or an inactive tenant:
+   *   - ACTIVE-ONLY: a `suspended`/`uninstalled` row never appears, no `includeInactive` escape hatch —
+   *     an operator who needs revoked merchants uses the point lookups with `includeInactive: true`.
+   *   - SECRET-FREE: each item is a `MerchantSummary` (`{tenantId, shopDomain, status}`), never a full
+   *     `MerchantRecord` — the same allowlist discipline as `MerchantRecord` itself, one level narrower.
+   *   - KEYSET PAGINATION on `tenantId`, not offset: stable under concurrent writes, and cheap on a
+   *     btree over (status, tenantId). `cursor` is the last `tenantId` already seen (exclusive); omit
+   *     it for the first page. `limit` defaults to 500 and is clamped to at most 1000 — this is an
+   *     enumeration for operators/batch jobs, not a per-request hot path.
+   *   - `nextCursor` is set ONLY when a full page came back (a partial/empty page is always the last
+   *     one) — the standard "ask for one more than you need" ambiguity does not apply here because a
+   *     short page already proves there is nothing after it.
+   */
+  listActive(opts?: { cursor?: string; limit?: number }): Promise<{ items: MerchantSummary[]; nextCursor?: string }>;
 }
 
 const REGIONS: readonly MerchantRegion[] = ["us", "eu", "uk", "other"];
 const GROUNDING_MODES: readonly MerchantGroundingMode[] = ["off", "general", "full"];
 const STATUSES: readonly MerchantStatus[] = ["active", "suspended", "uninstalled"];
+
+/** `listActive`'s default/max page size — shared by every adapter so behavior does not drift. */
+export const LIST_ACTIVE_DEFAULT_LIMIT = 500;
+export const LIST_ACTIVE_MAX_LIMIT = 1000;
+
+/** Clamp a caller-supplied `limit` to `(0, LIST_ACTIVE_MAX_LIMIT]`, defaulting when absent. Shared so the
+ *  in-memory and Postgres adapters can never disagree on what a given `limit` value means. */
+export function clampListActiveLimit(limit: number | undefined): number {
+  if (limit === undefined) return LIST_ACTIVE_DEFAULT_LIMIT;
+  if (!Number.isFinite(limit) || limit <= 0) return LIST_ACTIVE_DEFAULT_LIMIT;
+  return Math.min(LIST_ACTIVE_MAX_LIMIT, Math.floor(limit));
+}
 
 /** A blank identifier is a cross-tenant wildcard, not a query — reject it on every op (mirrors
  *  VectorPort's `requireNamespace` and RuntimeStatePort's tenant guard). Trims, so a stray space can
@@ -368,6 +408,27 @@ export function createInMemoryMerchantRegistry(opts: InMemoryMerchantRegistryOpt
         if (primaryDomain !== undefined) rec.primaryDomain = primaryDomain;
         return rec;
       });
+    },
+
+    async listActive(listOpts) {
+      const limit = clampListActiveLimit(listOpts?.limit);
+      const cursor = listOpts?.cursor;
+      // Sort by tenantId ASC over ALL active records — the same ordering the Postgres adapter's
+      // `ORDER BY tenant_id ASC` gives, so the two adapters page identically under the shared contract.
+      const activeSorted = Object.values(byTenant)
+        .filter((rec) => rec.status === "active")
+        .sort((a, b) => (a.tenantId < b.tenantId ? -1 : a.tenantId > b.tenantId ? 1 : 0));
+      const afterCursor = cursor === undefined ? activeSorted : activeSorted.filter((rec) => rec.tenantId > cursor);
+      const page = afterCursor.slice(0, limit);
+      const items: MerchantSummary[] = page.map((rec) => ({
+        tenantId: rec.tenantId,
+        shopDomain: rec.shopDomain,
+        status: "active",
+      }));
+      // nextCursor only on a FULL page — a short (or empty) page already proves there is nothing after
+      // it, matching the Postgres adapter's rule exactly so the two never disagree under the contract.
+      const nextCursor = page.length === limit ? page[page.length - 1]?.tenantId : undefined;
+      return nextCursor !== undefined ? { items, nextCursor } : { items };
     },
   };
 }

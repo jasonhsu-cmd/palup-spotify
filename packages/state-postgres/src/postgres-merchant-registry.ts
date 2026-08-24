@@ -1,4 +1,4 @@
-import { normalizePrimaryDomain } from "@palup/platform-ports";
+import { clampListActiveLimit, normalizePrimaryDomain } from "@palup/platform-ports";
 import type {
   MerchantGroundingMode,
   MerchantLookupOpts,
@@ -6,6 +6,7 @@ import type {
   MerchantRegion,
   MerchantRegistryPort,
   MerchantStatus,
+  MerchantSummary,
   MerchantUpdate,
   NewMerchant,
 } from "@palup/platform-ports";
@@ -233,6 +234,12 @@ export class PostgresMerchantRegistry implements MerchantRegistryPort {
     // and the app-level `normalizePrimaryDomain` — applied on every write AND read — is the actual guard;
     // this column only needs to exist.
     await this.sql.query("ALTER TABLE pl_merchant ADD COLUMN IF NOT EXISTS primary_domain text");
+    // `listActive`'s keyset-pagination index (ADR-0023): every predicate it issues is
+    // `WHERE status = 'active' AND tenant_id > $cursor ORDER BY tenant_id`, so a composite btree on
+    // exactly those two columns, in that order, lets Postgres satisfy the whole query — filter, range,
+    // AND the sort — from one index scan instead of a sequential scan over every status. `IF NOT
+    // EXISTS` keeps this call idempotent like every other statement in `migrate()`.
+    await this.sql.query("CREATE INDEX IF NOT EXISTS pl_merchant_active_idx ON pl_merchant (status, tenant_id)");
   }
 
   async create(input: NewMerchant): Promise<MerchantRecord> {
@@ -362,6 +369,51 @@ export class PostgresMerchantRegistry implements MerchantRegistryPort {
         RETURNING ${COLUMNS}`,
       [id, region, groundingMode, patch?.plan ?? null, this.now(), primaryDomain],
     );
+  }
+
+  /**
+   * The governed cross-tenant scan (ADR-0023). Keyset pagination on `tenant_id` (never OFFSET, which
+   * degrades and drifts under concurrent inserts): `tenant_id > $cursor` picks up exactly where the
+   * previous page left off, and `ORDER BY tenant_id ASC` together with `pl_merchant_active_idx` (status,
+   * tenant_id) lets Postgres serve the whole query — filter, range, sort — from one index scan.
+   *
+   * SECRET-FREE BY CONSTRUCTION: the SELECT list is the three allowlisted columns, not `${COLUMNS}` —
+   * there is no `toRecord`/`MerchantRecord` in this path, so a future column added to that constant can
+   * never leak into a `MerchantSummary` by accident.
+   *
+   * `nextCursor` is set ONLY when a full page came back, matching the in-memory oracle exactly (see its
+   * `listActive` for why a short/empty page needs no lookahead).
+   *
+   * AUDIT (concern, not silently skipped): the port's own header says mutations are audited by the
+   * CALLER via `RuntimeStatePort.audit`, which is tenant-scoped (`{tenantId}` context) — this is a READ,
+   * and a cross-tenant one at that, so there is no single tenant to scope an entry to and no audit seam
+   * on this registry to hook into. Per ADR-0023's intent this enumeration should still be audited
+   * end-to-end; that is left to whatever operator surface calls `listActive` (it can log the caller +
+   * cursor + result count itself), rather than inventing a cross-tenant write here that this port's
+   * design explicitly does not have a home for.
+   */
+  async listActive(opts?: { cursor?: string; limit?: number }): Promise<{ items: MerchantSummary[]; nextCursor?: string }> {
+    const limit = clampListActiveLimit(opts?.limit);
+    const cursor = opts?.cursor;
+    const { rows } = await this.sql.query<{ tenant_id: string; shop_domain: string }>(
+      cursor === undefined
+        ? `SELECT tenant_id, shop_domain FROM pl_merchant
+            WHERE status = 'active'
+            ORDER BY tenant_id ASC
+            LIMIT $1`
+        : `SELECT tenant_id, shop_domain FROM pl_merchant
+            WHERE status = 'active' AND tenant_id > $2
+            ORDER BY tenant_id ASC
+            LIMIT $1`,
+      cursor === undefined ? [limit] : [limit, cursor],
+    );
+    const items: MerchantSummary[] = rows.map((row) => ({
+      tenantId: row.tenant_id,
+      shopDomain: row.shop_domain,
+      status: "active",
+    }));
+    const nextCursor = rows.length === limit ? rows[rows.length - 1]?.tenant_id : undefined;
+    return nextCursor !== undefined ? { items, nextCursor } : { items };
   }
 
   /** Shared mutation tail: an UPDATE that matches no row must THROW, never insert — the port forbids
