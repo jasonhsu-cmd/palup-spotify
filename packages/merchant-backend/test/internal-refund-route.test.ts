@@ -121,6 +121,78 @@ describe("POST /_internal/propose-refund", () => {
     await app.close();
   });
 
+  // Coordinator review follow-up: the two tests above both used a merchant `maxUsd:200` that EQUALS
+  // `PALUP_FLOORS.refund.maxAutoUsd` (200), so they can't isolate "the inviolable PLATFORM floor is
+  // what capped it" from "the merchant's own (coincidentally identical) number capped it". These two
+  // tests use a merchant rule GENUINELY LOOSER than the floor (maxUsd: 1000) so only `clampToFloor`
+  // pulling the auto-limit down to the $200 platform ceiling — never the merchant's own $1000 — can
+  // explain the observed behavior. If `clampToFloor` were ever bypassed (the merchant's raw $1000
+  // used instead of the floor), the $500 case below would wrongly auto-execute.
+  it("a merchant rule genuinely LOOSER than the floor ($1000) still proposes above the $200 floor — the platform floor binds, not the merchant's number", async () => {
+    const store = new InMemoryRuntimeStore();
+    const proposalStore = new InMemoryProposalStore(store);
+    const rulesStore = new InMemoryMerchantRulesStore(store);
+    await rulesStore.set({ tenantId: "shop-1" }, { refund: { allowedAuto: true, maxUsd: 1000 } }, "owner", "merchant_set");
+    const refundPort = new SandboxRefundAdapter();
+    const app = await buildServer({
+      store,
+      identity: makeTestIdentity("shop-1"),
+      proposalStore,
+      rulesStore,
+      refundPort,
+    });
+
+    // $500 is > the $200 platform floor but well within the merchant's own $1000 ceiling — a
+    // proposal here can ONLY be explained by clampToFloor pulling the auto-limit down to $200.
+    const res = await app.inject({
+      method: "POST",
+      url: "/_internal/propose-refund",
+      headers: bearer(),
+      payload: { orderRef: "1001", amountUsd: 500 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().kind).toBe("proposed");
+
+    expect(refundPort.issued).toHaveLength(0);
+    const list = await proposalStore.list({ tenantId: "shop-1" });
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0]?.status).toBe("pending");
+
+    await app.close();
+  });
+
+  it("a merchant rule genuinely LOOSER than the floor ($1000) still auto-executes AT the $150 within-floor amount", async () => {
+    const store = new InMemoryRuntimeStore();
+    const proposalStore = new InMemoryProposalStore(store);
+    const rulesStore = new InMemoryMerchantRulesStore(store);
+    await rulesStore.set({ tenantId: "shop-1" }, { refund: { allowedAuto: true, maxUsd: 1000 } }, "owner", "merchant_set");
+    const refundPort = new SandboxRefundAdapter();
+    const app = await buildServer({
+      store,
+      identity: makeTestIdentity("shop-1"),
+      proposalStore,
+      rulesStore,
+      refundPort,
+    });
+
+    // $150 is within BOTH the $200 platform floor and the merchant's $1000 ceiling — proves the
+    // floor is the binding constraint (not that the merchant's $1000 disabled auto-act entirely).
+    const res = await app.inject({
+      method: "POST",
+      url: "/_internal/propose-refund",
+      headers: bearer(),
+      payload: { orderRef: "1001", amountUsd: 150, reason: "goodwill" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().kind).toBe("executed");
+
+    expect(refundPort.issued).toEqual([{ tenantId: "shop-1", orderRef: "1001", amountUsd: 150, reason: "goodwill" }]);
+    const list = await proposalStore.list({ tenantId: "shop-1" });
+    expect(list.items).toHaveLength(0);
+
+    await app.close();
+  });
+
   it("400s a malformed body (missing orderRef / non-number amount)", async () => {
     const store = new InMemoryRuntimeStore();
     const app = await buildServer({
