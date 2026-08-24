@@ -6,17 +6,30 @@
 // never widen either function to a default branch that executes/validates something unregistered.
 
 import { randomUUID } from "node:crypto";
-import type { CampaignCommsPort, LearnedStore, ProposalCategory, ProposalStore, RuntimeStatePort } from "@palup/platform-ports";
-import { campaignExecutor, voiceChangeExecutor, type EngineDeps, type Executor, type PreconditionValidator, type RulesProvider } from "@palup/agent-runtime";
+import type { CampaignCommsPort, LearnedStore, MerchantRulesStore, ProposalCategory, ProposalStore, RuntimeStatePort } from "@palup/platform-ports";
+import {
+  applyRuleChangeFromProposal,
+  campaignExecutor,
+  voiceChangeExecutor,
+  RULE_CHANGE_ACTION_TYPE,
+  type EngineDeps,
+  type Executor,
+  type PreconditionValidator,
+  type RulesProvider,
+} from "@palup/agent-runtime";
 
 /** Everything a registered executor/validator might need to resolve. Grows as new run-time agents
  *  (beyond the win-back campaign agent) land their own action types/categories.
  *  `learnedStore` (W3 Task 6): needed to resolve `change_voice` -> `voiceChangeExecutor` — optional
  *  because it is irrelevant to every OTHER registered action type; `resolveExecutor` throws a clear
- *  error if a `change_voice` proposal is approved without one wired, rather than silently no-op'ing. */
+ *  error if a `change_voice` proposal is approved without one wired, rather than silently no-op'ing.
+ *  `rulesStore` (W4-broaden Task 7): needed to resolve `change_rules` -> the executor that applies an
+ *  agent-proposed rule-envelope change via `applyRuleChangeFromProposal` — same optional-because-
+ *  irrelevant-to-other-types convention, same fail-closed throw if missing. */
 export interface EngineWiringDeps {
   comms: CampaignCommsPort;
   learnedStore?: LearnedStore;
+  rulesStore?: MerchantRulesStore;
 }
 
 /**
@@ -24,8 +37,12 @@ export interface EngineWiringDeps {
  * win-back agent's `campaignExecutor` bound to `deps.comms`; `change_voice` (W3 Task 6) -> the
  * insight synthesizer's `voiceChangeExecutor` bound to `deps.learnedStore` — this is the ONLY place
  * a voice change is ever actually written, and only reachable via the approve path
- * (`executeApproved`), never on proposal creation. Throws on any unregistered type —
- * `executeApproved` must never fall through to a silent no-op for an action it doesn't recognize.
+ * (`executeApproved`), never on proposal creation. `change_rules` (W4-broaden Task 7) -> a closure
+ * that calls `applyRuleChangeFromProposal(..., deps.rulesStore, ...)` — the ONLY place an
+ * agent-proposed rule-envelope change is ever actually written to `MerchantRulesStore`, and only
+ * reachable here, post human-approval, never on proposal creation (CLAUDE.md §3.1). Throws on any
+ * unregistered type — `executeApproved` must never fall through to a silent no-op for an action it
+ * doesn't recognize.
  */
 export function resolveExecutor(actionType: string, deps: EngineWiringDeps): Executor {
   switch (actionType) {
@@ -36,6 +53,15 @@ export function resolveExecutor(actionType: string, deps: EngineWiringDeps): Exe
         throw new Error("resolveExecutor: change_voice requires a learnedStore, none was wired");
       }
       return voiceChangeExecutor(deps.learnedStore, randomUUID, () => new Date().toISOString());
+    case RULE_CHANGE_ACTION_TYPE:
+      if (!deps.rulesStore) {
+        throw new Error(`resolveExecutor: ${RULE_CHANGE_ACTION_TYPE} requires a rulesStore, none was wired`);
+      }
+      return async (input) => {
+        // The proposal already passed human approval + the kill/status guard in executeApproved.
+        await applyRuleChangeFromProposal({ action: input.action }, deps.rulesStore!, input.ctx, input.agentId);
+        return { ok: true, detail: "rule change applied (agent_proposed, post-approval)" };
+      };
     default:
       throw new Error(`resolveExecutor: no executor registered for action type "${actionType}"`);
   }
@@ -46,10 +72,11 @@ export function resolveExecutor(actionType: string, deps: EngineWiringDeps): Exe
  * immediately before executing an approved proposal (the world may have moved on since it was
  * created). v1 is minimal: `campaign` always validates (a win-back send has no time-sensitive
  * precondition to re-check beyond what the kill-switch/status-guard in `executeApproved` already
- * enforce); `autonomy_scope` (W3 Task 6 — voice changes) likewise always validates: there is no
- * external state (stock, discount code, budget) that could have moved on for a voice-text change.
- * Throws on any unregistered category — never a silent always-valid for a category this registry
- * doesn't know about yet.
+ * enforce); `autonomy_scope` (W3 Task 6 — voice changes; W4-broaden Task 7 — agent-proposed rule
+ * changes share this same category) likewise always validates: the human approval itself IS the
+ * gate for both — there is no time-sensitive external state (stock, discount code, budget) that
+ * could have moved on since the proposal was created. Throws on any unregistered category — never a
+ * silent always-valid for a category this registry doesn't know about yet.
  *
  * TODO(v2): add real per-category revalidation as agents that need it land — e.g. `discount` should
  * re-check the merchant's current rule caps (the discount % might have been tightened since the
@@ -77,6 +104,8 @@ export interface BuildEngineDepsInput {
   comms: CampaignCommsPort;
   /** W3 Task 6: needed only when `actionType === "change_voice"` — see `EngineWiringDeps`. */
   learnedStore?: LearnedStore;
+  /** W4-broaden Task 7: needed only when `actionType === "change_rules"` — see `EngineWiringDeps`. */
+  rulesStore?: MerchantRulesStore;
 }
 
 /** Composes a full `EngineDeps` for the approve path (`executeApproved`) from the registry above —
@@ -84,7 +113,7 @@ export interface BuildEngineDepsInput {
  *  forward so the registry (and its fail-closed guarantees) stays the single place actions/
  *  categories are wired up. */
 export function buildEngineDeps(input: BuildEngineDepsInput): EngineDeps {
-  const wiring: EngineWiringDeps = { comms: input.comms, learnedStore: input.learnedStore };
+  const wiring: EngineWiringDeps = { comms: input.comms, learnedStore: input.learnedStore, rulesStore: input.rulesStore };
   return {
     store: input.store,
     state: input.state,

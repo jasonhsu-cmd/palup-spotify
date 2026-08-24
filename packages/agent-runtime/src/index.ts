@@ -49,6 +49,13 @@ export {
   VOICE_AGENT_TYPE,
   type ProposeVoiceChangeInput,
 } from "./voice.js";
+// W4-broaden Task 7: agent-proposed rule changes route through W1 — named exports (not `export *`),
+// same reason as win-back/insight-synthesizer/voice above.
+export {
+  RULE_CHANGE_ACTION_TYPE,
+  buildRuleChangeAction,
+  applyRuleChangeFromProposal,
+} from "./rule-change-proposal.js";
 // W4-min: `MerchantRulesStore`/`CONSERVATIVE_DEFAULTS`/`PALUP_FLOORS`/etc. are DEFINED in
 // `@palup/platform-ports` (moved there, task 5 — see `rules.ts`'s header) and re-exported by
 // `rules.ts`; `createRulesProvider` stays defined here. `export *` surfaces both together so a

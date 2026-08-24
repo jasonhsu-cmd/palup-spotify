@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { SandboxCommsAdapter, InMemoryRuntimeStore, InMemoryProposalStore } from "@palup/platform-ports";
+import { SandboxCommsAdapter, InMemoryRuntimeStore, InMemoryProposalStore, InMemoryMerchantRulesStore } from "@palup/platform-ports";
 import { createRulesProvider } from "@palup/agent-runtime";
-import { InMemoryMerchantRulesStore } from "@palup/platform-ports";
 import { resolveExecutor, resolveValidator, buildEngineDeps } from "../src/engine-wiring.js";
 
 // Task 1 (W1-API): the executor/validator registry the approve path (`executeApproved`) is built
@@ -34,6 +33,29 @@ describe("resolveExecutor", () => {
   it("throws on an unregistered action type — never a silent no-op", () => {
     expect(() => resolveExecutor("mystery", { comms: new SandboxCommsAdapter() })).toThrow(/no executor/i);
   });
+
+  // W4-broaden Task 7: change_rules -> the executor that applies an agent-proposed rule-envelope
+  // change via applyRuleChangeFromProposal, writing to the injected MerchantRulesStore.
+  it("routes change_rules to the rule-change executor, which writes the patch to rulesStore", async () => {
+    const state = new InMemoryRuntimeStore();
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+    const exec = resolveExecutor("change_rules", { comms: new SandboxCommsAdapter(), rulesStore });
+
+    const result = await exec({
+      ctx: { tenantId: "t1" },
+      agentId: "win_back_agent",
+      agentType: "win_back",
+      action: { type: "change_rules", params: { patch: { discount: { allowedAuto: true, maxPct: 25 } } } },
+    });
+
+    expect(result.ok).toBe(true);
+    const envelope = await rulesStore.get({ tenantId: "t1" });
+    expect(envelope.discount).toEqual({ allowedAuto: true, maxPct: 25 });
+  });
+
+  it("throws resolving change_rules without a rulesStore wired — never a silent no-op", () => {
+    expect(() => resolveExecutor("change_rules", { comms: new SandboxCommsAdapter() })).toThrow(/rulesStore/i);
+  });
 });
 
 describe("resolveValidator", () => {
@@ -63,6 +85,32 @@ describe("resolveValidator", () => {
 
   it("throws on an unregistered category — never a silent always-valid", () => {
     expect(() => resolveValidator("discount", { comms: new SandboxCommsAdapter() })).toThrow(/no validator/i);
+  });
+
+  // W4-broaden Task 7: change_rules proposals classify to autonomy_scope (same category W3's voice
+  // changes use) — the human approval itself is the gate, no time-sensitive precondition to re-check.
+  it("autonomy_scope always validates — the human approval IS the gate", async () => {
+    const validator = resolveValidator("autonomy_scope", { comms: new SandboxCommsAdapter() });
+    const result = await validator(
+      {
+        id: "p1",
+        tenantId: "t1",
+        agentId: "win_back_agent",
+        agentType: "win_back",
+        action: { type: "change_rules", params: { patch: {} } },
+        category: "autonomy_scope",
+        rationale: "r",
+        boundaryReasons: [],
+        reversalPlan: { reversible: true, plan: "restore the prior envelope" },
+        preconditions: {},
+        status: "pending",
+        version: 0,
+        createdAt: "2026-01-01T00:00:00Z",
+        expiresAt: "2026-01-08T00:00:00Z",
+      },
+      { tenantId: "t1" },
+    );
+    expect(result.valid).toBe(true);
   });
 });
 
@@ -110,5 +158,32 @@ describe("buildEngineDeps", () => {
         comms: new SandboxCommsAdapter(),
       }),
     ).toThrow(/no executor/i);
+  });
+
+  // W4-broaden Task 7: threading rulesStore through composes a working change_rules executor.
+  it("threads rulesStore through to compose a working change_rules executor", async () => {
+    const state = new InMemoryRuntimeStore();
+    const store = new InMemoryProposalStore(state);
+    const rules = createRulesProvider(new InMemoryMerchantRulesStore(state));
+    const rulesStore = new InMemoryMerchantRulesStore(state);
+
+    const deps = buildEngineDeps({
+      store,
+      state,
+      rules,
+      actionType: "change_rules",
+      category: "autonomy_scope",
+      comms: new SandboxCommsAdapter(),
+      rulesStore,
+    });
+
+    const execResult = await deps.executor({
+      ctx: { tenantId: "t1" },
+      agentId: "win_back_agent",
+      agentType: "win_back",
+      action: { type: "change_rules", params: { patch: { discount: { allowedAuto: true, maxPct: 25 } } } },
+    });
+    expect(execResult.ok).toBe(true);
+    expect((await rulesStore.get({ tenantId: "t1" })).discount).toEqual({ allowedAuto: true, maxPct: 25 });
   });
 });

@@ -227,6 +227,10 @@ export function registerApprovalsRoutes(app: FastifyInstance, deps: ApprovalsRou
           category: proposal.category,
           comms: deps.comms,
           learnedStore: deps.learnedStore,
+          // W4-broaden Task 7: needed to resolve `change_rules` -> the executor that applies an
+          // agent-proposed rule-envelope change via `applyRuleChangeFromProposal`. Already a route
+          // dep (`deps.rulesStore` feeds `createRulesProvider` above too), just threaded through here.
+          rulesStore: deps.rulesStore,
         });
 
         try {

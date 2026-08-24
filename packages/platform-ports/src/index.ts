@@ -117,6 +117,8 @@ export type {
   RuleSetChangeResult,
   MerchantRulesStore,
   AutoEligibleDimension,
+  SubscriptionSubAction,
+  QuietHours,
 } from "./merchant-rules-store.js";
 export {
   PALUP_FLOORS,
@@ -128,6 +130,8 @@ export {
   InMemoryMerchantRulesStore,
   clampToFloor,
 } from "./merchant-rules-store.js";
+export type { RulePreset } from "./rule-presets.js";
+export { CONSERVATIVE_DAY1_PRESET, VERTICAL_PRESETS, listPresets, findPreset } from "./rule-presets.js";
 export type {
   PrimaryGoalKind,
   PrimaryGoal,

@@ -27,10 +27,44 @@ import type { RuntimeStateCtx, RuntimeStatePort } from "./runtime-state-port.js"
  * `MerchantRulesStore`. Shares its numeric shape with `AutoActLimit` — this IS the per-category entry a
  * merchant's stored rule set holds; `createRulesProvider` (agent-runtime) reads one of these and clamps
  * it into an `AutoActLimit` at classify-time via `clampToFloor`. */
+export type SubscriptionSubAction = "pause" | "skip" | "cancel";
+
+/** A daily "no auto-sends outside these hours" window, in the tenant's local time (hour-of-day,
+ * 0-23). `startHour > endHour` means the window wraps past midnight (e.g. 21 → 9). Merchant-only
+ * policy — PalUp does not floor comms timing, only comms volume (see `massSendRecipientFloor`). */
+export interface QuietHours {
+  startHour: number;
+  endHour: number;
+}
+
 export interface CategoryRuleEnvelope {
   allowedAuto: boolean;
   maxPct?: number;
   maxUsd?: number;
+  /** Whether this category's discount may STACK with another active discount/promo. No PalUp floor —
+   * merchant-only policy; flagged by `isBigJump` when turned on (more autonomy: two discounts compound). */
+  stackable?: boolean;
+  /** Rolling-period (see `PalupFloor.maxAutoPeriodUsd`) spend budget in USD, e.g. ad-spend per week.
+   * Inviolable: `clampToFloor` applies the platform's period ceiling even when this is unset. */
+  periodBudgetUsd?: number;
+  /** Minimum acceptable ROI multiple (e.g. 4 = 4x) for an auto-approved ad buy. No PalUp floor —
+   * merchant-only policy. LOWERING this is a `isBigJump`-flagged autonomy increase (the agent may
+   * auto-buy on worse economics). */
+  roiFloor?: number;
+  /** Max USD the agent may auto-credit to match a competitor's price. Rides the refund-abuse dollar
+   * floor (`PalupFloor.maxAutoUsd`) — inviolable, fails closed to 0 when unset. */
+  priceMatchMaxUsd?: number;
+  /** Subscription self-serve actions the agent may take unattended. No PalUp floor — merchant-only
+   * policy. Adding an action the agent could not previously take (esp. `"cancel"`) is an
+   * `isBigJump`-flagged autonomy increase. */
+  subscriptionSelfServe?: SubscriptionSubAction[];
+  /** Max outbound comms (e.g. marketing messages) the agent may auto-send per shopper per week. No
+   * PalUp floor for the cap itself (mass-send blast-radius is separately floored elsewhere) —
+   * merchant-only policy. Raising it is an `isBigJump`-flagged autonomy increase. */
+  frequencyCapPerWeek?: number;
+  /** Local hours during which the agent must not auto-send comms. No PalUp floor — merchant-only
+   * policy, passed through unchanged by `clampToFloor`. */
+  quietHours?: QuietHours;
 }
 
 /** A merchant's full automation-rule envelope: one optional entry per `ProposalCategory`. Absent
@@ -56,6 +90,22 @@ export interface AutoActLimit {
   /** Whether the merchant has enabled auto-act for this category at all. `false` forces approval even
    * when every numeric check would otherwise pass. */
   allowedAuto: boolean;
+  /** Rolling-period spend budget in USD, floor-clamped to `PalupFloor.maxAutoPeriodUsd` — see
+   * `CategoryRuleEnvelope.periodBudgetUsd`. */
+  periodBudgetUsd?: number;
+  /** Max USD the agent may auto-credit to match a competitor's price, floor-clamped to
+   * `PalupFloor.maxAutoUsd` (rides the refund-abuse ceiling) — see `CategoryRuleEnvelope.priceMatchMaxUsd`. */
+  priceMatchMaxUsd?: number;
+  /** Merchant-only policy pass-through — no PalUp floor; see `CategoryRuleEnvelope.stackable`. */
+  stackable?: boolean;
+  /** Merchant-only policy pass-through — no PalUp floor; see `CategoryRuleEnvelope.roiFloor`. */
+  roiFloor?: number;
+  /** Merchant-only policy pass-through — no PalUp floor; see `CategoryRuleEnvelope.subscriptionSelfServe`. */
+  subscriptionSelfServe?: SubscriptionSubAction[];
+  /** Merchant-only policy pass-through — no PalUp floor; see `CategoryRuleEnvelope.frequencyCapPerWeek`. */
+  frequencyCapPerWeek?: number;
+  /** Merchant-only policy pass-through — no PalUp floor; see `CategoryRuleEnvelope.quietHours`. */
+  quietHours?: QuietHours;
 }
 
 /** PalUp's platform-wide, non-merchant-configurable ceiling — the floor under every merchant's own
@@ -70,6 +120,17 @@ export interface PalupFloor {
    * `classify.ts`'s invariant 1. This is the one number `classifyAction` itself enforces no matter what
    * any `RulesProvider` returns. */
   massSendRecipientFloor: number;
+  /** Platform-wide rolling-period (e.g. weekly) spend ceiling in USD — the spend-sanity floor. The
+   * NUMBER itself is fail-closed: `clampToFloor` always produces a ceiling even when the merchant
+   * sets no period budget at all (never "unlimited"). Only `ad_spend` defines this today — every
+   * other category's period budget clamps to 0. CAVEAT: this only bounds the ceiling `classify.ts`
+   * checks against; `classifyAction` is stateless per call and trusts the `periodSpentUsd` action
+   * param the calling agent supplies (defaulting to 0 when absent) as "spend so far this period" —
+   * so accurate CUMULATIVE enforcement across many auto-approved actions depends on a stateful
+   * producer tracking that running total correctly. That accumulator does not exist yet; it is a
+   * precondition before `ad_spend` auto-act should be enabled for real traffic, not something this
+   * ceiling number provides on its own. */
+  maxAutoPeriodUsd?: number;
 }
 
 /**
@@ -102,7 +163,16 @@ export const PALUP_FLOORS: Readonly<Record<ProposalCategory, PalupFloor>> = {
   // Ad spend is real cash leaving the merchant's account with delayed, hard-to-reverse feedback
   // (a bad campaign can burn budget for days before ROAS data catches it) — $500/action caps the
   // blast radius of one automated buy while a human still owns the campaign-level budget.
-  ad_spend: { maxAutoPct: 100, maxAutoUsd: 500, massSendRecipientFloor: 500 },
+  // maxAutoPeriodUsd (5000): a rolling-period (e.g. weekly) spend-sanity ceiling — the per-action
+  // $500 cap above bounds any ONE auto-approved buy, but a chain of many small auto-approved buys
+  // could still bleed the account dry over days; $5000/period is meant as a second, independent
+  // ceiling on TOTAL auto-spend over that window, and the NUMBER is fail-closed even when the
+  // merchant sets no period budget at all (see `clampToFloor`'s spend-sanity clamp). But the
+  // per-action check in `classify.ts` is stateless and trusts the agent-supplied `periodSpentUsd`
+  // param (defaults to 0 if omitted) — so this ceiling only does real cumulative-spend work once a
+  // stateful accumulator actually feeds it an accurate running total; that accumulator is a
+  // precondition for enabling `ad_spend` auto-act, not something this number guarantees by itself.
+  ad_spend: { maxAutoPct: 100, maxAutoUsd: 500, maxAutoPeriodUsd: 5000, massSendRecipientFloor: 500 },
   // A refund is the single easiest abuse vector for a chat agent (a shopper can talk an agent into
   // "just refund me") — $200/action is an explicit anti-abuse ceiling: enough to resolve routine
   // order issues, low enough that a fraud ring working the auto-refund path can't scale past it
@@ -249,6 +319,15 @@ export function isBigJump(before: CategoryRuleEnvelope, after: CategoryRuleEnvel
   if (!before.allowedAuto && after.allowedAuto) return true;
   if (after.maxPct !== undefined && after.maxPct - (before.maxPct ?? 0) > BIG_JUMP_PCT_DELTA) return true;
   if (after.maxUsd !== undefined && after.maxUsd - (before.maxUsd ?? 0) > BIG_JUMP_USD_DELTA) return true;
+  if (!before.stackable && after.stackable) return true;
+  if (after.periodBudgetUsd !== undefined && after.periodBudgetUsd - (before.periodBudgetUsd ?? 0) > BIG_JUMP_USD_DELTA) return true;
+  if (after.priceMatchMaxUsd !== undefined && after.priceMatchMaxUsd - (before.priceMatchMaxUsd ?? 0) > BIG_JUMP_USD_DELTA) return true;
+  // Lowering the ROI floor = the agent may auto-buy on WORSE economics ⇒ an autonomy increase.
+  if (after.roiFloor !== undefined && before.roiFloor !== undefined && after.roiFloor < before.roiFloor) return true;
+  if (after.frequencyCapPerWeek !== undefined && after.frequencyCapPerWeek - (before.frequencyCapPerWeek ?? 0) > 0) return true;
+  // Adding a self-serve sub-action the agent couldn't do before (esp. "cancel").
+  const beforeSelf = new Set(before.subscriptionSelfServe ?? []);
+  if ((after.subscriptionSelfServe ?? []).some((a) => !beforeSelf.has(a))) return true;
   return false;
 }
 
@@ -330,9 +409,35 @@ function withinFloor(floor: PalupFloor): boolean {
 export function clampToFloor(envelope: CategoryRuleEnvelope, floor: PalupFloor): AutoActLimit {
   const maxPct = Math.min(envelope.maxPct ?? floor.maxAutoPct, floor.maxAutoPct);
   const maxUsd = floor.maxAutoUsd !== undefined ? Math.min(envelope.maxUsd ?? floor.maxAutoUsd, floor.maxAutoUsd) : 0;
+  // Spend-sanity (period): an inviolable rolling-period ceiling that applies EVEN when the merchant
+  // set no period budget at all (fail-closed default to the floor itself, not "unlimited"). Only
+  // `undefined` when the FLOOR doesn't define this dimension for the category AND the merchant also
+  // never set one — a category with no period-budget concept keeps `periodBudgetUsd: undefined`
+  // rather than fabricating a 0 that would misleadingly read as "merchant tried to set a budget and
+  // got clamped to zero."
+  const periodBudgetUsd = floor.maxAutoPeriodUsd !== undefined
+    ? Math.min(envelope.periodBudgetUsd ?? floor.maxAutoPeriodUsd, floor.maxAutoPeriodUsd)
+    : (envelope.periodBudgetUsd !== undefined ? 0 : undefined);
+  // Price-match rides the refund-abuse dollar floor (`floor.maxAutoUsd`) — inviolable, same fail-
+  // closed discipline as `maxUsd`/`maxPct` above: an absent merchant value clamps to 0 (no auto
+  // price-match), and an absent FLOOR ceiling also clamps to 0, never to the merchant's raw number.
+  // NOTE (unconditional, like maxPct/maxUsd — not conditionally spread): every returned `AutoActLimit`
+  // carries a `priceMatchMaxUsd` number, even for categories the merchant never touched this field
+  // on. That is a deliberate departure from the merchant-only fields below (which pass through
+  // `undefined` unchanged) because this one IS floor-derived and inviolable, not merchant policy —
+  // it must never silently read as "no ceiling" by being absent from the object.
+  const priceMatchMaxUsd = floor.maxAutoUsd !== undefined
+    ? Math.min(envelope.priceMatchMaxUsd ?? 0, floor.maxAutoUsd)
+    : 0;
   return {
-    maxPct,
-    maxUsd,
-    allowedAuto: envelope.allowedAuto && withinFloor(floor),
+    maxPct, maxUsd, allowedAuto: envelope.allowedAuto && withinFloor(floor),
+    ...(periodBudgetUsd !== undefined ? { periodBudgetUsd } : {}),
+    priceMatchMaxUsd,
+    // Merchant-only dimensions have no PalUp floor — pass through unchanged (absent stays absent).
+    ...(envelope.stackable !== undefined ? { stackable: envelope.stackable } : {}),
+    ...(envelope.roiFloor !== undefined ? { roiFloor: envelope.roiFloor } : {}),
+    ...(envelope.subscriptionSelfServe !== undefined ? { subscriptionSelfServe: envelope.subscriptionSelfServe } : {}),
+    ...(envelope.frequencyCapPerWeek !== undefined ? { frequencyCapPerWeek: envelope.frequencyCapPerWeek } : {}),
+    ...(envelope.quietHours !== undefined ? { quietHours: envelope.quietHours } : {}),
   };
 }

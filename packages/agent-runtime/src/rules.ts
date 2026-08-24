@@ -108,6 +108,12 @@ const GLOBAL_PALUP_FLOOR: Readonly<PalupFloor> = {
  * looser, even if the stored envelope itself is misconfigured (e.g. `maxPct: 100` or an absurd
  * `maxUsd`). `palupFloor` returns the fixed, category-agnostic `GLOBAL_PALUP_FLOOR` (see above for
  * why it must be category-agnostic and why its specific numbers are safe).
+ *
+ * W4-broaden (Task 3): the `AutoActLimit` this returns now also carries the broadened categorical
+ * fields — `stackable` (discount), `priceMatchMaxUsd` (refund), `subscriptionSelfServe`
+ * (subscription) — straight through from `clampToFloor` (`@palup/platform-ports`), which already
+ * clamps/fails-closed on them (Task 1). No code change needed here: `clampToFloor` does the work,
+ * and `classify.ts`'s categorical gates are the only new reader of these fields.
  */
 export function createRulesProvider(store: MerchantRulesStore): RulesProvider {
   return {
