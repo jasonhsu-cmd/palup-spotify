@@ -1480,8 +1480,8 @@ export async function buildServer(opts?: {
       registry: merchantRegistry!,
       credentials: merchantCredentials!,
       // Task 13 — put-only (structurally, `AdminTokenStore` satisfies `Pick<AdminTokenStore,"put">`).
-      // `undefined` when ADMIN_TOKEN_CUSTODY_ENABLED is off — install behaves byte-identically to before
-      // this task (Task 5's own "absent adminTokens ⇒ zero behaviour change" contract).
+      // ALWAYS constructed (unified-cutover-cleanup, 2026-08-24): the Admin token is now the SOLE install
+      // credential, so custody is unconditional — the old ADMIN_TOKEN_CUSTODY_ENABLED gate is gone.
       adminTokens,
       clientSecret: () => secrets.get(SHOPIFY_APP_SECRET_SCOPE, SHOPIFY_APP_CLIENT_SECRET_NAME),
       fetchFn: opts?.installFetch ?? globalThis.fetch,
@@ -1759,9 +1759,9 @@ export async function buildServer(opts?: {
       // register only then (else 404) — the same inert-by-absence pattern as `queue` above.
       orderQueue,
       // Task 9/13 (ADR-0022 F1/F2) — delete-only (structurally, `AdminTokenStore` satisfies
-      // `Pick<AdminTokenStore,"delete">`). `undefined` when ADMIN_TOKEN_CUSTODY_ENABLED is off, matching
-      // `adminTokens`'s own gating at the install call site above — if custody was never attempted there is
-      // nothing here to ever need deleting, and Task 9's own handler is already a safe no-op on absence.
+      // `Pick<AdminTokenStore,"delete">`). ALWAYS constructed now (unified-cutover-cleanup, 2026-08-24) —
+      // the Admin token is the sole credential; the old ADMIN_TOKEN_CUSTODY_ENABLED gate is gone. Task 9's
+      // shop/redact + app/uninstalled handler still hard-deletes it on teardown.
       adminTokens,
       // Task 9/13 — UNCONDITIONAL, unlike `adminTokens`/`catalogProduct`'s write-plane gating elsewhere in
       // this file: `localCatalogProduct` (Task 8) is always constructed regardless of flags, and a
