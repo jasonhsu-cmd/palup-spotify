@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { requirePermission } from "@palup/identity-shopify";
 import {
-  LearnedInsightNotFoundError, gradeInsight, isSafetyFloorViolation,
+  LearnedInsightNotFoundError, isSafetyFloorViolation,
   type LearnedCategory, type LearnedInsight, type LearnedStore, type TeachingStance,
 } from "@palup/platform-ports";
 import { randomUUID } from "node:crypto";

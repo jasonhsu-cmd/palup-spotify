@@ -67,6 +67,8 @@ export function LearnedView({ api }: LearnedViewProps) {
   const [exportNote, setExportNote] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setState("loading");
@@ -85,14 +87,41 @@ export function LearnedView({ api }: LearnedViewProps) {
 
   const handlePin = useCallback(
     (insight: LearnedInsight) => {
-      api.pinLearned(insight.id, !insight.pinned).then(load, load);
+      setActionError(null);
+      api.pinLearned(insight.id, !insight.pinned).then(load, () => {
+        setActionError(
+          `Couldn't ${insight.pinned ? "unpin" : "pin"} "${insight.text}" — try again.`,
+        );
+      });
     },
     [api, load],
   );
 
-  const handleDelete = useCallback(
-    (id: string) => {
-      api.deleteLearned(id).then(load, load);
+  // Delete is a permanent, destructive act on merchant-owned data — matches the console's other
+  // destructive actions (Kill Switch halt, Reject) in requiring an explicit confirm step before
+  // the API is ever called. This is an inline row-level confirm (no new Dialog dependency) since
+  // it's a single low-stakes toggle, not a governance-boundary action.
+  const handleDeleteClick = useCallback((id: string) => {
+    setActionError(null);
+    setConfirmDeleteId(id);
+  }, []);
+
+  const handleDeleteCancel = useCallback(() => {
+    setConfirmDeleteId(null);
+  }, []);
+
+  const handleDeleteConfirm = useCallback(
+    (insight: LearnedInsight) => {
+      api.deleteLearned(insight.id).then(
+        () => {
+          setConfirmDeleteId(null);
+          load();
+        },
+        () => {
+          setConfirmDeleteId(null);
+          setActionError(`Couldn't delete "${insight.text}" — try again.`);
+        },
+      );
     },
     [api, load],
   );
@@ -161,6 +190,17 @@ export function LearnedView({ api }: LearnedViewProps) {
         the PalUp merchant network are not enabled yet; everything below is learned from your store alone.
       </Note>
 
+      {actionError && (
+        <Note variant="dang">
+          <div className="flex items-center justify-between gap-3">
+            <span>{actionError}</span>
+            <Button variant="ghost" size="sm" onClick={() => setActionError(null)}>
+              Dismiss
+            </Button>
+          </div>
+        </Note>
+      )}
+
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
         <Card className="xl:col-span-2">
           <Tabs value={tab} onValueChange={(v) => setTab(v as TabValue)}>
@@ -204,13 +244,33 @@ export function LearnedView({ api }: LearnedViewProps) {
                             {new Date(insight.updatedAt).toLocaleDateString()}
                           </TableCell>
                           <TableCell>
-                            <div className="flex gap-2">
+                            <div className="flex items-center gap-2">
                               <Button variant="ghost" size="sm" onClick={() => handlePin(insight)}>
                                 {insight.pinned ? "Unpin" : "Pin"}
                               </Button>
-                              <Button variant="ghost" size="sm" onClick={() => handleDelete(insight.id)}>
-                                Delete
-                              </Button>
+                              {confirmDeleteId === insight.id ? (
+                                <>
+                                  <span className="text-[12.5px] text-ink-3">Delete?</span>
+                                  <Button
+                                    variant="danger"
+                                    size="sm"
+                                    onClick={() => handleDeleteConfirm(insight)}
+                                  >
+                                    Confirm
+                                  </Button>
+                                  <Button variant="ghost" size="sm" onClick={handleDeleteCancel}>
+                                    Cancel
+                                  </Button>
+                                </>
+                              ) : (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => handleDeleteClick(insight.id)}
+                                >
+                                  Delete
+                                </Button>
+                              )}
                             </div>
                           </TableCell>
                         </TableRow>

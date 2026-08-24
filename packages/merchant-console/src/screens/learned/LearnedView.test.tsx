@@ -79,11 +79,40 @@ describe("LearnedView", () => {
     expect(api.pinLearned).toHaveBeenCalledWith("l1", true);
   });
 
-  it("deletes an insight via the API", async () => {
+  it("deletes an insight via the API only after confirming", async () => {
     const api = fakeApi([fact({ id: "l1" })]);
     render(<LearnedView api={api} />);
-    await userEvent.click(await screen.findByRole("button", { name: /delete/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /^delete$/i }));
+    // clicking Delete once does NOT immediately call the API — a destructive act needs a confirm
+    expect(api.deleteLearned).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
     expect(api.deleteLearned).toHaveBeenCalledWith("l1");
+  });
+
+  it("cancels a pending delete confirmation without calling the API", async () => {
+    const api = fakeApi([fact({ id: "l1" })]);
+    render(<LearnedView api={api} />);
+    await userEvent.click(await screen.findByRole("button", { name: /^delete$/i }));
+    await userEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(api.deleteLearned).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /^delete$/i })).toBeInTheDocument();
+  });
+
+  it("surfaces a dang error note when pin fails, instead of silently refetching", async () => {
+    const api = fakeApi([fact({ id: "l1", pinned: false, text: "pin me" })]);
+    (api.pinLearned as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
+    render(<LearnedView api={api} />);
+    await userEvent.click(await screen.findByRole("button", { name: /^pin$/i }));
+    expect(await screen.findByText(/couldn't pin "pin me"/i)).toBeInTheDocument();
+  });
+
+  it("surfaces a dang error note when delete fails after confirmation", async () => {
+    const api = fakeApi([fact({ id: "l1", text: "delete me" })]);
+    (api.deleteLearned as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
+    render(<LearnedView api={api} />);
+    await userEvent.click(await screen.findByRole("button", { name: /^delete$/i }));
+    await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
+    expect(await screen.findByText(/couldn't delete "delete me"/i)).toBeInTheDocument();
   });
 
   it("filters the table by tab without fabricating any counts", async () => {
