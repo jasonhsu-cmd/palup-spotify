@@ -4025,7 +4025,12 @@ export async function buildServer(opts?: {
           },
         }
       : undefined;
-  (app as unknown as { catalogSyncSchedulerDeps?: CatalogSyncSchedulerDeps }).catalogSyncSchedulerDeps = catalogSyncSchedulerDeps;
+  // Only assign the property when it is actually defined (the CATALOG_UNIFIED-on path) — an unconditional
+  // assignment here would give the returned `app` a new own-property (value `undefined`) even with the flag
+  // off, breaking the flag-off byte-identical guarantee this whole cutover otherwise holds to.
+  if (catalogSyncSchedulerDeps) {
+    (app as unknown as { catalogSyncSchedulerDeps?: CatalogSyncSchedulerDeps }).catalogSyncSchedulerDeps = catalogSyncSchedulerDeps;
+  }
 
   return app;
 }

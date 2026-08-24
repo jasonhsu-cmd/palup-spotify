@@ -206,7 +206,13 @@ type Refusal =
   | "no_app_secret";
 
 /** An upstream/internal failure: the request was legitimate, we could not complete it. */
-type Failure = "exchange_failed" | "scopes_not_granted" | "delegate_failed" | "custody_failed" | "registry_failed";
+type Failure =
+  | "exchange_failed"
+  | "scopes_not_granted"
+  | "delegate_failed"
+  | "custody_failed"
+  | "registry_failed"
+  | "admin_token_custody_failed";
 
 export type InstallStart = { ok: true; authorizeUrl: string; state: string; ttlSeconds: number } | { ok: false; refused: Refusal };
 export type InstallComplete = { ok: true; shopDomain: string } | { ok: false; refused: Refusal } | { ok: false; failed: Failure };
@@ -479,16 +485,20 @@ async function completeInstallInner(
   // (Task 13) requests exactly `ADMIN_SYNC_SCOPES`, never a write scope (F3's own pin,
   // order-attribution-scope-pinning.test.ts).
   //
-  // Task 13 (forward-carry from Task 5's own review note): a custody failure here is NON-FATAL to the
-  // install. The Admin token is SYNC-PLANE-ONLY (it feeds the catalog-backfill/reconcile jobs); the
-  // DELEGATE token custodied above is what SERVING needs, and it is already safely stored by this point.
-  // Refusing the whole install over a degraded sync-plane capability would strand a merchant with a
-  // perfectly good, servable delegate credential behind a failed install page — worse than landing them
-  // with serving working and sync degraded until a re-install/re-auth re-attempts custody. So: catch, log,
-  // audit `admin_token.custody_failed` (best-effort — a secondary audit-write failure must not abort an
-  // otherwise-successful install either, mirroring every other best-effort audit in this file/package,
-  // e.g. shopify-webhooks.ts's `admin_token.delete_failed`), and fall through to the rest of this function
-  // exactly as if `adminTokens` had been absent.
+  // Task 13 (forward-carry from Task 5's own review note), REVISED by Task 7 review (Critical): a custody
+  // failure here is NON-FATAL to the install ONLY when a delegate token exists — i.e. `deps.catalogUnified`
+  // is false/absent. In that case the Admin token is SYNC-PLANE-ONLY (it feeds the catalog-backfill/
+  // reconcile jobs); the DELEGATE token custodied above is what SERVING needs, and it is already safely
+  // stored by this point, so refusing the whole install over a degraded sync-plane capability would strand
+  // a merchant with a perfectly good, servable delegate credential behind a failed install page.
+  //
+  // UNDER `deps.catalogUnified` THIS IS FALSE: per ADR-0023 D1, no delegate was minted or custodied above
+  // (see the `if (!deps.catalogUnified)` block) — the Admin token IS the sole credential this install
+  // produces. If `adminTokens.put` throws there, "serving is unaffected" is not true: there is nothing else
+  // custodied, and falling through would register the merchant `active` with zero Shopify credentials,
+  // landing them on the OK page while stranded. So under `catalogUnified` this failure is FATAL: still log
+  // + best-effort-audit exactly as below (never surface the token), but then FAIL the install
+  // (`admin_token_custody_failed`) rather than falling through to `registry.create`/`setStatus`.
   if (deps.adminTokens) {
     try {
       // Task 6 (ADR-0023) — custody the paired refresh_token + both expiries alongside the access token,
@@ -508,6 +518,20 @@ async function completeInstallInner(
       // boundary as every other catch in this function.
       const message = (e as Error).message;
       console.error(`[shopify-install] admin token custody failed tenant=${tenantId}: ${message}`);
+      // Task 7 review (Critical, ADR-0023 D1): under `catalogUnified` there is no delegate — the Admin token
+      // is the SOLE credential — so this failure is FATAL, not the degraded-sync-plane story below.
+      const reason = deps.catalogUnified
+        ? `adminTokens.put threw: ${message}; under CATALOG_UNIFIED the Admin token is the SOLE credential ` +
+          "for this install (no delegate was minted/custodied) — the install does NOT complete and no " +
+          "merchant row is registered/reactivated"
+        : `adminTokens.put threw: ${message}; the delegate token is already custodied and the ` +
+          "install continues — sync-plane capability (catalog backfill/reconcile) is degraded until " +
+          "re-custody, but serving is unaffected";
+      const reversalPath = deps.catalogUnified
+        ? "re-run the install/OAuth flow to re-attempt Admin-token custody from scratch — no merchant row was " +
+          "registered, so a fresh install attempt is the correct recovery"
+        : "re-run the install/OAuth flow to re-attempt Admin-token custody (idempotent — re-custody simply " +
+          "overwrites); the delegate token and servability are unaffected in the meantime";
       try {
         await deps.store.audit(
           { tenantId },
@@ -515,21 +539,21 @@ async function completeInstallInner(
             actor: "system:shopify-install",
             action: "admin_token.custody_failed",
             input: { tenantId, shopDomain },
-            decision: {
-              complete: false,
-              reason: `adminTokens.put threw: ${message}; the delegate token is already custodied and the ` +
-                "install continues — sync-plane capability (catalog backfill/reconcile) is degraded until " +
-                "re-custody, but serving is unaffected",
-            },
-            reversalPath:
-              "re-run the install/OAuth flow to re-attempt Admin-token custody (idempotent — re-custody simply " +
-              "overwrites); the delegate token and servability are unaffected in the meantime",
+            decision: { complete: false, reason },
+            reversalPath,
           },
         );
       } catch {
         // Same tradeoff as every other best-effort audit in this file/package: a secondary audit-write
-        // failure must not abort or fail an otherwise-successful install. `console.error` above is the
-        // residual trace.
+        // failure must not swallow the CATALOG_UNIFIED fatal return below — that return is unconditional on
+        // `put` having thrown, independent of whether this audit write itself succeeded. `console.error`
+        // above is the residual trace either way.
+      }
+      // Guaranteed once `adminTokens.put` threw, regardless of the inner audit's own outcome (see above) —
+      // never let this fall through to `registry.create`/`setStatus` and strand a credential-less merchant
+      // on the OK page.
+      if (deps.catalogUnified) {
+        return { ok: false, failed: "admin_token_custody_failed" };
       }
     }
   }

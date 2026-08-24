@@ -3,7 +3,15 @@ import { createHmac } from "node:crypto";
 import Fastify from "fastify";
 import { InMemoryRuntimeStore, createInMemoryMerchantRegistry } from "@palup/platform-ports";
 import type { RuntimeStatePort } from "@palup/platform-ports";
-import { registerShopifyInstallRoutes, tenantIdForShop, type ShopifyInstallDeps, type MerchantCredentialSink } from "../src/routes/shopify-install.js";
+import {
+  registerShopifyInstallRoutes,
+  startInstall,
+  completeInstall,
+  tenantIdForShop,
+  INSTALL_STATE_COOKIE,
+  type ShopifyInstallDeps,
+  type MerchantCredentialSink,
+} from "../src/routes/shopify-install.js";
 
 // Task 5 (ADR-0022 F6/F7) — capturing and custodying the parent Admin offline token at install, under the
 // Task-4 AdminTokenStore, WITHOUT weakening the existing confused-deputy defence: custody must only happen
@@ -255,5 +263,69 @@ describe("Task 13 (forward-carry from Task 5) — admin-token custody failure is
 
     const audits = await store.readAudit({ tenantId: tenantIdForShop(SHOP) });
     expect(audits.some((a) => a.action === "admin_token.custody_failed")).toBe(false);
+  });
+});
+
+describe("Task 7 review (Critical, ADR-0023 D1) — admin-token custody failure under CATALOG_UNIFIED FAILS the install", () => {
+  /** Drive startInstall/completeInstall directly (no Fastify/app.inject) so the assertions can be made
+   *  against the exact `InstallComplete` value, not just the rendered HTTP status. */
+  async function driveInstall(deps: ShopifyInstallDeps, shop = SHOP) {
+    const startQuery = { shop, timestamp: String(Math.floor(Date.now() / 1000)) };
+    const start = await startInstall(deps, { ...startQuery, hmac: sign(startQuery) });
+    if (!start.ok) throw new Error(`startInstall unexpectedly refused: ${JSON.stringify(start)}`);
+    const query = { code: AUTH_CODE, host: "aG9zdA", shop, state: start.state, timestamp: String(Math.floor(Date.now() / 1000)) };
+    const signedQuery = { ...query, hmac: sign(query) };
+    const cookieHeader = `${INSTALL_STATE_COOKIE}=${start.state}`;
+    return completeInstall(deps, signedQuery, cookieHeader);
+  }
+
+  it("catalogUnified=true + adminTokens.put rejecting: the install FAILS with admin_token_custody_failed and no merchant row is created", async () => {
+    const registry = createInMemoryMerchantRegistry();
+    const createSpy = vi.spyOn(registry, "create");
+    const put = vi.fn(async () => {
+      throw new Error("KMS unavailable");
+    });
+    const deps = makeDeps({ registry, catalogUnified: true, adminTokens: { put } });
+
+    const result = await driveInstall(deps);
+
+    expect(result).toEqual({ ok: false, failed: "admin_token_custody_failed" });
+    expect(put).toHaveBeenCalledTimes(1);
+    // The merchant must NOT be left registered/active with zero Shopify credentials.
+    expect(createSpy).not.toHaveBeenCalled();
+    const rec = await registry.lookupByShopDomain(SHOP, { includeInactive: true });
+    expect(rec).toBeNull();
+  });
+
+  it("catalogUnified=true: the failure still logs + best-effort-audits admin_token.custody_failed before returning fatal", async () => {
+    const store: RuntimeStatePort = new InMemoryRuntimeStore();
+    const put = vi.fn(async () => {
+      throw new Error("KMS unavailable");
+    });
+    const deps = makeDeps({ store, catalogUnified: true, adminTokens: { put } });
+
+    const result = await driveInstall(deps);
+    expect(result).toEqual({ ok: false, failed: "admin_token_custody_failed" });
+
+    const audits = await store.readAudit({ tenantId: tenantIdForShop(SHOP) });
+    const failure = audits.find((a) => a.action === "admin_token.custody_failed");
+    expect(failure).toBeTruthy();
+    expect(failure!.decision).toMatchObject({ complete: false });
+    expect(JSON.stringify(failure)).not.toContain(PARENT_TOKEN);
+  });
+
+  it("regression pin — catalogUnified=false (default): the SAME adminTokens.put rejection stays non-fatal, install still succeeds", async () => {
+    const registry = createInMemoryMerchantRegistry();
+    const createSpy = vi.spyOn(registry, "create");
+    const put = vi.fn(async () => {
+      throw new Error("KMS unavailable");
+    });
+    const deps = makeDeps({ registry, catalogUnified: false, adminTokens: { put } });
+
+    const result = await driveInstall(deps);
+
+    expect(result).toEqual({ ok: true, shopDomain: SHOP });
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(createSpy).toHaveBeenCalledTimes(1);
   });
 });

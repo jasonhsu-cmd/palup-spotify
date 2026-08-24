@@ -371,6 +371,9 @@ describe("CATALOG_UNIFIED cutover — catalog-sync scheduler (CARRY T5, listActi
     try {
       const deps = (app as unknown as { catalogSyncSchedulerDeps?: CatalogSyncSchedulerDeps }).catalogSyncSchedulerDeps;
       expect(deps).toBeUndefined();
+      // Flag-off byte-identical guarantee: the returned `app` must not even gain the own-property (value
+      // `undefined`) — it must be genuinely absent, not present-but-undefined.
+      expect(Object.prototype.hasOwnProperty.call(app, "catalogSyncSchedulerDeps")).toBe(false);
     } finally {
       await app.close();
     }
