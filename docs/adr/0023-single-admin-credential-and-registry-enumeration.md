@@ -19,13 +19,22 @@
 
 ## Consequences
 - **Hard dependency:** the Admin-token refresh lifecycle (refresh_token storage + server-side refresh loop) must be live before the cutover — plan Task 6 (gated on this ADR + the spike). If the refresh loop fails, serving degrades to last-known-good local data (no live fallback exists by design), and sync halts with a re-auth signal.
-- **Blast radius (unchanged in kind):** a leaked Admin token is read-only product/inventory for one shop, revocable (uninstall/`shop/redact`, rotation, kill switch). Now the *sole* catalog credential, so its custody + refresh correctness is load-bearing — hence the `security-reviewer` gate.
+- **Blast radius:** a leaked *access* token is read-only product/inventory for one shop, 1h. The **`refresh_token` is higher-value** — it mints access tokens for up to **90 days with no user** — so it gets identical encrypted custody (F-A) and is deleted on revoke (F-C). Both are revocable locally (delete + kill switch); Shopify-side invalidation on uninstall is to be verified (F-C). Now the *sole* catalog credential, so custody + refresh correctness is load-bearing — hence the `security-reviewer` gate.
 - **Enumeration:** `listActive` is the one fleet source; a page failure is retried, never fatal to the run; no unbounded scan.
 - **Migration/rollback:** the cutover ships behind one `CATALOG_UNIFIED` flag with the old Storefront code kept dormant one release (spec §9). Production is a separate §5 human promotion (separate DB + KMS-backed CryptoPort, ADR-0022 F9).
-- **Retained from ADR-0022:** two-step revoke (F1), distinct admin key scope (F2), least-priv read scopes (F3), SSRF host allowlist (F4), sync-plane kill (F5), audit (NN#5).
+- **Retained from ADR-0022 (FULL set, F-D):** two-step revoke (F1), distinct admin key scope (F2), least-priv read scopes (F3), SSRF host allowlist (F4), sync-plane kill (F5), persist-expiresAt/no-hot-path-fallback (F6), token-exchange confused-deputy defense (F7 — now on the refresh + re-auth paths), boolean-availability/draft-archived-filter (F8 — now the sole serving source), audit (NN#5).
 
 ## Security-review conditions
-(To be filled by the `security-reviewer` pass — Task 0b Step 2 — before this moves to Accepted.)
+From the `security-reviewer` pass (2026-08-24, PASS-WITH-CONDITIONS). Each is a merge-gate condition on the implementation (plan Phase 2); folded into the plan's task carries.
+
+1. **(F-A) `refresh_token` custody.** Stored encrypted under the SAME distinct admin-cred CryptoPort scope + AAD as the access token (never `SecretsPort`); never logged, never in audit `input`. The blast-radius statement is updated to characterize the `refresh_token`'s 90-day, no-user mint capability.
+2. **(F-B) Refresh atomicity + single-flight-as-correctness.** `refresh` overwrites access + refresh tokens atomically, retaining neither prior value; refresh is single-flight **per tenant** — a **correctness** guard (Shopify retires the prior `refresh_token` on every refresh, so concurrent refreshes can strand a tenant), enforced by the scheduler.
+3. **(F-C) Revoke covers both.** Two-step revoke (`shop/redact`, ADR-0022 F1) hard-deletes BOTH the access and refresh tokens. Verify on shopify.dev whether uninstall invalidates them Shopify-side; if not, qualify the "revocable" claim (a leaked `refresh_token` stays mint-capable up to 90d until Shopify-side invalidation).
+4. **(F-D) Full ADR-0022 condition set carries forward** — explicitly incl. **F6** (persist `expiresAt`, no hot-path fallback), **F7** (token-exchange confused-deputy: validate session-token shop binding + returned-token shop binding; client secret via secrets port, never logged — now on the refresh + re-auth hot paths), and **F8** (persist `availableForSale` boolean not raw `inventoryQty`; filter draft/archived at ingest — now the SOLE serving source).
+5. **(F-E) `listActive` is internal sync-plane-only** — never exposed on a public, merchant-facing, or run-time-agent-reachable surface. The registry column-allowlist test is extended to `listActive`'s projection so a future `select *` / added token column cannot leak through it.
+6. **(F-F) Cross-tenant enumeration audit** uses a platform/operator audit context (not per-tenant — the registry has no per-tenant audit for reads); the caller (scheduler) writes it. (Registry `listActive` itself stays a clean read.)
+7. **(F-G) Staleness ceiling during re-auth lapse.** Last-known-good serving during a `refresh_token` lapse is bounded by the ADR-0020 D2/D5 staleness ceiling (fail-closed to "let me confirm current price/availability" past the ceiling, never quote stale price/stock); the re-auth signal is surfaced to a monitored, merchant/human-actionable destination so a permanently-halted tenant is visible.
+8. **(F-H) Migration of existing tokens.** A custodied row without a `refresh_token` (e.g. `palup-skincare-jason`, custodied pre-schema this session) is treated as **needs-reauth** (halt sync + signal) — never a crash in the refresh loop, never a hot-path fetch.
 
 ## Open items
 1. Live dev-store confirmation of the refresh_token grant (deferred to staging-enable; docs verified 2026-08-24).
