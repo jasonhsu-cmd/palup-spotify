@@ -1,5 +1,8 @@
-import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
-import { pathToFileURL } from "node:url";
+import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply } from "fastify";
+import fastifyStatic from "@fastify/static";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   type RuntimeStatePort,
   type MerchantIdentityPort,
@@ -158,10 +161,74 @@ export async function buildServer(opts?: {
   });
   app.decorate("registeredRoutes", registeredRoutes);
 
-  // /health is the ONLY unauthenticated route — registered directly on `app`, outside the encapsulated
-  // merchant-plane context below, so it can never accidentally pick up the auth preHandler that context
-  // scopes to everything registered inside it.
+  // /health is the ONLY unauthenticated DATA route — registered directly on `app`, outside the
+  // encapsulated merchant-plane context below, so it can never accidentally pick up the auth
+  // preHandler that context scopes to everything registered inside it.
   app.get("/health", async () => ({ ok: true }));
+
+  // ---------------------------------------------------------------------------------------------
+  // Merchant-console SPA (Vite build of `@palup/merchant-console`) — served PUBLICLY from this same
+  // Cloud Run service so one origin serves both the API and the embedded UI. This is safe to leave
+  // unauthenticated because it is pure app-shell code (no merchant/customer data): the browser has no
+  // session token yet when it first loads the iframe, and Shopify App Bridge only mints one AFTER the
+  // shell has booted. Every DATA route stays behind `requireMerchant` inside `merchantPlane` below —
+  // this block registers ONLY static/asset routes and an index.html fallback, never anything that
+  // reads `req.principal` or touches `store`/`commerce`/`comms`/etc.
+  //
+  // `vite.config.ts` sets `build.outDir` to `dist-web` (NOT `dist`, which is `tsc -b`'s plain-JS output
+  // dir for this same package — the two build steps would otherwise collide). Resolved relative to
+  // THIS file's own URL (not `process.cwd()`) so it's correct both in local dev (`tsx` from the repo
+  // root) and in the Cloud Run image (`Dockerfile.merchant-backend` runs `pnpm --filter
+  // @palup/merchant-console build` before this service starts, baking `dist-web` into the image at the
+  // same relative path).
+  const consoleDistDir = fileURLToPath(new URL("../../merchant-console/dist-web", import.meta.url));
+  const consoleAssetsDir = join(consoleDistDir, "assets");
+  const consoleIndexPath = join(consoleDistDir, "index.html");
+  // Read once at boot, not per-request — the SPA bundle doesn't change without a redeploy/restart.
+  // `null` (bundle not built — e.g. a unit test run that never invoked `vite build`) fails closed to a
+  // 503 rather than crashing the whole server at import time.
+  const consoleIndexHtml = existsSync(consoleIndexPath) ? readFileSync(consoleIndexPath, "utf-8") : null;
+
+  function sendConsoleIndex(reply: FastifyReply): void {
+    if (consoleIndexHtml === null) {
+      reply.code(503).send({
+        error: "console_not_built",
+        message: "merchant-console SPA bundle is missing — run `pnpm --filter @palup/merchant-console build`.",
+      });
+      return;
+    }
+    reply.type("text/html").send(consoleIndexHtml);
+  }
+
+  // Hashed asset chunks (`/assets/*.js`, `/assets/*.css`, etc) — a discrete, enumerable route
+  // (`GET`/`HEAD /assets/*`) so `route-protection.test.ts`'s structural guard can assert it by name,
+  // same as any other route. Registered only when the bundle exists so a test run that never built the
+  // console doesn't 500 at startup on a missing directory.
+  if (existsSync(consoleAssetsDir)) {
+    await app.register(fastifyStatic, { root: consoleAssetsDir, prefix: "/assets/" });
+  }
+
+  // `index.html` at both `/` (the embed's default entry) and `/index.html` (an explicit request for
+  // it) — plain routes, not `@fastify/static`, since there's exactly one file and no directory listing
+  // concerns.
+  app.get("/", async (_req, reply) => sendConsoleIndex(reply));
+  app.get("/index.html", async (_req, reply) => sendConsoleIndex(reply));
+
+  // SPA client-side routing fallback: any GET that doesn't match a registered route (API or static)
+  // gets the same `index.html` so the SPA's own router (react-router) can resolve it client-side.
+  // `setNotFoundHandler` registers on Fastify's INTERNAL 404 router, not via `.route()` — it never
+  // fires `onRoute` and so never shows up in `registeredRoutes`/the structural guard, and — more
+  // importantly — it only runs for requests that matched NO route anywhere, so it can never shadow or
+  // intercept an actual API route registered inside `merchantPlane` below (those already matched and
+  // already ran `requireMerchant` by the time routing would ever reach this fallback). Non-GET
+  // requests to an unmatched path still get a normal JSON 404, not the SPA HTML.
+  app.setNotFoundHandler((req, reply) => {
+    if (req.method === "GET" && consoleIndexHtml !== null) {
+      reply.type("text/html").send(consoleIndexHtml);
+      return;
+    }
+    reply.code(404).send({ statusCode: 404, error: "Not Found", message: `Route ${req.method}:${req.url} not found` });
+  });
 
   // CSP `frame-ancestors` pin (F2, anti-clickjacking): the embedded merchant console may only be framed
   // by Shopify admin. Per-shop widening needs the authenticated merchant's shop domain, which the

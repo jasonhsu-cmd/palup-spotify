@@ -4,6 +4,7 @@
   "type": "module",
   "main": "src/server.ts",
   "dependencies": {
+    "@fastify/static": "^8.0.0",
     "@palup/platform-ports": "workspace:*",
     "@palup/state-postgres": "workspace:*",
     "@palup/identity-shopify": "workspace:*",
