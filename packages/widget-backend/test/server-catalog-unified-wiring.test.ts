@@ -165,6 +165,52 @@ describe("CATALOG_UNIFIED — serving (local port, local store_profile, no Store
       await app.close();
     }
   });
+
+  // Final-review Critical (2026-08-24): unlike `getContext` above, `local-catalog-grounding.ts`'s
+  // `getShell` was NOT gated on `unifiedLocalShell` — it always read the local `store_profile` store no
+  // matter the flag. With CATALOG_UNIFIED off (this test) and CATALOG_LOCAL_SERVING at its default-ON, a
+  // BACKFILLED tenant's `getShell` therefore read the brand-new, permanently-EMPTY `store_profile` this
+  // composition falls back to when the flag is off (server.ts's `catalogUnifiedStoreProfile` stays
+  // `undefined` -> `createGroundingPort`'s own `opts.storeProfile ?? createInMemoryStoreProfileStore()`),
+  // instead of degrading to the real shellSource/fixtures shell `getContext` already correctly falls back
+  // to. Concretely this broke the `policy_q` support intent (widget-brain/support.ts calls
+  // `grounding.getShell` directly, ungated by any commerce port): a shopper asking "what's your return
+  // policy?" got "Our return policy: . Shipping: " (the blank FALLBACK_POLICY) instead of the real policy.
+  // Driven through the REAL composition + a REAL shopper message (not just the grounding port directly)
+  // so this pins the shopper-facing symptom, not merely the internal routing.
+  it("flag OFF: a backfilled tenant's policy_q reply uses the REAL shell (fixtures/shellSource), never a blank empty-store_profile fallback", async () => {
+    delete process.env.CATALOG_UNIFIED;
+    delete process.env.CATALOG_LOCAL_SERVING; // exercise the documented default (ON)
+    delete process.env.ADMIN_TOKEN_CUSTODY_ENABLED;
+
+    const store = new InMemoryRuntimeStore();
+    const catalogProduct: CatalogProductPort = createInMemoryCatalogProductStore();
+    await seedCatalogProduct(catalogProduct, TENANT, "Unified Serum"); // backfilled -> hasLocalCatalog() = true
+
+    const app = await buildServer({
+      store,
+      catalogProduct,
+      adminTokens: fakeAdminTokenStore(),
+      // No `storeProfile` injected at all — mirrors production exactly: with CATALOG_UNIFIED off, server.ts
+      // never wires a persisted store_profile handle, so `createGroundingPort` defaults to a brand-new,
+      // permanently-empty in-memory store. A `getShell` that (incorrectly) reads it unconditionally always
+      // finds nothing there and degrades to FALLBACK_BRAND/FALLBACK_POLICY.
+    });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/chat",
+        payload: { sessionId: "sess-policyq-off", message: "what's your return policy?", signals: {}, idempotencyKey: "policyq-off-0" },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as { reply: string };
+      // TENANT is "demo" -> the built-in AURIA fixture's real (non-blank) policy.
+      expect(body.reply).toContain("30-day returns");
+      expect(body.reply).not.toBe("Our return policy:  Shipping: "); // the blank FALLBACK_POLICY reply
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 const SHOP_ON = "acme-unified-on.myshopify.com";
