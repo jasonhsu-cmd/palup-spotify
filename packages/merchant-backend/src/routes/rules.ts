@@ -2,6 +2,9 @@ import type { FastifyInstance } from "fastify";
 import { requirePermission } from "@palup/identity-shopify";
 import {
   PALUP_FLOORS,
+  clampToFloor,
+  findPreset,
+  isBigJump,
   listPresets,
   type CategoryRuleEnvelope,
   type MerchantRuleSet,
@@ -135,6 +138,39 @@ function validateRuleSetBody(body: unknown): { ok: true; value: MerchantRuleSet 
   return { ok: true, value };
 }
 
+/** Which of `proposed`'s floor-relevant fields `clampToFloor` actually pulled down for `effective`
+ *  (the same category run through `clampToFloor`). Only the fields `clampToFloor` clamps
+ *  (`allowedAuto`, `maxPct`, `maxUsd`, `periodBudgetUsd`, `priceMatchMaxUsd`) are ever checked —
+ *  every other field (`stackable`, `roiFloor`, `subscriptionSelfServe`, `frequencyCapPerWeek`,
+ *  `quietHours`) is merchant-only policy that `clampToFloor` passes through unchanged, so it can
+ *  never appear here. Used by `POST /rules/preview` to tell the merchant which numbers in their
+ *  proposal a PalUp floor would actually reduce. */
+function cappedFields(proposed: CategoryRuleEnvelope, effective: CategoryRuleEnvelope): string[] {
+  const fields: string[] = [];
+  if (proposed.allowedAuto && !effective.allowedAuto) fields.push("allowedAuto");
+  if (proposed.maxPct !== undefined && effective.maxPct !== undefined && effective.maxPct < proposed.maxPct) {
+    fields.push("maxPct");
+  }
+  if (proposed.maxUsd !== undefined && effective.maxUsd !== undefined && effective.maxUsd < proposed.maxUsd) {
+    fields.push("maxUsd");
+  }
+  if (
+    proposed.periodBudgetUsd !== undefined &&
+    effective.periodBudgetUsd !== undefined &&
+    effective.periodBudgetUsd < proposed.periodBudgetUsd
+  ) {
+    fields.push("periodBudgetUsd");
+  }
+  if (
+    proposed.priceMatchMaxUsd !== undefined &&
+    effective.priceMatchMaxUsd !== undefined &&
+    effective.priceMatchMaxUsd < proposed.priceMatchMaxUsd
+  ) {
+    fields.push("priceMatchMaxUsd");
+  }
+  return fields;
+}
+
 export function registerRulesRoutes(app: FastifyInstance, deps: RulesRoutesDeps): void {
   // Read-only: the inviolable PalUp floors and the preset catalog, so the console can render the full
   // three-layer editor (merchant value / PalUp floor / preset). Neither route lets a caller APPLY a
@@ -163,4 +199,80 @@ export function registerRulesRoutes(app: FastifyInstance, deps: RulesRoutesDeps)
     const { envelope, bigJump } = await deps.rulesStore.set(ctx, validated.value, principal.userId, "merchant_set");
     return { envelope, bigJump };
   });
+
+  // Task 6 (W4-broaden): the big-jump confirmation DRY-RUN. Computes exactly the same
+  // before/after/bigJump math as `PUT /rules` above (same validation, same defaults-merged `before`,
+  // same per-category `isBigJump`), but NEVER calls `rulesStore.set` — no store mutation, no audit
+  // record. This lets the console render "this lets the agent auto-approve up to X" (and, if the
+  // proposal exceeds a PalUp floor, what the EFFECTIVE clamped ceiling and bigJump verdict would
+  // actually be) before the merchant commits via the sovereign `PUT /rules` write. `rules.edit` (not
+  // `console.view`) because the caller is about to hypothetically edit the rules — a viewer has no
+  // business previewing an edit they can't make.
+  app.post<{ Body: unknown }>("/rules/preview", { preHandler: requirePermission("rules.edit") }, async (req, reply) => {
+    const principal = req.principal!;
+    const ctx = { tenantId: principal.merchantId };
+
+    const validated = validateRuleSetBody(req.body);
+    if (!validated.ok) {
+      return reply.code(400).send({ error: "invalid rule set", reason: validated.reason });
+    }
+
+    const before = await deps.rulesStore.get(ctx); // read-only; NEVER passed to `.set`
+    const after: MerchantRuleSet = { ...before };
+    let bigJump = false;
+    for (const [key, envPatch] of Object.entries(validated.value)) {
+      if (!envPatch) continue;
+      const cat = key as ProposalCategory;
+      const beforeCat = before[cat] ?? { allowedAuto: false };
+      const afterCat: CategoryRuleEnvelope = { ...beforeCat, ...envPatch };
+      after[cat] = afterCat;
+      if (isBigJump(beforeCat, afterCat)) bigJump = true;
+    }
+
+    // The EFFECTIVE (PalUp-floor-clamped) auto-limits the engine would actually run with if `after`
+    // were saved as-is (`clampToFloor`, same clamp `createRulesProvider` applies at classify-time),
+    // plus which fields — if any — a floor would pull down from the raw proposal. Pure read-only
+    // math; no store call.
+    const effective: MerchantRuleSet = {};
+    const capped: Partial<Record<ProposalCategory, string[]>> = {};
+    for (const [key, afterCat] of Object.entries(after)) {
+      if (!afterCat) continue;
+      const cat = key as ProposalCategory;
+      const clamped = clampToFloor(afterCat, PALUP_FLOORS[cat]);
+      effective[cat] = clamped;
+      const fields = cappedFields(afterCat, clamped);
+      if (fields.length > 0) capped[cat] = fields;
+    }
+
+    return { before, after, bigJump, effective, capped };
+  });
+
+  // Task 6 (W4-broaden): one-call preset adoption. Writes the chosen preset's envelope through the
+  // SAME audited `MerchantRulesStore.set` path `PUT /rules` uses (provenance `"merchant_set"` — the
+  // store's `RuleProvenance` union is pinned to `"merchant_set" | "agent_proposed"`; adopting a
+  // preset is a merchant-initiated console action, same as a manual edit, so it audits identically).
+  // Every preset is authored `allowedAuto:false` everywhere (`rule-presets.ts`), so applying one can
+  // never auto-enable anything on its own. FAIL-SAFE: `findPreset` returns `undefined` for an unknown
+  // id — that is always a clean 404, NEVER a null/empty/unclamped write and never a silent no-op that
+  // leaves the merchant's envelope looking unexpectedly unchanged without saying why.
+  app.post<{ Body: { presetId?: unknown } }>(
+    "/rules/apply-preset",
+    { preHandler: requirePermission("rules.edit") },
+    async (req, reply) => {
+      const principal = req.principal!;
+      const ctx = { tenantId: principal.merchantId };
+
+      const presetId = req.body?.presetId;
+      if (typeof presetId !== "string" || presetId.length === 0) {
+        return reply.code(400).send({ error: "presetId required" });
+      }
+      const preset = findPreset(presetId);
+      if (!preset) {
+        return reply.code(404).send({ error: "unknown preset", presetId });
+      }
+
+      const { envelope, bigJump } = await deps.rulesStore.set(ctx, preset.envelope, principal.userId, "merchant_set");
+      return { envelope, bigJump };
+    },
+  );
 }
