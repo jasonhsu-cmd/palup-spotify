@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import {
   type RuntimeStatePort,
   type MerchantIdentityPort,
+  type MerchantRegistryPort,
   type CampaignCommsPort,
   type CustomerListingCommerce,
   type MerchantRulesStore,
@@ -73,16 +74,44 @@ export async function buildServer(opts?: {
   // store is available (DATABASE_URL set), else the in-memory adapter every other service falls back
   // to locally/in tests. `state` is `store` itself, so the `"rules.changed"` audit record `set()`
   // writes lands in the SAME `rs_audit` table every other governed mutation in this deployment uses.
-  const rulesStore: MerchantRulesStore =
-    opts?.rulesStore ??
-    (runtimeResult?.sql ? new PostgresMerchantRulesStore(runtimeResult.sql, store) : new InMemoryMerchantRulesStore(store));
+  //
+  // DEPLOY-BLOCKING GAP FIX: `createRuntimeStore()` only migrates its OWN `RuntimeStatePort` KV tables
+  // (`rs_kv`/`rs_audit`, inside `state-postgres/src/factory.ts`) — it has no idea `pl_merchant_rules`
+  // (this store) or `pl_merchant` (the registry, just below) exist. Each has its OWN `migrate()`
+  // (idempotent `CREATE TABLE IF NOT EXISTS`, mirroring `PostgresRuntimeStore.migrate()`), so on the
+  // durable path both concrete Postgres adapters are constructed here, `await`ed through `migrate()`,
+  // and ONLY THEN handed off as their port-typed const — a fresh `DATABASE_URL` boots with every table
+  // it needs instead of 500ing on first use. The in-memory path (no `DATABASE_URL`, every other test in
+  // this package) is untouched: no Postgres class is constructed and no `migrate()` call happens.
+  let rulesStore: MerchantRulesStore;
+  if (opts?.rulesStore) {
+    rulesStore = opts.rulesStore;
+  } else if (runtimeResult?.sql) {
+    const postgresRulesStore = new PostgresMerchantRulesStore(runtimeResult.sql, store);
+    await postgresRulesStore.migrate();
+    rulesStore = postgresRulesStore;
+  } else {
+    rulesStore = new InMemoryMerchantRulesStore(store);
+  }
   const bus: EventBus = opts?.bus ?? new InMemoryEventBus();
+  // Hoisted to a named const (rather than constructed inline inside `createShopifyAppBridgeIdentity`)
+  // so the concrete Postgres instance can be `migrate()`d on the durable path — the same reasoning as
+  // `rulesStore` above. `MerchantRegistryPort` (the interface `createShopifyAppBridgeIdentity` takes)
+  // does not declare `migrate()`; only the concrete `PostgresMerchantRegistry` does.
+  let registry: MerchantRegistryPort;
+  if (runtimeResult?.sql) {
+    const postgresRegistry = new PostgresMerchantRegistry(runtimeResult.sql);
+    await postgresRegistry.migrate();
+    registry = postgresRegistry;
+  } else {
+    registry = createInMemoryMerchantRegistry();
+  }
   const identity: MerchantIdentityPort =
     opts?.identity ??
     createShopifyAppBridgeIdentity({
       clientId: process.env.SHOPIFY_APP_CLIENT_ID ?? "",
       secrets: createEnvSecrets(),
-      registry: runtimeResult?.sql ? new PostgresMerchantRegistry(runtimeResult.sql) : createInMemoryMerchantRegistry(),
+      registry,
       // PER-INSTANCE, not shared — see DEPLOY.md "Shared state" ⚠️ for the multi-instance replay-window
       // caveat and the --max-instances 1 mitigation until a durable JtiReplayGuard adapter exists.
       jtiGuard: createInMemoryJtiGuard(),

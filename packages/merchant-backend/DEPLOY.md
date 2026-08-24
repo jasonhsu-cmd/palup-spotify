@@ -41,8 +41,19 @@ the identical reason: the caller is an end-user's browser, not an operator's aut
 `docs/DEPLOY.md`'s Cloud SQL section), not a separate one. This is load-bearing for NN #4 (the kill
 switch): `RuntimeStatePort` is how an operator's `pnpm kill:arm` halt propagates to every serving
 instance, and merchant-backend's `buildServer()` composition root (Task 4) constructs the SAME
-`PostgresRuntimeStore`/`PostgresMerchantRegistry` adapters against whatever `DATABASE_URL` it's given —
-point it at a different database and a halt armed against the shared store would not be visible here.
+`PostgresRuntimeStore`/`PostgresMerchantRulesStore`/`PostgresMerchantRegistry` adapters against whatever
+`DATABASE_URL` it's given — point it at a different database and a halt armed against the shared store
+would not be visible here.
+
+**Boot runs its own migrations — a fresh `DATABASE_URL` is safe.** `createRuntimeStore()` only migrates
+`RuntimeStatePort`'s own KV tables (`rs_kv`/`rs_audit`); it has no idea `pl_merchant_rules`
+(`PostgresMerchantRulesStore`) or `pl_merchant` (`PostgresMerchantRegistry`) exist. `buildServer()` now
+`await`s `migrate()` on both of those concrete Postgres adapters, on the durable (`DATABASE_URL`-set)
+path, before the server starts serving requests — so a brand-new staging database gets all three table
+sets (`rs_kv`/`rs_audit`, `pl_merchant_rules`, `pl_merchant`) on first boot instead of 500ing on first use
+of the rules or registry routes. All three `migrate()`s are idempotent `CREATE TABLE IF NOT EXISTS` (see
+`packages/state-postgres/src/{postgres-runtime-store,merchant-rules-store,postgres-merchant-registry}.ts`),
+so re-running them on every deploy/restart is free.
 
 ⚠️ **Single-use session-token exchange (the jti replay guard) is currently IN-MEMORY / per-instance
 only** — there is no durable/shared `JtiReplayGuard` adapter yet (`createInMemoryJtiGuard()`,
@@ -98,6 +109,21 @@ Notes:
 
 Staging-only, human-enablement, not yet wired into `deploy-staging.yml`. Production is not addressed by
 this document — see `docs/DEPLOY.md` for the standing "production is never auto-deployed" rule, which
-applies here unchanged. This service is also currently **inert** in the sense that W1–W7 haven't mounted
-any real merchant-console routes yet (only `/health`, `/me`, and the `/_probe/money` RBAC probe exist) —
-deploying it stands up chassis + auth with nothing behind it yet.
+applies here unchanged.
+
+The mounted route set (all merchant-plane routes below fail-close to 401 with no bearer session token —
+`/health` is the only exception; see `test/route-protection.test.ts`):
+
+- `GET /health` — unauthenticated liveness check
+- `GET /me` — the authenticated principal; `GET /_probe/money` — an `approve_money` RBAC probe
+- `GET /approvals`, `GET /approvals/:id`, `POST /approvals/:id/approve`, `POST /approvals/:id/reject` —
+  the Approval Center list/detail/approve/reject surface (approve/reject gated on `approve_money`)
+- `GET /rules`, `PUT /rules` — per-tenant automation rules (edit gated on `rules.edit`)
+- `GET /kill`, `POST /kill`, `POST /unkill` — the kill-switch console surface (`/kill` POST gated on
+  `agent.operate`, `/unkill` on the `manager` role)
+- `GET /audit` — the immutable audit log, read-only
+- `GET /events` — the SSE live-update channel (single-instance only; see `src/events.ts`'s multi-instance
+  Cloud Run TODO)
+- `POST /_internal/run-winback` — the WB win-back staging trigger (`agent.operate`)
+
+So deploying this service now stands up a real merchant console backend, not just chassis + auth.
