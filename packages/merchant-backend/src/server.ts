@@ -25,6 +25,8 @@ import {
   SandboxOrderDirectory,
   type PayoutsPort,
   SandboxPayoutsPort,
+  type RefundPort,
+  SandboxRefundAdapter,
 } from "@palup/platform-ports";
 import { createRuntimeStore, PostgresMerchantRegistry, PostgresMerchantRulesStore, PostgresPrimaryGoalStore, PostgresLearnedStore } from "@palup/state-postgres";
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
@@ -81,6 +83,10 @@ export async function buildServer(opts?: {
   // payout), same convention as `orderCommerce`/`commerce` above until a live Shopify-Payments
   // adapter is human-enabled.
   payouts?: PayoutsPort;
+  // W5 Task 8 (issue_refund executor wiring): injectable for tests, same "sandbox default until a
+  // live adapter is human-enabled" convention as `payouts`/`orderCommerce` above. Absent ->
+  // `SandboxRefundAdapter` — records the refund intent, never issues real money.
+  refundPort?: RefundPort;
   comms?: CampaignCommsPort;
   proposalStore?: ProposalStore;
   rulesStore?: MerchantRulesStore;
@@ -103,6 +109,7 @@ export async function buildServer(opts?: {
   const commerce: CustomerListingCommerce = opts?.commerce ?? new SandboxCustomerDirectory({});
   const orderCommerce: OrderListingCommerce = opts?.orderCommerce ?? new SandboxOrderDirectory({});
   const payouts: PayoutsPort = opts?.payouts ?? new SandboxPayoutsPort({});
+  const refundPort: RefundPort = opts?.refundPort ?? new SandboxRefundAdapter();
   // SandboxCommsAdapter records every send and NEVER delivers — the only comms adapter this service
   // may default to until a real (still consent/DLP-gated) provider adapter is wired + prod-enabled.
   const comms: CampaignCommsPort = opts?.comms ?? new SandboxCommsAdapter();
@@ -311,7 +318,7 @@ export async function buildServer(opts?: {
     registerInternalWinBackRoutes(merchantPlane, { state: store, commerce, comms, proposalStore, rulesStore });
     registerInternalInsightsRoutes(merchantPlane, { learnedStore });
     registerInternalVoiceRoutes(merchantPlane, { state: store, proposalStore, rulesStore, learnedStore });
-    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus, learnedStore });
+    registerApprovalsRoutes(merchantPlane, { proposalStore, state: store, rulesStore, comms, bus, learnedStore, refundPort });
     registerKillRoutes(merchantPlane, { state: store, bus });
     registerAuditRoutes(merchantPlane, { state: store });
     registerEventsRoutes(merchantPlane, { bus });
