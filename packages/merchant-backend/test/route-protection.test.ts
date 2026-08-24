@@ -55,6 +55,8 @@ const KNOWN_DATA_ROUTES: { method: string; url: string }[] = [
   { method: "POST", url: "/approvals/p1/approve" },
   { method: "POST", url: "/approvals/p1/reject" },
   { method: "GET", url: "/rules" },
+  { method: "GET", url: "/home/summary" },
+  { method: "PUT", url: "/home/goal" },
   { method: "GET", url: "/kill" },
   { method: "POST", url: "/unkill" },
   { method: "GET", url: "/audit" },
