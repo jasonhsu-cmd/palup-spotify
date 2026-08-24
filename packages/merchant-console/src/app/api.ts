@@ -161,6 +161,18 @@ export interface TeachRequest {
   stance?: "tighten" | "loosen";
 }
 
+/** Mirrors `GET /learned/export`'s response envelope (routes/learned.ts) — deliberately NOT a bare
+ *  `LearnedInsight[]`: the merchant-owns-their-brain promise (spec §10) needs `portabilityNote`
+ *  stated honestly alongside the data (the export mechanism is real today; the signed, portable,
+ *  legally-reviewed FORMAT is still legal-deferred — this type carries that caveat verbatim rather
+ *  than letting a screen imply more than the backend actually guarantees). */
+export interface LearnedExport {
+  tenantId: string;
+  exportedAt: string;
+  insights: LearnedInsight[];
+  portabilityNote: string;
+}
+
 export interface ApiClient {
   listApprovals(q: {
     status?: ProposalStatus | string;
@@ -181,6 +193,7 @@ export interface ApiClient {
   teachLearned(req: TeachRequest): Promise<{ insight: LearnedInsight }>;
   pinLearned(id: string, pinned: boolean): Promise<LearnedInsight>;
   deleteLearned(id: string): Promise<{ removed: boolean }>;
+  exportLearned(): Promise<LearnedExport>;
   /** Subscribes to the tenant's SSE `/events` stream; returns an unsubscribe function. Best-effort
    *  live nudge only (events.ts's own contract) — a dropped/never-opened stream never loses data,
    *  because the store (`listApprovals`/`getKill`) stays the source of truth (see
@@ -318,6 +331,9 @@ export function makeApiClient(args: MakeApiClientArgs): ApiClient {
     },
     async deleteLearned(id) {
       return request<{ removed: boolean }>(`/learned/${encodeURIComponent(id)}`, { method: "DELETE" });
+    },
+    async exportLearned() {
+      return request<LearnedExport>(`/learned/export`);
     },
     openEvents(onEvent, onStreamError) {
       let closed = false;

@@ -79,6 +79,9 @@ function fakeApi(initialItems: Proposal[]): ApiClient & { emit: (e: ConsoleEvent
     deleteLearned: vi.fn(async () => {
       throw new Error("not used by ApprovalCenter");
     }),
+    exportLearned: vi.fn(async () => {
+      throw new Error("not used by ApprovalCenter");
+    }),
     openEvents: vi.fn((onEvent: (e: ConsoleEvent) => void) => {
       listener = onEvent;
       return () => {

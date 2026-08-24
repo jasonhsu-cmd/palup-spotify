@@ -5,6 +5,7 @@ import { makeApiClient } from "./app/api";
 import { useSessionToken } from "./app/session";
 import { ApprovalCenter } from "./screens/approvals/ApprovalCenter";
 import { RevenueHome } from "./screens/home/RevenueHome";
+import { LearnedView } from "./screens/learned/LearnedView";
 
 // W1-UI Task 1: wires the shell + routing + a REAL (API-backed) pending-approval count. The
 // Approval Center screen itself (queue/detail/approve/reject/kill/audit/live-reconcile,
@@ -21,7 +22,6 @@ function StubScreen({ title, note }: { title: string; note?: string }) {
 }
 
 const STUB_ROUTES: Array<{ path: string; title: string }> = [
-  { path: "/learned", title: "Agent Memory" },
   { path: "/inbox", title: "Inbox" },
   { path: "/customers", title: "Customers" },
   { path: "/recovery", title: "Cart Recovery" },
@@ -74,6 +74,7 @@ export function App() {
         <Route path="/" element={<Navigate to="/approvals" replace />} />
         <Route path="/approvals" element={<ApprovalCenter api={api} />} />
         <Route path="/dashboard" element={<RevenueHome api={api} />} />
+        <Route path="/learned" element={<LearnedView api={api} />} />
         {STUB_ROUTES.map((r) => (
           <Route key={r.path} path={r.path} element={<StubScreen title={r.title} />} />
         ))}

@@ -314,4 +314,40 @@ describe("Learned methods (W3 T7)", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(403);
   });
+
+  it("maps a 400 safety-floor rejection on teachLearned to a typed ApiError with the server's message", async () => {
+    const fetchSpy = mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({ error: "safety floor: a safety-critical guardrail can be tightened but not loosened" }),
+          { status: 400 },
+        ),
+    );
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const err = await api
+      .teachLearned({ category: "policies", text: "loosen it", guardrailKey: "refund_cap", stance: "loosen" })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(400);
+    expect((err as ApiError).message).toMatch(/safety floor/i);
+  });
+
+  // Close the export gap (review-mandated): GET /learned/export returns a wrapping envelope, not
+  // a bare LearnedInsight[] — tenantId + exportedAt + insights + a portability note, per
+  // merchant-backend's routes/learned.ts (verified field-for-field before writing this test).
+  it("exportLearned GETs /learned/export and returns the full export envelope", async () => {
+    const body = {
+      tenantId: "t1",
+      exportedAt: "2026-08-24T00:00:00.000Z",
+      insights: [insight],
+      portabilityNote: "You own your agent's private brain. A signed, portable export format is pending legal review.",
+    };
+    const fetchSpy = mockFetch(() => new Response(JSON.stringify(body), { status: 200 }));
+    const api = makeApiClient({ baseUrl: "/api", getToken: async () => "t", fetch: fetchSpy });
+    const result = await api.exportLearned();
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(url).toBe("/api/learned/export");
+    expect(headersOf(init).Authorization).toBe("Bearer t");
+    expect(result).toEqual(body);
+  });
 });
