@@ -12,15 +12,17 @@ import {
   type MerchantRulesStore,
   type PrimaryGoalStore,
   type ProposalStore,
+  type LearnedStore,
   createEnvSecrets,
   createInMemoryMerchantRegistry,
   InMemoryMerchantRulesStore,
   InMemoryPrimaryGoalStore,
   InMemoryProposalStore,
+  InMemoryLearnedStore,
   SandboxCommsAdapter,
   SandboxCustomerDirectory,
 } from "@palup/platform-ports";
-import { createRuntimeStore, PostgresMerchantRegistry, PostgresMerchantRulesStore, PostgresPrimaryGoalStore } from "@palup/state-postgres";
+import { createRuntimeStore, PostgresMerchantRegistry, PostgresMerchantRulesStore, PostgresPrimaryGoalStore, PostgresLearnedStore } from "@palup/state-postgres";
 import { requireMerchant, shopifyEmbedFrameAncestors, createShopifyAppBridgeIdentity, createInMemoryJtiGuard } from "@palup/identity-shopify";
 import { registerMeRoutes } from "./routes/me.js";
 import { registerInternalWinBackRoutes } from "./routes/internal-winback.js";
@@ -31,6 +33,7 @@ import { registerActivityRoutes } from "./routes/activity.js";
 import { registerEventsRoutes } from "./routes/events.js";
 import { registerRulesRoutes } from "./routes/rules.js";
 import { registerHomeRoutes } from "./routes/home.js";
+import { registerLearnedRoutes } from "./routes/learned.js";
 import { InMemoryEventBus, type EventBus } from "./events.js";
 import "./types.js";
 
@@ -66,6 +69,11 @@ export async function buildServer(opts?: {
   // W2 (Revenue Home): injectable for tests, same convention as rulesStore. Absent → the durable
   // Postgres adapter when DATABASE_URL gave us a pool, else in-memory.
   goalStore?: PrimaryGoalStore;
+  // W3 Task 4 (Learned/Memory & Voice — merchant-facing `/learned` surface): injectable for tests,
+  // same durable-vs-in-memory convention as rulesStore/goalStore above. Absent → the durable Postgres
+  // adapter when DATABASE_URL gave us a pool, else in-memory. Build DARK: this store is only reachable
+  // through the private, per-tenant `/learned` routes below — no aggregate-tier caller wired here.
+  learnedStore?: LearnedStore;
   // Task 7 (SSE live-update channel): injectable for tests (each test that shares a bus across two
   // `buildServer()` calls, e.g. one connecting to `/events` and one driving an approve, needs the
   // SAME bus instance). Absent -> a fresh `InMemoryEventBus` per server — single-instance only; see
@@ -115,6 +123,19 @@ export async function buildServer(opts?: {
     goalStore = postgresGoalStore;
   } else {
     goalStore = new InMemoryPrimaryGoalStore(store);
+  }
+  // W3 Task 4: same durable-vs-inmemory split + migrate-before-serve rule as `rulesStore`/`goalStore`
+  // above — `createRuntimeStore()` migrates only its OWN tables, so the concrete Postgres adapter is
+  // constructed here, `await`ed through `migrate()`, and only then handed off port-typed.
+  let learnedStore: LearnedStore;
+  if (opts?.learnedStore) {
+    learnedStore = opts.learnedStore;
+  } else if (runtimeResult?.sql) {
+    const postgresLearnedStore = new PostgresLearnedStore(runtimeResult.sql, store);
+    await postgresLearnedStore.migrate();
+    learnedStore = postgresLearnedStore;
+  } else {
+    learnedStore = new InMemoryLearnedStore(store);
   }
   const bus: EventBus = opts?.bus ?? new InMemoryEventBus();
   // Hoisted to a named const (rather than constructed inline inside `createShopifyAppBridgeIdentity`)
@@ -273,6 +294,7 @@ export async function buildServer(opts?: {
     registerAuditRoutes(merchantPlane, { state: store });
     registerEventsRoutes(merchantPlane, { bus });
     registerRulesRoutes(merchantPlane, { rulesStore });
+    registerLearnedRoutes(merchantPlane, { learnedStore });
     registerHomeRoutes(merchantPlane, { state: store, goalStore });
     registerActivityRoutes(merchantPlane, { state: store });
   });
