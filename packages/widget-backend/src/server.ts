@@ -3978,6 +3978,28 @@ export async function buildServer(opts?: {
   // existing decoration pattern to reuse) purely as a composition-root test/ops seam: `buildServer`
   // otherwise returns only the bare Fastify instance, and there is today no HTTP route or cron caller that
   // would otherwise observe this wiring. This is a judgment call, flagged for review.
+  //
+  // TASK 9 DECISION (deliverable 3 of the plan's Task 9, evaluated 2026-08-24) — `backfill` STAYS the
+  // throw-default above; deliberately NOT composing a real `getFreshAdminToken` + `runCatalogBackfill` +
+  // Admin-client wiring here, for two independent verify-or-don't-write reasons, either of which alone
+  // would be disqualifying:
+  //   1. `admin-token-refresh.ts`'s `exchange` (the refresh_token-grant HTTP call) has NO live
+  //      implementation anywhere in this codebase — ADR-0023 open item 1: "Live dev-store confirmation of
+  //      the refresh_token grant (deferred to staging-enable; docs verified 2026-08-24)". Composing a real
+  //      caller here would force inventing that wire shape from memory, which CLAUDE.md's honesty rules
+  //      (verify-or-don't-write) forbid.
+  //   2. Independently, `catalog-backfill.ts`'s OWN file banner says its Bulk Operations query/JSONL shape
+  //      is "NOT LIVE-VERIFIED... against a live bulk export from this repo" — so even with a
+  //      hypothetically-injected `exchange` supplying a fresh Admin token, actually RUNNING this backfill
+  //      against live Shopify would exercise an separately-unverified wire surface. Injecting `exchange`
+  //      with no default live implementation (the plan's option (b)) would still leave this second
+  //      unverified surface live-reachable the moment any caller supplied a real Admin client — so option
+  //      (b) does not clear the plan's own bar ("ONLY if it introduces NO unverified-live-HTTP surface").
+  // Given both, the plan's option (a) is the one that actually holds: the throw-default fails LOUD (never
+  // a silent no-op) and — since nothing in this codebase invokes `runCatalogSyncScheduler` at all yet (see
+  // above) — costs nothing today. Standing up the real backfill composition is carried to staging-enable
+  // time, alongside the live refresh-grant confirmation and a live cron/HTTP trigger for the scheduler
+  // itself (both explicitly operator/deploy steps, never a build agent's).
   const catalogSyncSchedulerDeps: CatalogSyncSchedulerDeps | undefined =
     CATALOG_UNIFIED && merchantRegistry
       ? {
