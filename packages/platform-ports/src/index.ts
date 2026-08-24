@@ -35,8 +35,15 @@ export type {
   SubscriptionActionResult,
   CustomerLastOrder,
   CustomerListingCommerce,
+  MerchantOrderSummary,
+  OrderListingCommerce,
 } from "./commerce-port.js";
-export { SUBSCRIPTION_SKIP_CAP, CommerceGuardRefusalError, SandboxCustomerDirectory } from "./commerce-port.js";
+export {
+  SUBSCRIPTION_SKIP_CAP,
+  CommerceGuardRefusalError,
+  SandboxCustomerDirectory,
+  SandboxOrderDirectory,
+} from "./commerce-port.js";
 export type { StorePort } from "./store-port.js";
 export type {
   RuntimeStatePort,
