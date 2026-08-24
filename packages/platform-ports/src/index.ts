@@ -110,6 +110,8 @@ export type {
   RuleSetChangeResult,
   MerchantRulesStore,
   AutoEligibleDimension,
+  SubscriptionSubAction,
+  QuietHours,
 } from "./merchant-rules-store.js";
 export {
   PALUP_FLOORS,
