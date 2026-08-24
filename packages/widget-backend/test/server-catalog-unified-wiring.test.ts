@@ -13,22 +13,19 @@ import { SHOPIFY_APP_CLIENT_SECRET_NAME, SHOPIFY_APP_SECRET_SCOPE } from "../src
 import { tenantIdForShop } from "../src/routes/shopify-install.js";
 import { runCatalogSyncScheduler, type CatalogSyncSchedulerDeps } from "../src/jobs/catalog-sync-scheduler.js";
 
-// Task 7 (credential-enrollment-unification) — proves the CATALOG_UNIFIED cutover flag's OWN
+// Task 7 (credential-enrollment-unification) — proves the ADR-0023 D1 unified cutover's OWN
 // composition-root wiring in server.ts, on top of the already-shipped durable-catalog-sync seams
-// (localServingEnabled/hasLocalCatalog — server-catalog-sync-wiring.test.ts covers those). Four things,
-// each with a flag-OFF byte-identical regression pin alongside it:
+// (server-catalog-sync-wiring.test.ts covers those). unified-cutover-cleanup (2026-08-24): the
+// `CATALOG_UNIFIED` flag that used to gate all of this is gone — it is now the ONLY behavior, so the
+// flag-OFF regression pins this file used to carry alongside each case were deleted (they described
+// removed behavior). What remains:
 //
-//   (a)+(c)+T4b — serving is 100% local for a backfilled tenant when the flag is ON: no Storefront call
-//       for products (Task 8, unaffected by this flag) AND brand/policy come from the injected
-//       `store_profile` handle (not `shellSource`/fixtures) — proving BOTH the persistent-handle wiring
-//       into `createGroundingPort` AND `local-catalog-grounding.ts`'s `getContext` reading it. OFF: the
-//       injected `store_profile` handle is never even consulted — brand/policy stay on `shellSource`/
-//       fixtures exactly as before this task.
-//   (b) — install does NOT mint/custody a delegate token when ON (Admin token is the sole credential);
-//       OFF mints+custodies the delegate exactly as always (regression pin).
+//   (a)+(c)+T4b — serving is 100% local for a backfilled tenant: no Storefront call for products (Task 8)
+//       AND brand/policy come from the injected `store_profile` handle — proving BOTH the persistent-handle
+//       wiring into `createGroundingPort` AND `local-catalog-grounding.ts`'s `getContext` reading it.
+//   (b) — install does NOT mint/custody a delegate token (the Admin token is the sole credential).
 //   (d) — the catalog-sync scheduler's deps are composed with the REAL `listActive`-backed merchant
-//       registry when ON; OFF ⇒ nothing is composed at all (unchanged from before this task — nothing
-//       built this before Task 7 either).
+//       registry whenever one exists.
 
 const TENANT = "demo";
 
@@ -71,21 +68,8 @@ function seedCatalogProduct(store: CatalogProductPort, tenantId: string, title: 
   ]);
 }
 
-const SERVING_ENV_KEYS = ["CATALOG_UNIFIED", "CATALOG_LOCAL_SERVING", "ADMIN_TOKEN_CUSTODY_ENABLED"];
-const savedServingEnv: Record<string, string | undefined> = {};
-for (const k of SERVING_ENV_KEYS) savedServingEnv[k] = process.env[k];
-afterEach(() => {
-  for (const k of SERVING_ENV_KEYS) {
-    if (savedServingEnv[k] === undefined) delete process.env[k];
-    else process.env[k] = savedServingEnv[k];
-  }
-});
-
-describe("CATALOG_UNIFIED — serving (local port, local store_profile, no Storefront call)", () => {
-  it("flag ON: a backfilled tenant serves products locally AND brand/policy from the injected store_profile — shopifyFetch is never called", async () => {
-    process.env.CATALOG_UNIFIED = "true";
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
-
+describe("Unified serving — local port, local store_profile, no Storefront call", () => {
+  it("a backfilled tenant serves products locally AND brand/policy from the injected store_profile — shopifyFetch is never called", async () => {
     const store = new InMemoryRuntimeStore();
     const catalogProduct: CatalogProductPort = createInMemoryCatalogProductStore();
     await seedCatalogProduct(catalogProduct, TENANT, "Unified Serum");
@@ -100,7 +84,7 @@ describe("CATALOG_UNIFIED — serving (local port, local store_profile, no Store
       adminTokens: fakeAdminTokenStore(),
       shopifyFetch: async () => {
         shopifyFetchCalled = true;
-        throw new Error("Storefront must not be called under CATALOG_UNIFIED for a backfilled tenant");
+        throw new Error("Storefront must not be called for a backfilled tenant");
       },
     });
     try {
@@ -114,99 +98,10 @@ describe("CATALOG_UNIFIED — serving (local port, local store_profile, no Store
 
       const row = await pollGroundingCache(store, TENANT);
       expect(row).not.toBeNull();
-      // Brand/policy from the local store_profile handle (T4b) — NOT the "Auria" static fixture.
+      // Brand/policy from the local store_profile handle — NOT the "Auria" static fixture.
       expect(row!.ctx.brandName).toBe("Unified Co");
-      // Products from the local catalog_product store (Task 8, unaffected by this flag).
+      // Products from the local catalog_product store (Task 8).
       expect(row!.ctx.products.map((p) => p.title)).toContain("Unified Serum");
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("flag OFF: byte-identical — the SAME injected store_profile handle is never consulted; brand/policy stay on shellSource/fixtures", async () => {
-    delete process.env.CATALOG_UNIFIED;
-    delete process.env.ADMIN_TOKEN_CUSTODY_ENABLED;
-
-    const store = new InMemoryRuntimeStore();
-    const catalogProduct: CatalogProductPort = createInMemoryCatalogProductStore();
-    await seedCatalogProduct(catalogProduct, TENANT, "Unified Serum");
-    const storeProfile: StoreProfilePort = createInMemoryStoreProfileStore();
-    await storeProfile.put(TENANT, { brandName: "Unified Co", policy: { returns: "30d unified", shipping: "free unified" } });
-
-    let shopifyFetchCalled = false;
-    const app = await buildServer({
-      store,
-      catalogProduct,
-      storeProfile, // injected, but must be IGNORED entirely with the flag off
-      shopifyFetch: async () => {
-        shopifyFetchCalled = true;
-        return { shop: { name: "Should Not Be Used" }, products: { nodes: [] } };
-      },
-    });
-    try {
-      const res = await app.inject({
-        method: "POST",
-        url: "/chat",
-        payload: { sessionId: "sess-unified-off", message: "hi", signals: {}, idempotencyKey: "unified-off-0" },
-      });
-      expect(res.statusCode).toBe(200);
-      // Task 8's local-PRODUCT serving is independent of CATALOG_UNIFIED and defaults on — still no
-      // Shopify call for products.
-      expect(shopifyFetchCalled).toBe(false);
-
-      const row = await pollGroundingCache(store, TENANT);
-      expect(row).not.toBeNull();
-      // Brand/policy still come from shellSource -> the built-in "demo" fixture, NOT the injected
-      // store_profile — proving the persistent handle is CATALOG_UNIFIED-gated, not always-consulted.
-      expect(row!.ctx.brandName).toBe("Auria");
-      expect(row!.ctx.brandName).not.toBe("Unified Co");
-      expect(row!.ctx.products.map((p) => p.title)).toContain("Unified Serum");
-    } finally {
-      await app.close();
-    }
-  });
-
-  // Final-review Critical (2026-08-24): unlike `getContext` above, `local-catalog-grounding.ts`'s
-  // `getShell` was NOT gated on `unifiedLocalShell` — it always read the local `store_profile` store no
-  // matter the flag. With CATALOG_UNIFIED off (this test) and CATALOG_LOCAL_SERVING at its default-ON, a
-  // BACKFILLED tenant's `getShell` therefore read the brand-new, permanently-EMPTY `store_profile` this
-  // composition falls back to when the flag is off (server.ts's `catalogUnifiedStoreProfile` stays
-  // `undefined` -> `createGroundingPort`'s own `opts.storeProfile ?? createInMemoryStoreProfileStore()`),
-  // instead of degrading to the real shellSource/fixtures shell `getContext` already correctly falls back
-  // to. Concretely this broke the `policy_q` support intent (widget-brain/support.ts calls
-  // `grounding.getShell` directly, ungated by any commerce port): a shopper asking "what's your return
-  // policy?" got "Our return policy: . Shipping: " (the blank FALLBACK_POLICY) instead of the real policy.
-  // Driven through the REAL composition + a REAL shopper message (not just the grounding port directly)
-  // so this pins the shopper-facing symptom, not merely the internal routing.
-  it("flag OFF: a backfilled tenant's policy_q reply uses the REAL shell (fixtures/shellSource), never a blank empty-store_profile fallback", async () => {
-    delete process.env.CATALOG_UNIFIED;
-    delete process.env.CATALOG_LOCAL_SERVING; // exercise the documented default (ON)
-    delete process.env.ADMIN_TOKEN_CUSTODY_ENABLED;
-
-    const store = new InMemoryRuntimeStore();
-    const catalogProduct: CatalogProductPort = createInMemoryCatalogProductStore();
-    await seedCatalogProduct(catalogProduct, TENANT, "Unified Serum"); // backfilled -> hasLocalCatalog() = true
-
-    const app = await buildServer({
-      store,
-      catalogProduct,
-      adminTokens: fakeAdminTokenStore(),
-      // No `storeProfile` injected at all — mirrors production exactly: with CATALOG_UNIFIED off, server.ts
-      // never wires a persisted store_profile handle, so `createGroundingPort` defaults to a brand-new,
-      // permanently-empty in-memory store. A `getShell` that (incorrectly) reads it unconditionally always
-      // finds nothing there and degrades to FALLBACK_BRAND/FALLBACK_POLICY.
-    });
-    try {
-      const res = await app.inject({
-        method: "POST",
-        url: "/chat",
-        payload: { sessionId: "sess-policyq-off", message: "what's your return policy?", signals: {}, idempotencyKey: "policyq-off-0" },
-      });
-      expect(res.statusCode).toBe(200);
-      const body = res.json() as { reply: string };
-      // TENANT is "demo" -> the built-in AURIA fixture's real (non-blank) policy.
-      expect(body.reply).toContain("30-day returns");
-      expect(body.reply).not.toBe("Our return policy:  Shipping: "); // the blank FALLBACK_POLICY reply
     } finally {
       await app.close();
     }
@@ -214,7 +109,6 @@ describe("CATALOG_UNIFIED — serving (local port, local store_profile, no Store
 });
 
 const SHOP_ON = "acme-unified-on.myshopify.com";
-const SHOP_OFF = "acme-unified-off.myshopify.com";
 const APP_SECRET = "app-client-secret-never-logged";
 const CLIENT_ID = "client-123";
 const REDIRECT_URI = "https://widget.palup.ai/shopify/callback";
@@ -223,14 +117,7 @@ const DELEGATE_TOKEN = "shpca_UNIFIED_DELEGATE_TOKEN_NEVER_LOGGED";
 const AUTH_CODE = "authorization-code-unified-never-logged";
 const GRANTED_SCOPES = "unauthenticated_read_product_listings";
 
-const INSTALL_ENV_KEYS = [
-  "SHOPIFY_APP_CLIENT_ID",
-  "SHOPIFY_INSTALL_REDIRECT_URI",
-  "SHOPIFY_INSTALL_REGION",
-  "PALUP_SECRETS",
-  "CATALOG_UNIFIED",
-  "ADMIN_TOKEN_CUSTODY_ENABLED",
-];
+const INSTALL_ENV_KEYS = ["SHOPIFY_APP_CLIENT_ID", "SHOPIFY_INSTALL_REDIRECT_URI", "SHOPIFY_INSTALL_REGION", "PALUP_SECRETS"];
 const savedInstallEnv: Record<string, string | undefined> = {};
 for (const k of INSTALL_ENV_KEYS) savedInstallEnv[k] = process.env[k];
 afterEach(() => {
@@ -311,14 +198,12 @@ function baseSecrets(): string {
   return JSON.stringify({ [SHOPIFY_APP_SECRET_SCOPE]: { [SHOPIFY_APP_CLIENT_SECRET_NAME]: APP_SECRET } });
 }
 
-describe("CATALOG_UNIFIED cutover — install (ADR-0023 D1: Admin token is the sole credential)", () => {
-  it("flag ON: does NOT mint or custody a delegate token; the Admin token IS custodied", async () => {
+describe("Unified cutover — install (ADR-0023 D1: Admin token is the sole credential)", () => {
+  it("does NOT mint or custody a delegate token; the Admin token IS custodied", async () => {
     process.env.SHOPIFY_APP_CLIENT_ID = CLIENT_ID;
     process.env.SHOPIFY_INSTALL_REDIRECT_URI = REDIRECT_URI;
     process.env.SHOPIFY_INSTALL_REGION = "us";
     process.env.PALUP_SECRETS = baseSecrets();
-    process.env.CATALOG_UNIFIED = "true";
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
 
     const calls: string[] = [];
     const delegateSinkPut = vi.fn(async () => {});
@@ -348,40 +233,10 @@ describe("CATALOG_UNIFIED cutover — install (ADR-0023 D1: Admin token is the s
     }
   });
 
-  it("flag OFF: byte-identical — the delegate token IS minted and custodied (regression pin)", async () => {
-    process.env.SHOPIFY_APP_CLIENT_ID = CLIENT_ID;
-    process.env.SHOPIFY_INSTALL_REDIRECT_URI = REDIRECT_URI;
-    process.env.SHOPIFY_INSTALL_REGION = "us";
-    process.env.PALUP_SECRETS = baseSecrets();
-    delete process.env.CATALOG_UNIFIED;
-    delete process.env.ADMIN_TOKEN_CUSTODY_ENABLED;
-
-    const calls: string[] = [];
-    const delegateSinkPut = vi.fn(async () => {});
-    const app = await buildServer({
-      store: new InMemoryRuntimeStore(),
-      merchantRegistry: createInMemoryMerchantRegistry(),
-      installFetch: installFetchImpl(calls),
-      merchantCredentials: { put: delegateSinkPut },
-    });
-    try {
-      const { statusCode } = await runInstall(app, SHOP_OFF);
-      expect(statusCode).toBe(200);
-
-      expect(calls).toContain("delegateAccessTokenCreate");
-      expect(delegateSinkPut).toHaveBeenCalledTimes(1);
-      expect(delegateSinkPut).toHaveBeenCalledWith(tenantIdForShop(SHOP_OFF), DELEGATE_TOKEN, expect.objectContaining({ actor: "system:shopify-install" }));
-    } finally {
-      await app.close();
-    }
-  });
 });
 
-describe("CATALOG_UNIFIED cutover — catalog-sync scheduler (CARRY T5, listActive enumeration)", () => {
-  it("flag ON: catalogSyncSchedulerDeps is composed with the REAL listActive-backed registry; running it enumerates every active tenant", async () => {
-    process.env.CATALOG_UNIFIED = "true";
-    process.env.ADMIN_TOKEN_CUSTODY_ENABLED = "true";
-
+describe("Unified cutover — catalog-sync scheduler (CARRY T5, listActive enumeration)", () => {
+  it("catalogSyncSchedulerDeps is composed with the REAL listActive-backed registry; running it enumerates every active tenant", async () => {
     const registry = createInMemoryMerchantRegistry();
     await registry.create({ tenantId: "alpha", shopDomain: "alpha.myshopify.com", embedKey: "pk_alpha", region: "us" });
     await registry.create({ tenantId: "beta", shopDomain: "beta.myshopify.com", embedKey: "pk_beta", region: "us" });
@@ -410,15 +265,13 @@ describe("CATALOG_UNIFIED cutover — catalog-sync scheduler (CARRY T5, listActi
     }
   });
 
-  it("flag OFF: catalogSyncSchedulerDeps is not constructed at all (unchanged — nothing built this before Task 7 either)", async () => {
-    delete process.env.CATALOG_UNIFIED;
-    delete process.env.ADMIN_TOKEN_CUSTODY_ENABLED;
+  it("no durable merchantRegistry (e.g. no DATABASE_URL): catalogSyncSchedulerDeps is not constructed at all", async () => {
     const app = await buildServer({ store: new InMemoryRuntimeStore() });
     try {
       const deps = (app as unknown as { catalogSyncSchedulerDeps?: CatalogSyncSchedulerDeps }).catalogSyncSchedulerDeps;
       expect(deps).toBeUndefined();
-      // Flag-off byte-identical guarantee: the returned `app` must not even gain the own-property (value
-      // `undefined`) — it must be genuinely absent, not present-but-undefined.
+      // The returned `app` must not even gain the own-property (value `undefined`) — it must be genuinely
+      // absent, not present-but-undefined.
       expect(Object.prototype.hasOwnProperty.call(app, "catalogSyncSchedulerDeps")).toBe(false);
     } finally {
       await app.close();

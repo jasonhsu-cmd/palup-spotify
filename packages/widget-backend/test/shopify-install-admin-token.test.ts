@@ -85,6 +85,10 @@ function makeDeps(overrides: Partial<ShopifyInstallDeps> = {}, capture?: { acces
     store: new InMemoryRuntimeStore(),
     registry: createInMemoryMerchantRegistry(),
     credentials: credentialSink(),
+    // unified-cutover-cleanup (2026-08-24): `adminTokens` is now REQUIRED on `ShopifyInstallDeps` (it is the
+    // sole credential this install produces), so every caller of `makeDeps` needs a value here even when it
+    // does not care about custody — a no-op default that never inspects what it was given.
+    adminTokens: { put: async () => {} },
     clientSecret: async () => APP_SECRET,
     fetchFn: fetchImpl,
     clientId: CLIENT_ID,
@@ -192,14 +196,6 @@ describe("Task 5 — install captures + custodies the parent Admin token (F6/F7)
     expect(put).not.toHaveBeenCalled();
   });
 
-  it("without an `adminTokens` dep, install still succeeds unchanged (additive / back-compat)", async () => {
-    const deps = makeDeps(); // no adminTokens
-    const app = await buildApp(deps);
-    const { state, cookie } = await begin(app);
-    const res = await callback(app, { state, cookie });
-    expect(res.statusCode).toBe(200);
-  });
-
   it("never logs grant.accessToken, even on a successful custody", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -218,55 +214,11 @@ describe("Task 5 — install captures + custodies the parent Admin token (F6/F7)
   });
 });
 
-describe("Task 13 (forward-carry from Task 5) — admin-token custody failure is NON-FATAL to install", () => {
-  it("adminTokens.put throwing does NOT fail the install — the delegate token is stored, the install succeeds, and admin_token.custody_failed is audited", async () => {
-    const store: RuntimeStatePort = new InMemoryRuntimeStore();
-    const credentials: MerchantCredentialSink & { puts: Array<{ tenantId: string; token: string }> } = {
-      puts: [],
-      async put(tenantId, token) {
-        credentials.puts.push({ tenantId, token });
-      },
-    };
-    const put = vi.fn(async () => {
-      throw new Error("admin-cred key not provisioned");
-    });
-    const deps = makeDeps({ store, credentials, adminTokens: { put } });
-    const app = await buildApp(deps);
-    const { state, cookie } = await begin(app);
-    const res = await callback(app, { state, cookie });
-
-    // The install as a whole SUCCEEDS despite the admin-token custody failure.
-    expect(res.statusCode).toBe(200);
-    expect(put).toHaveBeenCalledTimes(1);
-    // The delegate token was already safely custodied before the admin-token attempt, and stays custodied.
-    expect(credentials.puts).toHaveLength(1);
-    expect(credentials.puts[0]!.token).toBe(DELEGATE_TOKEN);
-
-    // A corrective audit entry records the residual — the install's success does not silently overclaim
-    // that Admin-token custody also succeeded.
-    const tenantId = credentials.puts[0]!.tenantId;
-    const audits = await store.readAudit({ tenantId });
-    const failure = audits.find((a) => a.action === "admin_token.custody_failed");
-    expect(failure).toBeTruthy();
-    expect(failure!.decision).toMatchObject({ complete: false });
-    // Never leak the parent Admin token into the audit trail.
-    expect(JSON.stringify(failure)).not.toContain(PARENT_TOKEN);
-  });
-
-  it("without adminTokens configured at all, install behaves exactly as before (no custody attempted, no audit entry)", async () => {
-    const store: RuntimeStatePort = new InMemoryRuntimeStore();
-    const deps = makeDeps({ store }); // no adminTokens
-    const app = await buildApp(deps);
-    const { state, cookie } = await begin(app);
-    const res = await callback(app, { state, cookie });
-    expect(res.statusCode).toBe(200);
-
-    const audits = await store.readAudit({ tenantId: tenantIdForShop(SHOP) });
-    expect(audits.some((a) => a.action === "admin_token.custody_failed")).toBe(false);
-  });
-});
-
-describe("Task 7 review (Critical, ADR-0023 D1) — admin-token custody failure under CATALOG_UNIFIED FAILS the install", () => {
+// Task 7 review (Critical, ADR-0023 D1), now UNCONDITIONAL (unified-cutover-cleanup, 2026-08-24): the
+// `CATALOG_UNIFIED`/`catalogUnified` flag these tests used to gate on is deleted — there is no more
+// non-fatal/degraded-sync-plane branch to regression-pin, because the delegate token that branch's fallback
+// depended on is never minted. An Admin-token custody failure is FATAL, always, with no flag to flip.
+describe("admin-token custody failure is FATAL to install (ADR-0023 D1, unconditional since unified-cutover-cleanup)", () => {
   /** Drive startInstall/completeInstall directly (no Fastify/app.inject) so the assertions can be made
    *  against the exact `InstallComplete` value, not just the rendered HTTP status. */
   async function driveInstall(deps: ShopifyInstallDeps, shop = SHOP) {
@@ -279,13 +231,13 @@ describe("Task 7 review (Critical, ADR-0023 D1) — admin-token custody failure 
     return completeInstall(deps, signedQuery, cookieHeader);
   }
 
-  it("catalogUnified=true + adminTokens.put rejecting: the install FAILS with admin_token_custody_failed and no merchant row is created", async () => {
+  it("adminTokens.put rejecting: the install FAILS with admin_token_custody_failed and no merchant row is created", async () => {
     const registry = createInMemoryMerchantRegistry();
     const createSpy = vi.spyOn(registry, "create");
     const put = vi.fn(async () => {
       throw new Error("KMS unavailable");
     });
-    const deps = makeDeps({ registry, catalogUnified: true, adminTokens: { put } });
+    const deps = makeDeps({ registry, adminTokens: { put } });
 
     const result = await driveInstall(deps);
 
@@ -297,12 +249,12 @@ describe("Task 7 review (Critical, ADR-0023 D1) — admin-token custody failure 
     expect(rec).toBeNull();
   });
 
-  it("catalogUnified=true: the failure still logs + best-effort-audits admin_token.custody_failed before returning fatal", async () => {
+  it("the failure still logs + best-effort-audits admin_token.custody_failed before returning fatal", async () => {
     const store: RuntimeStatePort = new InMemoryRuntimeStore();
     const put = vi.fn(async () => {
       throw new Error("KMS unavailable");
     });
-    const deps = makeDeps({ store, catalogUnified: true, adminTokens: { put } });
+    const deps = makeDeps({ store, adminTokens: { put } });
 
     const result = await driveInstall(deps);
     expect(result).toEqual({ ok: false, failed: "admin_token_custody_failed" });
@@ -312,20 +264,5 @@ describe("Task 7 review (Critical, ADR-0023 D1) — admin-token custody failure 
     expect(failure).toBeTruthy();
     expect(failure!.decision).toMatchObject({ complete: false });
     expect(JSON.stringify(failure)).not.toContain(PARENT_TOKEN);
-  });
-
-  it("regression pin — catalogUnified=false (default): the SAME adminTokens.put rejection stays non-fatal, install still succeeds", async () => {
-    const registry = createInMemoryMerchantRegistry();
-    const createSpy = vi.spyOn(registry, "create");
-    const put = vi.fn(async () => {
-      throw new Error("KMS unavailable");
-    });
-    const deps = makeDeps({ registry, catalogUnified: false, adminTokens: { put } });
-
-    const result = await driveInstall(deps);
-
-    expect(result).toEqual({ ok: true, shopDomain: SHOP });
-    expect(put).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledTimes(1);
   });
 });
